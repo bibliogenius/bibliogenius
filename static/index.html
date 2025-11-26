@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BiblioGenius - Dashboard</title>
+    <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📚 BiblioGenius</h1>
+            <nav>
+                <a href="/">Dashboard</a>
+                <a href="/books.html">Books</a>
+                <a href="/copies.html">Copies</a>
+                <a href="/contacts.html">Contacts</a>
+                <a href="/loans.html">Loans</a>
+                <a href="/p2p.html">P2P Search</a>
+            </nav>
+        </header>
+
+        <div class="card">
+            <h2>Welcome to BiblioGenius</h2>
+            <p>Your personal library management system with P2P capabilities.</p>
+        </div>
+
+        <div class="stats-grid" id="stats">
+            <div class="stat-card">
+                <h3 id="totalBooks">-</h3>
+                <p>Total Books</p>
+            </div>
+            <div class="stat-card">
+                <h3 id="totalCopies">-</h3>
+                <p>Total Copies</p>
+            </div>
+            <div class="stat-card">
+                <h3 id="activeLoans">-</h3>
+                <p>Active Loans</p>
+            </div>
+            <div class="stat-card">
+                <h3 id="totalContacts">-</h3>
+                <p>Contacts</p>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Quick Actions</h2>
+            <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+                <a href="/books.html" class="btn btn-primary">Add Book</a>
+                <a href="/loans.html" class="btn btn-primary">Checkout Book</a>
+                <a href="/p2p.html" class="btn btn-primary">Search Remote Library</a>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/api.js"></script>
+    <script>
+        async function loadStats() {
+            try {
+                const [books, copies, loans, contacts] = await Promise.all([
+                    api.getBooks(),
+                    api.getCopies(),
+                    api.getLoans({ status: 'active' }),
+                    api.getContacts()
+                ]);
+
+                document.getElementById('totalBooks').textContent = books.books?.length || 0;
+                document.getElementById('totalCopies').textContent = copies.copies?.length || 0;
+                document.getElementById('activeLoans').textContent = loans.loans?.length || 0;
+                document.getElementById('totalContacts').textContent = contacts.contacts?.length || 0;
+            } catch (error) {
+                console.error('Failed to load stats:', error);
+            }
+        }
+
+        loadStats();
+    </script>
+</body>
+</html>

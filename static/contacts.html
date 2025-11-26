@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BiblioGenius - Contacts</title>
+    <link rel="stylesheet" href="/css/app.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>📚 BiblioGenius - Contacts</h1>
+            <nav>
+                <a href="/">Dashboard</a>
+                <a href="/books.html">Books</a>
+                <a href="/copies.html">Copies</a>
+                <a href="/contacts.html">Contacts</a>
+                <a href="/loans.html">Loans</a>
+                <a href="/p2p.html">P2P Search</a>
+            </nav>
+        </header>
+
+        <div class="card">
+            <h2>👥 Contacts</h2>
+            <div id="contactsList">
+                <div class="loading">Loading contacts...</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/api.js"></script>
+    <script>
+        async function loadContacts() {
+            const listDiv = document.getElementById('contactsList');
+            try {
+                const data = await api.getContacts();
+                const contacts = data.contacts || [];
+
+                if (contacts.length === 0) {
+                    listDiv.innerHTML = '<p style="color: var(--text-light);">No contacts yet.</p>';
+                    return;
+                }
+
+                listDiv.innerHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Email</th>
+                                <th>Phone</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${contacts.map(contact => `
+                                <tr>
+                                    <td><strong>${contact.name}</strong></td>
+                                    <td><span class="badge badge-${contact.type === 'borrower' ? 'warning' : 'success'}">${contact.type}</span></td>
+                                    <td>${contact.email || '-'}</td>
+                                    <td>${contact.phone || '-'}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                `;
+            } catch (error) {
+                listDiv.innerHTML = `<p style="color: var(--danger);">Error loading contacts: ${error.message}</p>`;
+            }
+        }
+
+        loadContacts();
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BiblioGenius - Loans</title>
+    <link rel="stylesheet" href="/css/app.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>📚 BiblioGenius - Loans</h1>
+            <nav>
+                <a href="/">Dashboard</a>
+                <a href="/books.html">Books</a>
+                <a href="/copies.html">Copies</a>
+                <a href="/contacts.html">Contacts</a>
+                <a href="/loans.html">Loans</a>
+                <a href="/p2p.html">P2P Search</a>
+            </nav>
+        </header>
+
+        <div class="card">
+            <h2>📋 Loan Management</h2>
+            <div id="loansList">
+                <div class="loading">Loading loans...</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/api.js"></script>
+    <script>
+        async function loadLoans() {
+            const listDiv = document.getElementById('loansList');
+            try {
+                const data = await api.getLoans();
+                const loans = data.loans || [];
+
+                if (loans.length === 0) {
+                    listDiv.innerHTML = '<p style="color: var(--text-light);">No loans yet.</p>';
+                    return;
+                }
+
+                listDiv.innerHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Copy ID</th>
+                                <th>Contact ID</th>
+                                <th>Loan Date</th>
+                                <th>Due Date</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${loans.map(loan => {
+                    const statusClass = loan.status === 'active' ? 'warning' : 'success';
+                    return `
+                                    <tr>
+                                        <td>${loan.copy_id}</td>
+                                        <td>${loan.contact_id}</td>
+                                        <td>${loan.loan_date}</td>
+                                        <td>${loan.due_date}</td>
+                                        <td><span class="badge badge-${statusClass}">${loan.status}</span></td>
+                                        <td>
+                                            ${loan.status === 'active' ?
+                            `<button class="btn btn-success btn-sm" onclick="returnLoan(${loan.id})">Return</button>` :
+                            '-'}
+                                        </td>
+                                    </tr>
+                                `;
+                }).join('')}
+                        </tbody>
+                    </table>
+                `;
+            } catch (error) {
+                listDiv.innerHTML = `<p style="color: var(--danger);">Error loading loans: ${error.message}</p>`;
+            }
+        }
+
+        async function returnLoan(id) {
+            if (!confirm('Mark this loan as returned?')) return;
+            try {
+                await api.returnLoan(id);
+                loadLoans();
+            } catch (error) {
+                alert('Error returning loan: ' + error.message);
+            }
+        }
+
+        loadLoans();
+    </script>
+</body>
+
+</html>
