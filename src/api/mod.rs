@@ -1,0 +1,12 @@
+pub mod books;
+pub mod health;
+pub mod hub;
+pub mod library;
+pub mod auth;
+pub mod user;
+pub mod author;
+pub mod tag;
+pub mod peer;
+pub mod copy;
+pub mod contact;
+pub mod loan;

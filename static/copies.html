@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BiblioGenius - Copies</title>
+    <link rel="stylesheet" href="/css/app.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>📚 BiblioGenius - Copies</h1>
+            <nav>
+                <a href="/">Dashboard</a>
+                <a href="/books.html">Books</a>
+                <a href="/copies.html">Copies</a>
+                <a href="/contacts.html">Contacts</a>
+                <a href="/loans.html">Loans</a>
+                <a href="/p2p.html">P2P Search</a>
+            </nav>
+        </header>
+
+        <div class="card">
+            <h2>📦 Book Copies</h2>
+            <div id="copiesList">
+                <div class="loading">Loading copies...</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/api.js"></script>
+    <script>
+        async function loadCopies() {
+            const listDiv = document.getElementById('copiesList');
+            try {
+                const data = await api.getCopies();
+                const copies = data.copies || [];
+
+                if (copies.length === 0) {
+                    listDiv.innerHTML = '<p style="color: var(--text-light);">No copies yet.</p>';
+                    return;
+                }
+
+                listDiv.innerHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Book ID</th>
+                                <th>Status</th>
+                                <th>Acquisition Date</th>
+                                <th>Notes</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${copies.map(copy => {
+                    const statusClass = copy.status === 'available' ? 'success' :
+                        copy.status === 'borrowed' ? 'warning' : 'danger';
+                    return `
+                                    <tr>
+                                        <td>${copy.book_id}</td>
+                                        <td><span class="badge badge-${statusClass}">${copy.status}</span></td>
+                                        <td>${copy.acquisition_date || '-'}</td>
+                                        <td>${copy.notes || '-'}</td>
+                                    </tr>
+                                `;
+                }).join('')}
+                        </tbody>
+                    </table>
+                `;
+            } catch (error) {
+                listDiv.innerHTML = `<p style="color: var(--danger);">Error loading copies: ${error.message}</p>`;
+            }
+        }
+
+        loadCopies();
+    </script>
+</body>
+
+</html>
