@@ -9,6 +9,9 @@ pub struct Model {
     pub name: String,
     pub description: Option<String>,
     pub tags: String, // JSON array stored as string
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub share_location: Option<bool>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }
@@ -24,6 +27,9 @@ pub struct LibraryConfig {
     pub name: String,
     pub description: Option<String>,
     pub tags: Vec<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub share_location: bool,
 }
 
 impl From<Model> for LibraryConfig {
@@ -33,6 +39,9 @@ impl From<Model> for LibraryConfig {
             name: model.name,
             description: model.description,
             tags,
+            latitude: model.latitude,
+            longitude: model.longitude,
+            share_location: model.share_location.unwrap_or(false),
         }
     }
 }

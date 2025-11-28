@@ -5,7 +5,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BiblioGenius - P2P Search</title>
-    <link rel="stylesheet" href="/css/app.css">
+    <link rel="stylesheet" href="/css/app.css?v=beige">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 </head>
 
 <body>
@@ -90,6 +94,34 @@
         </div>
 
         <div class="card">
+            <h2>🌍 Discovery Map</h2>
+            <p style="color: var(--text-light); margin-bottom: 1rem;">Find libraries and bookstores near you.</p>
+
+            <div id="map" style="height: 400px; width: 100%; border-radius: 12px; margin-bottom: 1rem;"></div>
+
+            <div class="map-controls" style="display: flex; gap: 1rem; flex-wrap: wrap;">
+                <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                    <input type="checkbox" id="layerPeers" checked onchange="updateMapLayers()">
+                    <span
+                        style="display: inline-block; width: 12px; height: 12px; background: #10b981; border-radius: 50%;"></span>
+                    Peers
+                </label>
+                <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                    <input type="checkbox" id="layerLibraries" checked onchange="updateMapLayers()">
+                    <span
+                        style="display: inline-block; width: 12px; height: 12px; background: #3b82f6; border-radius: 50%;"></span>
+                    Public Libraries
+                </label>
+                <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                    <input type="checkbox" id="layerBookstores" onchange="updateMapLayers()">
+                    <span
+                        style="display: inline-block; width: 12px; height: 12px; background: #f59e0b; border-radius: 50%;"></span>
+                    Bookstores
+                </label>
+            </div>
+        </div>
+
+        <div class="card">
             <h2>🔍 Search Remote Library</h2>
             <form id="searchForm">
                 <div class="form-group">
@@ -112,9 +144,20 @@
     </div>
 
     <script src="/js/api.js"></script>
+    <script src="/js/theme.js"></script>
     <script>
+        let map;
+        let layers = {
+            peers: L.layerGroup(),
+            libraries: L.layerGroup(),
+            bookstores: L.layerGroup(),
+            me: L.layerGroup()
+        };
+        let myLocation = null;
+        let myLibraryId = 1; // Default to 1
+
         // Populate "My URL" field with current location
-        window.addEventListener('DOMContentLoaded', () => {
+        window.addEventListener('DOMContentLoaded', async () => {
             const myUrl = `${window.location.protocol}//${window.location.host}`;
             document.getElementById('myUrl').value = myUrl;
 
@@ -122,7 +165,162 @@
             if (myUrl.includes('localhost') || myUrl.includes('127.0.0.1')) {
                 document.getElementById('localhostWarning').style.display = 'block';
             }
+
+            // Initialize Map
+            await initMap();
         });
+
+        async function initMap() {
+            // 1. Get My Config (Location)
+            try {
+                const configRes = await fetch('/api/config');
+                const config = await configRes.json();
+
+                if (config.id) {
+                    myLibraryId = config.id;
+                }
+
+                if (config.latitude && config.longitude) {
+                    myLocation = [config.latitude, config.longitude];
+                } else {
+                    // Default to Paris if no location set
+                    myLocation = [48.8566, 2.3522];
+                }
+            } catch (e) {
+                console.error("Failed to load config", e);
+                myLocation = [48.8566, 2.3522];
+            }
+
+            // 2. Create Map
+            map = L.map('map').setView(myLocation, 13);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors'
+            }).addTo(map);
+
+            // 3. Add "Me" marker
+            const meIcon = L.divIcon({
+                className: 'custom-div-icon',
+                html: "<div style='background-color:#8b5cf6; width:15px; height:15px; border-radius:50%; border:2px solid white; box-shadow: 0 0 5px rgba(0,0,0,0.3);'></div>",
+                iconSize: [15, 15],
+                iconAnchor: [7, 7]
+            });
+            L.marker(myLocation, { icon: meIcon }).addTo(map).bindPopup("<b>You are here</b>");
+
+            // 4. Load Layers
+            await loadPeers();
+            await loadLibraries();
+            // Bookstores loaded on demand
+        }
+
+        async function loadPeers() {
+            try {
+                const res = await fetch('/api/peers');
+                const peers = await res.json();
+
+                layers.peers.clearLayers();
+                peers.forEach(peer => {
+                    if (peer.latitude && peer.longitude) {
+                        const marker = L.marker([peer.latitude, peer.longitude], {
+                            icon: createIcon('#10b981') // Green
+                        }).bindPopup(`
+                            <b>${peer.name}</b><br>BiblioGenius Peer<br>
+                            <button class="btn btn-sm btn-primary" style="margin-top: 5px;" onclick="addPeerToContacts('${peer.name.replace(/'/g, "\\'")}', '${peer.url}')">Add to Contacts</button>
+                        `);
+                        layers.peers.addLayer(marker);
+                    }
+                });
+                layers.peers.addTo(map);
+            } catch (e) {
+                console.error("Failed to load peers", e);
+            }
+        }
+
+        async function addPeerToContacts(name, url) {
+            try {
+                await api.createContact({
+                    type: 'library',
+                    name: name,
+                    notes: `Added from Discovery Map. URL: ${url}`,
+                    library_owner_id: myLibraryId || 1
+                });
+                alert(`Added "${name}" to contacts!`);
+            } catch (e) {
+                alert(`Failed to add contact: ${e.message}`);
+                console.error(e);
+            }
+        }
+
+        async function loadLibraries() {
+            try {
+                const [lat, lon] = myLocation;
+                const res = await fetch(`/api/integrations/osm/libraries?lat=${lat}&lon=${lon}&radius=5000`);
+                const nodes = await res.json();
+
+                layers.libraries.clearLayers();
+                nodes.forEach(node => {
+                    const name = node.tags && node.tags.name ? node.tags.name : "Public Library";
+                    const marker = L.marker([node.lat, node.lon], {
+                        icon: createIcon('#3b82f6') // Blue
+                    }).bindPopup(`<b>${name}</b><br>Public Library`);
+                    layers.libraries.addLayer(marker);
+                });
+                layers.libraries.addTo(map);
+            } catch (e) {
+                console.error("Failed to load libraries", e);
+            }
+        }
+
+        async function loadBookstores() {
+            try {
+                const [lat, lon] = myLocation;
+                const res = await fetch(`/api/integrations/osm/bookstores?lat=${lat}&lon=${lon}&radius=5000`);
+                const nodes = await res.json();
+
+                layers.bookstores.clearLayers();
+                nodes.forEach(node => {
+                    const name = node.tags && node.tags.name ? node.tags.name : "Bookstore";
+                    const marker = L.marker([node.lat, node.lon], {
+                        icon: createIcon('#f59e0b') // Orange
+                    }).bindPopup(`<b>${name}</b><br>Bookstore`);
+                    layers.bookstores.addLayer(marker);
+                });
+                layers.bookstores.addTo(map);
+            } catch (e) {
+                console.error("Failed to load bookstores", e);
+            }
+        }
+
+        function updateMapLayers() {
+            if (document.getElementById('layerPeers').checked) {
+                map.addLayer(layers.peers);
+            } else {
+                map.removeLayer(layers.peers);
+            }
+
+            if (document.getElementById('layerLibraries').checked) {
+                map.addLayer(layers.libraries);
+            } else {
+                map.removeLayer(layers.libraries);
+            }
+
+            if (document.getElementById('layerBookstores').checked) {
+                if (layers.bookstores.getLayers().length === 0) {
+                    loadBookstores();
+                }
+                map.addLayer(layers.bookstores);
+            } else {
+                map.removeLayer(layers.bookstores);
+            }
+        }
+
+        function createIcon(color) {
+            return L.divIcon({
+                className: 'custom-div-icon',
+                html: `<div style='background-color:${color}; width:12px; height:12px; border-radius:50%; border:2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.3);'></div>`,
+                iconSize: [12, 12],
+                iconAnchor: [6, 6]
+            });
+        }
 
         // Copy My URL to clipboard
         function copyMyUrl() {
@@ -204,6 +402,9 @@
                                     <td>${book.isbn || '-'}</td>
                                     <td>${book.publisher || '-'}</td>
                                     <td>${book.publication_year || '-'}</td>
+                                    <td>
+                                        <button class="btn btn-sm btn-primary" onclick="requestBook('${peerId}', '${book.isbn}', '${book.title.replace(/'/g, "\\'")}')">Request</button>
+                                    </td>
                                 </tr>
                             `).join('')}
                         </tbody>
@@ -217,6 +418,17 @@
                 `;
             }
         });
+
+        async function requestBook(peerId, isbn, title) {
+            if (!confirm(`Request "${title}" from this library?`)) return;
+
+            try {
+                await api.sendRequest(parseInt(peerId), isbn, title);
+                alert('Request sent successfully!');
+            } catch (e) {
+                alert(`Failed to send request: ${e.message}`);
+            }
+        }
     </script>
 </body>
 

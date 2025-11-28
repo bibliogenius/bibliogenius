@@ -1,5 +1,5 @@
 # Multi-stage build for Rust server
-FROM rust:latest as builder
+FROM rust:bookworm as builder
 
 WORKDIR /app
 
@@ -26,6 +26,8 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     sqlite3 \
     ca-certificates \
+    tesseract-ocr \
+    libtesseract-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

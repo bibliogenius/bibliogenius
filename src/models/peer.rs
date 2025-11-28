@@ -10,6 +10,10 @@ pub struct Model {
     #[sea_orm(unique)]
     pub url: String,
     pub public_key: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    #[sea_orm(default_value = "false")]
+    pub auto_approve: bool,
     pub last_seen: Option<String>,
     pub created_at: String,
     pub updated_at: String,

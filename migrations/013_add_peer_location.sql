@@ -1,0 +1,2 @@
+ALTER TABLE peers ADD COLUMN latitude REAL;
+ALTER TABLE peers ADD COLUMN longitude REAL;

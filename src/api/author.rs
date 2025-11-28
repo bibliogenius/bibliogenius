@@ -14,9 +14,7 @@ pub struct CreateAuthorRequest {
     name: String,
 }
 
-pub async fn list_authors(
-    State(db): State<DatabaseConnection>,
-) -> impl IntoResponse {
+pub async fn list_authors(State(db): State<DatabaseConnection>) -> impl IntoResponse {
     let authors = Author::find().all(&db).await.unwrap_or(vec![]);
     (StatusCode::OK, Json(authors)).into_response()
 }
@@ -34,7 +32,11 @@ pub async fn create_author(
 
     match author.insert(&db).await {
         Ok(model) => (StatusCode::CREATED, Json(model)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -45,7 +47,11 @@ pub async fn get_author(
     let author = Author::find_by_id(id).one(&db).await.unwrap_or(None);
     match author {
         Some(author) => (StatusCode::OK, Json(author)).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "Author not found" }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Author not found" })),
+        )
+            .into_response(),
     }
 }
 
@@ -58,10 +64,20 @@ pub async fn delete_author(
         Some(author) => {
             let res = author.delete(&db).await;
             match res {
-                Ok(_) => (StatusCode::OK, Json(json!({ "message": "Author deleted" }))).into_response(),
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+                Ok(_) => {
+                    (StatusCode::OK, Json(json!({ "message": "Author deleted" }))).into_response()
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response(),
             }
         }
-        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "Author not found" }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Author not found" })),
+        )
+            .into_response(),
     }
 }

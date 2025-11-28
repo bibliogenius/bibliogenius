@@ -3,13 +3,13 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use sea_orm::*;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use chrono::Local;
+use sea_orm::*;
+use serde::Deserialize;
+use serde_json::{json, Value};
 
-use crate::models::loan::{self, Entity as Loan};
 use crate::models::copy::{self, Entity as Copy};
+use crate::models::loan::{self, Entity as Loan};
 
 #[derive(Deserialize)]
 pub struct ListLoansQuery {
@@ -51,7 +51,7 @@ pub async fn create_loan(
     Json(payload): Json<loan::LoanDto>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    
+
     // 1. Check if copy exists and is available
     let copy = Copy::find_by_id(payload.copy_id)
         .one(&db)
@@ -60,7 +60,10 @@ pub async fn create_loan(
         .ok_or((StatusCode::NOT_FOUND, "Copy not found".to_string()))?;
 
     if copy.status == "borrowed" || copy.status == "lost" {
-        return Err((StatusCode::BAD_REQUEST, format!("Copy is currently {}", copy.status)));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Copy is currently {}", copy.status),
+        ));
     }
 
     // 2. Create Loan
@@ -86,9 +89,14 @@ pub async fn create_loan(
     // 3. Update Copy status to 'borrowed'
     let mut copy_active: copy::ActiveModel = copy.into();
     copy_active.status = Set("borrowed".to_owned());
-    copy_active.update(&db).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    copy_active
+        .update(&db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(json!({ "loan": saved_loan, "message": "Loan created successfully" })))
+    Ok(Json(
+        json!({ "loan": saved_loan, "message": "Loan created successfully" }),
+    ))
 }
 
 pub async fn return_loan(
@@ -105,7 +113,10 @@ pub async fn return_loan(
         .ok_or((StatusCode::NOT_FOUND, "Loan not found".to_string()))?;
 
     if loan.status == "returned" {
-        return Err((StatusCode::BAD_REQUEST, "Loan is already returned".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Loan is already returned".to_string(),
+        ));
     }
 
     // 2. Update Loan
@@ -125,11 +136,19 @@ pub async fn return_loan(
         .one(&db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Associated copy not found".to_string()))?;
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Associated copy not found".to_string(),
+        ))?;
 
     let mut copy_active: copy::ActiveModel = copy.into();
     copy_active.status = Set("available".to_owned());
-    copy_active.update(&db).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    copy_active
+        .update(&db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(json!({ "loan": updated_loan, "message": "Loan returned successfully" })))
+    Ok(Json(
+        json!({ "loan": updated_loan, "message": "Loan returned successfully" }),
+    ))
 }

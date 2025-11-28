@@ -7,13 +7,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod api;
-mod config;
-mod db;
-mod models;
-mod auth;
-mod seed;
-mod sync;
+use bibliogenius::{api, config, db, seed};
 
 #[tokio::main]
 async fn main() {
@@ -54,35 +48,95 @@ async fn main() {
         .route("/library/config", post(api::library::update_config))
         // Books
         .route("/books", get(api::books::list_books))
+        .route("/api/books/search", get(api::search::search_books))
+        .route("/api/chat", post(api::chat::chat_handler))
         .route("/books", post(api::books::create_book))
         .route("/books/:id", axum::routing::delete(api::books::delete_book))
         // Authors
         .route("/authors", get(api::author::list_authors))
         .route("/authors", post(api::author::create_author))
         .route("/authors/:id", get(api::author::get_author))
-        .route("/authors/:id", axum::routing::delete(api::author::delete_author))
+        .route(
+            "/authors/:id",
+            axum::routing::delete(api::author::delete_author),
+        )
         // Tags
         .route("/tags", get(api::tag::list_tags))
         .route("/tags", post(api::tag::create_tag))
         .route("/tags/:id", get(api::tag::get_tag))
         .route("/tags/:id", axum::routing::delete(api::tag::delete_tag))
         // Peers
+        .route("/peers", get(api::peer::list_peers))
         .route("/peers/connect", post(api::peer::connect))
         .route("/peers/push", post(api::peer::push_operations))
         .route("/peers/pull", get(api::peer::pull_operations))
+        .route("/peers/:id/sync", post(api::peer::sync_peer)) // Sync remote books
         .route("/peers/search", post(api::peer::search_local))
         .route("/peers/proxy_search", post(api::peer::proxy_search))
+        .route("/peers/:id/request", post(api::peer::request_book)) // Send request
+        .route("/peers/request", post(api::peer::receive_request)) // Receive request
+        .route("/peers/requests", get(api::peer::list_requests)) // List incoming requests
+        .route(
+            "/peers/requests/outgoing",
+            get(api::peer::list_outgoing_requests),
+        ) // List outgoing requests
+        .route("/peers/requests/:id", put(api::peer::update_request_status)) // Update status
+        // Scanning
+        .route("/scan/image", post(api::scan::scan_image))
+        // Batch Operations
+        .route("/books/batch/edit", post(api::batch::batch_edit))
+        .route("/books/batch/sort", post(api::batch::batch_sort))
+        .route("/books/duplicates", get(api::batch::find_duplicates))
+        // Copies
         // Copies
         .route("/copies", get(api::copy::list_copies))
         .route("/copies", post(api::copy::create_copy))
         .route("/books/:id/copies", get(api::copy::get_book_copies))
         .route("/copies/:id", axum::routing::delete(api::copy::delete_copy))
         // Contacts
-        .route("/contacts", get(api::contact::list_contacts).post(api::contact::create_contact))
-        .route("/contacts/:id", get(api::contact::get_contact).put(api::contact::update_contact).delete(api::contact::delete_contact))
+        .route(
+            "/contacts",
+            get(api::contact::list_contacts).post(api::contact::create_contact),
+        )
+        .route(
+            "/contacts/:id",
+            get(api::contact::get_contact)
+                .put(api::contact::update_contact)
+                .delete(api::contact::delete_contact),
+        )
         // Loan routes
-        .route("/loans", get(api::loan::list_loans).post(api::loan::create_loan))
+        .route(
+            "/loans",
+            get(api::loan::list_loans).post(api::loan::create_loan),
+        )
         .route("/loans/:id/return", put(api::loan::return_loan))
+        // Lookup
+        .route("/lookup/:isbn", get(api::lookup::lookup_book))
+        // Data Import/Export
+        .route(
+            "/import/goodreads",
+            axum::routing::post(api::data::import_goodreads),
+        )
+        // Setup & Config
+        .route("/setup", axum::routing::post(api::setup::setup))
+        .route("/config", get(api::setup::get_config))
+        // Integrations (Professional)
+        .route(
+            "/integrations/sudoc/search",
+            get(api::integrations::search_sudoc),
+        )
+        .route(
+            "/integrations/osm/libraries",
+            get(api::integrations::search_osm_libraries),
+        )
+        .route(
+            "/integrations/osm/bookstores",
+            get(api::integrations::search_osm_bookstores),
+        )
+        // Gamification
+        .route("/user/status", get(api::gamification::get_user_status))
+        // Export
+        .route("/export", get(api::export::export_data))
         .with_state(db);
 
     // Build main app with static file serving

@@ -25,17 +25,23 @@ pub async fn seed_demo_data(db: &DatabaseConnection) -> Result<(), DbErr> {
         ..Default::default()
     };
 
-    user::Entity::insert(admin).on_conflict(
-        sea_orm::sea_query::OnConflict::column(user::Column::Username)
-            .do_nothing()
-            .to_owned()
-    ).exec(db).await?;
+    user::Entity::insert(admin)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::column(user::Column::Username)
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec(db)
+        .await?;
 
-    user::Entity::insert(normal_user).on_conflict(
-        sea_orm::sea_query::OnConflict::column(user::Column::Username)
-            .do_nothing()
-            .to_owned()
-    ).exec(db).await?;
+    user::Entity::insert(normal_user)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::column(user::Column::Username)
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec(db)
+        .await?;
 
     // 1.5. Create Default Library for admin
     let default_library = library::ActiveModel {
@@ -47,11 +53,14 @@ pub async fn seed_demo_data(db: &DatabaseConnection) -> Result<(), DbErr> {
         ..Default::default()
     };
 
-    library::Entity::insert(default_library).on_conflict(
-        sea_orm::sea_query::OnConflict::column(library::Column::Id)
-            .do_nothing()
-            .to_owned()
-    ).exec(db).await?;
+    library::Entity::insert(default_library)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::column(library::Column::Id)
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec(db)
+        .await?;
 
     // 2. Create Authors
     let authors = vec!["J.R.R. Tolkien", "Isaac Asimov", "Frank Herbert"];
@@ -67,8 +76,8 @@ pub async fn seed_demo_data(db: &DatabaseConnection) -> Result<(), DbErr> {
         if let Ok(_res) = res {
             // author_ids.push(res.last_insert_id);
         } else {
-             // Handle existing authors if needed, for now just skip or find
-             // Simplified: assume empty DB for seed or ignore errors
+            // Handle existing authors if needed, for now just skip or find
+            // Simplified: assume empty DB for seed or ignore errors
         }
     }
 
@@ -82,12 +91,15 @@ pub async fn seed_demo_data(db: &DatabaseConnection) -> Result<(), DbErr> {
             updated_at: Set(chrono::Utc::now().to_rfc3339()),
             ..Default::default()
         };
-         let res = tag::Entity::insert(tag).on_conflict(
-            sea_orm::sea_query::OnConflict::column(tag::Column::Name)
-                .do_nothing()
-                .to_owned()
-        ).exec(db).await;
-        
+        let _res = tag::Entity::insert(tag)
+            .on_conflict(
+                sea_orm::sea_query::OnConflict::column(tag::Column::Name)
+                    .do_nothing()
+                    .to_owned(),
+            )
+            .exec(db)
+            .await;
+
         // Retrieve ID (simplified, in real app we'd query back if exists)
     }
 
@@ -102,7 +114,7 @@ pub async fn seed_demo_data(db: &DatabaseConnection) -> Result<(), DbErr> {
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
         ..Default::default()
     };
-    
+
     book::Entity::insert(book).exec(db).await?;
 
     Ok(())

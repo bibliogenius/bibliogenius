@@ -1,4 +1,5 @@
 use sea_orm::entity::prelude::*;
+use sea_orm::{NotSet, Set};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
@@ -11,6 +12,13 @@ pub struct Model {
     pub summary: Option<String>,
     pub publisher: Option<String>,
     pub publication_year: Option<i32>,
+    pub dewey_decimal: Option<String>,
+    pub lcc: Option<String>,
+    pub subjects: Option<String>, // JSON array
+    pub marc_record: Option<String>,
+    pub cataloguing_notes: Option<String>,
+    pub source_data: Option<String>,
+    pub shelf_position: Option<i32>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -52,10 +60,33 @@ pub struct Book {
     pub summary: Option<String>,
     pub publisher: Option<String>,
     pub publication_year: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dewey_decimal: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lcc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subjects: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marc_record: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cataloguing_notes: Option<String>,
+    pub source_data: Option<String>,
+    pub shelf_position: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_url: Option<String>,
 }
 
 impl From<Model> for Book {
     fn from(model: Model) -> Self {
+        let subjects: Option<Vec<String>> = model
+            .subjects
+            .as_ref()
+            .map(|s| serde_json::from_str(s).unwrap_or_default());
+
         Self {
             id: Some(model.id),
             title: model.title,
@@ -63,6 +94,42 @@ impl From<Model> for Book {
             summary: model.summary,
             publisher: model.publisher,
             publication_year: model.publication_year,
+            dewey_decimal: model.dewey_decimal,
+            lcc: model.lcc,
+            subjects,
+            marc_record: model.marc_record,
+            cataloguing_notes: model.cataloguing_notes,
+            source_data: model.source_data,
+            shelf_position: model.shelf_position,
+            source: Some("Local".to_string()),
+            author: None,    // TODO: Fetch from relation
+            cover_url: None, // TODO: Derive from ISBN or store in DB
+        }
+    }
+}
+
+impl From<Book> for ActiveModel {
+    fn from(book: Book) -> Self {
+        Self {
+            id: match book.id {
+                Some(id) => Set(id),
+                None => NotSet,
+            },
+            title: Set(book.title),
+            isbn: Set(book.isbn),
+            summary: Set(book.summary),
+            publisher: Set(book.publisher),
+            publication_year: Set(book.publication_year),
+            dewey_decimal: Set(book.dewey_decimal),
+            lcc: Set(book.lcc),
+            subjects: Set(book
+                .subjects
+                .map(|s| serde_json::to_string(&s).unwrap_or_default())),
+            marc_record: Set(book.marc_record),
+            cataloguing_notes: Set(book.cataloguing_notes),
+            source_data: Set(book.source_data),
+            shelf_position: Set(book.shelf_position),
+            ..Default::default()
         }
     }
 }

@@ -14,9 +14,7 @@ pub struct CreateTagRequest {
     name: String,
 }
 
-pub async fn list_tags(
-    State(db): State<DatabaseConnection>,
-) -> impl IntoResponse {
+pub async fn list_tags(State(db): State<DatabaseConnection>) -> impl IntoResponse {
     let tags = Tag::find().all(&db).await.unwrap_or(vec![]);
     (StatusCode::OK, Json(tags)).into_response()
 }
@@ -34,7 +32,11 @@ pub async fn create_tag(
 
     match tag.insert(&db).await {
         Ok(model) => (StatusCode::CREATED, Json(model)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -45,7 +47,11 @@ pub async fn get_tag(
     let tag = Tag::find_by_id(id).one(&db).await.unwrap_or(None);
     match tag {
         Some(tag) => (StatusCode::OK, Json(tag)).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "Tag not found" }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Tag not found" })),
+        )
+            .into_response(),
     }
 }
 
@@ -58,10 +64,20 @@ pub async fn delete_tag(
         Some(tag) => {
             let res = tag.delete(&db).await;
             match res {
-                Ok(_) => (StatusCode::OK, Json(json!({ "message": "Tag deleted" }))).into_response(),
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+                Ok(_) => {
+                    (StatusCode::OK, Json(json!({ "message": "Tag deleted" }))).into_response()
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response(),
             }
         }
-        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "Tag not found" }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Tag not found" })),
+        )
+            .into_response(),
     }
 }

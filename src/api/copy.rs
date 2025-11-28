@@ -17,6 +17,7 @@ pub struct CopyDto {
     pub notes: Option<String>,
     pub status: String,
     pub is_temporary: bool,
+    pub book_title: Option<String>,
 }
 
 impl From<copy_model::Model> for CopyDto {
@@ -29,17 +30,26 @@ impl From<copy_model::Model> for CopyDto {
             notes: model.notes,
             status: model.status,
             is_temporary: model.is_temporary,
+            book_title: None,
         }
     }
 }
 
-// List all copies
-pub async fn list_copies(
-    State(db): State<DatabaseConnection>,
-) -> impl IntoResponse {
-    match Copy::find().all(&db).await {
-        Ok(copies) => {
-            let copy_dtos: Vec<CopyDto> = copies.into_iter().map(CopyDto::from).collect();
+// List all copies with book details
+pub async fn list_copies(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    use crate::models::book::Entity as Book;
+
+    match Copy::find().find_also_related(Book).all(&db).await {
+        Ok(copies_with_books) => {
+            let copy_dtos: Vec<CopyDto> = copies_with_books
+                .into_iter()
+                .map(|(copy, book)| {
+                    let mut dto = CopyDto::from(copy);
+                    dto.book_title = book.map(|b| b.title);
+                    dto
+                })
+                .collect();
+
             Json(serde_json::json!({
                 "copies": copy_dtos,
                 "total": copy_dtos.len()

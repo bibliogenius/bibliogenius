@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BiblioGenius - Copies</title>
-    <link rel="stylesheet" href="/css/app.css">
+    <link rel="stylesheet" href="/css/app.css?v=beige">
 </head>
 
 <body>
@@ -31,7 +31,30 @@
     </div>
 
     <script src="/js/api.js"></script>
+    <script src="/js/i18n.js"></script>
+    <script src="/js/theme.js"></script>
     <script>
+        // i18n is already defined as const in i18n.js
+        let isProfessional = false;
+
+        async function init() {
+            // Initialize existing i18n instance
+            await i18n.load(localStorage.getItem('lang') || 'en');
+
+            // Check profile
+            try {
+                const response = await fetch('/api/config');
+                if (response.ok) {
+                    const config = await response.json();
+                    isProfessional = config.profile_type === 'professional';
+                }
+            } catch (e) {
+                console.error("Failed to load profile config", e);
+            }
+
+            loadCopies();
+        }
+
         async function loadCopies() {
             const listDiv = document.getElementById('copiesList');
             try {
@@ -39,7 +62,7 @@
                 const copies = data.copies || [];
 
                 if (copies.length === 0) {
-                    listDiv.innerHTML = '<p style="color: var(--text-light);">No copies yet.</p>';
+                    listDiv.innerHTML = `<p style="color: var(--text-light);">${i18n.t('copies.noCopies')}</p>`;
                     return;
                 }
 
@@ -47,10 +70,11 @@
                     <table>
                         <thead>
                             <tr>
-                                <th>Book ID</th>
-                                <th>Status</th>
-                                <th>Acquisition Date</th>
-                                <th>Notes</th>
+                                <th>${i18n.t('copies.bookTitle')}</th>
+                                ${isProfessional ? `<th>${i18n.t('copies.bookId')}</th>` : ''}
+                                <th>${i18n.t('copies.status')}</th>
+                                <th>${i18n.t('copies.acquisitionDate')}</th>
+                                <th>${i18n.t('copies.notes')}</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -59,7 +83,8 @@
                         copy.status === 'borrowed' ? 'warning' : 'danger';
                     return `
                                     <tr>
-                                        <td>${copy.book_id}</td>
+                                        <td><strong>${copy.book_title || 'Unknown Title'}</strong></td>
+                                        ${isProfessional ? `<td><small class="text-muted">${copy.book_id}</small></td>` : ''}
                                         <td><span class="badge badge-${statusClass}">${copy.status}</span></td>
                                         <td>${copy.acquisition_date || '-'}</td>
                                         <td>${copy.notes || '-'}</td>
@@ -70,11 +95,11 @@
                     </table>
                 `;
             } catch (error) {
-                listDiv.innerHTML = `<p style="color: var(--danger);">Error loading copies: ${error.message}</p>`;
+                listDiv.innerHTML = `<p style="color: var(--danger);">${i18n.t('copies.error')}: ${error.message}</p>`;
             }
         }
 
-        loadCopies();
+        init();
     </script>
 </body>
 
