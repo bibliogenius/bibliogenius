@@ -7,10 +7,10 @@ pub struct AppState {
 
 pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     let db = Database::connect(database_url).await?;
-    
+
     // Run migrations manually (simple SQL)
     run_migrations(&db).await?;
-    
+
     Ok(db)
 }
 
@@ -26,11 +26,20 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             summary TEXT,
             publisher TEXT,
             publication_year INTEGER,
+            dewey_decimal TEXT,
+            lcc TEXT,
+            subjects TEXT,
+            marc_record TEXT,
+            cataloguing_notes TEXT,
+            source_data TEXT,
+            shelf_position INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     // Create library_config table
     db.execute(Statement::from_string(
@@ -44,8 +53,10 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     // Insert default library config if not exists
     db.execute(Statement::from_string(
@@ -53,8 +64,10 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         r#"
         INSERT OR IGNORE INTO library_config (id, name, description, tags, created_at, updated_at)
         VALUES (1, 'My Library', 'Personal book collection', '[]', datetime('now'), datetime('now'))
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     // Create users table
     db.execute(Statement::from_string(
@@ -68,8 +81,10 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     // Create authors table
     db.execute(Statement::from_string(
@@ -81,8 +96,10 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     // Create tags table
     db.execute(Statement::from_string(
@@ -94,8 +111,10 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     // Create book_authors junction table
     db.execute(Statement::from_string(
@@ -108,8 +127,10 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE,
             FOREIGN KEY (author_id) REFERENCES authors(id) ON DELETE CASCADE
         )
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     // Create book_tags junction table
     db.execute(Statement::from_string(
@@ -122,8 +143,10 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE,
             FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
         )
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     // Create operation_log table
     db.execute(Statement::from_string(
@@ -137,24 +160,10 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             payload TEXT, -- JSON payload of the change
             created_at TEXT NOT NULL
         )
-        "#.to_owned(),
-    )).await?;
-
-    // Create peers table
-    db.execute(Statement::from_string(
-        db.get_database_backend(),
-        r#"
-        CREATE TABLE IF NOT EXISTS peers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            url TEXT NOT NULL UNIQUE,
-            public_key TEXT,
-            last_seen TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     // Migration 004: Book/Copy Architecture Refactoring
     // Create libraries table
@@ -170,8 +179,10 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             updated_at TEXT NOT NULL,
             FOREIGN KEY (owner_id) REFERENCES users(id)
         )
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     // Create copies table
     db.execute(Statement::from_string(
@@ -190,31 +201,39 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE,
             FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
         )
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     // Migration 005: Add status and is_temporary columns if they don't exist
     // Note: SQLite doesn't support IF NOT EXISTS in ALTER TABLE, so we ignore errors
-    let _ = db.execute(Statement::from_string(
-        db.get_database_backend(),
-        "ALTER TABLE copies ADD COLUMN status TEXT NOT NULL DEFAULT 'available'".to_owned(),
-    )).await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE copies ADD COLUMN status TEXT NOT NULL DEFAULT 'available'".to_owned(),
+        ))
+        .await;
 
-    let _ = db.execute(Statement::from_string(
-        db.get_database_backend(),
-        "ALTER TABLE copies ADD COLUMN is_temporary INTEGER NOT NULL DEFAULT 0".to_owned(),
-    )).await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE copies ADD COLUMN is_temporary INTEGER NOT NULL DEFAULT 0".to_owned(),
+        ))
+        .await;
 
     // Create indexes for copies
     db.execute(Statement::from_string(
         db.get_database_backend(),
         "CREATE INDEX IF NOT EXISTS idx_copies_status ON copies(status)".to_owned(),
-    )).await?;
+    ))
+    .await?;
 
     db.execute(Statement::from_string(
         db.get_database_backend(),
         "CREATE INDEX IF NOT EXISTS idx_copies_temporary ON copies(is_temporary)".to_owned(),
-    )).await?;
+    ))
+    .await?;
 
     // Create contacts table
     db.execute(Statement::from_string(
@@ -240,8 +259,10 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         CREATE INDEX IF NOT EXISTS idx_contacts_library_owner_id ON contacts(library_owner_id);
         CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email);
         CREATE INDEX IF NOT EXISTS idx_contacts_user_id ON contacts(user_id);
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     // Create loans table
     db.execute(Statement::from_string(
@@ -267,8 +288,10 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         CREATE INDEX IF NOT EXISTS idx_loans_contact_id ON loans(contact_id);
         CREATE INDEX IF NOT EXISTS idx_loans_library_id ON loans(library_id);
         CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     // Create peers table
     db.execute(Statement::from_string(
@@ -279,11 +302,83 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             name TEXT NOT NULL,
             url TEXT NOT NULL UNIQUE,
             public_key TEXT,
+            latitude REAL,
+            longitude REAL,
             last_seen TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_peers_url ON peers(url);
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Migration 006: Peer Books Cache and Auto-Approve
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS peer_books (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            peer_id INTEGER NOT NULL,
+            remote_book_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            isbn TEXT,
+            author TEXT,
+            cover_url TEXT,
+            summary TEXT,
+            synced_at TEXT NOT NULL,
+            FOREIGN KEY (peer_id) REFERENCES peers(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_peer_books_peer_id ON peer_books(peer_id);
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Add auto_approve to peers
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peers ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0".to_owned(),
+        ))
+        .await;
+
+    // Create p2p_requests table
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS p2p_requests (
+            id TEXT PRIMARY KEY,
+            from_peer_id INTEGER NOT NULL,
+            book_isbn TEXT NOT NULL,
+            book_title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (from_peer_id) REFERENCES peers(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_p2p_requests_from_peer_id ON p2p_requests(from_peer_id);
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Create p2p_outgoing_requests table
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS p2p_outgoing_requests (
+            id TEXT PRIMARY KEY,
+            to_peer_id INTEGER NOT NULL,
+            book_isbn TEXT NOT NULL,
+            book_title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (to_peer_id) REFERENCES peers(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_p2p_outgoing_requests_to_peer_id ON p2p_outgoing_requests(to_peer_id);
         "#.to_owned(),
     )).await?;
 

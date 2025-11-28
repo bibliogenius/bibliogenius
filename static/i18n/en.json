@@ -1,0 +1,100 @@
+{
+    "setup": {
+        "welcome": "Welcome to BiblioGenius",
+        "subtitle": "Let's set up your library in just a few steps",
+        "chooseProfile": "Choose Your Profile",
+        "profileDescription": "Select the profile that best fits your needs. You can change this later in Settings.",
+        "individual": "Individual",
+        "individualDescription": "Perfect for personal book collections and book clubs",
+        "professional": "Professional",
+        "professionalDescription": "For libraries, schools, and professional cataloguing",
+        "features": {
+            "simpleInterface": "Simple, visual interface",
+            "isbnImport": "ISBN auto-import",
+            "shareBooks": "Share books with friends (P2P)",
+            "goodreadsImport": "Import from Goodreads",
+            "allIndividual": "All Individual features",
+            "marcCataloguing": "MARC/FRBR cataloguing standards",
+            "advancedLending": "Advanced lending workflows",
+            "statistics": "Statistics and reports",
+            "sudocIntegration": "SUDOC/Z39.50 integration"
+        },
+        "continue": "Continue",
+        "back": "Back",
+        "configureLibrary": "Configure Your Library",
+        "libraryName": "Library Name",
+        "libraryNamePlaceholder": "My Personal Library",
+        "description": "Description (optional)",
+        "descriptionPlaceholder": "A brief description of your library...",
+        "language": "Language",
+        "selectLanguage": "Select your preferred language",
+        "completeSetup": "Complete Setup"
+    },
+    "copies": {
+        "title": "Book Copies",
+        "bookTitle": "Book Title",
+        "bookId": "Book ID",
+        "status": "Status",
+        "acquisitionDate": "Acquisition Date",
+        "notes": "Notes",
+        "noCopies": "No copies yet.",
+        "loading": "Loading copies...",
+        "error": "Error loading copies"
+    },
+    "nav": {
+        "dashboard": "Dashboard",
+        "books": "Books",
+        "copies": "Copies",
+        "contacts": "Contacts",
+        "loans": "Loans",
+        "p2p": "P2P Search",
+        "requests": "Requests",
+        "scan": "Scan",
+        "settings": "Settings"
+    },
+    "dashboard": {
+        "title": "Dashboard",
+        "totalBooks": "Total Books",
+        "activeLoans": "Active Loans",
+        "contacts": "Contacts",
+        "recentBooks": "Recent Books",
+        "noBooks": "No recent books."
+    },
+    "books": {
+        "title": "Books",
+        "searchPlaceholder": "Search books...",
+        "filters": "Filters",
+        "selectBooks": "Select",
+        "addBook": "Add Book",
+        "table": {
+            "title": "Title",
+            "isbn": "ISBN",
+            "publisher": "Publisher",
+            "year": "Year",
+            "source": "Source",
+            "actions": "Actions"
+        },
+        "actions": {
+            "edit": "Edit",
+            "delete": "Delete",
+            "request": "Request",
+            "import": "Import"
+        }
+    },
+    "settings": {
+        "title": "Settings",
+        "language": "Language",
+        "selectLanguage": "Select your preferred language",
+        "import": {
+            "title": "Import Library",
+            "description": "Migrate your library from other platforms. Currently supports Goodreads CSV export.",
+            "selectFile": "Select CSV File",
+            "start": "Start Import"
+        },
+        "export": {
+            "title": "Export Backup",
+            "description": "Download a full backup of your library (Books, Copies, Contacts, Loans) in JSON format.",
+            "download": "Download JSON Backup"
+        }
+    }
+}

@@ -1,22 +1,25 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BiblioGenius - Dashboard</title>
-    <link rel="stylesheet" href="/css/app.css">
+    <link rel="stylesheet" href="/css/app.css?v=beige">
 </head>
+
 <body>
     <div class="container">
         <header>
-            <h1>📚 BiblioGenius</h1>
+            <h1 data-i18n="dashboard.title">📊 BiblioGenius Dashboard</h1>
             <nav>
-                <a href="/">Dashboard</a>
-                <a href="/books.html">Books</a>
-                <a href="/copies.html">Copies</a>
-                <a href="/contacts.html">Contacts</a>
-                <a href="/loans.html">Loans</a>
-                <a href="/p2p.html">P2P Search</a>
+                <a href="/" class="active" data-i18n="nav.dashboard">Dashboard</a>
+                <a href="/books.html" data-i18n="nav.books">Books</a>
+                <a href="/copies.html" data-i18n="nav.copies">Copies</a>
+                <a href="/contacts.html" data-i18n="nav.contacts">Contacts</a>
+                <a href="/loans.html" data-i18n="nav.loans">Loans</a>
+                <a href="/p2p.html" data-i18n="nav.p2p">P2P Search</a>
+                <a href="/settings.html" data-i18n="nav.settings">Settings</a>
             </nav>
         </header>
 
@@ -25,22 +28,18 @@
             <p>Your personal library management system with P2P capabilities.</p>
         </div>
 
-        <div class="stats-grid" id="stats">
+        <div class="stats-grid" style="margin-bottom: 2rem;">
             <div class="stat-card">
-                <h3 id="totalBooks">-</h3>
-                <p>Total Books</p>
+                <h3 id="totalBooks">0</h3>
+                <p data-i18n="dashboard.totalBooks">Total Books</p>
             </div>
             <div class="stat-card">
-                <h3 id="totalCopies">-</h3>
-                <p>Total Copies</p>
+                <h3 id="activeLoans">0</h3>
+                <p data-i18n="dashboard.activeLoans">Active Loans</p>
             </div>
             <div class="stat-card">
-                <h3 id="activeLoans">-</h3>
-                <p>Active Loans</p>
-            </div>
-            <div class="stat-card">
-                <h3 id="totalContacts">-</h3>
-                <p>Contacts</p>
+                <h3 id="totalContacts">0</h3>
+                <p data-i18n="dashboard.contacts">Contacts</p>
             </div>
         </div>
 
@@ -50,31 +49,100 @@
                 <a href="/books.html" class="btn btn-primary">Add Book</a>
                 <a href="/loans.html" class="btn btn-primary">Checkout Book</a>
                 <a href="/p2p.html" class="btn btn-primary">Search Remote Library</a>
+                <a href="/chat.html" class="btn btn-primary" style="background: #8b5cf6; border-color: #7c3aed;">💬 Ask
+                    Library</a>
             </div>
+        </div>
+
+        <div class="card" style="margin-top: 2rem;">
+            <h2 data-i18n="dashboard.recentBooks">📚 Recent Books</h2>
+            <div id="recentBooksList">Loading...</div>
         </div>
     </div>
 
     <script src="/js/api.js"></script>
+    <script src="/js/theme.js"></script>
+    <script src="/js/i18n.js"></script>
     <script>
-        async function loadStats() {
+        async function loadDashboard() {
+            // Initialize i18n
+            await i18n.load(localStorage.getItem('lang') || 'en');
+            i18n.applyTranslations();
+
             try {
-                const [books, copies, loans, contacts] = await Promise.all([
+                const [booksData, loans, contacts] = await Promise.all([
                     api.getBooks(),
-                    api.getCopies(),
-                    api.getLoans({ status: 'active' }),
+                    api.getLoans(),
                     api.getContacts()
                 ]);
 
-                document.getElementById('totalBooks').textContent = books.books?.length || 0;
-                document.getElementById('totalCopies').textContent = copies.copies?.length || 0;
-                document.getElementById('activeLoans').textContent = loans.loans?.length || 0;
-                document.getElementById('totalContacts').textContent = contacts.contacts?.length || 0;
+                document.getElementById('totalBooks').textContent = booksData.total;
+                document.getElementById('activeLoans').textContent = loans.filter(l => !l.return_date).length;
+                document.getElementById('totalContacts').textContent = contacts.length;
+
+                const recentDiv = document.getElementById('recentBooksList');
+                if (booksData.books.length === 0) {
+                    recentDiv.innerHTML = `<p style="color: var(--text-light);" data-i18n="dashboard.noBooks">${i18n.t('dashboard.noBooks')}</p>`;
+                } else {
+                    // Show last 5 books
+                    const recent = booksData.books.slice(0, 5);
+                    recentDiv.innerHTML = `
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th data-i18n="books.table.title">Title</th>
+                                    <th data-i18n="books.table.publisher">Publisher</th>
+                                    <th data-i18n="books.table.year">Year</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${recent.map(book => `
+                                    <tr>
+                                        <td><strong>${book.title}</strong></td>
+                                        <td>${book.publisher || '-'}</td>
+                                        <td>${book.publication_year || '-'}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    `;
+                    // Re-apply translations for dynamic content if needed, but here we used data-i18n
+                    i18n.applyTranslations();
+                }
+
             } catch (error) {
-                console.error('Failed to load stats:', error);
+                console.error("Dashboard error:", error);
             }
         }
 
-        loadStats();
+        loadDashboard();
     </script>
+    <a href="/scan.html" class="fab" title="Scan Book">📷</a>
+
+    <style>
+        .fab {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            width: 60px;
+            height: 60px;
+            background: var(--primary-color);
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2rem;
+            text-decoration: none;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            transition: transform 0.2s;
+            z-index: 1000;
+        }
+
+        .fab:hover {
+            transform: scale(1.1);
+        }
+    </style>
 </body>
+
 </html>

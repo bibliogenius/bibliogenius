@@ -1,11 +1,6 @@
 use crate::auth::{create_jwt, hash_password, verify_password};
 use crate::models::user::{self, Entity as User};
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use sea_orm::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -38,7 +33,11 @@ pub async fn login(
         }
     }
 
-    (StatusCode::UNAUTHORIZED, Json(json!({ "error": "Invalid credentials" }))).into_response()
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": "Invalid credentials" })),
+    )
+        .into_response()
 }
 
 // Temporary helper to create admin user if not exists
@@ -53,7 +52,7 @@ pub async fn create_admin(
     Json(payload): Json<CreateUserRequest>,
 ) -> impl IntoResponse {
     let password_hash = hash_password(&payload.password).unwrap();
-    
+
     let user = user::ActiveModel {
         username: Set(payload.username),
         password_hash: Set(password_hash),
@@ -64,7 +63,15 @@ pub async fn create_admin(
     };
 
     match user.insert(&db).await {
-        Ok(_) => (StatusCode::CREATED, Json(json!({ "message": "Admin created" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(_) => (
+            StatusCode::CREATED,
+            Json(json!({ "message": "Admin created" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BiblioGenius - Requests</title>
+    <link rel="stylesheet" href="/css/app.css?v=beige">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>📚 BiblioGenius - Requests</h1>
+            <nav>
+                <a href="/">Dashboard</a>
+                <a href="/books.html">Books</a>
+                <a href="/copies.html">Copies</a>
+                <a href="/contacts.html">Contacts</a>
+                <a href="/loans.html">Loans</a>
+                <a href="/p2p.html">P2P Search</a>
+                <a href="/requests.html" class="active">Requests</a>
+            </nav>
+        </header>
+
+        <div class="card">
+            <h2>📥 Incoming Requests</h2>
+            <p style="color: var(--text-light); margin-bottom: 1rem;">Books that other libraries want to borrow from
+                you.</p>
+            <div id="incomingRequests">Loading...</div>
+        </div>
+
+        <div class="card">
+            <h2>📤 Outgoing Requests</h2>
+            <p style="color: var(--text-light); margin-bottom: 1rem;">Books you have requested from other libraries.</p>
+            <div id="outgoingRequests">Loading...</div>
+        </div>
+    </div>
+
+    <script src="/js/api.js?v=2"></script>
+    <script src="/js/theme.js"></script>
+    <script>
+        window.addEventListener('DOMContentLoaded', loadRequests);
+
+        async function loadRequests() {
+            const inDiv = document.getElementById('incomingRequests');
+            const outDiv = document.getElementById('outgoingRequests');
+
+            try {
+                const [incoming, outgoing] = await Promise.all([
+                    api.listRequests(),
+                    api.listOutgoingRequests()
+                ]);
+
+                // Render Incoming
+                if (incoming.length === 0) {
+                    inDiv.innerHTML = '<p style="color: var(--text-light);">No incoming requests.</p>';
+                } else {
+                    inDiv.innerHTML = renderTable(incoming, true);
+                }
+
+                // Render Outgoing
+                if (outgoing.length === 0) {
+                    outDiv.innerHTML = '<p style="color: var(--text-light);">No outgoing requests.</p>';
+                } else {
+                    outDiv.innerHTML = renderTable(outgoing, false);
+                }
+
+            } catch (e) {
+                inDiv.innerHTML = `<div class="error">Failed to load requests: ${e.message}</div>`;
+                outDiv.innerHTML = `<div class="error">Failed to load requests: ${e.message}</div>`;
+            }
+        }
+
+        function renderTable(requests, isIncoming) {
+            return `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>${isIncoming ? 'From' : 'To'}</th>
+                            <th>Book</th>
+                            <th>Status</th>
+                            <th>Date</th>
+                            ${isIncoming ? '<th>Actions</th>' : ''}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${requests.map(req => `
+                            <tr>
+                                <td><strong>${req.peer_name}</strong></td>
+                                <td>${req.book_title} <small>(${req.book_isbn})</small></td>
+                                <td><span class="badge badge-${getStatusColor(req.status)}">${req.status}</span></td>
+                                <td>${new Date(req.created_at).toLocaleDateString()}</td>
+                                ${isIncoming ? `
+                                    <td>
+                                        ${req.status === 'pending' ? `
+                                            <button class="btn btn-sm btn-primary" onclick="updateStatus('${req.id}', 'accepted')">Accept</button>
+                                            <button class="btn btn-sm btn-danger" onclick="updateStatus('${req.id}', 'rejected')">Reject</button>
+                                        ` : '-'}
+                                    </td>
+                                ` : ''}
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        function getStatusColor(status) {
+            switch (status) {
+                case 'pending': return 'warning';
+                case 'accepted': return 'success';
+                case 'rejected': return 'danger';
+                default: return 'secondary';
+            }
+        }
+
+        async function updateStatus(id, status) {
+            if (!confirm(`Are you sure you want to ${status} this request?`)) return;
+
+            try {
+                await api.updateRequestStatus(id, status);
+                loadRequests();
+            } catch (e) {
+                alert(`Failed to update status: ${e.message}`);
+            }
+        }
+    </script>
+    <style>
+        .badge {
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
+        .badge-warning {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .badge-success {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .badge-danger {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .badge-secondary {
+            background: #f3f4f6;
+            color: #374151;
+        }
+
+        .btn-danger {
+            background: #ef4444;
+            color: white;
+            border: none;
+        }
+
+        .btn-danger:hover {
+            background: #dc2626;
+        }
+    </style>
+</body>
+
+</html>

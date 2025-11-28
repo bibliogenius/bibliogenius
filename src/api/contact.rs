@@ -18,7 +18,7 @@ pub struct ContactDto {
     pub address: Option<String>,
     pub notes: Option<String>,
     pub user_id: Option<i32>,
-    pub library_owner_id: i32,
+    pub library_owner_id: Option<i32>,
     pub is_active: bool,
 }
 
@@ -33,7 +33,7 @@ impl From<contact_model::Model> for ContactDto {
             address: model.address,
             notes: model.notes,
             user_id: model.user_id,
-            library_owner_id: model.library_owner_id,
+            library_owner_id: Some(model.library_owner_id),
             is_active: model.is_active,
         }
     }
@@ -62,7 +62,8 @@ pub async fn list_contacts(
 
     match query.all(&db).await {
         Ok(contacts) => {
-            let contact_dtos: Vec<ContactDto> = contacts.into_iter().map(ContactDto::from).collect();
+            let contact_dtos: Vec<ContactDto> =
+                contacts.into_iter().map(ContactDto::from).collect();
             Json(serde_json::json!({
                 "contacts": contact_dtos,
                 "total": contact_dtos.len()
@@ -115,7 +116,7 @@ pub async fn create_contact(
         address: Set(contact_dto.address),
         notes: Set(contact_dto.notes),
         user_id: Set(contact_dto.user_id),
-        library_owner_id: Set(contact_dto.library_owner_id),
+        library_owner_id: Set(contact_dto.library_owner_id.unwrap_or(1)),
         is_active: Set(contact_dto.is_active),
         created_at: Set(now.clone()),
         updated_at: Set(now),
@@ -161,7 +162,9 @@ pub async fn update_contact(
         active_model.address = Set(contact_dto.address);
         active_model.notes = Set(contact_dto.notes);
         active_model.user_id = Set(contact_dto.user_id);
-        active_model.library_owner_id = Set(contact_dto.library_owner_id);
+        if let Some(lid) = contact_dto.library_owner_id {
+            active_model.library_owner_id = Set(lid);
+        }
         active_model.is_active = Set(contact_dto.is_active);
         active_model.updated_at = Set(now);
 

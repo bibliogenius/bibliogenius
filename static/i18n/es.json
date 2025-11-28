@@ -1,0 +1,100 @@
+{
+    "setup": {
+        "welcome": "Bienvenido a BiblioGenius",
+        "subtitle": "Configuremos tu biblioteca en solo unos pasos",
+        "chooseProfile": "Elige Tu Perfil",
+        "profileDescription": "Selecciona el perfil que mejor se adapte a tus necesidades. Puedes cambiarlo más tarde en Ajustes.",
+        "individual": "Individual",
+        "individualDescription": "Perfecto para colecciones personales y clubes de lectura",
+        "professional": "Profesional",
+        "professionalDescription": "Para bibliotecas, escuelas y catalogación profesional",
+        "features": {
+            "simpleInterface": "Interfaz simple y visual",
+            "isbnImport": "Importación automática por ISBN",
+            "shareBooks": "Comparte libros con amigos (P2P)",
+            "goodreadsImport": "Importar desde Goodreads",
+            "allIndividual": "Todas las funciones Individuales",
+            "marcCataloguing": "Estándares de catalogación MARC/FRBR",
+            "advancedLending": "Gestión avanzada de préstamos",
+            "statistics": "Estadísticas e informes",
+            "sudocIntegration": "Integración SUDOC/Z39.50"
+        },
+        "continue": "Continuar",
+        "back": "Atrás",
+        "configureLibrary": "Configura Tu Biblioteca",
+        "libraryName": "Nombre de la Biblioteca",
+        "libraryNamePlaceholder": "Mi Biblioteca Personal",
+        "description": "Descripción (opcional)",
+        "descriptionPlaceholder": "Una breve descripción de tu biblioteca...",
+        "language": "Idioma",
+        "selectLanguage": "Selecciona tu idioma preferido",
+        "completeSetup": "Completar Configuración"
+    },
+    "copies": {
+        "title": "Copias de Libros",
+        "bookTitle": "Título del Libro",
+        "bookId": "ID del Libro",
+        "status": "Estado",
+        "acquisitionDate": "Fecha de Adquisición",
+        "notes": "Notas",
+        "noCopies": "Aún no hay copias.",
+        "loading": "Cargando copias...",
+        "error": "Error al cargar copias"
+    },
+    "nav": {
+        "dashboard": "Tablero",
+        "books": "Libros",
+        "copies": "Copias",
+        "contacts": "Contactos",
+        "loans": "Préstamos",
+        "p2p": "Búsqueda P2P",
+        "requests": "Solicitudes",
+        "scan": "Escanear",
+        "settings": "Ajustes"
+    },
+    "dashboard": {
+        "title": "Tablero",
+        "totalBooks": "Total de Libros",
+        "activeLoans": "Préstamos Activos",
+        "contacts": "Contactos",
+        "recentBooks": "Libros Recientes",
+        "noBooks": "No hay libros recientes."
+    },
+    "books": {
+        "title": "Libros",
+        "searchPlaceholder": "Buscar libros...",
+        "filters": "Filtros",
+        "selectBooks": "Seleccionar",
+        "addBook": "Añadir Libro",
+        "table": {
+            "title": "Título",
+            "isbn": "ISBN",
+            "publisher": "Editorial",
+            "year": "Año",
+            "source": "Fuente",
+            "actions": "Acciones"
+        },
+        "actions": {
+            "edit": "Editar",
+            "delete": "Eliminar",
+            "request": "Solicitar",
+            "import": "Importar"
+        }
+    },
+    "settings": {
+        "title": "Ajustes",
+        "language": "Idioma",
+        "selectLanguage": "Selecciona tu idioma preferido",
+        "import": {
+            "title": "Importar Biblioteca",
+            "description": "Migra tu biblioteca desde otras plataformas. Actualmente soporta exportación CSV de Goodreads.",
+            "selectFile": "Seleccionar Archivo CSV",
+            "start": "Iniciar Importación"
+        },
+        "export": {
+            "title": "Exportar Copia de Seguridad",
+            "description": "Descarga una copia de seguridad completa de tu biblioteca (Libros, Copias, Contactos, Préstamos) en formato JSON.",
+            "download": "Descargar Copia de Seguridad JSON"
+        }
+    }
+}

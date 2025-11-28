@@ -1,0 +1,100 @@
+{
+    "setup": {
+        "welcome": "Bienvenue sur BiblioGenius",
+        "subtitle": "Configurons votre bibliothèque en quelques étapes",
+        "chooseProfile": "Choisissez Votre Profil",
+        "profileDescription": "Sélectionnez le profil qui correspond le mieux à vos besoins. Vous pourrez le modifier ultérieurement dans les Paramètres.",
+        "individual": "Particulier",
+        "individualDescription": "Parfait pour les collections personnelles et les clubs de lecture",
+        "professional": "Professionnel",
+        "professionalDescription": "Pour les bibliothèques, écoles et catalogage professionnel",
+        "features": {
+            "simpleInterface": "Interface simple et visuelle",
+            "isbnImport": "Import automatique par ISBN",
+            "shareBooks": "Partage de livres entre amis (P2P)",
+            "goodreadsImport": "Import depuis Goodreads",
+            "allIndividual": "Toutes les fonctionnalités Particulier",
+            "marcCataloguing": "Standards de catalogage MARC/FRBR",
+            "advancedLending": "Gestion avancée des prêts",
+            "statistics": "Statistiques et rapports",
+            "sudocIntegration": "Intégration SUDOC/Z39.50"
+        },
+        "continue": "Continuer",
+        "back": "Retour",
+        "configureLibrary": "Configurez Votre Bibliothèque",
+        "libraryName": "Nom de la Bibliothèque",
+        "libraryNamePlaceholder": "Ma Bibliothèque Personnelle",
+        "description": "Description (optionnel)",
+        "descriptionPlaceholder": "Une brève description de votre bibliothèque...",
+        "language": "Langue",
+        "selectLanguage": "Sélectionnez votre langue préférée",
+        "completeSetup": "Terminer la Configuration"
+    },
+    "copies": {
+        "title": "Exemplaires",
+        "bookTitle": "Titre du livre",
+        "bookId": "ID Livre",
+        "status": "Statut",
+        "acquisitionDate": "Date d'acquisition",
+        "notes": "Notes",
+        "noCopies": "Aucun exemplaire pour le moment.",
+        "loading": "Chargement des exemplaires...",
+        "error": "Erreur lors du chargement des exemplaires"
+    },
+    "nav": {
+        "dashboard": "Tableau de bord",
+        "books": "Livres",
+        "copies": "Exemplaires",
+        "contacts": "Contacts",
+        "loans": "Prêts",
+        "p2p": "Recherche P2P",
+        "requests": "Demandes",
+        "scan": "Scan",
+        "settings": "Paramètres"
+    },
+    "dashboard": {
+        "title": "Tableau de bord",
+        "totalBooks": "Total Livres",
+        "activeLoans": "Prêts Actifs",
+        "contacts": "Contacts",
+        "recentBooks": "Livres Récents",
+        "noBooks": "Aucun livre récent."
+    },
+    "books": {
+        "title": "Livres",
+        "searchPlaceholder": "Rechercher des livres...",
+        "filters": "Filtres",
+        "selectBooks": "Sélectionner",
+        "addBook": "Ajouter un Livre",
+        "table": {
+            "title": "Titre",
+            "isbn": "ISBN",
+            "publisher": "Éditeur",
+            "year": "Année",
+            "source": "Source",
+            "actions": "Actions"
+        },
+        "actions": {
+            "edit": "Modifier",
+            "delete": "Supprimer",
+            "request": "Demander",
+            "import": "Importer"
+        }
+    },
+    "settings": {
+        "title": "Paramètres",
+        "language": "Langue",
+        "selectLanguage": "Sélectionner la langue",
+        "import": {
+            "title": "Importer une Bibliothèque",
+            "description": "Migrez votre bibliothèque depuis d'autres plateformes. Supporte actuellement l'export CSV de Goodreads.",
+            "selectFile": "Choisir un fichier CSV",
+            "start": "Lancer l'Import"
+        },
+        "export": {
+            "title": "Exporter une Sauvegarde",
+            "description": "Téléchargez une sauvegarde complète de votre bibliothèque (Livres, Exemplaires, Contacts, Prêts) au format JSON.",
+            "download": "Télécharger JSON"
+        }
+    }
+}

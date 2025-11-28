@@ -36,6 +36,9 @@ pub async fn register_with_hub(
             name: "My Library".to_string(),
             description: None,
             tags: vec![],
+            latitude: None,
+            longitude: None,
+            share_location: false,
         });
 
     // Prepare registration data
