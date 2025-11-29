@@ -19,6 +19,8 @@ pub struct Model {
     pub cataloguing_notes: Option<String>,
     pub source_data: Option<String>,
     pub shelf_position: Option<i32>,
+    #[sea_orm(default_value = "to_read")]
+    pub reading_status: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -72,6 +74,7 @@ pub struct Book {
     pub cataloguing_notes: Option<String>,
     pub source_data: Option<String>,
     pub shelf_position: Option<i32>,
+    pub reading_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,6 +104,7 @@ impl From<Model> for Book {
             cataloguing_notes: model.cataloguing_notes,
             source_data: model.source_data,
             shelf_position: model.shelf_position,
+            reading_status: Some(model.reading_status),
             source: Some("Local".to_string()),
             author: None,    // TODO: Fetch from relation
             cover_url: None, // TODO: Derive from ISBN or store in DB
@@ -129,6 +133,7 @@ impl From<Book> for ActiveModel {
             cataloguing_notes: Set(book.cataloguing_notes),
             source_data: Set(book.source_data),
             shelf_position: Set(book.shelf_position),
+            reading_status: Set(book.reading_status.unwrap_or("to_read".to_string())),
             ..Default::default()
         }
     }

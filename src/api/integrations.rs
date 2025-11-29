@@ -135,6 +135,7 @@ pub async fn search_external(query: &crate::api::search::SearchQuery) -> Vec<boo
                     cataloguing_notes: None,
                     source_data: Some(source_data.to_string()),
                     shelf_position: None,
+                    reading_status: "to_read".to_string(),
                     created_at: chrono::Utc::now().to_rfc3339(),
                     updated_at: chrono::Utc::now().to_rfc3339(),
                 };

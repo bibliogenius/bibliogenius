@@ -43,6 +43,9 @@ async fn main() {
     let api_router = Router::new()
         // Health check
         .route("/health", get(api::health::health_check))
+        // Auth
+        .route("/auth/login", post(api::auth::login))
+        .route("/auth/register", post(api::auth::create_admin))
         // Library config
         .route("/library/config", get(api::library::get_config))
         .route("/library/config", post(api::library::update_config))
@@ -71,6 +74,7 @@ async fn main() {
         .route("/peers/push", post(api::peer::push_operations))
         .route("/peers/pull", get(api::peer::pull_operations))
         .route("/peers/:id/sync", post(api::peer::sync_peer)) // Sync remote books
+        .route("/peers/:id/books", get(api::peer::list_peer_books))
         .route("/peers/search", post(api::peer::search_local))
         .route("/peers/proxy_search", post(api::peer::proxy_search))
         .route("/peers/:id/request", post(api::peer::request_book)) // Send request
@@ -81,6 +85,10 @@ async fn main() {
             get(api::peer::list_outgoing_requests),
         ) // List outgoing requests
         .route("/peers/requests/:id", put(api::peer::update_request_status)) // Update status
+        .route(
+            "/peers/requests/:id",
+            axum::routing::delete(api::peer::delete_request),
+        ) // Delete request
         // Scanning
         .route("/scan/image", post(api::scan::scan_image))
         // Batch Operations
@@ -114,8 +122,8 @@ async fn main() {
         .route("/lookup/:isbn", get(api::lookup::lookup_book))
         // Data Import/Export
         .route(
-            "/import/goodreads",
-            axum::routing::post(api::data::import_goodreads),
+            "/import/file",
+            axum::routing::post(api::data::import_file),
         )
         // Setup & Config
         .route("/setup", axum::routing::post(api::setup::setup))

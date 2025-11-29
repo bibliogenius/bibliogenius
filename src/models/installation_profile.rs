@@ -27,7 +27,7 @@ impl std::fmt::Display for InstallationProfile {
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(table_name = "installation_profiles")]
+#[sea_orm(table_name = "installation_profile")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,

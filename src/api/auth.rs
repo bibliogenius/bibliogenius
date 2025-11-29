@@ -20,6 +20,7 @@ pub async fn login(
     State(db): State<DatabaseConnection>,
     Json(payload): Json<LoginRequest>,
 ) -> impl IntoResponse {
+    println!("Login attempt for user: {}", payload.username);
     let user = User::find()
         .filter(user::Column::Username.eq(&payload.username))
         .one(&db)
@@ -27,10 +28,16 @@ pub async fn login(
         .unwrap_or(None);
 
     if let Some(user) = user {
+        println!("User found: {}", user.username);
         if verify_password(&payload.password, &user.password_hash).unwrap_or(false) {
+            println!("Password verified successfully");
             let token = create_jwt(&user.username, &user.role).unwrap();
             return (StatusCode::OK, Json(json!({ "token": token }))).into_response();
+        } else {
+            println!("Password verification failed");
         }
+    } else {
+        println!("User not found");
     }
 
     (

@@ -41,7 +41,7 @@ pub async fn update_config(
         active.name = Set(config.name);
         active.description = Set(config.description);
         active.tags = Set(tags_json);
-        active.updated_at = Set(now);
+        active.updated_at = Set(now.to_rfc3339());
 
         active
             .update(&db)
@@ -53,8 +53,8 @@ pub async fn update_config(
             name: Set(config.name),
             description: Set(config.description),
             tags: Set(tags_json),
-            created_at: Set(now),
-            updated_at: Set(now),
+            created_at: Set(now.to_rfc3339()),
+            updated_at: Set(now.to_rfc3339()),
             ..Default::default()
         };
 

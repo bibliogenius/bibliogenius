@@ -12,8 +12,8 @@ pub struct Model {
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
     pub share_location: Option<bool>,
-    pub created_at: DateTimeUtc,
-    pub updated_at: DateTimeUtc,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
