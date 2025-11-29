@@ -7,14 +7,14 @@ use axum::{
 };
 use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
 
-pub async fn import_goodreads(
+pub async fn import_file(
     State(db): State<DatabaseConnection>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     while let Some(field) = multipart.next_field().await.unwrap_or(None) {
         if field.name() == Some("file") {
             let data = field.bytes().await.unwrap_or_default();
-            match import::parse_goodreads_csv(&data) {
+            match import::parse_import_file(&data) {
                 Ok(books) => {
                     let mut count = 0;
                     let mut errors = Vec::new();

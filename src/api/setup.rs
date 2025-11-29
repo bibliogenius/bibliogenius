@@ -1,6 +1,6 @@
 use crate::models::{installation_profile, library_config};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -51,12 +51,12 @@ pub async fn setup(
     // Update library config
     let config = library_config::ActiveModel {
         id: Set(1),
-        name: Set(req.library_name),
-        description: Set(req.library_description),
+        name: Set(req.library_name.clone()),
+        description: Set(req.library_description.clone()),
         latitude: Set(req.latitude),
         longitude: Set(req.longitude),
         share_location: Set(req.share_location.or(Some(false))),
-        updated_at: Set(now),
+        updated_at: Set(now.to_rfc3339()),
         ..Default::default()
     };
 
@@ -69,6 +69,72 @@ pub async fn setup(
             }),
         )
             .into_response();
+    }
+
+    // Create admin user if not exists
+    use crate::models::user;
+    use crate::auth::hash_password;
+
+    let admin_exists = user::Entity::find()
+        .filter(user::Column::Username.eq("admin"))
+        .one(&db)
+        .await
+        .unwrap_or(None);
+
+    if admin_exists.is_none() {
+        println!("Admin user not found, creating...");
+        let password_hash = hash_password("admin").unwrap();
+        let admin = user::ActiveModel {
+            username: Set("admin".to_string()),
+            password_hash: Set(password_hash),
+            role: Set("admin".to_string()),
+            created_at: Set(now.to_rfc3339()),
+            updated_at: Set(now.to_rfc3339()),
+            ..Default::default()
+        };
+        
+        if let Err(e) = admin.insert(&db).await {
+             println!("Failed to create admin user: {}", e);
+             return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(SetupResponse {
+                    success: false,
+                    message: format!("Failed to create admin user: {}", e),
+                }),
+            )
+                .into_response();
+        }
+        println!("Admin user created successfully");
+    } else {
+        println!("Admin user already exists");
+    }
+
+    // Create default library if not exists (Required for copies)
+    use crate::models::library;
+    let admin_user = user::Entity::find()
+        .filter(user::Column::Username.eq("admin"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let library_exists = library::Entity::find_by_id(1).one(&db).await.unwrap_or(None);
+    if library_exists.is_none() {
+        println!("Default library not found, creating...");
+        let new_library = library::ActiveModel {
+            id: Set(1),
+            name: Set(req.library_name.clone()),
+            description: Set(req.library_description.clone()),
+            owner_id: Set(admin_user.id),
+            created_at: Set(now.to_rfc3339()),
+            updated_at: Set(now.to_rfc3339()),
+            ..Default::default()
+        };
+        if let Err(e) = new_library.insert(&db).await {
+            println!("Failed to create default library: {}", e);
+        } else {
+            println!("Default library created successfully");
+        }
     }
 
     (

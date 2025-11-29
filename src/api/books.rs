@@ -63,6 +63,18 @@ pub async fn create_book(
             )
             .await;
 
+            // Create default copy
+            let copy = crate::models::copy::ActiveModel {
+                book_id: Set(model.id),
+                library_id: Set(1), // Default library ID
+                status: Set("available".to_string()),
+                is_temporary: Set(false),
+                created_at: Set(now.to_rfc3339()),
+                updated_at: Set(now.to_rfc3339()),
+                ..Default::default()
+            };
+            let _ = copy.insert(&db).await;
+
             (
                 StatusCode::CREATED,
                 Json(json!({

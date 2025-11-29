@@ -50,6 +50,9 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             name TEXT NOT NULL,
             description TEXT,
             tags TEXT NOT NULL DEFAULT '[]',
+            latitude REAL,
+            longitude REAL,
+            share_location INTEGER DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -58,12 +61,61 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     ))
     .await?;
 
+    // Migration 018: Add location fields to library_config
+    // We attempt to add columns. If they exist, it might fail, so we ignore errors (simple migration strategy)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE library_config ADD COLUMN latitude REAL".to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE library_config ADD COLUMN longitude REAL".to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE library_config ADD COLUMN share_location INTEGER DEFAULT 0".to_owned(),
+        ))
+        .await;
+
     // Insert default library config if not exists
     db.execute(Statement::from_string(
         db.get_database_backend(),
         r#"
-        INSERT OR IGNORE INTO library_config (id, name, description, tags, created_at, updated_at)
-        VALUES (1, 'My Library', 'Personal book collection', '[]', datetime('now'), datetime('now'))
+        INSERT OR IGNORE INTO library_config (id, name, description, tags, latitude, longitude, share_location, created_at, updated_at)
+        VALUES (1, 'My Library', 'Personal book collection', '[]', NULL, NULL, 0, datetime('now'), datetime('now'))
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Create installation_profile table
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS installation_profile (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_type TEXT NOT NULL DEFAULT 'individual',
+            enabled_modules TEXT NOT NULL DEFAULT '[]',
+            theme TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Insert default installation profile if not exists
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        INSERT OR IGNORE INTO installation_profile (id, profile_type, enabled_modules, theme, created_at, updated_at)
+        VALUES (1, 'individual', '[]', 'default', datetime('now'), datetime('now'))
         "#
         .to_owned(),
     ))
@@ -179,6 +231,21 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             updated_at TEXT NOT NULL,
             FOREIGN KEY (owner_id) REFERENCES users(id)
         )
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Insert default library (ID 1) if it doesn't exist
+    // This requires a default admin user to exist first
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        INSERT OR IGNORE INTO libraries (id, name, description, owner_id, created_at, updated_at)
+        SELECT 1, 'Default Library', 'Main library collection', 
+               (SELECT id FROM users WHERE username = 'admin' LIMIT 1),
+               datetime('now'), datetime('now')
+        WHERE EXISTS (SELECT 1 FROM users WHERE username = 'admin')
         "#
         .to_owned(),
     ))
@@ -379,8 +446,18 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             FOREIGN KEY (to_peer_id) REFERENCES peers(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_p2p_outgoing_requests_to_peer_id ON p2p_outgoing_requests(to_peer_id);
-        "#.to_owned(),
-    )).await?;
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Migration 017: Add reading_status to books
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE books ADD COLUMN reading_status TEXT NOT NULL DEFAULT 'to_read'".to_owned(),
+        ))
+        .await;
 
     Ok(())
 }
