@@ -39,6 +39,7 @@ pub async fn register_with_hub(
             latitude: None,
             longitude: None,
             share_location: false,
+            show_borrowed_books: false,
         });
 
     // Prepare registration data

@@ -12,6 +12,7 @@ pub struct Model {
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
     pub share_location: Option<bool>,
+    pub show_borrowed_books: Option<bool>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -30,6 +31,7 @@ pub struct LibraryConfig {
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
     pub share_location: bool,
+    pub show_borrowed_books: bool,
 }
 
 impl From<Model> for LibraryConfig {
@@ -42,6 +44,7 @@ impl From<Model> for LibraryConfig {
             latitude: model.latitude,
             longitude: model.longitude,
             share_location: model.share_location.unwrap_or(false),
+            show_borrowed_books: model.show_borrowed_books.unwrap_or(false),
         }
     }
 }

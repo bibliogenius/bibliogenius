@@ -15,6 +15,7 @@ pub mod library;
 pub mod loan;
 pub mod lookup;
 pub mod peer;
+pub mod profile;
 pub mod scan;
 pub mod search;
 pub mod setup;
