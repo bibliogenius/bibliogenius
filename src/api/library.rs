@@ -41,6 +41,8 @@ pub async fn update_config(
         active.name = Set(config.name);
         active.description = Set(config.description);
         active.tags = Set(tags_json);
+        active.share_location = Set(Some(config.share_location));
+        active.show_borrowed_books = Set(Some(config.show_borrowed_books));
         active.updated_at = Set(now.to_rfc3339());
 
         active
@@ -53,6 +55,8 @@ pub async fn update_config(
             name: Set(config.name),
             description: Set(config.description),
             tags: Set(tags_json),
+            share_location: Set(Some(config.share_location)),
+            show_borrowed_books: Set(Some(config.show_borrowed_books)),
             created_at: Set(now.to_rfc3339()),
             updated_at: Set(now.to_rfc3339()),
             ..Default::default()

@@ -52,7 +52,8 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             tags TEXT NOT NULL DEFAULT '[]',
             latitude REAL,
             longitude REAL,
-            share_location INTEGER DEFAULT 0,
+            share_location BOOLEAN DEFAULT 0,
+            show_borrowed_books BOOLEAN DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -81,6 +82,12 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             "ALTER TABLE library_config ADD COLUMN share_location INTEGER DEFAULT 0".to_owned(),
         ))
         .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE library_config ADD COLUMN show_borrowed_books INTEGER DEFAULT 0".to_owned(),
+        ))
+        .await;
 
     // Insert default library config if not exists
     db.execute(Statement::from_string(
@@ -102,6 +109,7 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             profile_type TEXT NOT NULL DEFAULT 'individual',
             enabled_modules TEXT NOT NULL DEFAULT '[]',
             theme TEXT,
+            avatar_config TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -456,6 +464,14 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         .execute(Statement::from_string(
             db.get_database_backend(),
             "ALTER TABLE books ADD COLUMN reading_status TEXT NOT NULL DEFAULT 'to_read'".to_owned(),
+        ))
+        .await;
+
+    // Migration 019: Add avatar_config to installation_profile
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE installation_profile ADD COLUMN avatar_config TEXT".to_owned(),
         ))
         .await;
 

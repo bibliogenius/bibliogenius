@@ -27,45 +27,49 @@ pub async fn setup(
 ) -> impl IntoResponse {
     let now = chrono::Utc::now();
 
-    // Update installation profile
+    // Update or create installation profile
     let profile = installation_profile::ActiveModel {
         id: Set(1),
         profile_type: Set(req.profile_type.clone()),
         enabled_modules: Set("[]".to_string()), // Start with no modules
         theme: Set(req.theme.or(Some("default".to_string()))),
         updated_at: Set(now.to_rfc3339()),
+        created_at: Set(now.to_rfc3339()),
         ..Default::default()
     };
 
-    if let Err(e) = profile.update(&db).await {
+    if let Err(e) = profile.save(&db).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(SetupResponse {
                 success: false,
-                message: format!("Failed to update profile: {}", e),
+                message: format!("Failed to save profile: {}", e),
             }),
         )
             .into_response();
     }
 
-    // Update library config
+    // Update or create library config
     let config = library_config::ActiveModel {
         id: Set(1),
         name: Set(req.library_name.clone()),
         description: Set(req.library_description.clone()),
+        tags: Set("[]".to_string()),
         latitude: Set(req.latitude),
         longitude: Set(req.longitude),
         share_location: Set(req.share_location.or(Some(false))),
+        show_borrowed_books: Set(Some(req.profile_type == "individual")),
         updated_at: Set(now.to_rfc3339()),
+        created_at: Set(now.to_rfc3339()),
         ..Default::default()
     };
 
-    if let Err(e) = config.update(&db).await {
+    if let Err(e) = config.save(&db).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(SetupResponse {
                 success: false,
-                message: format!("Failed to update library config: {}", e),
+                message: format!("Failed to save library config: {}", e),
             }),
         )
             .into_response();
@@ -158,6 +162,7 @@ pub struct ConfigResponse {
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
     pub share_location: bool,
+    pub show_borrowed_books: bool,
 }
 
 pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoResponse {
@@ -208,6 +213,7 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
                 config.longitude
             },
             share_location: config.share_location.unwrap_or(false),
+            show_borrowed_books: config.show_borrowed_books.unwrap_or(false),
         }),
     )
         .into_response()

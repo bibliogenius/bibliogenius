@@ -146,3 +146,62 @@ pub async fn search_external(query: &crate::api::search::SearchQuery) -> Vec<boo
 
     books
 }
+
+/// Public endpoint for Open Library search (proxy to avoid CORS issues)
+#[derive(Deserialize)]
+pub struct OpenLibraryQuery {
+    title: Option<String>,
+    author: Option<String>,
+    subject: Option<String>,
+}
+
+pub async fn search_openlibrary(
+    Query(params): Query<OpenLibraryQuery>,
+) -> impl IntoResponse {
+    let client = reqwest::Client::new();
+    
+    // Build query parameters for Open Library
+    let mut query_params = vec![("limit", "20".to_string())];
+    
+    if let Some(title) = params.title {
+        query_params.push(("title", title));
+    }
+    if let Some(author) = params.author {
+        query_params.push(("author", author));
+    }
+    if let Some(subject) = params.subject {
+        query_params.push(("subject", subject));
+    }
+    
+    // Call Open Library API
+    match client
+        .get("https://openlibrary.org/search.json")
+        .query(&query_params)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                match response.json::<serde_json::Value>().await {
+                    Ok(data) => (StatusCode::OK, Json(data)).into_response(),
+                    Err(_) => (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": "Failed to parse response" })),
+                    )
+                        .into_response(),
+                }
+            } else {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": "Open Library returned error" })),
+                )
+                    .into_response()
+            }
+        }
+        Err(_) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "Failed to contact Open Library" })),
+        )
+            .into_response(),
+    }
+}

@@ -11,6 +11,20 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+/// Translate localhost URLs to Docker service names for inter-container communication
+/// Examples:
+/// - http://localhost:8001 -> http://bibliogenius-a:8000
+/// - http://localhost:8002 -> http://bibliogenius-b:8000
+fn translate_url_for_docker(url: &str) -> String {
+    if url.contains("localhost:8001") {
+        url.replace("localhost:8001", "bibliogenius-a:8000")
+    } else if url.contains("localhost:8002") {
+        url.replace("localhost:8002", "bibliogenius-b:8000")
+    } else {
+        url.to_string()
+    }
+}
+
 #[derive(Deserialize)]
 pub struct ConnectRequest {
     name: String,
@@ -53,9 +67,12 @@ pub async fn connect(
         remote_name.unwrap_or_else(|| "Unknown Library".to_string())
     };
 
+    // Translate localhost URLs to Docker service names for inter-container communication
+    let docker_url = translate_url_for_docker(&payload.url);
+
     let peer = peer::ActiveModel {
         name: Set(name),
-        url: Set(payload.url),
+        url: Set(docker_url),
         public_key: Set(payload.public_key),
         latitude: Set(latitude),
         longitude: Set(longitude),
@@ -289,6 +306,112 @@ pub async fn sync_peer(
     }
 }
 
+/// Sync peer by URL (solves ID mismatch between Hub and Backend)
+pub async fn sync_peer_by_url(
+    State(db): State<DatabaseConnection>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use crate::models::peer_book;
+
+    // Extract URL from payload
+    let peer_url = match payload.get("url").and_then(|v| v.as_str()) {
+        Some(url) => url,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Missing 'url' field" })),
+            )
+                .into_response()
+        }
+    };
+
+    // Translate localhost URL to Docker service name if needed
+    let docker_url = translate_url_for_docker(peer_url);
+
+    // 1. Find peer by URL
+    let peer = match peer::Entity::find()
+        .filter(peer::Column::Url.eq(&docker_url))
+        .one(&db)
+        .await
+    {
+        Ok(Some(p)) => p,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("Peer not found with URL: {}", docker_url) })),
+            )
+                .into_response()
+        }
+    };
+
+    // 2. Fetch remote books
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/books", peer.url);
+
+    let res = client.get(&url).send().await;
+
+    match res {
+        Ok(response) => {
+            if response.status().is_success() {
+                // Parse response: { "books": [...] }
+                #[derive(Deserialize)]
+                struct BooksResponse {
+                    books: Vec<crate::models::Book>,
+                }
+
+                if let Ok(data) = response.json::<BooksResponse>().await {
+                    // 3. Clear old cache for this peer
+                    let _ = peer_book::Entity::delete_many()
+                        .filter(peer_book::Column::PeerId.eq(peer.id))
+                        .exec(&db)
+                        .await;
+
+                    let count = data.books.len();
+
+                    // 4. Insert new cache
+                    for book in data.books {
+                        let cache = peer_book::ActiveModel {
+                            peer_id: Set(peer.id),
+                            remote_book_id: Set(book.id.unwrap_or(0)),
+                            title: Set(book.title),
+                            isbn: Set(book.isbn),
+                            author: Set(book.author),
+                            cover_url: Set(book.cover_url),
+                            summary: Set(book.summary),
+                            synced_at: Set(chrono::Utc::now().to_rfc3339()),
+                            ..Default::default()
+                        };
+                        let _ = peer_book::Entity::insert(cache).exec(&db).await;
+                    }
+
+                    (
+                        StatusCode::OK,
+                        Json(json!({ "message": "Sync successful", "count": count, "peer_id": peer.id })),
+                    )
+                        .into_response()
+                } else {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": "Invalid response format" })),
+                    )
+                        .into_response()
+                }
+            } else {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": "Peer returned error" })),
+                )
+                    .into_response()
+            }
+        }
+        Err(_) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "Failed to contact peer" })),
+        )
+            .into_response(),
+    }
+}
+
 // --- Federated Search Helper ---
 
 pub async fn broadcast_search(
@@ -387,11 +510,19 @@ pub async fn request_book(
     let url = format!("{}/api/peers/request", peer.url);
 
     // Get my config to identify myself
-    let my_config = crate::models::library_config::Entity::find()
+    let my_config = match crate::models::library_config::Entity::find()
         .one(&db)
         .await
-        .unwrap()
-        .unwrap();
+    {
+        Ok(Some(config)) => config,
+        _ => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Library config not found" })),
+            )
+                .into_response()
+        }
+    };
 
     let res = client
         .post(&url)
@@ -802,6 +933,54 @@ pub async fn list_peer_books(
     (StatusCode::OK, Json(books)).into_response()
 }
 
+/// List peer books by URL (solves ID mismatch)
+pub async fn list_peer_books_by_url(
+    State(db): State<DatabaseConnection>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use crate::models::peer_book;
+
+    // Extract URL from payload
+    let peer_url = match payload.get("url").and_then(|v| v.as_str()) {
+        Some(url) => url,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Missing 'url' field" })),
+            )
+                .into_response()
+        }
+    };
+
+    // Translate localhost URL to Docker service name if needed
+    let docker_url = translate_url_for_docker(peer_url);
+
+    // Find peer by URL
+    let peer = match peer::Entity::find()
+        .filter(peer::Column::Url.eq(&docker_url))
+        .one(&db)
+        .await
+    {
+        Ok(Some(p)) => p,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("Peer not found with URL: {}", docker_url) })),
+            )
+                .into_response()
+        }
+    };
+
+    // Get books for this peer
+    let books = peer_book::Entity::find()
+        .filter(peer_book::Column::PeerId.eq(peer.id))
+        .all(&db)
+        .await
+        .unwrap_or(vec![]);
+
+    (StatusCode::OK, Json(books)).into_response()
+}
+
 pub async fn delete_request(
     State(db): State<DatabaseConnection>,
     Path(id): Path<String>,
@@ -809,6 +988,28 @@ pub async fn delete_request(
     use crate::models::p2p_request;
 
     match p2p_request::Entity::delete_by_id(id).exec(&db).await {
+        Ok(res) => {
+            if res.rows_affected == 0 {
+                (StatusCode::NOT_FOUND, Json(json!({ "error": "Request not found" }))).into_response()
+            } else {
+                StatusCode::OK.into_response()
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn delete_outgoing_request(
+    State(db): State<DatabaseConnection>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    use crate::models::p2p_outgoing_request;
+
+    match p2p_outgoing_request::Entity::delete_by_id(id).exec(&db).await {
         Ok(res) => {
             if res.rows_affected == 0 {
                 (StatusCode::NOT_FOUND, Json(json!({ "error": "Request not found" }))).into_response()

@@ -54,7 +54,10 @@ async fn main() {
         .route("/api/books/search", get(api::search::search_books))
         .route("/api/chat", post(api::chat::chat_handler))
         .route("/books", post(api::books::create_book))
-        .route("/books/:id", axum::routing::delete(api::books::delete_book))
+        .route(
+            "/books/:id",
+            axum::routing::put(api::books::update_book).delete(api::books::delete_book),
+        )
         // Authors
         .route("/authors", get(api::author::list_authors))
         .route("/authors", post(api::author::create_author))
@@ -73,8 +76,10 @@ async fn main() {
         .route("/peers/connect", post(api::peer::connect))
         .route("/peers/push", post(api::peer::push_operations))
         .route("/peers/pull", get(api::peer::pull_operations))
-        .route("/peers/:id/sync", post(api::peer::sync_peer)) // Sync remote books
+        .route("/peers/:id/sync", post(api::peer::sync_peer)) // Sync remote books by ID
+        .route("/peers/sync_by_url", post(api::peer::sync_peer_by_url)) // Sync by URL (solves Hub ID mismatch)
         .route("/peers/:id/books", get(api::peer::list_peer_books))
+        .route("/peers/books_by_url", post(api::peer::list_peer_books_by_url)) // Get books by URL
         .route("/peers/search", post(api::peer::search_local))
         .route("/peers/proxy_search", post(api::peer::proxy_search))
         .route("/peers/:id/request", post(api::peer::request_book)) // Send request
@@ -84,6 +89,10 @@ async fn main() {
             "/peers/requests/outgoing",
             get(api::peer::list_outgoing_requests),
         ) // List outgoing requests
+        .route(
+            "/peers/requests/outgoing/:id",
+            axum::routing::delete(api::peer::delete_outgoing_request),
+        )
         .route("/peers/requests/:id", put(api::peer::update_request_status)) // Update status
         .route(
             "/peers/requests/:id",
@@ -112,7 +121,8 @@ async fn main() {
                 .put(api::contact::update_contact)
                 .delete(api::contact::delete_contact),
         )
-        // Loan routes
+        .route("/profile", put(api::profile::update_profile))
+        // P2P routes
         .route(
             "/loans",
             get(api::loan::list_loans).post(api::loan::create_loan),
@@ -140,6 +150,10 @@ async fn main() {
         .route(
             "/integrations/osm/bookstores",
             get(api::integrations::search_osm_bookstores),
+        )
+        .route(
+            "/integrations/openlibrary/search",
+            get(api::integrations::search_openlibrary),
         )
         // Gamification
         .route("/user/status", get(api::gamification::get_user_status))

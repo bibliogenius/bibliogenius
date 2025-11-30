@@ -34,6 +34,7 @@ pub struct Model {
     pub profile_type: String,
     pub enabled_modules: String, // JSON array
     pub theme: Option<String>,
+    pub avatar_config: Option<String>, // JSON object
     pub created_at: String,
     pub updated_at: String,
 }
@@ -48,6 +49,7 @@ pub struct ProfileConfig {
     pub profile: InstallationProfile,
     pub enabled_modules: Vec<String>,
     pub theme: String,
+    pub avatar_config: Option<serde_json::Value>,
 }
 
 impl ProfileConfig {
@@ -65,6 +67,9 @@ impl ProfileConfig {
             profile: InstallationProfile::from(profile_model.profile_type),
             enabled_modules,
             theme: profile_model.theme.unwrap_or_else(|| "default".to_string()),
+            avatar_config: profile_model
+                .avatar_config
+                .and_then(|s| serde_json::from_str(&s).ok()),
         })
     }
 
@@ -73,12 +78,18 @@ impl ProfileConfig {
         let modules_json = serde_json::to_string(&self.enabled_modules)
             .map_err(|e| format!("Failed to serialize modules: {}", e))?;
 
+        let avatar_json = self
+            .avatar_config
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+
         // Update existing profile (assume ID 1 for now)
         let profile = ActiveModel {
             id: Set(1),
             profile_type: Set(self.profile.to_string()),
             enabled_modules: Set(modules_json),
             theme: Set(Some(self.theme.clone())),
+            avatar_config: Set(avatar_json),
             updated_at: Set(now),
             ..Default::default()
         };
