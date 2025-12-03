@@ -1,0 +1,80 @@
+name: Release Rust Server
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build for Linux
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev libssl-dev pkg-config
+
+      - name: Build Release
+        run: cargo build --release --verbose
+
+      - name: Rename Binary
+        run: mv target/release/bibliogenius target/release/bibliogenius-linux-x64
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bibliogenius-linux-x64
+          path: target/release/bibliogenius-linux-x64
+
+  # Build for macOS
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Release
+        run: cargo build --release --verbose
+
+      - name: Rename Binary
+        run: mv target/release/bibliogenius target/release/bibliogenius-macos-universal
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bibliogenius-macos-universal
+          path: target/release/bibliogenius-macos-universal
+
+  # Create GitHub Release
+  create-release:
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bibliogenius-linux-x64
+
+      - name: Download macOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bibliogenius-macos-universal
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            bibliogenius-linux-x64
+            bibliogenius-macos-universal
+          draft: true
+          prerelease: false
+          generate_release_notes: true
