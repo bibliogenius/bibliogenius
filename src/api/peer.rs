@@ -646,6 +646,125 @@ pub async fn request_book(
     }
 }
 
+#[derive(Deserialize)]
+pub struct BookRequestByUrl {
+    peer_url: String,
+    book_isbn: String,
+    book_title: String,
+}
+
+pub async fn request_book_by_url(
+    State(db): State<DatabaseConnection>,
+    Json(payload): Json<BookRequestByUrl>,
+) -> impl IntoResponse {
+    // Translate localhost URL to Docker service name if needed
+    let docker_url = translate_url_for_docker(&payload.peer_url);
+
+    // 1. Find peer by URL
+    let peer = match peer::Entity::find()
+        .filter(peer::Column::Url.eq(&docker_url))
+        .one(&db)
+        .await
+    {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+             // Optional: Auto-create peer if not found? 
+             // For now, let's return 404 to be safe, assuming they should have synced first.
+             // But wait, if they are viewing books, they might be viewing them from a "Search Network" result 
+             // which might not have created the peer yet?
+             // Actually, list_peer_books_by_url requires peer to exist.
+             return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("Peer not found with URL: {}", docker_url) })),
+            )
+                .into_response()
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "DB Error" })),
+            )
+                .into_response()
+        }
+    };
+
+    // 2. Save Outgoing Request
+    let outgoing = crate::models::p2p_outgoing_request::ActiveModel {
+        id: Set(uuid::Uuid::new_v4().to_string()),
+        to_peer_id: Set(peer.id),
+        book_isbn: Set(payload.book_isbn.clone()),
+        book_title: Set(payload.book_title.clone()),
+        status: Set("pending".to_string()),
+        created_at: Set(chrono::Utc::now().to_rfc3339()),
+        updated_at: Set(chrono::Utc::now().to_rfc3339()),
+    };
+
+    if let Err(e) = crate::models::p2p_outgoing_request::Entity::insert(outgoing)
+        .exec(&db)
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
+    }
+
+    // 3. Send request to peer
+    if let Err(e) = validate_url(&peer.url) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
+        )
+            .into_response();
+    }
+
+    let client = get_safe_client();
+    let url = format!("{}/api/peers/request", peer.url);
+
+    // Get my config to identify myself
+    let my_config = match crate::models::library_config::Entity::find().one(&db).await {
+        Ok(Some(config)) => config,
+        _ => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Library config not found" })),
+            )
+                .into_response()
+        }
+    };
+
+    let res = client
+        .post(&url)
+        .json(&json!({
+            "from_peer_url": "http://localhost:8000", // TODO: Get from config or dynamic
+            "from_peer_name": my_config.name,
+            "book_isbn": payload.book_isbn,
+            "book_title": payload.book_title
+        }))
+        .send()
+        .await;
+
+    match res {
+        Ok(response) => {
+            if response.status().is_success() {
+                (StatusCode::OK, Json(json!({ "message": "Request sent" }))).into_response()
+            } else {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": "Peer rejected request" })),
+                )
+                    .into_response()
+            }
+        }
+        Err(_) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "Failed to contact peer" })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn list_outgoing_requests(State(db): State<DatabaseConnection>) -> impl IntoResponse {
     let requests = crate::models::p2p_outgoing_request::Entity::find()
         .find_also_related(peer::Entity)

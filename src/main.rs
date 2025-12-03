@@ -149,6 +149,7 @@ async fn main() {
         ) // Get books by URL
         .route("/peers/search", post(api::peer::search_local))
         .route("/peers/proxy_search", post(api::peer::proxy_search))
+        .route("/peers/request_by_url", post(api::peer::request_book_by_url)) // Send request by URL
         .route("/peers/:id/request", post(api::peer::request_book)) // Send request
         .route("/peers/request", post(api::peer::receive_request)) // Receive request
         .route("/peers/requests", get(api::peer::list_requests)) // List incoming requests
@@ -201,6 +202,7 @@ async fn main() {
         .route("/import/file", axum::routing::post(api::data::import_file))
         // Setup & Config
         .route("/setup", axum::routing::post(api::setup::setup))
+        .route("/reset", axum::routing::post(api::setup::reset_app))
         .route("/config", get(api::setup::get_config))
         // Integrations (Professional)
         .route(
