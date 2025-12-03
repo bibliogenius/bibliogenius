@@ -1,5 +1,5 @@
 use crate::auth::{create_jwt, hash_password, verify_password};
-use crate::models::user::{self, Entity as User};
+use crate::models::user;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use sea_orm::*;
 use serde::{Deserialize, Serialize};
