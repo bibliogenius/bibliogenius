@@ -161,8 +161,13 @@ async fn main() {
         .route("/export", get(api::export::export_data))
         .with_state(db);
 
-    // Build main app with static file serving
+    // Swagger UI
+    use utoipa::OpenApi;
+    use utoipa_swagger_ui::SwaggerUi;
+    use crate::api_docs::ApiDoc;
+
     let app = Router::new()
+        .merge(SwaggerUi::new("/api/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .nest("/api", api_router)
         .nest_service("/", ServeDir::new("static"))
         // CORS
