@@ -9,6 +9,13 @@ use serde_json::{json, Value};
 use crate::models::book::{ActiveModel, Entity as BookEntity};
 use crate::models::Book;
 
+#[utoipa::path(
+    get,
+    path = "/api/books",
+    responses(
+        (status = 200, description = "List all books")
+    )
+)]
 pub async fn list_books(State(db): State<DatabaseConnection>) -> Result<Json<Value>, StatusCode> {
     use sea_orm::ModelTrait;
     
@@ -43,6 +50,14 @@ pub async fn list_books(State(db): State<DatabaseConnection>) -> Result<Json<Val
     })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/books",
+    responses(
+        (status = 201, description = "Book created successfully"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn create_book(
     State(db): State<DatabaseConnection>,
     Json(book): Json<Book>,
@@ -160,6 +175,17 @@ pub async fn create_book(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/books/{id}",
+    params(
+        ("id" = i32, Path, description = "Book ID")
+    ),
+    responses(
+        (status = 200, description = "Book deleted successfully"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn delete_book(
     State(db): State<DatabaseConnection>,
     axum::extract::Path(id): axum::extract::Path<i32>,
@@ -178,6 +204,18 @@ pub async fn delete_book(
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/books/{id}",
+    params(
+        ("id" = i32, Path, description = "Book ID")
+    ),
+    responses(
+        (status = 200, description = "Book updated successfully"),
+        (status = 404, description = "Book not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn update_book(
     State(db): State<DatabaseConnection>,
     axum::extract::Path(id): axum::extract::Path<i32>,
