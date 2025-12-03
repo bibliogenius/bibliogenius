@@ -162,7 +162,7 @@ async fn main() {
         .with_state(db);
 
     // Swagger UI
-    use crate::api_docs::ApiDoc;
+    use bibliogenius::api_docs::ApiDoc;
     use utoipa::OpenApi;
     use utoipa_swagger_ui::SwaggerUi;
 
