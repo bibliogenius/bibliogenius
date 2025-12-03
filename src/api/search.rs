@@ -5,9 +5,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use sea_orm::{
-    ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-};
+use sea_orm::{ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]

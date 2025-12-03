@@ -67,10 +67,11 @@ pub fn parse_import_file(content: &[u8]) -> Result<Vec<CreateBookRequest>, Strin
 
     // 2. Fallback: Treat as raw ISBN list if it looks like a list of numbers
     // Check if first few lines look like ISBNs (10 or 13 digits)
-    let is_isbn_list = content_str
-        .lines()
-        .take(5)
-        .all(|line| line.trim().chars().all(|c| c.is_numeric() || c == '-' || c == 'X'));
+    let is_isbn_list = content_str.lines().take(5).all(|line| {
+        line.trim()
+            .chars()
+            .all(|c| c.is_numeric() || c == '-' || c == 'X')
+    });
 
     if is_isbn_list {
         return parse_isbn_list(content);
@@ -137,9 +138,10 @@ fn parse_babelio_csv(content: &[u8]) -> Result<Vec<CreateBookRequest>, String> {
     for result in rdr.deserialize() {
         let record: BabelioBook = result.map_err(|e| format!("CSV parse error: {}", e))?;
         let isbn = clean_isbn(record.ean);
-        
+
         // Extract year from "01/01/2020"
-        let year = record.date_publication
+        let year = record
+            .date_publication
             .and_then(|d| d.split('/').last().map(|y| y.to_string()))
             .and_then(|y| y.parse::<i32>().ok());
 
@@ -160,7 +162,7 @@ fn parse_isbn_list(content: &[u8]) -> Result<Vec<CreateBookRequest>, String> {
     for line in content_str.lines() {
         let isbn = line.trim().replace("-", "");
         if !isbn.is_empty() {
-             books.push(CreateBookRequest {
+            books.push(CreateBookRequest {
                 title: format!("Imported ISBN {}", isbn), // Placeholder title
                 isbn: Some(isbn),
                 publisher: None,

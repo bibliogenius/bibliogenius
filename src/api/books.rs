@@ -18,29 +18,42 @@ use crate::models::Book;
 )]
 pub async fn list_books(State(db): State<DatabaseConnection>) -> Result<Json<Value>, StatusCode> {
     use sea_orm::ModelTrait;
-    
+
     let books = BookEntity::find()
         .all(&db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut book_dtos = Vec::new();
-    
+
     for book_model in books {
         let mut book_dto = Book::from(book_model.clone());
-        
+
         // Fetch authors
-        if let Ok(authors) = book_model.find_related(crate::models::author::Entity).all(&db).await {
+        if let Ok(authors) = book_model
+            .find_related(crate::models::author::Entity)
+            .all(&db)
+            .await
+        {
             if !authors.is_empty() {
-                book_dto.author = Some(authors.into_iter().map(|a| a.name).collect::<Vec<_>>().join(", "));
+                book_dto.author = Some(
+                    authors
+                        .into_iter()
+                        .map(|a| a.name)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
             }
         }
-        
+
         // Derive cover_url from ISBN if available
         if let Some(isbn) = &book_dto.isbn {
-            book_dto.cover_url = Some(format!("https://covers.openlibrary.org/b/isbn/{}-M.jpg", isbn));
+            book_dto.cover_url = Some(format!(
+                "https://covers.openlibrary.org/b/isbn/{}-M.jpg",
+                isbn
+            ));
         }
-        
+
         book_dtos.push(book_dto);
     }
 
@@ -92,7 +105,7 @@ pub async fn create_book(
             // Handle author if provided
             if let Some(author_name) = book.author {
                 use crate::models::author::{ActiveModel as AuthorActive, Entity as AuthorEntity};
-                use crate::models::book_authors::{ActiveModel as BookAuthorActive};
+                use crate::models::book_authors::ActiveModel as BookAuthorActive;
                 use sea_orm::{ColumnTrait, QueryFilter};
 
                 // Find or create author
@@ -264,7 +277,7 @@ pub async fn update_book(
     //     // TODO: Handle author update (requires managing book_authors relation)
     //     // book.author = Set(Some(author));
     // }
-    
+
     book.updated_at = Set(now.to_rfc3339());
 
     match book.update(&db).await {

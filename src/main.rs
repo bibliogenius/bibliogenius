@@ -79,7 +79,10 @@ async fn main() {
         .route("/peers/:id/sync", post(api::peer::sync_peer)) // Sync remote books by ID
         .route("/peers/sync_by_url", post(api::peer::sync_peer_by_url)) // Sync by URL (solves Hub ID mismatch)
         .route("/peers/:id/books", get(api::peer::list_peer_books))
-        .route("/peers/books_by_url", post(api::peer::list_peer_books_by_url)) // Get books by URL
+        .route(
+            "/peers/books_by_url",
+            post(api::peer::list_peer_books_by_url),
+        ) // Get books by URL
         .route("/peers/search", post(api::peer::search_local))
         .route("/peers/proxy_search", post(api::peer::proxy_search))
         .route("/peers/:id/request", post(api::peer::request_book)) // Send request
@@ -131,10 +134,7 @@ async fn main() {
         // Lookup
         .route("/lookup/:isbn", get(api::lookup::lookup_book))
         // Data Import/Export
-        .route(
-            "/import/file",
-            axum::routing::post(api::data::import_file),
-        )
+        .route("/import/file", axum::routing::post(api::data::import_file))
         // Setup & Config
         .route("/setup", axum::routing::post(api::setup::setup))
         .route("/config", get(api::setup::get_config))
@@ -162,9 +162,9 @@ async fn main() {
         .with_state(db);
 
     // Swagger UI
+    use crate::api_docs::ApiDoc;
     use utoipa::OpenApi;
     use utoipa_swagger_ui::SwaggerUi;
-    use crate::api_docs::ApiDoc;
 
     let app = Router::new()
         .merge(SwaggerUi::new("/api/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))

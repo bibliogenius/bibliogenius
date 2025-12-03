@@ -155,14 +155,12 @@ pub struct OpenLibraryQuery {
     subject: Option<String>,
 }
 
-pub async fn search_openlibrary(
-    Query(params): Query<OpenLibraryQuery>,
-) -> impl IntoResponse {
+pub async fn search_openlibrary(Query(params): Query<OpenLibraryQuery>) -> impl IntoResponse {
     let client = reqwest::Client::new();
-    
+
     // Build query parameters for Open Library
     let mut query_params = vec![("limit", "20".to_string())];
-    
+
     if let Some(title) = params.title {
         query_params.push(("title", title));
     }
@@ -172,7 +170,7 @@ pub async fn search_openlibrary(
     if let Some(subject) = params.subject {
         query_params.push(("subject", subject));
     }
-    
+
     // Call Open Library API
     match client
         .get("https://openlibrary.org/search.json")
