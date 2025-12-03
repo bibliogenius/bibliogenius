@@ -44,6 +44,10 @@ rand = "0.8"
 futures = "0.3"
 urlencoding = "2.1"
 
+# Documentation
+utoipa = { version = "4.2", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "6.0", features = ["axum"] }
+
 [dev-dependencies]
 wiremock = "0.6"
 tokio = { version = "1.0", features = ["full"] }
