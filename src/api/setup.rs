@@ -221,3 +221,59 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
     )
         .into_response()
 }
+
+pub async fn reset_app(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    use crate::models::{
+        author, book, book_authors, book_tags, contact, copy, installation_profile, library,
+        library_config, loan, operation_log, p2p_outgoing_request, p2p_request, peer, peer_book,
+        tag, user,
+    };
+
+    // Helper macro to delete all from a table
+    macro_rules! delete_all {
+        ($entity:ident) => {
+            if let Err(e) = $entity::Entity::delete_many().exec(&db).await {
+                tracing::error!("Failed to delete from {}: {}", stringify!($entity), e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("Failed to delete {}: {}", stringify!($entity), e)})),
+                )
+                    .into_response();
+            }
+        };
+    }
+
+    // Delete in order of dependencies (child tables first)
+    delete_all!(loan);
+    delete_all!(copy);
+    delete_all!(book_authors);
+    delete_all!(book_tags);
+    delete_all!(book);
+    delete_all!(author);
+    delete_all!(tag);
+    
+    delete_all!(p2p_outgoing_request);
+    delete_all!(p2p_request);
+    delete_all!(peer_book);
+    delete_all!(peer);
+    delete_all!(contact);
+    
+    delete_all!(operation_log);
+    
+    delete_all!(library_config);
+    delete_all!(library);
+    delete_all!(installation_profile);
+    
+    // We keep the admin user for now, or we could delete it too. 
+    // If we delete it, the setup process will recreate it.
+    // Let's delete everything to be safe and clean.
+    delete_all!(user);
+
+    tracing::info!("App reset successful: All data cleared.");
+
+    (
+        StatusCode::OK,
+        Json(json!({"success": true, "message": "App reset successfully"})),
+    )
+        .into_response()
+}
