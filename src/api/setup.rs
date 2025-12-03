@@ -86,7 +86,7 @@ pub async fn setup(
         .unwrap_or(None);
 
     if admin_exists.is_none() {
-        println!("Admin user not found, creating...");
+        tracing::info!("Admin user not found, creating...");
         let password_hash = hash_password("admin").unwrap();
         let admin = user::ActiveModel {
             username: Set("admin".to_string()),
@@ -98,7 +98,7 @@ pub async fn setup(
         };
 
         if let Err(e) = admin.insert(&db).await {
-            println!("Failed to create admin user: {}", e);
+            tracing::error!("Failed to create admin user: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(SetupResponse {
@@ -108,9 +108,9 @@ pub async fn setup(
             )
                 .into_response();
         }
-        println!("Admin user created successfully");
+        tracing::info!("Admin user created successfully");
     } else {
-        println!("Admin user already exists");
+        tracing::info!("Admin user already exists");
     }
 
     // Create default library if not exists (Required for copies)
@@ -127,7 +127,7 @@ pub async fn setup(
         .await
         .unwrap_or(None);
     if library_exists.is_none() {
-        println!("Default library not found, creating...");
+        tracing::info!("Default library not found, creating...");
         let new_library = library::ActiveModel {
             id: Set(1),
             name: Set(req.library_name.clone()),
@@ -138,9 +138,9 @@ pub async fn setup(
             ..Default::default()
         };
         if let Err(e) = new_library.insert(&db).await {
-            println!("Failed to create default library: {}", e);
+            tracing::error!("Failed to create default library: {}", e);
         } else {
-            println!("Default library created successfully");
+            tracing::info!("Default library created successfully");
         }
     }
 

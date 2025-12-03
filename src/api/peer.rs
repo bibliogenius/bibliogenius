@@ -8,6 +8,60 @@ use futures::future::join_all;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::net::IpAddr;
+use url::Url;
+
+/// Validate URL to prevent SSRF
+/// Blocks:
+/// - Loopback (127.0.0.0/8, ::1)
+/// - Link-Local (169.254.0.0/16, fe80::/10)
+/// - AWS Metadata Service (169.254.169.254)
+/// - "localhost" hostname
+fn validate_url(url_str: &str) -> Result<String, String> {
+    let url = Url::parse(url_str).map_err(|_| "Invalid URL format".to_string())?;
+
+    // 1. Check Scheme
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err("Only HTTP/HTTPS schemes allowed".to_string());
+    }
+
+    // 2. Check Host
+    if let Some(host_str) = url.host_str() {
+        if host_str == "localhost" {
+            return Err("Localhost access is blocked".to_string());
+        }
+        
+        // Check if it's an IP address
+        if let Ok(ip) = host_str.parse::<IpAddr>() {
+            if ip.is_loopback() {
+                return Err("Loopback addresses blocked".to_string());
+            }
+            // Check for Link-Local (IPv4 169.254.x.x)
+            if let IpAddr::V4(ipv4) = ip {
+                if ipv4.is_link_local() {
+                    return Err("Link-local addresses blocked".to_string());
+                }
+            }
+            // IPv6 Link-Local (fe80::/10) - Rust's is_unicast_link_local() covers this
+             if let IpAddr::V6(ipv6) = ip {
+                if (ipv6.segments()[0] & 0xffc0) == 0xfe80 {
+                     return Err("Link-local addresses blocked".to_string());
+                }
+            }
+        }
+    }
+
+    Ok(url.to_string())
+}
+
+/// Create a safe HTTP client with restricted redirects and timeouts
+fn get_safe_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none()) // Disable redirects to prevent bypass
+        .build()
+        .unwrap_or_default()
+}
 
 /// Translate localhost URLs to Docker service names for inter-container communication
 /// Examples:
@@ -34,8 +88,16 @@ pub async fn connect(
     State(db): State<DatabaseConnection>,
     Json(payload): Json<ConnectRequest>,
 ) -> impl IntoResponse {
-    // 1. Fetch remote config to get location and verify connectivity
-    let client = reqwest::Client::new();
+    // 1. Validate URL
+    if let Err(e) = validate_url(&payload.url) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e })),
+        ).into_response();
+    }
+
+    // 2. Fetch remote config to get location and verify connectivity
+    let client = get_safe_client();
     let config_url = format!("{}/api/config", payload.url.trim_end_matches('/'));
 
     let (latitude, longitude, remote_name) = match client.get(&config_url).send().await {
@@ -184,8 +246,16 @@ pub async fn proxy_search(
         .unwrap_or(None);
 
     if let Some(peer) = peer {
+        // Validate Peer URL (just in case it was modified in DB)
+        if let Err(e) = validate_url(&peer.url) {
+             return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
+            ).into_response();
+        }
+
         // 2. Call peer's search endpoint
-        let client = reqwest::Client::new();
+        let client = get_safe_client();
         let url = format!("{}/api/peers/search", peer.url);
 
         let res = client
@@ -237,7 +307,14 @@ pub async fn sync_peer(
     };
 
     // 2. Fetch remote books
-    let client = reqwest::Client::new();
+    if let Err(e) = validate_url(&peer.url) {
+         return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
+        ).into_response();
+    }
+
+    let client = get_safe_client();
     let url = format!("{}/api/books", peer.url);
 
     let res = client.get(&url).send().await;
@@ -343,7 +420,14 @@ pub async fn sync_peer_by_url(
     };
 
     // 2. Fetch remote books
-    let client = reqwest::Client::new();
+    if let Err(e) = validate_url(&peer.url) {
+         return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
+        ).into_response();
+    }
+
+    let client = get_safe_client();
     let url = format!("{}/api/books", peer.url);
 
     let res = client.get(&url).send().await;
@@ -421,13 +505,16 @@ pub async fn broadcast_search(
         return vec![];
     }
 
-    let client = reqwest::Client::new();
+    let client = get_safe_client();
     let query_str = params.title.clone().unwrap_or_default(); // Simple query for now
 
     let futures = peers.into_iter().map(|peer| {
         let client = client.clone();
         let q = query_str.clone();
         async move {
+            if validate_url(&peer.url).is_err() {
+                return vec![];
+            }
             let url = format!("{}/api/peers/search", peer.url);
             match client
                 .post(&url)
@@ -504,7 +591,14 @@ pub async fn request_book(
     }
 
     // 3. Send request to peer
-    let client = reqwest::Client::new();
+    if let Err(e) = validate_url(&peer.url) {
+         return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
+        ).into_response();
+    }
+
+    let client = get_safe_client();
     let url = format!("{}/api/peers/request", peer.url);
 
     // Get my config to identify myself
@@ -743,7 +837,7 @@ pub async fn update_request_status(
                     .unwrap_or(None);
 
                 if any_copy.is_none() {
-                    println!("Self-healing: Creating missing copy for book {}", book.id);
+                    tracing::info!("Self-healing: Creating missing copy for book {}", book.id);
                     // No copies exist at all (legacy data), create one!
                     let now = chrono::Utc::now().to_rfc3339();
                     let new_copy = copy::ActiveModel {
@@ -759,7 +853,7 @@ pub async fn update_request_status(
                     match new_copy.insert(&db).await {
                         Ok(c) => c,
                         Err(e) => {
-                            println!("Failed to auto-create copy: {}", e);
+                            tracing::error!("Failed to auto-create copy: {}", e);
                             return (
                                 StatusCode::CONFLICT,
                                 Json(json!({ "error": "No available copies and failed to create one" })),

@@ -34,7 +34,7 @@ pub async fn fetch_by_isbn(isbn: &str) -> Result<SudocBook, String> {
     }
 
     let ppn_json: serde_json::Value = ppn_res.json().await.map_err(|e| e.to_string())?;
-    println!("SUDOC JSON: {:?}", ppn_json);
+    tracing::debug!("SUDOC JSON: {:?}", ppn_json);
 
     // Extract PPN (take the first one if multiple)
     let ppn = ppn_json["sudoc"]["query"]["result"][0]["ppn"]
