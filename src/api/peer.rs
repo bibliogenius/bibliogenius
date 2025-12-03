@@ -30,7 +30,7 @@ fn validate_url(url_str: &str) -> Result<String, String> {
         if host_str == "localhost" {
             return Err("Localhost access is blocked".to_string());
         }
-        
+
         // Check if it's an IP address
         if let Ok(ip) = host_str.parse::<IpAddr>() {
             if ip.is_loopback() {
@@ -43,9 +43,9 @@ fn validate_url(url_str: &str) -> Result<String, String> {
                 }
             }
             // IPv6 Link-Local (fe80::/10) - Rust's is_unicast_link_local() covers this
-             if let IpAddr::V6(ipv6) = ip {
+            if let IpAddr::V6(ipv6) = ip {
                 if (ipv6.segments()[0] & 0xffc0) == 0xfe80 {
-                     return Err("Link-local addresses blocked".to_string());
+                    return Err("Link-local addresses blocked".to_string());
                 }
             }
         }
@@ -90,10 +90,7 @@ pub async fn connect(
 ) -> impl IntoResponse {
     // 1. Validate URL
     if let Err(e) = validate_url(&payload.url) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e })),
-        ).into_response();
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
     }
 
     // 2. Fetch remote config to get location and verify connectivity
@@ -248,10 +245,11 @@ pub async fn proxy_search(
     if let Some(peer) = peer {
         // Validate Peer URL (just in case it was modified in DB)
         if let Err(e) = validate_url(&peer.url) {
-             return (
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
-            ).into_response();
+            )
+                .into_response();
         }
 
         // 2. Call peer's search endpoint
@@ -308,10 +306,11 @@ pub async fn sync_peer(
 
     // 2. Fetch remote books
     if let Err(e) = validate_url(&peer.url) {
-         return (
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     let client = get_safe_client();
@@ -421,10 +420,11 @@ pub async fn sync_peer_by_url(
 
     // 2. Fetch remote books
     if let Err(e) = validate_url(&peer.url) {
-         return (
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     let client = get_safe_client();
@@ -592,10 +592,11 @@ pub async fn request_book(
 
     // 3. Send request to peer
     if let Err(e) = validate_url(&peer.url) {
-         return (
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     let client = get_safe_client();

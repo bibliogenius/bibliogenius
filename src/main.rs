@@ -173,7 +173,13 @@ async fn main() {
         // CORS
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin(
+                    config
+                        .cors_allowed_origins
+                        .iter()
+                        .map(|origin| origin.parse::<axum::http::HeaderValue>().unwrap())
+                        .collect::<Vec<_>>(),
+                )
                 .allow_methods(Any)
                 .allow_headers(Any),
         );

@@ -1,12 +1,12 @@
-use bibliogenius::api;
-use bibliogenius::db;
-use bibliogenius::auth::{hash_password, verify_password, create_jwt, decode_jwt};
-use sea_orm::{DatabaseConnection, EntityTrait, Set};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
     Router,
 };
+use bibliogenius::api;
+use bibliogenius::auth::{create_jwt, decode_jwt, hash_password, verify_password};
+use bibliogenius::db;
+use sea_orm::{DatabaseConnection, EntityTrait, Set};
 use tower::util::ServiceExt; // for `oneshot`
 
 // Helper to create a test database
@@ -20,7 +20,7 @@ async fn setup_test_db() -> DatabaseConnection {
 async fn test_password_hashing() {
     let password = "super_secret_password";
     let hash = hash_password(password).expect("Failed to hash password");
-    
+
     assert_ne!(password, hash);
     assert!(verify_password(password, &hash).unwrap());
     assert!(!verify_password("wrong_password", &hash).unwrap());
@@ -30,10 +30,10 @@ async fn test_password_hashing() {
 async fn test_jwt_creation_and_verification() {
     let username = "test_user";
     let role = "admin";
-    
+
     let token = create_jwt(username, role).expect("Failed to create JWT");
     assert!(!token.is_empty());
-    
+
     let claims = decode_jwt(&token).expect("Failed to verify JWT");
     assert_eq!(claims.sub, username);
     // Note: claims might not have role directly depending on implementation, checking sub is good enough
@@ -42,11 +42,11 @@ async fn test_jwt_creation_and_verification() {
 #[tokio::test]
 async fn test_login_flow() {
     let db = setup_test_db().await;
-    
+
     // 1. Create Admin User manually
     let password = "admin_password";
     let hash = hash_password(password).unwrap();
-    
+
     let user = bibliogenius::models::user::ActiveModel {
         username: Set("admin".to_string()),
         password_hash: Set(hash),
@@ -70,7 +70,7 @@ async fn test_login_flow() {
         "username": "admin",
         "password": "admin_password"
     });
-    
+
     let req = Request::builder()
         .uri("/auth/login")
         .method("POST")
@@ -80,13 +80,13 @@ async fn test_login_flow() {
 
     let response = app.clone().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     // 4. Test Invalid Password
     let payload_bad = serde_json::json!({
         "username": "admin",
         "password": "wrong_password"
     });
-    
+
     let req_bad = Request::builder()
         .uri("/auth/login")
         .method("POST")
@@ -96,13 +96,13 @@ async fn test_login_flow() {
 
     let response_bad = app.clone().oneshot(req_bad).await.unwrap();
     assert_eq!(response_bad.status(), StatusCode::UNAUTHORIZED);
-    
+
     // 5. Test Non-existent User
     let payload_none = serde_json::json!({
         "username": "nobody",
         "password": "password"
     });
-    
+
     let req_none = Request::builder()
         .uri("/auth/login")
         .method("POST")
