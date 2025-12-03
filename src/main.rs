@@ -2,12 +2,76 @@ use axum::{
     routing::{get, post, put},
     Router,
 };
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
+use std::path::PathBuf;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use bibliogenius::{api, config, db, seed};
+
+/// Find an available port starting from the preferred port
+fn find_available_port(preferred_port: u16) -> Option<u16> {
+    // Try preferred port first
+    if TcpListener::bind(("127.0.0.1", preferred_port)).is_ok() {
+        return Some(preferred_port);
+    }
+
+    // Scan next 100 ports
+    for port in (preferred_port + 1)..(preferred_port + 100) {
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return Some(port);
+        }
+    }
+
+    None
+}
+
+/// Write the selected port to a file for the Flutter app to read
+fn write_port_file(port: u16) -> std::io::Result<()> {
+    let port_file = get_port_file_path();
+    
+    // Create parent directory if it doesn't exist
+    if let Some(parent) = port_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    
+    std::fs::write(port_file, port.to_string())
+}
+
+/// Get the path to the port file
+fn get_port_file_path() -> PathBuf {
+    // On macOS: ~/Library/Caches/BiblioGenius/backend_port.txt
+    // On Linux: ~/.cache/bibliogenius/backend_port.txt
+    // On Windows: %LOCALAPPDATA%\BiblioGenius\backend_port.txt
+    
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").expect("HOME not set");
+        PathBuf::from(home)
+            .join("Library")
+            .join("Caches")
+            .join("BiblioGenius")
+            .join("backend_port.txt")
+    }
+    
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME").expect("HOME not set");
+        PathBuf::from(home)
+            .join(".cache")
+            .join("bibliogenius")
+            .join("backend_port.txt")
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA not set");
+        PathBuf::from(appdata)
+            .join("BiblioGenius")
+            .join("backend_port.txt")
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -184,9 +248,28 @@ async fn main() {
                 .allow_headers(Any),
         );
 
+    // Find available port
+    let port = find_available_port(config.port)
+        .expect("Failed to find available port");
+    
+    if port != config.port {
+        tracing::warn!(
+            "Preferred port {} was not available, using port {} instead",
+            config.port,
+            port
+        );
+    }
+    
+    // Write port to file for Flutter app
+    if let Err(e) = write_port_file(port) {
+        tracing::error!("Failed to write port file: {}", e);
+    } else {
+        tracing::info!("Port file written: {:?}", get_port_file_path());
+    }
+
     // Start server
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    tracing::info!("BiblioGenius server v2 (Loans) listening on {}", addr);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    tracing::info!("BiblioGenius server listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
