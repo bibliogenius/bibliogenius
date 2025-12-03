@@ -20,31 +20,41 @@ pub async fn login(
     State(db): State<DatabaseConnection>,
     Json(payload): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    println!("Login attempt for user: {}", payload.username);
-    let user = User::find()
+    tracing::info!("Login attempt for user: {}", payload.username);
+
+    let user = match user::Entity::find()
         .filter(user::Column::Username.eq(&payload.username))
         .one(&db)
         .await
-        .unwrap_or(None);
-
-    if let Some(user) = user {
-        println!("User found: {}", user.username);
-        if verify_password(&payload.password, &user.password_hash).unwrap_or(false) {
-            println!("Password verified successfully");
-            let token = create_jwt(&user.username, &user.role).unwrap();
-            return (StatusCode::OK, Json(json!({ "token": token }))).into_response();
-        } else {
-            println!("Password verification failed");
+    {
+        Ok(Some(u)) => u,
+        _ => {
+            tracing::warn!("User not found: {}", payload.username);
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Invalid credentials" })),
+            )
+                .into_response();
         }
-    } else {
-        println!("User not found");
-    }
+    };
 
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(json!({ "error": "Invalid credentials" })),
-    )
-        .into_response()
+    tracing::debug!("User found: {}", user.username);
+
+    match verify_password(&payload.password, &user.password_hash) {
+        Ok(true) => {
+            tracing::info!("Password verified successfully for user: {}", user.username);
+            let token = create_jwt(&user.username, &user.role).unwrap();
+            (StatusCode::OK, Json(json!({ "token": token }))).into_response()
+        }
+        _ => {
+            tracing::warn!("Password verification failed for user: {}", user.username);
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Invalid credentials" })),
+            )
+                .into_response()
+        }
+    }
 }
 
 // Temporary helper to create admin user if not exists

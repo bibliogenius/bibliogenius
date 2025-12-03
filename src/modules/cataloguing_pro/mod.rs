@@ -5,5 +5,5 @@ pub mod classification;
 pub mod marc;
 
 pub fn init() {
-    println!("Initializing Professional Cataloguing Module...");
+    tracing::info!("Initializing Professional Cataloguing Module...");
 }
