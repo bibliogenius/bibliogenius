@@ -85,7 +85,8 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     let _ = db
         .execute(Statement::from_string(
             db.get_database_backend(),
-            "ALTER TABLE library_config ADD COLUMN show_borrowed_books INTEGER DEFAULT 0".to_owned(),
+            "ALTER TABLE library_config ADD COLUMN show_borrowed_books INTEGER DEFAULT 0"
+                .to_owned(),
         ))
         .await;
 
@@ -463,7 +464,8 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     let _ = db
         .execute(Statement::from_string(
             db.get_database_backend(),
-            "ALTER TABLE books ADD COLUMN reading_status TEXT NOT NULL DEFAULT 'to_read'".to_owned(),
+            "ALTER TABLE books ADD COLUMN reading_status TEXT NOT NULL DEFAULT 'to_read'"
+                .to_owned(),
         ))
         .await;
 

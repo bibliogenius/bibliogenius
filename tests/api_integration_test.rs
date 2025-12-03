@@ -495,10 +495,7 @@ async fn test_sync_clears_old_peer_books() {
         synced_at: Set(chrono::Utc::now().to_rfc3339()),
         ..Default::default()
     };
-    peer_book::Entity::insert(old_book)
-        .exec(&db)
-        .await
-        .unwrap();
+    peer_book::Entity::insert(old_book).exec(&db).await.unwrap();
 
     // Verify old book exists
     let count_before = peer_book::Entity::find()
@@ -523,10 +520,7 @@ async fn test_sync_clears_old_peer_books() {
         synced_at: Set(chrono::Utc::now().to_rfc3339()),
         ..Default::default()
     };
-    peer_book::Entity::insert(new_book)
-        .exec(&db)
-        .await
-        .unwrap();
+    peer_book::Entity::insert(new_book).exec(&db).await.unwrap();
 
     // Verify: Only new book exists
     let cached_books = peer_book::Entity::find()

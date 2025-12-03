@@ -76,8 +76,8 @@ pub async fn setup(
     }
 
     // Create admin user if not exists
-    use crate::models::user;
     use crate::auth::hash_password;
+    use crate::models::user;
 
     let admin_exists = user::Entity::find()
         .filter(user::Column::Username.eq("admin"))
@@ -96,10 +96,10 @@ pub async fn setup(
             updated_at: Set(now.to_rfc3339()),
             ..Default::default()
         };
-        
+
         if let Err(e) = admin.insert(&db).await {
-             println!("Failed to create admin user: {}", e);
-             return (
+            println!("Failed to create admin user: {}", e);
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(SetupResponse {
                     success: false,
@@ -122,7 +122,10 @@ pub async fn setup(
         .unwrap()
         .unwrap();
 
-    let library_exists = library::Entity::find_by_id(1).one(&db).await.unwrap_or(None);
+    let library_exists = library::Entity::find_by_id(1)
+        .one(&db)
+        .await
+        .unwrap_or(None);
     if library_exists.is_none() {
         println!("Default library not found, creating...");
         let new_library = library::ActiveModel {

@@ -1,13 +1,6 @@
 use crate::models::book;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
 
 #[derive(Deserialize)]

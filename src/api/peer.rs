@@ -5,9 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 use futures::future::join_all;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -510,10 +508,7 @@ pub async fn request_book(
     let url = format!("{}/api/peers/request", peer.url);
 
     // Get my config to identify myself
-    let my_config = match crate::models::library_config::Entity::find()
-        .one(&db)
-        .await
-    {
+    let my_config = match crate::models::library_config::Entity::find().one(&db).await {
         Ok(Some(config)) => config,
         _ => {
             return (
@@ -760,16 +755,16 @@ pub async fn update_request_status(
                         updated_at: Set(now),
                         ..Default::default()
                     };
-                    
+
                     match new_copy.insert(&db).await {
                         Ok(c) => c,
                         Err(e) => {
-                             println!("Failed to auto-create copy: {}", e);
-                             return (
+                            println!("Failed to auto-create copy: {}", e);
+                            return (
                                 StatusCode::CONFLICT,
                                 Json(json!({ "error": "No available copies and failed to create one" })),
                             )
-                                .into_response()
+                                .into_response();
                         }
                     }
                 } else {
@@ -778,7 +773,7 @@ pub async fn update_request_status(
                         StatusCode::CONFLICT,
                         Json(json!({ "error": "No available copies" })),
                     )
-                        .into_response()
+                        .into_response();
                 }
             }
         };
@@ -838,20 +833,19 @@ pub async fn update_request_status(
         let mut active_copy: copy::ActiveModel = copy.into();
         active_copy.status = Set("loaned".to_string());
         let _ = active_copy.update(&db).await;
-
     } else if new_status == "returned" && req.status == "accepted" {
         // Handle Return
         // Find the loan associated with this peer (contact) and book
         // This is tricky because we didn't link Loan to Request directly.
         // We have to infer: Find active loan for this book's copy where contact matches peer.
-        
+
         // 1. Find Peer/Contact
         let peer = peer::Entity::find_by_id(req.from_peer_id)
             .one(&db)
             .await
             .unwrap()
             .unwrap();
-            
+
         let contact = contact::Entity::find()
             .filter(contact::Column::Name.eq(&peer.name))
             .filter(contact::Column::Type.eq("Library"))
@@ -860,7 +854,7 @@ pub async fn update_request_status(
             .unwrap(); // Should exist if accepted
 
         if let Some(contact) = contact {
-             // 2. Find Book
+            // 2. Find Book
             let book = book::Entity::find()
                 .filter(book::Column::Isbn.eq(&req.book_isbn))
                 .one(&db)
@@ -877,7 +871,7 @@ pub async fn update_request_status(
                 .all(&db)
                 .await
                 .unwrap();
-            
+
             let copy_ids: Vec<i32> = copies.iter().map(|c| c.id).collect();
 
             let active_loan = loan::Entity::find()
@@ -896,7 +890,11 @@ pub async fn update_request_status(
                 let _ = active_loan.update(&db).await;
 
                 // Update Copy
-                let copy = copy::Entity::find_by_id(l.copy_id).one(&db).await.unwrap().unwrap();
+                let copy = copy::Entity::find_by_id(l.copy_id)
+                    .one(&db)
+                    .await
+                    .unwrap()
+                    .unwrap();
                 let mut active_copy: copy::ActiveModel = copy.into();
                 active_copy.status = Set("available".to_string());
                 let _ = active_copy.update(&db).await;
@@ -990,7 +988,11 @@ pub async fn delete_request(
     match p2p_request::Entity::delete_by_id(id).exec(&db).await {
         Ok(res) => {
             if res.rows_affected == 0 {
-                (StatusCode::NOT_FOUND, Json(json!({ "error": "Request not found" }))).into_response()
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "Request not found" })),
+                )
+                    .into_response()
             } else {
                 StatusCode::OK.into_response()
             }
@@ -1009,10 +1011,17 @@ pub async fn delete_outgoing_request(
 ) -> impl IntoResponse {
     use crate::models::p2p_outgoing_request;
 
-    match p2p_outgoing_request::Entity::delete_by_id(id).exec(&db).await {
+    match p2p_outgoing_request::Entity::delete_by_id(id)
+        .exec(&db)
+        .await
+    {
         Ok(res) => {
             if res.rows_affected == 0 {
-                (StatusCode::NOT_FOUND, Json(json!({ "error": "Request not found" }))).into_response()
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "Request not found" })),
+                )
+                    .into_response()
             } else {
                 StatusCode::OK.into_response()
             }
