@@ -203,6 +203,61 @@ pub async fn receive_connection_request(
 
 
 pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    // 1. Sync with Hub if HUB_URL is set
+    if let Ok(hub_url) = std::env::var("HUB_URL") {
+        let client = get_safe_client();
+        let url = format!("{}/api/peers", hub_url);
+        
+        if let Ok(res) = client.get(&url).send().await {
+            if res.status().is_success() {
+                #[derive(Deserialize)]
+                struct HubPeer {
+                    name: String,
+                    url: String,
+                    status: String,
+                }
+                #[derive(Deserialize)]
+                struct HubResponse {
+                    data: Vec<HubPeer>,
+                }
+
+                if let Ok(hub_res) = res.json::<HubResponse>().await {
+                    for hub_peer in hub_res.data {
+                        // Normalize URL
+                        let docker_url = translate_url_for_docker(&hub_peer.url);
+                        
+                        // Check if peer exists
+                        let existing = peer::Entity::find()
+                            .filter(peer::Column::Url.eq(&docker_url))
+                            .one(&db)
+                            .await;
+
+                        match existing {
+                            Ok(Some(p)) => {
+                                // Update status if changed
+                                let mut active: peer::ActiveModel = p.into();
+                                active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+                                let _ = active.update(&db).await;
+                            }
+                            Ok(None) => {
+                                // Insert new peer
+                                let new_peer = peer::ActiveModel {
+                                    name: Set(hub_peer.name),
+                                    url: Set(docker_url),
+                                    created_at: Set(chrono::Utc::now().to_rfc3339()),
+                                    updated_at: Set(chrono::Utc::now().to_rfc3339()),
+                                    ..Default::default()
+                                };
+                                let _ = peer::Entity::insert(new_peer).exec(&db).await;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let peers = peer::Entity::find().all(&db).await.unwrap_or(vec![]);
     (StatusCode::OK, Json(peers)).into_response()
 }
@@ -459,11 +514,63 @@ pub async fn sync_peer_by_url(
     {
         Ok(Some(p)) => p,
         _ => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": format!("Peer not found with URL: {}", docker_url) })),
-            )
-                .into_response()
+            // Peer not found locally, try to fetch from Hub
+            let mut found_peer = None;
+            
+            if let Ok(hub_url) = std::env::var("HUB_URL") {
+                let client = get_safe_client();
+                let url = format!("{}/api/peers", hub_url);
+                
+                if let Ok(res) = client.get(&url).send().await {
+                    if res.status().is_success() {
+                        #[derive(Deserialize)]
+                        struct HubPeer {
+                            name: String,
+                            url: String,
+                            status: String,
+                        }
+                        #[derive(Deserialize)]
+                        struct HubResponse {
+                            data: Vec<HubPeer>,
+                        }
+
+                        if let Ok(hub_res) = res.json::<HubResponse>().await {
+                            for hub_peer in hub_res.data {
+                                let hub_docker_url = translate_url_for_docker(&hub_peer.url);
+                                
+                                // Match by URL
+                                if hub_docker_url == docker_url {
+                                    // Insert new peer
+                                    let new_peer = peer::ActiveModel {
+                                        name: Set(hub_peer.name),
+                                        url: Set(hub_docker_url.clone()),
+                                        created_at: Set(chrono::Utc::now().to_rfc3339()),
+                                        updated_at: Set(chrono::Utc::now().to_rfc3339()),
+                                        ..Default::default()
+                                    };
+                                    
+                                    if let Ok(res) = peer::Entity::insert(new_peer).exec(&db).await {
+                                        // Fetch the inserted peer to return it
+                                        found_peer = peer::Entity::find_by_id(res.last_insert_id).one(&db).await.unwrap_or(None);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            match found_peer {
+                Some(p) => p,
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({ "error": format!("Peer not found with URL: {}", docker_url) })),
+                    )
+                    .into_response()
+                }
+            }
         }
     };
 
