@@ -153,6 +153,55 @@ pub async fn connect(
     }
 }
 
+#[derive(Deserialize)]
+pub struct IncomingConnectionRequest {
+    name: String,
+    url: String,
+}
+
+/// Receive an incoming connection request from a remote peer
+/// This forwards the request to the local Hub to create an 'incoming' peer record
+pub async fn receive_connection_request(
+    Json(payload): Json<IncomingConnectionRequest>,
+) -> impl IntoResponse {
+    // Forward to local Hub
+    let hub_url = std::env::var("HUB_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+    let endpoint = format!("{}/api/peers/receive_connection", hub_url);
+    
+    let client = get_safe_client();
+    match client
+        .post(&endpoint)
+        .json(&serde_json::json!({
+            "name": payload.name,
+            "url": payload.url,
+        }))
+        .send()
+        .await
+    {
+        Ok(res) => {
+            if res.status().is_success() {
+                (
+                    StatusCode::OK,
+                    Json(json!({ "message": "Connection request received and forwarded to Hub" })),
+                )
+                    .into_response()
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "Hub rejected the request" })),
+                )
+                    .into_response()
+            }
+        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "Failed to contact local Hub" })),
+        )
+            .into_response(),
+    }
+}
+
+
 pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoResponse {
     let peers = peer::Entity::find().all(&db).await.unwrap_or(vec![]);
     (StatusCode::OK, Json(peers)).into_response()

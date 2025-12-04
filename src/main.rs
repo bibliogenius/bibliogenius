@@ -138,6 +138,7 @@ async fn main() {
         // Peers
         .route("/peers", get(api::peer::list_peers))
         .route("/peers/connect", post(api::peer::connect))
+        .route("/peers/incoming", post(api::peer::receive_connection_request)) // Receive incoming connection
         .route("/peers/push", post(api::peer::push_operations))
         .route("/peers/pull", get(api::peer::pull_operations))
         .route("/peers/:id/sync", post(api::peer::sync_peer)) // Sync remote books by ID
