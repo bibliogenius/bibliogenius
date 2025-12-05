@@ -98,3 +98,69 @@ pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
         Err("Book not found".to_string())
     }
 }
+
+pub async fn search_books(query: &str) -> Result<Vec<BookMetadata>, String> {
+    let url = format!(
+        "https://openlibrary.org/search.json?q={}&limit=10&fields=title,author_name,first_publish_year,cover_i,key,publisher",
+        query
+    );
+
+    let client = reqwest::Client::new();
+    let resp = client.get(&url).send().await
+        .map_err(|e| format!("Failed to send request: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Open Library API error: {}", resp.status()));
+    }
+
+    let body = resp.text().await
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    let parsed: OpenLibrarySearchResponse = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+
+    let results = parsed.docs.into_iter().map(|doc| {
+        let cover_url = doc.cover_i.map(|id| format!("https://covers.openlibrary.org/b/id/{}-L.jpg", id));
+        BookMetadata {
+            title: doc.title,
+            authors: doc.author_name.unwrap_or_default(),
+            publisher: doc.publisher.and_then(|p| p.first().cloned()),
+            publication_year: doc.first_publish_year.map(|y| y.to_string()),
+            cover_url,
+        }
+    }).collect();
+
+    Ok(results)
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenLibrarySearchResponse {
+    docs: Vec<OpenLibrarySearchDoc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenLibrarySearchDoc {
+    title: String,
+    author_name: Option<Vec<String>>,
+    publisher: Option<Vec<String>>,
+    first_publish_year: Option<i32>,
+    cover_i: Option<i64>,
+}
+
+/// Fetch cover URL from OpenLibrary's Cover API (most reliable endpoint)
+/// This is separate from their ISBN/Books APIs and works very consistently
+/// Returns None if the cover doesn't exist (404 response)
+pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
+    let cover_url = format!("https://covers.openlibrary.org/b/isbn/{}-L.jpg", isbn);
+    
+    // Check if cover exists using HEAD request (lightweight)
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+    
+    match client.head(&cover_url).send().await {
+        Ok(resp) if resp.status().is_success() => Some(cover_url),
+        _ => None,
+    }
+}

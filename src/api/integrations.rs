@@ -203,3 +203,76 @@ pub async fn search_openlibrary(Query(params): Query<OpenLibraryQuery>) -> impl 
             .into_response(),
     }
 }
+
+#[derive(Deserialize)]
+pub struct UnifiedSearchQuery {
+    q: String,
+}
+
+pub async fn search_unified(Query(params): Query<UnifiedSearchQuery>) -> impl IntoResponse {
+    let query = &params.q;
+    let mut results = Vec::new();
+
+    // 1. Try Inventaire
+    if let Ok(inv_results) = crate::inventaire_client::search_inventaire(query).await {
+        for item in inv_results {
+             let book = book::Model {
+                id: 0,
+                title: item.label,
+                isbn: None, // Search results often don't have ISBNs in list view
+                publisher: None,
+                publication_year: None, // Description often has it but needs parsing
+                summary: item.description,
+                dewey_decimal: None,
+                lcc: None,
+                subjects: None,
+                marc_record: None,
+                cataloguing_notes: None,
+                source_data: Some(serde_json::json!({
+                    "source": "inventaire",
+                    "uri": item.uri,
+                    "image_url": item.image
+                }).to_string()),
+                shelf_position: None,
+                reading_status: "to_read".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            };
+            results.push(book);
+        }
+    }
+
+    // 2. Fallback to OpenLibrary if results are empty (or maybe merge them? User asked for fallback)
+    // "could be openlibrary be a fallback if inventaire api does not respond ?" -> checks for failure/empty
+    if results.is_empty() {
+         if let Ok(ol_results) = crate::openlibrary::search_books(query).await {
+            for meta in ol_results {
+                let book = book::Model {
+                    id: 0,
+                    title: meta.title,
+                    isbn: None,
+                    publisher: meta.publisher,
+                    publication_year: meta.publication_year.and_then(|y| y.parse().ok()),
+                    summary: None,
+                    dewey_decimal: None,
+                    lcc: None,
+                    subjects: None,
+                    marc_record: None,
+                    cataloguing_notes: None,
+                    source_data: Some(serde_json::json!({
+                        "source": "openlibrary",
+                        "authors": meta.authors,
+                        "cover_url": meta.cover_url
+                    }).to_string()),
+                    shelf_position: None,
+                    reading_status: "to_read".to_string(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                };
+                results.push(book);
+            }
+         }
+    }
+
+    (StatusCode::OK, Json(results)).into_response()
+}
