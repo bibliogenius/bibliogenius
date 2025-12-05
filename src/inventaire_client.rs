@@ -161,3 +161,81 @@ async fn fetch_entity(client: &reqwest::Client, uri: &str) -> Result<InventaireE
         .ok_or_else(|| format!("Entity not found: {}", uri))
 }
 
+#[derive(Debug, Deserialize)]
+struct InventaireSearchResponse {
+    results: Vec<InventaireSearchResult>,
+}
+
+#[derive(Debug, Serialize, Deserialize)] // Added Serialize for re-use in API response if needed
+pub struct InventaireSearchResult {
+    pub uri: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub image: Option<String>,
+}
+
+pub async fn search_inventaire(query: &str) -> Result<Vec<InventaireSearchResult>, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .map_err(|e| format!("Failed to build client: {}", e))?;
+
+    let url = format!(
+        "https://inventaire.io/api/search?types=works&search={}",
+        urlencoding::encode(query)
+    );
+
+    let resp = client.get(&url).send().await
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("API error: {}", resp.status()));
+    }
+
+    let body = resp.text().await
+        .map_err(|e| format!("Read body failed: {}", e))?;
+
+    let parsed: InventaireSearchResponse = serde_json::from_str(&body)
+        .map_err(|e| format!("Parse error: {}", e))?;
+
+    // Fix image URLs to be absolute
+    let results = parsed.results.into_iter().map(|mut item| {
+        if let Some(img) = item.image {
+            if !img.starts_with("http") {
+                 item.image = Some(format!("https://inventaire.io{}", img));
+            } else {
+                item.image = Some(img);
+            }
+        }
+        item
+    }).collect();
+
+    Ok(results)
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_search_inventaire() {
+        let query = "Harry Potter";
+        let result = search_inventaire(query).await;
+
+        match result {
+            Ok(results) => {
+                println!("Found {} results", results.len());
+                assert!(!results.is_empty());
+                let first = &results[0];
+                println!("First result: {:?}", first);
+                assert!(first.label.contains("Harry Potter"));
+            }
+            Err(e) => {
+                // It's possible the API fails in CI/offline, but for manual verification it should pass.
+                // We'll panic to see the error.
+                panic!("Search failed: {}", e);
+            }
+        }
+    }
+}
+

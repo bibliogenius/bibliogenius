@@ -533,3 +533,40 @@ async fn test_sync_clears_old_peer_books() {
     assert_eq!(cached_books[0].title, "New Book");
     assert_eq!(cached_books[0].remote_book_id, 2);
 }
+
+#[tokio::test]
+async fn test_search_unified_endpoint() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt; // for oneshot
+
+    let db = setup_test_db().await;
+    let _admin_id = create_test_admin(&db).await;
+
+    // We can't easily mock the external HTTP calls in this integration test without a lot of setup (e.g. wiremock).
+    // However, we can verifying the endpoint *exists* and handles a query, even if it returns empty or fails to connect to real external APIs.
+    // Ideally we would mock the `search_inventaire` and `search_books` functions but they are free functions in other modules.
+    
+    // For now, let's just ensure the route is registered and returns 200 OK (with potentially empty list if no network or no match).
+    // This confirms the wiring is correct.
+    
+    let app = bibliogenius::api::api_router(db);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/integrations/search_unified?q=test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    
+    // We expect a JSON array
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    
+    assert!(body_json.is_array(), "Expected JSON array response");
+}

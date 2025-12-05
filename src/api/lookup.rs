@@ -2,8 +2,13 @@ use crate::openlibrary;
 use axum::{extract::Path, http::StatusCode, response::IntoResponse, Json};
 
 pub async fn lookup_book(Path(isbn): Path<String>) -> impl IntoResponse {
-    // 1. Try Inventaire
-    if let Ok(inv_metadata) = crate::inventaire_client::fetch_inventaire_metadata(&isbn).await {
+    // 1. Try Inventaire (single source of truth for metadata)
+    if let Ok(mut inv_metadata) = crate::inventaire_client::fetch_inventaire_metadata(&isbn).await {
+        // 2. Enrich with OpenLibrary cover if missing
+        if inv_metadata.cover_url.is_none() {
+            inv_metadata.cover_url = crate::openlibrary::fetch_cover_url(&isbn).await;
+        }
+        
         let metadata = crate::openlibrary::BookMetadata {
             title: inv_metadata.title,
             authors: inv_metadata.authors,
@@ -14,7 +19,7 @@ pub async fn lookup_book(Path(isbn): Path<String>) -> impl IntoResponse {
         return (StatusCode::OK, Json(metadata)).into_response();
     }
 
-    // 2. Fallback to OpenLibrary
+    // 3. Fallback to OpenLibrary (only if Inventaire completely fails)
     match crate::openlibrary::fetch_book_metadata(&isbn).await {
         Ok(metadata) => (StatusCode::OK, Json(metadata)).into_response(),
         Err(e) => (
