@@ -65,6 +65,8 @@ pub fn parse_import_file(content: &[u8]) -> Result<Vec<CreateBookRequest>, Strin
         return parse_babelio_csv(content);
     } else if first_line.contains("Item URL") && first_line.contains("Edition ISBN-13") {
         return parse_inventaire_csv(content);
+    } else if content_str.trim_start().starts_with('{') && content_str.contains("\"items\"") {
+        return parse_inventaire_json(content);
     }
 
     // 2. Fallback: Treat as raw ISBN list if it looks like a list of numbers
@@ -220,6 +222,54 @@ fn parse_inventaire_csv(content: &[u8]) -> Result<Vec<CreateBookRequest>, String
     Ok(books)
 }
 
+fn parse_inventaire_json(content: &[u8]) -> Result<Vec<CreateBookRequest>, String> {
+    let content_str = String::from_utf8_lossy(content);
+    
+    #[derive(Deserialize)]
+    struct Root {
+        items: Vec<Item>,
+    }
+    #[derive(Deserialize)]
+    struct Item {
+        entity: String,
+        snapshot: Option<Snapshot>,
+    }
+    #[derive(Deserialize)]
+    struct Snapshot {
+        #[serde(rename = "entity:title")]
+        title: Option<String>,
+        #[serde(rename = "entity:authors")]
+        authors: Option<serde_json::Value>,
+    }
+
+    let root: Root = serde_json::from_str(&content_str)
+        .map_err(|e| format!("JSON parse error: {}", e))?;
+
+    let mut books = Vec::new();
+
+    for item in root.items {
+        if let Some(snapshot) = item.snapshot {
+            let title = snapshot.title.unwrap_or_else(|| "Unknown Title".to_string());
+            
+            // Extract ISBN from "entity":"isbn:978..."
+            let isbn = if item.entity.starts_with("isbn:") {
+                Some(item.entity.replace("isbn:", ""))
+            } else {
+                None
+            };
+
+            books.push(CreateBookRequest {
+                title,
+                isbn: clean_isbn(isbn),
+                publisher: None,
+                publication_year: None,
+            });
+        }
+    }
+    Ok(books)
+}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -235,5 +285,35 @@ https://inventaire.io/items/123,,,"friends,groups",inventorying,2025-12-05T06:10
         assert_eq!(result[0].title, "Martin Eden");
         assert_eq!(result[0].isbn, Some("9782264024848".to_string()));
         assert_eq!(result[0].publication_year, Some(1999));
+    }
+
+    #[test]
+    fn test_parse_inventaire_json() {
+        let json_content = r#"{
+            "items": [
+                {
+                    "entity": "isbn:9782264024848",
+                    "snapshot": {
+                        "entity:title": "Martin Eden",
+                        "entity:authors": "Jack London"
+                    }
+                },
+                {
+                    "entity": "isbn:9782330124298",
+                    "snapshot": {
+                        "entity:title": "Mille petits riens",
+                        "entity:authors": ["Jodi Picoult"]
+                    }
+                }
+            ]
+        }"#;
+
+        let result = parse_import_file(json_content.as_bytes()).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].title, "Martin Eden");
+        assert_eq!(result[0].isbn, Some("9782264024848".to_string()));
+        
+        assert_eq!(result[1].title, "Mille petits riens");
+        assert_eq!(result[1].isbn, Some("9782330124298".to_string()));
     }
 }
