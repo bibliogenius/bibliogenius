@@ -63,6 +63,8 @@ pub fn parse_import_file(content: &[u8]) -> Result<Vec<CreateBookRequest>, Strin
         return parse_librarything_csv(content);
     } else if first_line.contains("Titre") && first_line.contains("EAN") {
         return parse_babelio_csv(content);
+    } else if first_line.contains("Item URL") && first_line.contains("Edition ISBN-13") {
+        return parse_inventaire_csv(content);
     }
 
     // 2. Fallback: Treat as raw ISBN list if it looks like a list of numbers
@@ -174,6 +176,64 @@ fn parse_isbn_list(content: &[u8]) -> Result<Vec<CreateBookRequest>, String> {
 }
 
 fn clean_isbn(isbn: Option<String>) -> Option<String> {
-    isbn.map(|s| s.replace("=", "").replace("\"", "").trim().to_string())
+    isbn.map(|s| s.replace("=", "").replace("\"", "").replace("-", "").trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+#[derive(Debug, Deserialize)]
+struct InventaireBook {
+    #[serde(rename = "Edition title")]
+    title: String,
+    #[serde(rename = "Edition ISBN-13")]
+    isbn13: Option<String>,
+    #[serde(rename = "Edition ISBN-10")]
+    isbn10: Option<String>,
+    #[serde(rename = "Publisher label")]
+    publisher: Option<String>,
+    #[serde(rename = "Edition publication date")]
+    publication_date: Option<String>,
+}
+
+fn parse_inventaire_csv(content: &[u8]) -> Result<Vec<CreateBookRequest>, String> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(content);
+
+    let mut books = Vec::new();
+
+    for result in rdr.deserialize() {
+        let record: InventaireBook = result.map_err(|e| format!("CSV parse error: {}", e))?;
+        let isbn = clean_isbn(record.isbn13.or(record.isbn10));
+
+        // Parse year from "YYYY-MM-DD" or just "YYYY"
+        let year = record.publication_date
+            .and_then(|d| d.split('-').next().map(|y| y.to_string()))
+            .and_then(|y| y.parse::<i32>().ok());
+
+        books.push(CreateBookRequest {
+            title: record.title,
+            isbn,
+            publisher: record.publisher,
+            publication_year: year,
+        });
+    }
+    Ok(books)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_inventaire_csv() {
+        let csv_content = r#"Item URL,Item details,Item notes,Item visibility,Item transaction,Item created,Shelves,Edition URL,Edition ISBN-13,Edition ISBN-10,Edition title,Edition subtitle,Edition publication date,Edition cover,Edition number of pages,Edition language,Works URLs,Works labels,Original language,Works Series ordinals,Authors URLs,Authors labels,Translators labels,Translators URLs,Series URLs,Series labels,Genres URLs,Genres labels,Subjects URLs,Subjects labels,Publisher URLs,Publisher label
+https://inventaire.io/items/123,,,"friends,groups",inventorying,2025-12-05T06:10:16.091Z,,https://inventaire.io/entity/isbn:9782264024848,978-2-264-02484-8,2-264-02484-4,Martin Eden,,1999-09-12,https://inventaire.io/img/entities/879f475f9346653da1811850cc881ee153c8193d,,français,https://inventaire.io/entity/wd:Q1317839,Martin Eden,anglais,,https://inventaire.io/entity/wd:Q45765,Jack London,,,,,https://inventaire.io/entity/wd:Q783459,Künstlerroman,,,,"#;
+
+        let result = parse_import_file(csv_content.as_bytes()).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].title, "Martin Eden");
+        assert_eq!(result[0].isbn, Some("9782264024848".to_string()));
+        assert_eq!(result[0].publication_year, Some(1999));
+    }
 }
