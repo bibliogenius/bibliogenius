@@ -9,3 +9,4 @@ pub mod modules;
 pub mod openlibrary;
 pub mod seed;
 pub mod sync;
+pub mod inventaire_client;

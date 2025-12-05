@@ -26,6 +26,8 @@ impl Config {
                         "http://localhost:8080".to_string(),
                         "http://127.0.0.1:8080".to_string(),
                         "http://localhost:3000".to_string(), // Common dev port
+                        "http://localhost:8083".to_string(), // Flutter Chrome port
+                        "http://127.0.0.1:8083".to_string(), // Flutter Chrome port (IP)
                     ]
                 }),
         }
