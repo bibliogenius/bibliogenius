@@ -21,10 +21,13 @@ pub struct Model {
     pub shelf_position: Option<i32>,
     #[sea_orm(default_value = "to_read")]
     pub reading_status: String,
+    pub finished_reading_at: Option<String>,
+    pub started_reading_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
 
+// ... (Relation enum and Related impls omit for brevity) ...
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
     #[sea_orm(has_many = "super::copy::Entity")]
@@ -76,6 +79,10 @@ pub struct Book {
     pub shelf_position: Option<i32>,
     pub reading_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_reading_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_reading_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
@@ -87,8 +94,7 @@ impl From<Model> for Book {
     fn from(model: Model) -> Self {
         let subjects: Option<Vec<String>> = model
             .subjects
-            .as_ref()
-            .map(|s| serde_json::from_str(s).unwrap_or_default());
+            .map(|s| serde_json::from_str(&s).unwrap_or_default());
 
         Self {
             id: Some(model.id),
@@ -105,6 +111,8 @@ impl From<Model> for Book {
             source_data: model.source_data,
             shelf_position: model.shelf_position,
             reading_status: Some(model.reading_status),
+            finished_reading_at: model.finished_reading_at,
+            started_reading_at: model.started_reading_at,
             source: Some("Local".to_string()),
             author: None,    // TODO: Fetch from relation
             cover_url: None, // TODO: Derive from ISBN or store in DB
@@ -115,10 +123,7 @@ impl From<Model> for Book {
 impl From<Book> for ActiveModel {
     fn from(book: Book) -> Self {
         Self {
-            id: match book.id {
-                Some(id) => Set(id),
-                None => NotSet,
-            },
+            id: book.id.map_or(NotSet, Set),
             title: Set(book.title),
             isbn: Set(book.isbn),
             summary: Set(book.summary),
@@ -133,8 +138,14 @@ impl From<Book> for ActiveModel {
             cataloguing_notes: Set(book.cataloguing_notes),
             source_data: Set(book.source_data),
             shelf_position: Set(book.shelf_position),
-            reading_status: Set(book.reading_status.unwrap_or("to_read".to_string())),
-            ..Default::default()
+            reading_status: book.reading_status.map_or(NotSet, Set),
+            finished_reading_at: book
+                .finished_reading_at
+                .map(|v| Some(v))
+                .map_or(NotSet, Set),
+            started_reading_at: book.started_reading_at.map(|v| Some(v)).map_or(NotSet, Set),
+            created_at: NotSet,
+            updated_at: NotSet,
         }
     }
 }

@@ -167,7 +167,7 @@ pub async fn receive_connection_request(
     // Forward to local Hub
     let hub_url = std::env::var("HUB_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
     let endpoint = format!("{}/api/peers/receive_connection", hub_url);
-    
+
     let client = get_safe_client();
     match client
         .post(&endpoint)
@@ -201,20 +201,20 @@ pub async fn receive_connection_request(
     }
 }
 
-
 pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoResponse {
     // 1. Sync with Hub if HUB_URL is set
     if let Ok(hub_url) = std::env::var("HUB_URL") {
         let client = get_safe_client();
         let url = format!("{}/api/peers", hub_url);
-        
+
         if let Ok(res) = client.get(&url).send().await {
             if res.status().is_success() {
                 #[derive(Deserialize)]
                 struct HubPeer {
                     name: String,
                     url: String,
-                    status: String,
+                    #[serde(rename = "status")]
+                    _status: String,
                 }
                 #[derive(Deserialize)]
                 struct HubResponse {
@@ -225,7 +225,7 @@ pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoRespon
                     for hub_peer in hub_res.data {
                         // Normalize URL
                         let docker_url = translate_url_for_docker(&hub_peer.url);
-                        
+
                         // Check if peer exists
                         let existing = peer::Entity::find()
                             .filter(peer::Column::Url.eq(&docker_url))
@@ -516,18 +516,19 @@ pub async fn sync_peer_by_url(
         _ => {
             // Peer not found locally, try to fetch from Hub
             let mut found_peer = None;
-            
+
             if let Ok(hub_url) = std::env::var("HUB_URL") {
                 let client = get_safe_client();
                 let url = format!("{}/api/peers", hub_url);
-                
+
                 if let Ok(res) = client.get(&url).send().await {
                     if res.status().is_success() {
                         #[derive(Deserialize)]
                         struct HubPeer {
                             name: String,
                             url: String,
-                            status: String,
+                            #[serde(rename = "status")]
+                            _status: String,
                         }
                         #[derive(Deserialize)]
                         struct HubResponse {
@@ -537,7 +538,7 @@ pub async fn sync_peer_by_url(
                         if let Ok(hub_res) = res.json::<HubResponse>().await {
                             for hub_peer in hub_res.data {
                                 let hub_docker_url = translate_url_for_docker(&hub_peer.url);
-                                
+
                                 // Match by URL
                                 if hub_docker_url == docker_url {
                                     // Insert new peer
@@ -548,10 +549,14 @@ pub async fn sync_peer_by_url(
                                         updated_at: Set(chrono::Utc::now().to_rfc3339()),
                                         ..Default::default()
                                     };
-                                    
-                                    if let Ok(res) = peer::Entity::insert(new_peer).exec(&db).await {
+
+                                    if let Ok(res) = peer::Entity::insert(new_peer).exec(&db).await
+                                    {
                                         // Fetch the inserted peer to return it
-                                        found_peer = peer::Entity::find_by_id(res.last_insert_id).one(&db).await.unwrap_or(None);
+                                        found_peer = peer::Entity::find_by_id(res.last_insert_id)
+                                            .one(&db)
+                                            .await
+                                            .unwrap_or(None);
                                     }
                                     break;
                                 }
@@ -566,9 +571,11 @@ pub async fn sync_peer_by_url(
                 None => {
                     return (
                         StatusCode::NOT_FOUND,
-                        Json(json!({ "error": format!("Peer not found with URL: {}", docker_url) })),
+                        Json(
+                            json!({ "error": format!("Peer not found with URL: {}", docker_url) }),
+                        ),
                     )
-                    .into_response()
+                        .into_response()
                 }
             }
         }
@@ -824,16 +831,16 @@ pub async fn request_book_by_url(
     {
         Ok(Some(p)) => p,
         Ok(None) => {
-             // Optional: Auto-create peer if not found? 
-             // For now, let's return 404 to be safe, assuming they should have synced first.
-             // But wait, if they are viewing books, they might be viewing them from a "Search Network" result 
-             // which might not have created the peer yet?
-             // Actually, list_peer_books_by_url requires peer to exist.
-             return (
+            // Optional: Auto-create peer if not found?
+            // For now, let's return 404 to be safe, assuming they should have synced first.
+            // But wait, if they are viewing books, they might be viewing them from a "Search Network" result
+            // which might not have created the peer yet?
+            // Actually, list_peer_books_by_url requires peer to exist.
+            return (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": format!("Peer not found with URL: {}", docker_url) })),
             )
-                .into_response()
+                .into_response();
         }
         Err(_) => {
             return (

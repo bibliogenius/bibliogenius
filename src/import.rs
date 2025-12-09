@@ -178,8 +178,14 @@ fn parse_isbn_list(content: &[u8]) -> Result<Vec<CreateBookRequest>, String> {
 }
 
 fn clean_isbn(isbn: Option<String>) -> Option<String> {
-    isbn.map(|s| s.replace("=", "").replace("\"", "").replace("-", "").trim().to_string())
-        .filter(|s| !s.is_empty())
+    isbn.map(|s| {
+        s.replace("=", "")
+            .replace("\"", "")
+            .replace("-", "")
+            .trim()
+            .to_string()
+    })
+    .filter(|s| !s.is_empty())
 }
 
 #[derive(Debug, Deserialize)]
@@ -208,7 +214,8 @@ fn parse_inventaire_csv(content: &[u8]) -> Result<Vec<CreateBookRequest>, String
         let isbn = clean_isbn(record.isbn13.or(record.isbn10));
 
         // Parse year from "YYYY-MM-DD" or just "YYYY"
-        let year = record.publication_date
+        let year = record
+            .publication_date
             .and_then(|d| d.split('-').next().map(|y| y.to_string()))
             .and_then(|y| y.parse::<i32>().ok());
 
@@ -224,7 +231,7 @@ fn parse_inventaire_csv(content: &[u8]) -> Result<Vec<CreateBookRequest>, String
 
 fn parse_inventaire_json(content: &[u8]) -> Result<Vec<CreateBookRequest>, String> {
     let content_str = String::from_utf8_lossy(content);
-    
+
     #[derive(Deserialize)]
     struct Root {
         items: Vec<Item>,
@@ -239,18 +246,20 @@ fn parse_inventaire_json(content: &[u8]) -> Result<Vec<CreateBookRequest>, Strin
         #[serde(rename = "entity:title")]
         title: Option<String>,
         #[serde(rename = "entity:authors")]
-        authors: Option<serde_json::Value>,
+        _authors: Option<serde_json::Value>,
     }
 
-    let root: Root = serde_json::from_str(&content_str)
-        .map_err(|e| format!("JSON parse error: {}", e))?;
+    let root: Root =
+        serde_json::from_str(&content_str).map_err(|e| format!("JSON parse error: {}", e))?;
 
     let mut books = Vec::new();
 
     for item in root.items {
         if let Some(snapshot) = item.snapshot {
-            let title = snapshot.title.unwrap_or_else(|| "Unknown Title".to_string());
-            
+            let title = snapshot
+                .title
+                .unwrap_or_else(|| "Unknown Title".to_string());
+
             // Extract ISBN from "entity":"isbn:978..."
             let isbn = if item.entity.starts_with("isbn:") {
                 Some(item.entity.replace("isbn:", ""))
@@ -268,8 +277,6 @@ fn parse_inventaire_json(content: &[u8]) -> Result<Vec<CreateBookRequest>, Strin
     }
     Ok(books)
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -312,7 +319,7 @@ https://inventaire.io/items/123,,,"friends,groups",inventorying,2025-12-05T06:10
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].title, "Martin Eden");
         assert_eq!(result[0].isbn, Some("9782264024848".to_string()));
-        
+
         assert_eq!(result[1].title, "Mille petits riens");
         assert_eq!(result[1].isbn, Some("9782330124298".to_string()));
     }
