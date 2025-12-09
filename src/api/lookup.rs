@@ -1,4 +1,3 @@
-use crate::openlibrary;
 use axum::{extract::Path, http::StatusCode, response::IntoResponse, Json};
 
 pub async fn lookup_book(Path(isbn): Path<String>) -> impl IntoResponse {
@@ -8,13 +7,14 @@ pub async fn lookup_book(Path(isbn): Path<String>) -> impl IntoResponse {
         if inv_metadata.cover_url.is_none() {
             inv_metadata.cover_url = crate::openlibrary::fetch_cover_url(&isbn).await;
         }
-        
+
         let metadata = crate::openlibrary::BookMetadata {
             title: inv_metadata.title,
             authors: inv_metadata.authors,
             publisher: inv_metadata.publisher,
             publication_year: inv_metadata.publication_year,
             cover_url: inv_metadata.cover_url,
+            summary: inv_metadata.summary,
         };
         return (StatusCode::OK, Json(metadata)).into_response();
     }

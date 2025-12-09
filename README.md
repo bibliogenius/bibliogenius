@@ -48,10 +48,6 @@ POST /api/hub/register        # Register with hub
 GET  /api/hub/discover        # Discover peers
 ```
 
-## Documentation
-
-See [POC_ROADMAP.md](../docs/POC_ROADMAP.md) for implementation details.
-
 ## Repository
 
 https://github.com/bibliogenius/bibliogenius

@@ -136,6 +136,8 @@ pub async fn search_external(query: &crate::api::search::SearchQuery) -> Vec<boo
                     source_data: Some(source_data.to_string()),
                     shelf_position: None,
                     reading_status: "to_read".to_string(),
+                    finished_reading_at: None,
+                    started_reading_at: None,
                     created_at: chrono::Utc::now().to_rfc3339(),
                     updated_at: chrono::Utc::now().to_rfc3339(),
                 };
@@ -206,73 +208,188 @@ pub async fn search_openlibrary(Query(params): Query<OpenLibraryQuery>) -> impl 
 
 #[derive(Deserialize)]
 pub struct UnifiedSearchQuery {
-    q: String,
+    pub q: Option<String>,
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub publisher: Option<String>,
 }
 
 pub async fn search_unified(Query(params): Query<UnifiedSearchQuery>) -> impl IntoResponse {
-    let query = &params.q;
-    let mut results = Vec::new();
+    let mut results: Vec<book::Book> = Vec::new();
 
-    // 1. Try Inventaire
-    if let Ok(inv_results) = crate::inventaire_client::search_inventaire(query).await {
-        for item in inv_results {
-             let book = book::Model {
-                id: 0,
-                title: item.label,
-                isbn: None, // Search results often don't have ISBNs in list view
-                publisher: None,
-                publication_year: None, // Description often has it but needs parsing
-                summary: item.description,
-                dewey_decimal: None,
-                lcc: None,
-                subjects: None,
-                marc_record: None,
-                cataloguing_notes: None,
-                source_data: Some(serde_json::json!({
-                    "source": "inventaire",
-                    "uri": item.uri,
-                    "image_url": item.image
-                }).to_string()),
-                shelf_position: None,
-                reading_status: "to_read".to_string(),
-                created_at: chrono::Utc::now().to_rfc3339(),
-                updated_at: chrono::Utc::now().to_rfc3339(),
-            };
-            results.push(book);
-        }
+    // 1. Build Query String for Inventaire (General Search)
+    let mut inv_query_parts = Vec::new();
+    if let Some(q) = &params.q {
+        inv_query_parts.push(q.clone());
+    }
+    if let Some(t) = &params.title {
+        inv_query_parts.push(t.clone());
+    }
+    if let Some(a) = &params.author {
+        inv_query_parts.push(a.clone());
     }
 
-    // 2. Fallback to OpenLibrary if results are empty (or maybe merge them? User asked for fallback)
-    // "could be openlibrary be a fallback if inventaire api does not respond ?" -> checks for failure/empty
-    if results.is_empty() {
-         if let Ok(ol_results) = crate::openlibrary::search_books(query).await {
-            for meta in ol_results {
-                let book = book::Model {
-                    id: 0,
-                    title: meta.title,
+    let inv_query = inv_query_parts.join(" ");
+
+    // 2. Try Inventaire if we have a query string
+    if !inv_query.trim().is_empty() {
+        if let Ok(inv_results) = crate::inventaire_client::search_inventaire(&inv_query).await {
+            // Enrich results with author names
+            let enriched = match crate::inventaire_client::enrich_search_results(inv_results).await
+            {
+                Ok(res) => res,
+                Err(e) => {
+                    eprintln!("Inventaire enrichment failed: {}", e);
+                    Vec::new()
+                }
+            };
+
+            for item in enriched {
+                let author_name = item.authors.as_ref().map(|a| a.join(", "));
+
+                let book = book::Book {
+                    id: None,
+                    title: item.label,
                     isbn: None,
-                    publisher: meta.publisher,
-                    publication_year: meta.publication_year.and_then(|y| y.parse().ok()),
-                    summary: None,
+                    publisher: None,
+                    publication_year: None,
+                    summary: item.description,
                     dewey_decimal: None,
                     lcc: None,
                     subjects: None,
                     marc_record: None,
                     cataloguing_notes: None,
-                    source_data: Some(serde_json::json!({
-                        "source": "openlibrary",
-                        "authors": meta.authors,
-                        "cover_url": meta.cover_url
-                    }).to_string()),
+                    source_data: Some(
+                        serde_json::json!({
+                            "source": "inventaire",
+                            "uri": item.uri,
+                            "image_url": item.image
+                        })
+                        .to_string(),
+                    ),
                     shelf_position: None,
-                    reading_status: "to_read".to_string(),
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    reading_status: Some("to_read".to_string()),
+                    source: Some("Inventaire".to_string()),
+                    author: author_name,
+                    cover_url: item.image,
+                    finished_reading_at: None,
+                    started_reading_at: None,
                 };
                 results.push(book);
             }
-         }
+        }
     }
 
+    // 3. Always Search OpenLibrary (via search_external) for better coverage
+    // Construct SearchQuery for search_external
+    let search_query = crate::api::search::SearchQuery {
+        title: params.title.clone().or_else(|| params.q.clone()), // Use q as title fallback if generic
+        author: params.author.clone(),
+        publisher: params.publisher.clone(),
+        year_min: None,
+        year_max: None,
+        tags: None,
+        sources: None,
+    };
+
+    // Only call if we have something to search
+    if search_query.title.is_some()
+        || search_query.author.is_some()
+        || search_query.publisher.is_some()
+    {
+        let ol_results = search_external(&search_query).await;
+        for model in ol_results {
+            // Convert Model to Book DTO and enrich
+            let mut dto = book::Book::from(model.clone());
+
+            // Extract author and cover from source_data if present (search_external puts them there)
+            if let Some(source_data_str) = &model.source_data {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str) {
+                    if let Some(authors) = json.get("authors").and_then(|a| a.as_array()) {
+                        let author_str = authors
+                            .iter()
+                            .map(|v| v.as_str().unwrap_or("").to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        if !author_str.is_empty() {
+                            dto.author = Some(author_str);
+                        }
+                    }
+                    if let Some(cover_id) = json.get("cover_id").and_then(|v| v.as_i64()) {
+                        dto.cover_url = Some(format!(
+                            "https://covers.openlibrary.org/b/id/{}-L.jpg",
+                            cover_id
+                        ));
+                    }
+                }
+            }
+            dto.source = Some("Open Library".to_string());
+            results.push(dto);
+        }
+    }
+
+    // 4. Sort Results by Relevance
+    // Prioritize:
+    // 1. Author matches query author (if provided)
+    // 2. Title matches query title (if provided)
+    // 3. Author matches general query 'q'
+
+    let query_author = params.author.as_deref().unwrap_or("").to_lowercase();
+    let query_title = params.title.as_deref().unwrap_or("").to_lowercase();
+    let query_q = params.q.as_deref().unwrap_or("").to_lowercase();
+
+    results.sort_by(|a, b| {
+        let score_a = calculate_relevance(a, &query_author, &query_title, &query_q);
+        let score_b = calculate_relevance(b, &query_author, &query_title, &query_q);
+        score_b.cmp(&score_a) // Descending score
+    });
+
     (StatusCode::OK, Json(results)).into_response()
+}
+
+fn calculate_relevance(book: &book::Book, q_author: &str, q_title: &str, q_any: &str) -> i32 {
+    let mut score = 0;
+
+    let title = book.title.to_lowercase();
+    let author = book.author.as_deref().unwrap_or("").to_lowercase();
+
+    // Author Match
+    if !q_author.is_empty() {
+        if author == q_author {
+            score += 100;
+        } else if author.contains(q_author) {
+            score += 50;
+        }
+    }
+
+    // Title Match
+    if !q_title.is_empty() {
+        if title == q_title {
+            score += 80;
+        } else if title.contains(q_title) {
+            score += 40;
+        }
+    }
+
+    // General Query Match
+    if !q_any.is_empty() {
+        if author.contains(q_any) {
+            score += 30;
+        }
+        if title.contains(q_any) {
+            score += 30;
+        }
+    }
+
+    // Boost items with covers
+    if book.cover_url.is_some() {
+        score += 5;
+    }
+
+    // Boost items with summaries
+    if book.summary.is_some() {
+        score += 5;
+    }
+
+    score
 }

@@ -257,6 +257,10 @@ pub async fn update_book(
 
     let mut book: ActiveModel = book.into();
 
+    println!("Updating book {} with data: {:?}", id, book_data);
+
+    // Ensure title is updated if provided, or fallback to existing?
+    // Frontend is now sending title, so we can set it.
     book.title = Set(book_data.title);
     if let Some(isbn) = book_data.isbn {
         book.isbn = Set(Some(isbn));
@@ -272,6 +276,12 @@ pub async fn update_book(
     }
     if let Some(status) = book_data.reading_status {
         book.reading_status = Set(status);
+    }
+    if let Some(finished_at) = book_data.finished_reading_at {
+        book.finished_reading_at = Set(Some(finished_at));
+    }
+    if let Some(started_at) = book_data.started_reading_at {
+        book.started_reading_at = Set(Some(started_at));
     }
     // if let Some(author) = book_data.author {
     //     // TODO: Handle author update (requires managing book_authors relation)
