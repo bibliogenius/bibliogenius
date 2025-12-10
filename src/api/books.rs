@@ -9,20 +9,67 @@ use serde_json::{json, Value};
 use crate::models::book::{ActiveModel, Entity as BookEntity};
 use crate::models::Book;
 
+#[derive(serde::Deserialize, Default)]
+pub struct BookFilter {
+    pub status: Option<String>,
+    pub author: Option<String>,
+    pub title: Option<String>,
+    pub tag: Option<String>,
+}
+
 #[utoipa::path(
     get,
     path = "/api/books",
+    params(
+        ("status" = Option<String>, Query, description = "Reading status"),
+        ("author" = Option<String>, Query, description = "Filter by author name"),
+        ("title" = Option<String>, Query, description = "Filter by title"),
+        ("tag" = Option<String>, Query, description = "Filter by subject/tag")
+    ),
     responses(
         (status = 200, description = "List all books")
     )
 )]
-pub async fn list_books(State(db): State<DatabaseConnection>) -> Result<Json<Value>, StatusCode> {
-    use sea_orm::ModelTrait;
+pub async fn list_books(
+    State(db): State<DatabaseConnection>,
+    axum::extract::Query(filter): axum::extract::Query<BookFilter>,
+) -> Result<Json<Value>, StatusCode> {
+    use sea_orm::{ColumnTrait, ModelTrait, QueryFilter};
 
-    let books = BookEntity::find()
+    tracing::info!(
+        "List books request - Filters: status={:?}, title={:?}, tag={:?}",
+        filter.status,
+        filter.title,
+        filter.tag
+    );
+
+    let mut query = BookEntity::find();
+
+    if let Some(status) = &filter.status {
+        if !status.is_empty() {
+            query = query.filter(crate::models::book::Column::ReadingStatus.eq(status));
+        }
+    }
+
+    if let Some(title) = &filter.title {
+        if !title.is_empty() {
+            query = query.filter(crate::models::book::Column::Title.contains(title));
+        }
+    }
+
+    // Tag filter (searching in JSON subjects array via simple text match for compatibility)
+    if let Some(tag) = &filter.tag {
+        if !tag.is_empty() {
+            query = query.filter(crate::models::book::Column::Subjects.contains(tag));
+        }
+    }
+
+    let books = query
         .all(&db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tracing::info!("DB query returned {} books before filtering", books.len());
 
     let mut book_dtos = Vec::new();
 
@@ -46,7 +93,7 @@ pub async fn list_books(State(db): State<DatabaseConnection>) -> Result<Json<Val
             }
         }
 
-        // Derive cover_url from ISBN if available
+        // Derive cover_url
         if let Some(isbn) = &book_dto.isbn {
             book_dto.cover_url = Some(format!(
                 "https://covers.openlibrary.org/b/isbn/{}-M.jpg",
@@ -54,8 +101,49 @@ pub async fn list_books(State(db): State<DatabaseConnection>) -> Result<Json<Val
             ));
         }
 
+        // DEFENSIVE: Apply status filter in-memory as safety net
+        if let Some(status_filter) = &filter.status {
+            if !status_filter.is_empty() {
+                if let Some(book_status) = &book_dto.reading_status {
+                    if book_status != status_filter {
+                        tracing::debug!(
+                            "Filtering out book '{}' - status '{}' != '{}'",
+                            book_dto.title,
+                            book_status,
+                            status_filter
+                        );
+                        continue;
+                    }
+                } else {
+                    tracing::debug!("Filtering out book '{}' - no status", book_dto.title);
+                    continue;
+                }
+            }
+        }
+
+        // Apply author filter in-memory (simplified for now)
+        if let Some(author_query) = &filter.author {
+            if !author_query.is_empty() {
+                if let Some(authors) = &book_dto.author {
+                    if !authors
+                        .to_lowercase()
+                        .contains(&author_query.to_lowercase())
+                    {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+        }
+
         book_dtos.push(book_dto);
     }
+
+    tracing::info!(
+        "Returning {} books after all filters applied",
+        book_dtos.len()
+    );
 
     Ok(Json(json!({
         "books": book_dtos,
@@ -95,6 +183,8 @@ pub async fn create_book(
         cataloguing_notes: Set(book.cataloguing_notes),
         source_data: Set(book.source_data),
         reading_status: Set(book.reading_status.unwrap_or_else(|| "to_read".to_string())),
+        started_reading_at: Set(book.started_reading_at.flatten()),
+        finished_reading_at: Set(book.finished_reading_at.flatten()),
         created_at: Set(now.to_rfc3339()),
         updated_at: Set(now.to_rfc3339()),
         ..Default::default()
@@ -278,10 +368,10 @@ pub async fn update_book(
         book.reading_status = Set(status);
     }
     if let Some(finished_at) = book_data.finished_reading_at {
-        book.finished_reading_at = Set(Some(finished_at));
+        book.finished_reading_at = Set(finished_at);
     }
     if let Some(started_at) = book_data.started_reading_at {
-        book.started_reading_at = Set(Some(started_at));
+        book.started_reading_at = Set(started_at);
     }
     // if let Some(author) = book_data.author {
     //     // TODO: Handle author update (requires managing book_authors relation)
