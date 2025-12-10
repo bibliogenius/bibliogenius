@@ -79,9 +79,9 @@ pub struct Book {
     pub shelf_position: Option<i32>,
     pub reading_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub finished_reading_at: Option<String>,
+    pub finished_reading_at: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_reading_at: Option<String>,
+    pub started_reading_at: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -111,8 +111,8 @@ impl From<Model> for Book {
             source_data: model.source_data,
             shelf_position: model.shelf_position,
             reading_status: Some(model.reading_status),
-            finished_reading_at: model.finished_reading_at,
-            started_reading_at: model.started_reading_at,
+            finished_reading_at: Some(model.finished_reading_at),
+            started_reading_at: Some(model.started_reading_at),
             source: Some("Local".to_string()),
             author: None,    // TODO: Fetch from relation
             cover_url: None, // TODO: Derive from ISBN or store in DB
@@ -139,11 +139,8 @@ impl From<Book> for ActiveModel {
             source_data: Set(book.source_data),
             shelf_position: Set(book.shelf_position),
             reading_status: book.reading_status.map_or(NotSet, Set),
-            finished_reading_at: book
-                .finished_reading_at
-                .map(|v| Some(v))
-                .map_or(NotSet, Set),
-            started_reading_at: book.started_reading_at.map(|v| Some(v)).map_or(NotSet, Set),
+            finished_reading_at: book.finished_reading_at.map_or(NotSet, Set),
+            started_reading_at: book.started_reading_at.map_or(NotSet, Set),
             created_at: NotSet,
             updated_at: NotSet,
         }

@@ -477,5 +477,20 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 020: Add reading dates to books
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE books ADD COLUMN started_reading_at TEXT".to_owned(),
+        ))
+        .await;
+
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE books ADD COLUMN finished_reading_at TEXT".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
