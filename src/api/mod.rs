@@ -41,6 +41,7 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         // Books
         .route("/books", get(books::list_books))
         .route("/api/books/search", get(search::search_books))
+        .route("/api/books/tags", get(books::list_tags))
         .route("/api/chat", post(chat::chat_handler))
         .route("/books", post(books::create_book))
         .route(
@@ -51,10 +52,7 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/authors", get(author::list_authors))
         .route("/authors", post(author::create_author))
         .route("/authors/:id", get(author::get_author))
-        .route(
-            "/authors/:id",
-            axum::routing::delete(author::delete_author),
-        )
+        .route("/authors/:id", axum::routing::delete(author::delete_author))
         // Tags
         .route("/tags", get(tag::list_tags))
         .route("/tags", post(tag::create_tag))
@@ -69,10 +67,7 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/peers/:id/sync", post(peer::sync_peer)) // Sync remote books by ID
         .route("/peers/sync_by_url", post(peer::sync_peer_by_url)) // Sync by URL (solves Hub ID mismatch)
         .route("/peers/:id/books", get(peer::list_peer_books))
-        .route(
-            "/peers/books_by_url",
-            post(peer::list_peer_books_by_url),
-        ) // Get books by URL
+        .route("/peers/books_by_url", post(peer::list_peer_books_by_url)) // Get books by URL
         .route("/peers/search", post(peer::search_local))
         .route("/peers/proxy_search", post(peer::proxy_search))
         .route("/peers/request_by_url", post(peer::request_book_by_url)) // Send request by URL
@@ -117,10 +112,7 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         )
         .route("/profile", put(profile::update_profile))
         // P2P routes
-        .route(
-            "/loans",
-            get(loan::list_loans).post(loan::create_loan),
-        )
+        .route("/loans", get(loan::list_loans).post(loan::create_loan))
         .route("/loans/:id/return", put(loan::return_loan))
         // Lookup
         .route("/lookup/:isbn", get(lookup::lookup_book))

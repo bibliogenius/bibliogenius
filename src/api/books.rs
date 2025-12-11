@@ -373,10 +373,12 @@ pub async fn update_book(
     if let Some(started_at) = book_data.started_reading_at {
         book.started_reading_at = Set(started_at);
     }
-    // if let Some(author) = book_data.author {
-    //     // TODO: Handle author update (requires managing book_authors relation)
-    //     // book.author = Set(Some(author));
-    // }
+
+    // Handle attributes/tags update
+    if let Some(subjects) = book_data.subjects {
+        let subjects_json = serde_json::to_string(&subjects).unwrap_or_else(|_| "[]".to_string());
+        book.subjects = Set(Some(subjects_json));
+    }
 
     book.updated_at = Set(now.to_rfc3339());
 
@@ -395,4 +397,53 @@ pub async fn update_book(
         )
             .into_response(),
     }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct TagDto {
+    pub name: String,
+    pub count: usize,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/books/tags",
+    responses(
+        (status = 200, description = "List all tags with counts")
+    )
+)]
+pub async fn list_tags(
+    State(db): State<DatabaseConnection>,
+) -> Result<Json<Vec<TagDto>>, StatusCode> {
+    use std::collections::HashMap;
+
+    // Fetch all books
+    let books = BookEntity::find()
+        .all(&db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut tag_counts: HashMap<String, usize> = HashMap::new();
+
+    for book in books {
+        if let Some(subjects_json) = book.subjects {
+            if let Ok(subjects) = serde_json::from_str::<Vec<String>>(&subjects_json) {
+                for subject in subjects {
+                    if !subject.trim().is_empty() {
+                        *tag_counts.entry(subject.trim().to_string()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut tags: Vec<TagDto> = tag_counts
+        .into_iter()
+        .map(|(name, count)| TagDto { name, count })
+        .collect();
+
+    // Sort by count descending, then name ascending
+    tags.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+
+    Ok(Json(tags))
 }
