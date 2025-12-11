@@ -474,7 +474,6 @@ pub async fn fetch_entities_batch(
 #[cfg(test)]
 mod search_tests {
     use super::*;
-    use std::collections::HashMap; // Added for HashMap in fetch_entities_batch
 
     #[tokio::test]
     async fn test_search_inventaire() {
