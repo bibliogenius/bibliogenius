@@ -273,6 +273,7 @@ pub async fn search_unified(Query(params): Query<UnifiedSearchQuery>) -> impl In
                     source: Some("Inventaire".to_string()),
                     author: author_name,
                     cover_url: item.image,
+                    large_cover_url: None,
                     finished_reading_at: None,
                     started_reading_at: None,
                     user_rating: None,
