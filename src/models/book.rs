@@ -90,6 +90,8 @@ pub struct Book {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cover_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub large_cover_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub user_rating: Option<i32>, // 0-10 scale
 }
 
@@ -119,6 +121,7 @@ impl From<Model> for Book {
             source: Some("Local".to_string()),
             author: None,    // TODO: Fetch from relation
             cover_url: None, // TODO: Derive from ISBN or store in DB
+            large_cover_url: None,
             user_rating: model.user_rating,
         }
     }

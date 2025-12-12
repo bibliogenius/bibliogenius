@@ -34,7 +34,7 @@ pub async fn list_books(
     State(db): State<DatabaseConnection>,
     axum::extract::Query(filter): axum::extract::Query<BookFilter>,
 ) -> Result<Json<Value>, StatusCode> {
-    use sea_orm::{ColumnTrait, ModelTrait, QueryFilter};
+    use sea_orm::{ColumnTrait, ModelTrait, QueryFilter, QueryOrder};
 
     tracing::info!(
         "List books request - Filters: status={:?}, title={:?}, tag={:?}",
@@ -64,7 +64,10 @@ pub async fn list_books(
         }
     }
 
+    // ... (existing code, ensure imports are correct or just use crate::models::book::Column etc)
+
     let books = query
+        .order_by_asc(crate::models::book::Column::ShelfPosition)
         .all(&db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -380,6 +383,11 @@ pub async fn update_book(
         book.subjects = Set(Some(subjects_json));
     }
 
+    // Handle user_rating update
+    if let Some(rating) = book_data.user_rating {
+        book.user_rating = Set(Some(rating));
+    }
+
     book.updated_at = Set(now.to_rfc3339());
 
     match book.update(&db).await {
@@ -446,4 +454,142 @@ pub async fn list_tags(
     tags.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
 
     Ok(Json(tags))
+}
+#[utoipa::path(
+    get,
+    path = "/api/books/{id}",
+    params(
+        ("id" = i32, Path, description = "Book ID")
+    ),
+    responses(
+        (status = 200, description = "Book found"),
+        (status = 404, description = "Book not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn get_book(
+    State(db): State<DatabaseConnection>,
+    axum::extract::Path(id): axum::extract::Path<i32>,
+) -> impl IntoResponse {
+    use sea_orm::{EntityTrait, ModelTrait};
+
+    match BookEntity::find_by_id(id).one(&db).await {
+        Ok(Some(book_model)) => {
+            let mut book_dto = Book::from(book_model.clone());
+
+            // Fetch authors
+            if let Ok(authors) = book_model
+                .find_related(crate::models::author::Entity)
+                .all(&db)
+                .await
+            {
+                if !authors.is_empty() {
+                    book_dto.author = Some(
+                        authors
+                            .into_iter()
+                            .map(|a| a.name)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    );
+                }
+            }
+
+            // Derive cover_url
+            if let Some(isbn) = &book_dto.isbn {
+                book_dto.cover_url = Some(format!(
+                    "https://covers.openlibrary.org/b/isbn/{}-M.jpg",
+                    isbn
+                ));
+                // Add large cover URL
+                book_dto.large_cover_url = Some(format!(
+                    "https://covers.openlibrary.org/b/isbn/{}-L.jpg",
+                    isbn
+                ));
+            }
+
+            (StatusCode::OK, Json(book_dto)).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Book not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct ReorderRequest {
+    pub book_ids: Vec<i32>,
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/books/reorder",
+    request_body = ReorderRequest,
+    responses(
+        (status = 200, description = "Books reordered successfully"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn reorder_books(
+    State(db): State<DatabaseConnection>,
+    Json(payload): Json<ReorderRequest>,
+) -> impl IntoResponse {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
+
+    // We simply iterate and update shelf_position
+    // For a prototype, N updates is fine. For production with thousands of books,
+    // we'd use a transaction and maybe a batch update if SeaORM supports it easily,
+    // or just a loop inside a transaction.
+
+    let txn = match db.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    for (index, book_id) in payload.book_ids.iter().enumerate() {
+        // We only update if the book exists.
+        // We use ActiveModel to update individual fields.
+        let update_res = BookEntity::update_many()
+            .col_expr(
+                crate::models::book::Column::ShelfPosition,
+                sea_orm::sea_query::Expr::value(index as i32),
+            )
+            .filter(crate::models::book::Column::Id.eq(*book_id))
+            .exec(&txn)
+            .await;
+
+        if let Err(e) = update_res {
+            let _ = txn.rollback().await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    }
+
+    match txn.commit().await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({"message": "Books reordered successfully"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }

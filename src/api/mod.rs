@@ -48,8 +48,11 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/books", post(books::create_book))
         .route(
             "/books/:id",
-            axum::routing::put(books::update_book).delete(books::delete_book),
+            get(books::get_book)
+                .put(books::update_book)
+                .delete(books::delete_book),
         )
+        .route("/books/reorder", axum::routing::patch(books::reorder_books))
         // Authors
         .route("/authors", get(author::list_authors))
         .route("/authors", post(author::create_author))
