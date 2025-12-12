@@ -25,3 +25,6 @@
 .idea/
 .vscode/
 *.swp
+
+# Other
+migrations
