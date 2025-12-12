@@ -10,13 +10,13 @@ use bibliogenius::{api, config, db, seed};
 /// Find an available port starting from the preferred port
 fn find_available_port(preferred_port: u16) -> Option<u16> {
     // Try preferred port first
-    if TcpListener::bind(("127.0.0.1", preferred_port)).is_ok() {
+    if TcpListener::bind(("0.0.0.0", preferred_port)).is_ok() {
         return Some(preferred_port);
     }
 
     // Scan next 100 ports
     for port in (preferred_port + 1)..(preferred_port + 100) {
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        if TcpListener::bind(("0.0.0.0", port)).is_ok() {
             return Some(port);
         }
     }

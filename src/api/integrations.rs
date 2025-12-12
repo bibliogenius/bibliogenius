@@ -140,6 +140,7 @@ pub async fn search_external(query: &crate::api::search::SearchQuery) -> Vec<boo
                     started_reading_at: None,
                     created_at: chrono::Utc::now().to_rfc3339(),
                     updated_at: chrono::Utc::now().to_rfc3339(),
+                    user_rating: None,
                 };
                 books.push(book);
             }
@@ -274,6 +275,7 @@ pub async fn search_unified(Query(params): Query<UnifiedSearchQuery>) -> impl In
                     cover_url: item.image,
                     finished_reading_at: None,
                     started_reading_at: None,
+                    user_rating: None,
                 };
                 results.push(book);
             }

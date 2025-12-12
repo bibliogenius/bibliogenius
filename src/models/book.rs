@@ -25,6 +25,7 @@ pub struct Model {
     pub started_reading_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub user_rating: Option<i32>, // 0-10 scale, NULL = not rated
 }
 
 // ... (Relation enum and Related impls omit for brevity) ...
@@ -88,6 +89,8 @@ pub struct Book {
     pub author: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cover_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_rating: Option<i32>, // 0-10 scale
 }
 
 impl From<Model> for Book {
@@ -116,6 +119,7 @@ impl From<Model> for Book {
             source: Some("Local".to_string()),
             author: None,    // TODO: Fetch from relation
             cover_url: None, // TODO: Derive from ISBN or store in DB
+            user_rating: model.user_rating,
         }
     }
 }
@@ -143,6 +147,7 @@ impl From<Book> for ActiveModel {
             started_reading_at: book.started_reading_at.map_or(NotSet, Set),
             created_at: NotSet,
             updated_at: NotSet,
+            user_rating: book.user_rating.map_or(NotSet, |r| Set(Some(r))),
         }
     }
 }

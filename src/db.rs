@@ -90,6 +90,14 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration: Add user_rating to books table (0-10 scale, NULL = not rated)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE books ADD COLUMN user_rating INTEGER DEFAULT NULL".to_owned(),
+        ))
+        .await;
+
     // Insert default library config if not exists
     db.execute(Statement::from_string(
         db.get_database_backend(),
@@ -491,6 +499,141 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             "ALTER TABLE books ADD COLUMN finished_reading_at TEXT".to_owned(),
         ))
         .await;
+
+    // ============================================
+    // Gamification V3 Migrations (Migration 021)
+    // ============================================
+
+    // Gamification Config - Feature flags per user
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS gamification_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL UNIQUE,
+            preset TEXT NOT NULL DEFAULT 'individual',
+            streaks_enabled INTEGER NOT NULL DEFAULT 1,
+            achievements_enabled INTEGER NOT NULL DEFAULT 1,
+            achievements_style TEXT NOT NULL DEFAULT 'minimal',
+            reading_goals_enabled INTEGER NOT NULL DEFAULT 1,
+            reading_goal_yearly INTEGER NOT NULL DEFAULT 12,
+            tracks_enabled TEXT NOT NULL DEFAULT '["collector","reader","lender"]',
+            notifications_enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Gamification Progress - Track progress per user
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS gamification_progress (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            track TEXT NOT NULL,
+            current_value INTEGER NOT NULL DEFAULT 0,
+            level INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, track),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_gamification_progress_user ON gamification_progress(user_id);
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Gamification Achievements - Unlocked achievements per user
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS gamification_achievements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            achievement_id TEXT NOT NULL,
+            unlocked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, achievement_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_gamification_achievements_user ON gamification_achievements(user_id);
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Gamification Streaks - Activity streaks per user
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS gamification_streaks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL UNIQUE,
+            current_streak INTEGER NOT NULL DEFAULT 0,
+            longest_streak INTEGER NOT NULL DEFAULT 0,
+            last_activity_date TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Initialize gamification data for existing users (if any)
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        INSERT OR IGNORE INTO gamification_config (user_id, preset, created_at, updated_at)
+        SELECT id, 'individual', datetime('now'), datetime('now') FROM users
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        INSERT OR IGNORE INTO gamification_progress (user_id, track, created_at, updated_at)
+        SELECT id, 'collector', datetime('now'), datetime('now') FROM users
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        INSERT OR IGNORE INTO gamification_progress (user_id, track, created_at, updated_at)
+        SELECT id, 'reader', datetime('now'), datetime('now') FROM users
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        INSERT OR IGNORE INTO gamification_progress (user_id, track, created_at, updated_at)
+        SELECT id, 'lender', datetime('now'), datetime('now') FROM users
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        INSERT OR IGNORE INTO gamification_streaks (user_id)
+        SELECT id FROM users
+        "#
+        .to_owned(),
+    ))
+    .await?;
 
     Ok(())
 }

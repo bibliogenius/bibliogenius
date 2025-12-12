@@ -8,6 +8,7 @@ pub mod copy;
 pub mod data;
 pub mod export;
 pub mod gamification;
+pub mod genie;
 pub mod health;
 pub mod hub;
 pub mod integrations;
@@ -40,9 +41,10 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/library/config", post(library::update_config))
         // Books
         .route("/books", get(books::list_books))
-        .route("/api/books/search", get(search::search_books))
-        .route("/api/books/tags", get(books::list_tags))
-        .route("/api/chat", post(chat::chat_handler))
+        .route("/books/search", get(search::search_books))
+        .route("/books/tags", get(books::list_tags))
+        .route("/chat", post(chat::chat_handler))
+        .route("/genie/chat", post(genie::chat))
         .route("/books", post(books::create_book))
         .route(
             "/books/:id",
