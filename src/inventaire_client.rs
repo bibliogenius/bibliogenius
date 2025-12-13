@@ -105,7 +105,7 @@ pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<InventaireMetadata,
             if let Some(author_uris) = work_entity.claims.authors.as_ref() {
                 for author_uri in author_uris {
                     // 5. Fetch Author
-                    if let Ok(author_entity) = fetch_entity(&client, &author_uri).await {
+                    if let Ok(author_entity) = fetch_entity(&client, author_uri).await {
                         // Extract Name
                         let name = author_entity
                             .labels

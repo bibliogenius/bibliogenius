@@ -146,7 +146,7 @@ fn parse_babelio_csv(content: &[u8]) -> Result<Vec<CreateBookRequest>, String> {
         // Extract year from "01/01/2020"
         let year = record
             .date_publication
-            .and_then(|d| d.split('/').last().map(|y| y.to_string()))
+            .and_then(|d| d.split('/').next_back().map(|y| y.to_string()))
             .and_then(|y| y.parse::<i32>().ok());
 
         books.push(CreateBookRequest {
