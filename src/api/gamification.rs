@@ -10,12 +10,20 @@ use crate::models::{
 
 // Track thresholds configuration
 const COLLECTOR_THRESHOLDS: [i32; 3] = [10, 50, 200]; // Bronze, Silver, Gold
+const COLLECTOR_STEP: i32 = 50; // Books per prestige level
+
 const READER_THRESHOLDS: [i32; 3] = [5, 20, 100];
+const READER_STEP: i32 = 20; // Reads per prestige level
+
 const LENDER_THRESHOLDS: [i32; 3] = [5, 20, 50];
+const LENDER_STEP: i32 = 10; // Loans per prestige level
+
+const CATALOGUER_THRESHOLDS: [i32; 3] = [10, 50, 100]; // Books with custom shelf order (Cataloguer track)
+const CATALOGUER_STEP: i32 = 20; // Organized books per prestige level
 
 #[derive(Serialize)]
 pub struct TrackProgress {
-    pub level: i32,          // 0=None, 1=Bronze, 2=Silver, 3=Gold
+    pub level: i32,          // 0=Curieux, 1=Initié, 2=Bibliophile, 3=Érudit
     pub progress: f32,       // 0.0 to 1.0 progress to next level
     pub current: i64,        // Current value
     pub next_threshold: i32, // Next level threshold
@@ -53,17 +61,42 @@ pub struct TracksStatus {
     pub collector: TrackProgress,
     pub reader: TrackProgress,
     pub lender: TrackProgress,
+    pub cataloguer: TrackProgress,
 }
 
-fn calculate_track_progress(current: i64, thresholds: &[i32; 3]) -> TrackProgress {
-    let (level, next_threshold) = if current >= thresholds[2] as i64 {
-        (3, thresholds[2]) // Gold (max level)
-    } else if current >= thresholds[1] as i64 {
-        (2, thresholds[2]) // Silver, progressing to Gold
-    } else if current >= thresholds[0] as i64 {
-        (1, thresholds[1]) // Bronze, progressing to Silver
+fn calculate_track_progress(
+    current: i64,
+    thresholds: &[i32; 3],
+    prestige_step: i32,
+) -> TrackProgress {
+    let current_val = current as i32;
+
+    // Check for Prestige Levels (Level > 3)
+    if current_val >= thresholds[2] {
+        let excess = current_val - thresholds[2];
+        let prestige_levels = excess / prestige_step;
+        let level = 3 + prestige_levels;
+
+        let current_step_progress = excess % prestige_step;
+        let next_threshold = thresholds[2] + (prestige_levels + 1) * prestige_step;
+
+        let progress = current_step_progress as f32 / prestige_step as f32;
+
+        return TrackProgress {
+            level,
+            progress: progress.clamp(0.0, 1.0),
+            current,
+            next_threshold,
+        };
+    }
+
+    // Standard levels (0-3)
+    let (level, next_threshold) = if current_val >= thresholds[1] {
+        (2, thresholds[2]) // Bibliophile, progressing to Érudit
+    } else if current_val >= thresholds[0] {
+        (1, thresholds[1]) // Initié, progressing to Bibliophile
     } else {
-        (0, thresholds[0]) // None, progressing to Bronze
+        (0, thresholds[0]) // Curieux, progressing to Initié
     };
 
     let prev_threshold = match level {
@@ -73,13 +106,9 @@ fn calculate_track_progress(current: i64, thresholds: &[i32; 3]) -> TrackProgres
         _ => thresholds[2],
     };
 
-    let progress = if level == 3 {
-        1.0 // Max level reached
-    } else {
-        let range = (next_threshold - prev_threshold) as f32;
-        let progress_in_range = (current as i32 - prev_threshold) as f32;
-        (progress_in_range / range).clamp(0.0, 1.0)
-    };
+    let range = (next_threshold - prev_threshold) as f32;
+    let progress_in_range = (current_val - prev_threshold) as f32;
+    let progress = (progress_in_range / range).clamp(0.0, 1.0);
 
     TrackProgress {
         level,
@@ -106,10 +135,20 @@ pub async fn get_user_status(State(db): State<DatabaseConnection>) -> impl IntoR
     // 3. Count loans (Lender Track)
     let loans_count = loan::Entity::find().count(&db).await.unwrap_or(0) as i64;
 
+    // 4. Count books with custom shelf order (Cataloguer Track)
+    let organized_count = book::Entity::find()
+        .filter(book::Column::ShelfPosition.gt(0))
+        .count(&db)
+        .await
+        .unwrap_or(0) as i64;
+
     // Calculate track progress
-    let collector_progress = calculate_track_progress(books_count, &COLLECTOR_THRESHOLDS);
-    let reader_progress = calculate_track_progress(read_count, &READER_THRESHOLDS);
-    let lender_progress = calculate_track_progress(loans_count, &LENDER_THRESHOLDS);
+    let collector_progress =
+        calculate_track_progress(books_count, &COLLECTOR_THRESHOLDS, COLLECTOR_STEP);
+    let reader_progress = calculate_track_progress(read_count, &READER_THRESHOLDS, READER_STEP);
+    let lender_progress = calculate_track_progress(loans_count, &LENDER_THRESHOLDS, LENDER_STEP);
+    let cataloguer_progress =
+        calculate_track_progress(organized_count, &CATALOGUER_THRESHOLDS, CATALOGUER_STEP);
 
     // Get streak info
     let streak = gamification_streaks::Entity::find()
@@ -179,6 +218,7 @@ pub async fn get_user_status(State(db): State<DatabaseConnection>) -> impl IntoR
             collector: collector_progress,
             reader: reader_progress,
             lender: lender_progress,
+            cataloguer: cataloguer_progress,
         },
         streak,
         recent_achievements,

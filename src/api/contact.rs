@@ -13,6 +13,7 @@ pub struct ContactDto {
     pub id: Option<i32>,
     pub r#type: String,
     pub name: String,
+    pub first_name: Option<String>,
     pub email: Option<String>,
     pub phone: Option<String>,
     pub address: Option<String>,
@@ -28,6 +29,7 @@ impl From<contact_model::Model> for ContactDto {
             id: Some(model.id),
             r#type: model.r#type,
             name: model.name,
+            first_name: model.first_name,
             email: model.email,
             phone: model.phone,
             address: model.address,
@@ -111,6 +113,7 @@ pub async fn create_contact(
     let new_contact = contact_model::ActiveModel {
         r#type: Set(contact_dto.r#type),
         name: Set(contact_dto.name),
+        first_name: Set(contact_dto.first_name),
         email: Set(contact_dto.email),
         phone: Set(contact_dto.phone),
         address: Set(contact_dto.address),
@@ -157,6 +160,7 @@ pub async fn update_contact(
 
         active_model.r#type = Set(contact_dto.r#type);
         active_model.name = Set(contact_dto.name);
+        active_model.first_name = Set(contact_dto.first_name);
         active_model.email = Set(contact_dto.email);
         active_model.phone = Set(contact_dto.phone);
         active_model.address = Set(contact_dto.address);
