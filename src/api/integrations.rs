@@ -92,22 +92,39 @@ pub async fn search_external(query: &crate::api::search::SearchQuery) -> Vec<boo
 
     // Build Open Library Query
     let mut q_parts = Vec::new();
-    if let Some(t) = &query.title {
-        q_parts.push(format!("title:{}", t));
-    }
-    if let Some(a) = &query.author {
-        q_parts.push(format!("author:{}", a));
+
+    // If we have a generic query 'q', use it directly
+    if let Some(q) = &query.q {
+        q_parts.push(format!("q={}", urlencoding::encode(q)));
+    } else {
+        // Otherwise use specific fields
+        if let Some(t) = &query.title {
+            q_parts.push(format!("title:{}", t));
+        }
+        if let Some(a) = &query.author {
+            q_parts.push(format!("author:{}", a));
+        }
+        if let Some(s) = &query.subjects {
+            q_parts.push(format!("subject:{}", s));
+        }
     }
 
     if q_parts.is_empty() {
         return books;
     }
 
-    let q_str = q_parts.join(" AND ");
-    let url = format!(
-        "https://openlibrary.org/search.json?q={}&limit=5",
-        urlencoding::encode(&q_str)
-    );
+    let q_str = q_parts.join("&");
+    // If using generic q, the params are already encoded and formatted
+    let url = if query.q.is_some() {
+        format!("https://openlibrary.org/search.json?{}&limit=5", q_str)
+    } else {
+        // Fallback for specific fields (legacy construction)
+        let q_str_legacy = q_parts.join(" AND ");
+        format!(
+            "https://openlibrary.org/search.json?q={}&limit=5",
+            urlencoding::encode(&q_str_legacy)
+        )
+    };
 
     if let Ok(res) = client.get(&url).send().await {
         if let Ok(data) = res.json::<OpenLibrarySearchResponse>().await {
@@ -213,6 +230,7 @@ pub struct UnifiedSearchQuery {
     pub title: Option<String>,
     pub author: Option<String>,
     pub publisher: Option<String>,
+    pub subject: Option<String>,
 }
 
 pub async fn search_unified(Query(params): Query<UnifiedSearchQuery>) -> impl IntoResponse {
@@ -286,19 +304,23 @@ pub async fn search_unified(Query(params): Query<UnifiedSearchQuery>) -> impl In
     // 3. Always Search OpenLibrary (via search_external) for better coverage
     // Construct SearchQuery for search_external
     let search_query = crate::api::search::SearchQuery {
-        title: params.title.clone().or_else(|| params.q.clone()), // Use q as title fallback if generic
+        q: params.q.clone(), // Use generic query explicitly
+        title: params.title.clone(),
         author: params.author.clone(),
         publisher: params.publisher.clone(),
         year_min: None,
         year_max: None,
         tags: None,
+        subjects: params.subject.clone(),
         sources: None,
     };
 
     // Only call if we have something to search
-    if search_query.title.is_some()
+    if search_query.q.is_some()
+        || search_query.title.is_some()
         || search_query.author.is_some()
         || search_query.publisher.is_some()
+        || search_query.subjects.is_some()
     {
         let ol_results = search_external(&search_query).await;
         for model in ol_results {
