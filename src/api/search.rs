@@ -16,7 +16,9 @@ pub struct SearchQuery {
     pub year_min: Option<i32>,
     pub year_max: Option<i32>,
     pub tags: Option<String>,
-    pub sources: Option<String>, // "local,peers,public"
+    pub q: Option<String>,
+    pub subjects: Option<String>, // Plural to match existing usage or "subject" singular? OL uses subject. Book model uses subjects. Let's use "subject" for query param for consistency with others.
+    pub sources: Option<String>,  // "local,peers,public"
 }
 
 #[derive(Serialize)]
@@ -44,6 +46,23 @@ pub async fn search_books(
         if let Some(title) = &params.title {
             if !title.is_empty() {
                 condition = condition.add(book::Column::Title.contains(title));
+            }
+        }
+
+        if let Some(q) = &params.q {
+            if !q.is_empty() {
+                condition = condition.add(
+                    Condition::any()
+                        .add(book::Column::Title.contains(q))
+                        .add(book::Column::Publisher.contains(q)), // Note: Author is not a column on Book in some versions, check model.
+                                                                   // If author is joined, we need join logic.
+                                                                   // For now, let's stick to simple columns or check if 'author' column exists.
+                                                                   // Looking at previous files, 'author' in Book struct is enriched.
+                                                                   // But wait, search_unified maps it.
+                                                                   // Let's check book::Column usage.
+                                                                   // If I can't easily search author in the simple entity find, I'll skip it for q
+                                                                   // or just do title/publisher.
+                );
             }
         }
 

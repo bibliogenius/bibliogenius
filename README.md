@@ -48,6 +48,14 @@ POST /api/hub/register        # Register with hub
 GET  /api/hub/discover        # Discover peers
 ```
 
+## 🗺️ Roadmap
+
+| Version | Status | Focus |
+|---------|--------|-------|
+| **v1.0.0-beta** | ✅ Current | Personal library + LAN sync |
+| v1.0.0 | Q1 2026 | Stable P2P on local network |
+| v2.0.0 | Q2-Q3 2026 | Global P2P (libp2p) + Social |
+
 ## Repository
 
-https://github.com/bibliogenius/bibliogenius
+<https://github.com/bibliogenius/bibliogenius>

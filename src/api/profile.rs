@@ -8,6 +8,7 @@ use crate::models::installation_profile::{ActiveModel, Entity as InstallationPro
 #[derive(Debug, Deserialize)]
 pub struct UpdateProfileRequest {
     pub profile_type: String,
+    #[serde(default)]
     pub avatar_config: Option<serde_json::Value>,
 }
 
@@ -16,10 +17,13 @@ pub async fn update_profile(
     Json(req): Json<UpdateProfileRequest>,
 ) -> impl IntoResponse {
     // Validate profile type
-    if req.profile_type != "individual" && req.profile_type != "professional" {
+    if req.profile_type != "individual"
+        && req.profile_type != "professional"
+        && req.profile_type != "librarian"
+    {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Invalid profile type. Must be 'individual' or 'professional'"})),
+            Json(json!({"error": "Invalid profile type. Must be 'individual', 'professional' or 'librarian'"})),
         )
             .into_response();
     }
