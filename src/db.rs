@@ -253,16 +253,25 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     ))
     .await?;
 
+    // Insert default user (ID 1) if it doesn't exist
+    // This is required for the default library's owner_id FK constraint
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        INSERT OR IGNORE INTO users (id, username, password_hash, role, created_at, updated_at)
+        VALUES (1, 'admin', '', 'admin', datetime('now'), datetime('now'))
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
     // Insert default library (ID 1) if it doesn't exist
-    // This requires a default admin user to exist first
+    // Use owner_id = 1 (default admin user created above)
     db.execute(Statement::from_string(
         db.get_database_backend(),
         r#"
         INSERT OR IGNORE INTO libraries (id, name, description, owner_id, created_at, updated_at)
-        SELECT 1, 'Default Library', 'Main library collection', 
-               (SELECT id FROM users WHERE username = 'admin' LIMIT 1),
-               datetime('now'), datetime('now')
-        WHERE EXISTS (SELECT 1 FROM users WHERE username = 'admin')
+        VALUES (1, 'Default Library', 'Main library collection', 1, datetime('now'), datetime('now'))
         "#
         .to_owned(),
     ))
@@ -327,6 +336,7 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             type TEXT NOT NULL,
             name TEXT NOT NULL,
+            first_name TEXT,
             email TEXT,
             phone TEXT,
             address TEXT,
@@ -347,6 +357,14 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         .to_owned(),
     ))
     .await?;
+
+    // Migration: Add first_name column if missing (for existing databases)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE contacts ADD COLUMN first_name TEXT".to_owned(),
+        ))
+        .await;
 
     // Create loans table
     db.execute(Statement::from_string(

@@ -20,10 +20,11 @@ pub async fn update_profile(
     if req.profile_type != "individual"
         && req.profile_type != "professional"
         && req.profile_type != "librarian"
+        && req.profile_type != "kid"
     {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Invalid profile type. Must be 'individual', 'professional' or 'librarian'"})),
+            Json(json!({"error": "Invalid profile type. Must be 'individual', 'professional', 'librarian' or 'kid'"})),
         )
             .into_response();
     }
