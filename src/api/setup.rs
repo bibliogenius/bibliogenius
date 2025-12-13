@@ -33,9 +33,9 @@ pub async fn setup(
         profile_type: Set(req.profile_type.clone()),
         enabled_modules: Set("[]".to_string()), // Start with no modules
         theme: Set(req.theme.or(Some("default".to_string()))),
+        avatar_config: Set(None),
         updated_at: Set(now.to_rfc3339()),
         created_at: Set(now.to_rfc3339()),
-        ..Default::default()
     };
 
     if let Err(e) = profile.save(&db).await {
@@ -61,7 +61,6 @@ pub async fn setup(
         show_borrowed_books: Set(Some(req.profile_type == "individual")),
         updated_at: Set(now.to_rfc3339()),
         created_at: Set(now.to_rfc3339()),
-        ..Default::default()
     };
 
     if let Err(e) = config.save(&db).await {
@@ -135,7 +134,6 @@ pub async fn setup(
             owner_id: Set(admin_user.id),
             created_at: Set(now.to_rfc3339()),
             updated_at: Set(now.to_rfc3339()),
-            ..Default::default()
         };
         if let Err(e) = new_library.insert(&db).await {
             tracing::error!("Failed to create default library: {}", e);
@@ -251,20 +249,20 @@ pub async fn reset_app(State(db): State<DatabaseConnection>) -> impl IntoRespons
     delete_all!(book);
     delete_all!(author);
     delete_all!(tag);
-    
+
     delete_all!(p2p_outgoing_request);
     delete_all!(p2p_request);
     delete_all!(peer_book);
     delete_all!(peer);
     delete_all!(contact);
-    
+
     delete_all!(operation_log);
-    
+
     delete_all!(library_config);
     delete_all!(library);
     delete_all!(installation_profile);
-    
-    // We keep the admin user for now, or we could delete it too. 
+
+    // We keep the admin user for now, or we could delete it too.
     // If we delete it, the setup process will recreate it.
     // Let's delete everything to be safe and clean.
     delete_all!(user);
