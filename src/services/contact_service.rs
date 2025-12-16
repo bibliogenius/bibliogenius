@@ -27,6 +27,12 @@ pub struct ContactDto {
     pub email: Option<String>,
     pub phone: Option<String>,
     pub address: Option<String>,
+    pub street_address: Option<String>,
+    pub postal_code: Option<String>,
+    pub city: Option<String>,
+    pub country: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
     pub notes: Option<String>,
     pub user_id: Option<i32>,
     pub library_owner_id: Option<i32>,
@@ -43,6 +49,12 @@ impl From<contact_model::Model> for ContactDto {
             email: model.email,
             phone: model.phone,
             address: model.address,
+            street_address: model.street_address,
+            postal_code: model.postal_code,
+            city: model.city,
+            country: model.country,
+            latitude: model.latitude,
+            longitude: model.longitude,
             notes: model.notes,
             user_id: model.user_id,
             library_owner_id: Some(model.library_owner_id),
@@ -101,6 +113,12 @@ pub async fn create_contact(
         email: Set(dto.email),
         phone: Set(dto.phone),
         address: Set(dto.address),
+        street_address: Set(dto.street_address),
+        postal_code: Set(dto.postal_code),
+        city: Set(dto.city),
+        country: Set(dto.country),
+        latitude: Set(dto.latitude),
+        longitude: Set(dto.longitude),
         notes: Set(dto.notes),
         user_id: Set(dto.user_id),
         library_owner_id: Set(dto.library_owner_id.unwrap_or(1)),
@@ -138,6 +156,12 @@ pub async fn update_contact(
     active_model.email = Set(dto.email);
     active_model.phone = Set(dto.phone);
     active_model.address = Set(dto.address);
+    active_model.street_address = Set(dto.street_address);
+    active_model.postal_code = Set(dto.postal_code);
+    active_model.city = Set(dto.city);
+    active_model.country = Set(dto.country);
+    active_model.latitude = Set(dto.latitude);
+    active_model.longitude = Set(dto.longitude);
     active_model.notes = Set(dto.notes);
     active_model.user_id = Set(dto.user_id);
     if let Some(lid) = dto.library_owner_id {

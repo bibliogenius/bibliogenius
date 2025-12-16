@@ -123,6 +123,12 @@ pub struct FrbContact {
     pub email: Option<String>,
     pub phone: Option<String>,
     pub address: Option<String>,
+    pub street_address: Option<String>,
+    pub postal_code: Option<String>,
+    pub city: Option<String>,
+    pub country: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
     pub notes: Option<String>,
     pub is_active: bool,
 }
@@ -137,6 +143,12 @@ impl From<crate::services::contact_service::ContactDto> for FrbContact {
             email: c.email,
             phone: c.phone,
             address: c.address,
+            street_address: c.street_address,
+            postal_code: c.postal_code,
+            city: c.city,
+            country: c.country,
+            latitude: c.latitude,
+            longitude: c.longitude,
             notes: c.notes,
             is_active: c.is_active,
         }
@@ -369,6 +381,12 @@ pub async fn create_contact(contact: FrbContact) -> Result<FrbContact, String> {
         email: contact.email,
         phone: contact.phone,
         address: contact.address,
+        street_address: contact.street_address,
+        postal_code: contact.postal_code,
+        city: contact.city,
+        country: contact.country,
+        latitude: contact.latitude,
+        longitude: contact.longitude,
         notes: contact.notes,
         user_id: Some(1),          // Default user ID for FFI mode
         library_owner_id: Some(1), // Default library ID for FFI mode
@@ -394,6 +412,12 @@ pub async fn update_contact(contact: FrbContact) -> Result<FrbContact, String> {
         email: contact.email,
         phone: contact.phone,
         address: contact.address,
+        street_address: contact.street_address,
+        postal_code: contact.postal_code,
+        city: contact.city,
+        country: contact.country,
+        latitude: contact.latitude,
+        longitude: contact.longitude,
         notes: contact.notes,
         user_id: Some(1),          // Default user ID for FFI mode
         library_owner_id: Some(1), // Default library ID for FFI mode

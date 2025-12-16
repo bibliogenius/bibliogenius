@@ -821,6 +821,13 @@ impl SseDecode for bool {
     }
 }
 
+impl SseDecode for f64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_f64::<NativeEndian>().unwrap()
+    }
+}
+
 impl SseDecode for crate::api::frb::FrbBook {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -873,6 +880,12 @@ impl SseDecode for crate::api::frb::FrbContact {
         let mut var_email = <Option<String>>::sse_decode(deserializer);
         let mut var_phone = <Option<String>>::sse_decode(deserializer);
         let mut var_address = <Option<String>>::sse_decode(deserializer);
+        let mut var_streetAddress = <Option<String>>::sse_decode(deserializer);
+        let mut var_postalCode = <Option<String>>::sse_decode(deserializer);
+        let mut var_city = <Option<String>>::sse_decode(deserializer);
+        let mut var_country = <Option<String>>::sse_decode(deserializer);
+        let mut var_latitude = <Option<f64>>::sse_decode(deserializer);
+        let mut var_longitude = <Option<f64>>::sse_decode(deserializer);
         let mut var_notes = <Option<String>>::sse_decode(deserializer);
         let mut var_isActive = <bool>::sse_decode(deserializer);
         return crate::api::frb::FrbContact {
@@ -883,6 +896,12 @@ impl SseDecode for crate::api::frb::FrbContact {
             email: var_email,
             phone: var_phone,
             address: var_address,
+            street_address: var_streetAddress,
+            postal_code: var_postalCode,
+            city: var_city,
+            country: var_country,
+            latitude: var_latitude,
+            longitude: var_longitude,
             notes: var_notes,
             is_active: var_isActive,
         };
@@ -998,6 +1017,17 @@ impl SseDecode for Option<String> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<String>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<f64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<f64>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -1126,6 +1156,12 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbContact {
             self.email.into_into_dart().into_dart(),
             self.phone.into_into_dart().into_dart(),
             self.address.into_into_dart().into_dart(),
+            self.street_address.into_into_dart().into_dart(),
+            self.postal_code.into_into_dart().into_dart(),
+            self.city.into_into_dart().into_dart(),
+            self.country.into_into_dart().into_dart(),
+            self.latitude.into_into_dart().into_dart(),
+            self.longitude.into_into_dart().into_dart(),
             self.notes.into_into_dart().into_dart(),
             self.is_active.into_into_dart().into_dart(),
         ]
@@ -1180,6 +1216,13 @@ impl SseEncode for bool {
     }
 }
 
+impl SseEncode for f64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_f64::<NativeEndian>(self).unwrap();
+    }
+}
+
 impl SseEncode for crate::api::frb::FrbBook {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1213,6 +1256,12 @@ impl SseEncode for crate::api::frb::FrbContact {
         <Option<String>>::sse_encode(self.email, serializer);
         <Option<String>>::sse_encode(self.phone, serializer);
         <Option<String>>::sse_encode(self.address, serializer);
+        <Option<String>>::sse_encode(self.street_address, serializer);
+        <Option<String>>::sse_encode(self.postal_code, serializer);
+        <Option<String>>::sse_encode(self.city, serializer);
+        <Option<String>>::sse_encode(self.country, serializer);
+        <Option<f64>>::sse_encode(self.latitude, serializer);
+        <Option<f64>>::sse_encode(self.longitude, serializer);
         <Option<String>>::sse_encode(self.notes, serializer);
         <bool>::sse_encode(self.is_active, serializer);
     }
@@ -1305,6 +1354,16 @@ impl SseEncode for Option<String> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <String>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<f64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <f64>::sse_encode(value, serializer);
         }
     }
 }
