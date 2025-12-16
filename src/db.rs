@@ -256,13 +256,14 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // Default user (ID 1) removed for security.
     // Users must be created via the Setup/Registration flow.
 
-    // Insert default library (ID 1) if it doesn't exist
-    // Use owner_id = 1 (default admin user created above)
+    // Insert default library (ID 1) if it doesn't exist AND if user 1 exists
+    // This is conditional to avoid FK constraint errors in test databases
     db.execute(Statement::from_string(
         db.get_database_backend(),
         r#"
         INSERT OR IGNORE INTO libraries (id, name, description, owner_id, created_at, updated_at)
-        VALUES (1, 'Default Library', 'Main library collection', 1, datetime('now'), datetime('now'))
+        SELECT 1, 'Default Library', 'Main library collection', 1, datetime('now'), datetime('now')
+        WHERE EXISTS (SELECT 1 FROM users WHERE id = 1)
         "#
         .to_owned(),
     ))

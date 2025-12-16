@@ -15,7 +15,8 @@ fn find_available_port(preferred_port: u16) -> Option<u16> {
     }
 
     // Scan next 100 ports
-    ((preferred_port + 1)..(preferred_port + 100)).find(|&port| TcpListener::bind(("0.0.0.0", port)).is_ok())
+    ((preferred_port + 1)..(preferred_port + 100))
+        .find(|&port| TcpListener::bind(("0.0.0.0", port)).is_ok())
 }
 
 /// Write the selected port to a file for the Flutter app to read
@@ -136,6 +137,31 @@ async fn main() {
         tracing::error!("Failed to write port file: {}", e);
     } else {
         tracing::info!("Port file written: {:?}", get_port_file_path());
+    }
+
+    // Initialize mDNS for local network discovery (if enabled)
+    let mdns_enabled = std::env::var("MDNS_ENABLED")
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true); // Enabled by default
+
+    if mdns_enabled {
+        // Get library name from database or use default
+        let library_name =
+            std::env::var("LIBRARY_NAME").unwrap_or_else(|_| "BiblioGenius Library".to_string());
+
+        match bibliogenius::services::init_mdns(&library_name, port, None) {
+            Ok(()) => {
+                tracing::info!("📡 mDNS service started - library discoverable on local network");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to start mDNS service: {} (local discovery disabled)",
+                    e
+                );
+            }
+        }
+    } else {
+        tracing::info!("mDNS disabled via MDNS_ENABLED=false");
     }
 
     // Start server

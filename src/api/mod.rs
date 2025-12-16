@@ -6,6 +6,7 @@ pub mod chat;
 pub mod contact;
 pub mod copy;
 pub mod data;
+pub mod discovery;
 pub mod export;
 pub mod frb; // FFI API for flutter_rust_bridge
 pub mod gamification;
@@ -97,6 +98,10 @@ pub fn api_router(db: DatabaseConnection) -> Router {
             "/peers/requests/:id",
             axum::routing::delete(peer::delete_request),
         ) // Delete request
+        // Local Discovery (mDNS)
+        .route("/discovery/local", get(discovery::list_local_peers))
+        .route("/discovery/status", get(discovery::mdns_status))
+        .route("/discovery/toggle", post(discovery::toggle_mdns))
         // Scanning
         .route("/scan/image", post(scan::scan_image))
         // Batch Operations

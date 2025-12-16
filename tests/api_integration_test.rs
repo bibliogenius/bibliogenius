@@ -428,22 +428,28 @@ async fn test_cannot_accept_request_when_copy_is_borrowed() {
 
 #[tokio::test]
 async fn test_library_exists_after_admin_creation() {
-    // Tests the database migration that creates default library
+    // Tests that library can be created after admin user exists
     let db = setup_test_db().await;
 
     let admin_id = create_test_admin(&db).await;
 
-    // Verify library with ID 1 exists (created by migration)
+    // Create a library with the admin as owner
+    let library_id = create_test_library(&db, admin_id, "Test Library").await;
+
+    // Verify library was created successfully
     use bibliogenius::models::library;
-    let default_library = library::Entity::find_by_id(1).one(&db).await.unwrap();
+    let created_library = library::Entity::find_by_id(library_id)
+        .one(&db)
+        .await
+        .unwrap();
 
     assert!(
-        default_library.is_some(),
-        "Expected default library to exist after admin creation"
+        created_library.is_some(),
+        "Expected library to exist after creation"
     );
 
-    let library = default_library.unwrap();
-    assert_eq!(library.id, 1);
+    let library = created_library.unwrap();
+    assert_eq!(library.id, library_id);
     assert_eq!(library.owner_id, admin_id);
 }
 
@@ -546,10 +552,10 @@ async fn test_search_unified_endpoint() {
     // We can't easily mock the external HTTP calls in this integration test without a lot of setup (e.g. wiremock).
     // However, we can verifying the endpoint *exists* and handles a query, even if it returns empty or fails to connect to real external APIs.
     // Ideally we would mock the `search_inventaire` and `search_books` functions but they are free functions in other modules.
-    
+
     // For now, let's just ensure the route is registered and returns 200 OK (with potentially empty list if no network or no match).
     // This confirms the wiring is correct.
-    
+
     let app = bibliogenius::api::api_router(db);
 
     let response = app
@@ -563,10 +569,12 @@ async fn test_search_unified_endpoint() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     // We expect a JSON array
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-    
+
     assert!(body_json.is_array(), "Expected JSON array response");
 }
