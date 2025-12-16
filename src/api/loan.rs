@@ -8,6 +8,8 @@ use sea_orm::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::models::book::Entity as Book;
+use crate::models::contact::Entity as Contact;
 use crate::models::copy::{self, Entity as Copy};
 use crate::models::loan::{self, Entity as Loan};
 
@@ -36,14 +38,68 @@ pub async fn list_loans(
         condition = condition.add(loan::Column::ContactId.eq(contact_id));
     }
 
-    let loans = Loan::find()
+    let loans_with_contacts = Loan::find()
         .filter(condition)
         .order_by_desc(loan::Column::LoanDate)
+        .find_also_related(Contact)
         .all(&db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(json!({ "loans": loans })))
+    // Collect copy IDs to fetch books
+    let copy_ids: Vec<i32> = loans_with_contacts.iter().map(|(l, _)| l.copy_id).collect();
+
+    // Fetch copies with books
+    // We only need to fetch if there are loans
+    let mut copy_book_map = std::collections::HashMap::new();
+
+    if !copy_ids.is_empty() {
+        let copies_with_books = Copy::find()
+            .filter(copy::Column::Id.is_in(copy_ids))
+            .find_also_related(Book)
+            .all(&db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        for (copy, book) in copies_with_books {
+            if let Some(book) = book {
+                copy_book_map.insert(copy.id, book);
+            }
+        }
+    }
+
+    let result: Vec<Value> = loans_with_contacts
+        .into_iter()
+        .map(|(loan, contact)| {
+            let book = copy_book_map.get(&loan.copy_id);
+            let contact_name = contact
+                .as_ref()
+                .map(|c| c.name.clone())
+                .unwrap_or("Unknown".to_string());
+            let book_title = book
+                .as_ref()
+                .map(|b| b.title.clone())
+                .unwrap_or("Unknown".to_string());
+
+            json!({
+                "id": loan.id,
+                "copy_id": loan.copy_id,
+                "contact_id": loan.contact_id,
+                "library_id": loan.library_id,
+                "loan_date": loan.loan_date,
+                "due_date": loan.due_date,
+                "return_date": loan.return_date,
+                "status": loan.status,
+                "notes": loan.notes,
+                "contact_name": contact_name,
+                "book_title": book_title,
+                "contact": contact.map(|c| json!({"name": c.name})),
+                "book": book.map(|b| json!({"title": b.title})),
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "loans": result })))
 }
 
 pub async fn create_loan(

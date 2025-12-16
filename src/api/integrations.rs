@@ -84,6 +84,7 @@ struct OpenLibraryDoc {
     publisher: Option<Vec<String>>,
     isbn: Option<Vec<String>>,
     cover_i: Option<i32>,
+    language: Option<Vec<String>>,
 }
 
 pub async fn search_external(query: &crate::api::search::SearchQuery) -> Vec<book::Model> {
@@ -133,10 +134,15 @@ pub async fn search_external(query: &crate::api::search::SearchQuery) -> Vec<boo
 
                 // Map to our Book Model (store additional data in source_data)
                 let source_data = serde_json::json!({
-                    "authors": doc.author_name.unwrap_or_default(),
+                    "authors": doc.author_name.clone().unwrap_or_default(),
                     "cover_id": doc.cover_i,
-                    "source": "openlibrary"
+                    "source": "openlibrary",
+                    "languages": doc.language.clone().unwrap_or_default()
                 });
+
+                let cover_url = doc
+                    .cover_i
+                    .map(|id| format!("https://covers.openlibrary.org/b/id/{}-M.jpg", id));
 
                 let book = book::Model {
                     id: 0, // Placeholder ID
@@ -152,6 +158,7 @@ pub async fn search_external(query: &crate::api::search::SearchQuery) -> Vec<boo
                     cataloguing_notes: None,
                     source_data: Some(source_data.to_string()),
                     shelf_position: None,
+                    cover_url,
                     reading_status: "to_read".to_string(),
                     finished_reading_at: None,
                     started_reading_at: None,
@@ -231,6 +238,7 @@ pub struct UnifiedSearchQuery {
     pub author: Option<String>,
     pub publisher: Option<String>,
     pub subject: Option<String>,
+    pub lang: Option<String>, // User's preferred language (e.g., "fr", "en")
 }
 
 pub async fn search_unified(Query(params): Query<UnifiedSearchQuery>) -> impl IntoResponse {
@@ -355,28 +363,57 @@ pub async fn search_unified(Query(params): Query<UnifiedSearchQuery>) -> impl In
 
     // 4. Sort Results by Relevance
     // Prioritize:
-    // 1. Author matches query author (if provided)
-    // 2. Title matches query title (if provided)
-    // 3. Author matches general query 'q'
+    // 1. Language matches user preference
+    // 2. Author matches query author (if provided)
+    // 3. Title matches query title (if provided)
+    // 4. Author matches general query 'q'
 
     let query_author = params.author.as_deref().unwrap_or("").to_lowercase();
     let query_title = params.title.as_deref().unwrap_or("").to_lowercase();
     let query_q = params.q.as_deref().unwrap_or("").to_lowercase();
+    let user_lang = params.lang.as_deref().unwrap_or("").to_lowercase();
 
     results.sort_by(|a, b| {
-        let score_a = calculate_relevance(a, &query_author, &query_title, &query_q);
-        let score_b = calculate_relevance(b, &query_author, &query_title, &query_q);
+        let score_a = calculate_relevance(a, &query_author, &query_title, &query_q, &user_lang);
+        let score_b = calculate_relevance(b, &query_author, &query_title, &query_q, &user_lang);
         score_b.cmp(&score_a) // Descending score
     });
 
     (StatusCode::OK, Json(results)).into_response()
 }
 
-fn calculate_relevance(book: &book::Book, q_author: &str, q_title: &str, q_any: &str) -> i32 {
+fn calculate_relevance(
+    book: &book::Book,
+    q_author: &str,
+    q_title: &str,
+    q_any: &str,
+    user_lang: &str,
+) -> i32 {
     let mut score = 0;
 
     let title = book.title.to_lowercase();
     let author = book.author.as_deref().unwrap_or("").to_lowercase();
+
+    // Language Match - highest priority for user experience
+    if !user_lang.is_empty() {
+        if let Some(source_data_str) = &book.source_data {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str) {
+                if let Some(languages) = json.get("languages").and_then(|l| l.as_array()) {
+                    for lang in languages {
+                        if let Some(lang_str) = lang.as_str() {
+                            // Check for match (e.g., "fre" matches "fr", "fra", "french")
+                            if lang_str.to_lowercase().starts_with(user_lang)
+                                || user_lang.starts_with(&lang_str.to_lowercase())
+                            {
+                                score += 40; // Strong language preference boost
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Author Match
     if !q_author.is_empty() {

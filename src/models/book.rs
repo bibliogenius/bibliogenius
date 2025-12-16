@@ -23,6 +23,7 @@ pub struct Model {
     pub reading_status: String,
     pub finished_reading_at: Option<String>,
     pub started_reading_at: Option<String>,
+    pub cover_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub user_rating: Option<i32>, // 0-10 scale, NULL = not rated
@@ -119,8 +120,8 @@ impl From<Model> for Book {
             finished_reading_at: Some(model.finished_reading_at),
             started_reading_at: Some(model.started_reading_at),
             source: Some("Local".to_string()),
-            author: None,    // TODO: Fetch from relation
-            cover_url: None, // TODO: Derive from ISBN or store in DB
+            author: None,               // TODO: Fetch from relation
+            cover_url: model.cover_url, // Use stored cover_url
             large_cover_url: None,
             user_rating: model.user_rating,
         }
@@ -145,6 +146,7 @@ impl From<Book> for ActiveModel {
             cataloguing_notes: Set(book.cataloguing_notes),
             source_data: Set(book.source_data),
             shelf_position: Set(book.shelf_position),
+            cover_url: Set(book.cover_url),
             reading_status: book.reading_status.map_or(NotSet, Set),
             finished_reading_at: book.finished_reading_at.map_or(NotSet, Set),
             started_reading_at: book.started_reading_at.map_or(NotSet, Set),

@@ -3,7 +3,24 @@ name = "bibliogenius"
 version = "1.0.0-beta.1"
 edition = "2021"
 
+[lib]
+name = "bibliogenius"
+crate-type = ["cdylib", "staticlib", "lib"]
+
+# The binary is only for desktop - requires "desktop" feature
+[[bin]]
+name = "bibliogenius"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = ["desktop"]
+desktop = []
+
 [dependencies]
+# Flutter Rust Bridge
+flutter_rust_bridge = "=2.11.1"
+
 # Web framework
 axum = { version = "0.7", features = ["macros", "multipart"] }
 tokio = { version = "1.0", features = ["full"] }
@@ -50,6 +67,7 @@ utoipa = { version = "4.2", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "6.0", features = ["axum"] }
 strsim = "0.11.1"
 regex = "1.12.2"
+totp-rs = { version = "5.7.0", features = ["qr", "otpauth", "gen_secret"] }
 
 [dev-dependencies]
 wiremock = "0.6"

@@ -253,17 +253,8 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     ))
     .await?;
 
-    // Insert default user (ID 1) if it doesn't exist
-    // This is required for the default library's owner_id FK constraint
-    db.execute(Statement::from_string(
-        db.get_database_backend(),
-        r#"
-        INSERT OR IGNORE INTO users (id, username, password_hash, role, created_at, updated_at)
-        VALUES (1, 'admin', '', 'admin', datetime('now'), datetime('now'))
-        "#
-        .to_owned(),
-    ))
-    .await?;
+    // Default user (ID 1) removed for security.
+    // Users must be created via the Setup/Registration flow.
 
     // Insert default library (ID 1) if it doesn't exist
     // Use owner_id = 1 (default admin user created above)
@@ -515,6 +506,14 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         .execute(Statement::from_string(
             db.get_database_backend(),
             "ALTER TABLE books ADD COLUMN finished_reading_at TEXT".to_owned(),
+        ))
+        .await;
+
+    // Migration 021: Add cover_url to books table
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE books ADD COLUMN cover_url TEXT".to_owned(),
         ))
         .await;
 

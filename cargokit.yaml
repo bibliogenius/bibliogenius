@@ -1,0 +1,12 @@
+# Cargokit configuration for BiblioGenius
+# This file configures how Cargokit builds the Rust library for mobile platforms
+
+cargo:
+  # For release builds, disable default features to avoid compiling the desktop binary
+  release:
+    extra_flags:
+      - "--no-default-features"
+  # Debug builds also need no-default-features for iOS/Android
+  debug:
+    extra_flags:
+      - "--no-default-features"

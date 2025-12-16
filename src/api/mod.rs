@@ -7,6 +7,7 @@ pub mod contact;
 pub mod copy;
 pub mod data;
 pub mod export;
+pub mod frb; // FFI API for flutter_rust_bridge
 pub mod gamification;
 pub mod genie;
 pub mod health;
@@ -35,7 +36,11 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/health", get(health::health_check))
         // Auth
         .route("/auth/login", post(auth::login))
+        .route("/auth/login-mfa", post(auth::login_mfa))
         .route("/auth/register", post(auth::create_admin))
+        .route("/auth/me", get(auth::get_me))
+        .route("/auth/2fa/setup", post(auth::setup_2fa))
+        .route("/auth/2fa/verify", post(auth::verify_2fa))
         // Library config
         .route("/library/config", get(library::get_config))
         .route("/library/config", post(library::update_config))

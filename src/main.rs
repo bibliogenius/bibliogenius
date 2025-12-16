@@ -15,13 +15,7 @@ fn find_available_port(preferred_port: u16) -> Option<u16> {
     }
 
     // Scan next 100 ports
-    for port in (preferred_port + 1)..(preferred_port + 100) {
-        if TcpListener::bind(("0.0.0.0", port)).is_ok() {
-            return Some(port);
-        }
-    }
-
-    None
+    ((preferred_port + 1)..(preferred_port + 100)).find(|&port| TcpListener::bind(("0.0.0.0", port)).is_ok())
 }
 
 /// Write the selected port to a file for the Flutter app to read

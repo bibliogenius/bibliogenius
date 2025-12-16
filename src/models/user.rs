@@ -9,6 +9,7 @@ pub struct Model {
     #[sea_orm(unique)]
     pub username: String,
     pub password_hash: String,
+    pub totp_secret: Option<String>,
     pub role: String,
     pub created_at: String,
     pub updated_at: String,
