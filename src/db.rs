@@ -652,5 +652,43 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     ))
     .await?;
 
+    // Migration 022: Add structured address fields to contacts
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE contacts ADD COLUMN street_address TEXT".to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE contacts ADD COLUMN postal_code TEXT".to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE contacts ADD COLUMN city TEXT".to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE contacts ADD COLUMN country TEXT".to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE contacts ADD COLUMN latitude REAL".to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE contacts ADD COLUMN longitude REAL".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
