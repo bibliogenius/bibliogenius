@@ -472,6 +472,39 @@ pub async fn count_active_loans() -> Result<i64, String> {
     }
 }
 
+/// Create a new loan
+pub async fn create_loan(
+    copy_id: i32,
+    contact_id: i32,
+    library_id: i32,
+    loan_date: String,
+    due_date: String,
+    notes: Option<String>,
+) -> Result<i32, String> {
+    let db = db().ok_or("Database not initialized")?;
+
+    let dto = crate::models::loan::LoanDto {
+        id: None,
+        copy_id,
+        contact_id,
+        library_id,
+        loan_date,
+        due_date,
+        return_date: None,
+        status: None,
+        notes,
+    };
+
+    match crate::services::loan_service::create_loan(db, dto).await {
+        Ok(loan) => Ok(loan.id),
+        Err(crate::services::loan_service::ServiceError::NotFound) => {
+            Err("Copy not found".to_string())
+        }
+        Err(crate::services::loan_service::ServiceError::InvalidState(msg)) => Err(msg),
+        Err(e) => Err(format!("{:?}", e)),
+    }
+}
+
 /// Return a loan
 pub async fn return_loan(id: i32) -> Result<String, String> {
     let db = db().ok_or("Database not initialized")?;

@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -715455778;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -276111427;
 
 // Section: executor
 
@@ -214,6 +214,55 @@ fn wire__crate__api__frb__create_contact_impl(
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let output_ok = crate::api::frb::create_contact(api_contact).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__create_loan_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "create_loan",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_copy_id = <i32>::sse_decode(&mut deserializer);
+            let api_contact_id = <i32>::sse_decode(&mut deserializer);
+            let api_library_id = <i32>::sse_decode(&mut deserializer);
+            let api_loan_date = <String>::sse_decode(&mut deserializer);
+            let api_due_date = <String>::sse_decode(&mut deserializer);
+            let api_notes = <Option<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::create_loan(
+                            api_copy_id,
+                            api_contact_id,
+                            api_library_id,
+                            api_loan_date,
+                            api_due_date,
+                            api_notes,
+                        )
+                        .await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -1001,18 +1050,19 @@ fn pde_ffi_dispatcher_primary_impl(
         3 => wire__crate__api__frb__count_contacts_impl(port, ptr, rust_vec_len, data_len),
         4 => wire__crate__api__frb__create_book_impl(port, ptr, rust_vec_len, data_len),
         5 => wire__crate__api__frb__create_contact_impl(port, ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__frb__delete_book_impl(port, ptr, rust_vec_len, data_len),
-        7 => wire__crate__api__frb__get_all_books_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__frb__get_all_contacts_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__frb__get_all_loans_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__frb__get_all_tags_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__frb__get_book_by_id_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__frb__get_contact_by_id_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__frb__init_backend_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__frb__create_loan_impl(port, ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__frb__delete_book_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__frb__get_all_books_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__frb__get_all_contacts_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__frb__get_all_loans_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__frb__get_all_tags_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__frb__get_book_by_id_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__frb__get_contact_by_id_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__frb__init_backend_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1025,9 +1075,9 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        13 => wire__crate__api__frb__get_version_impl(ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__frb__greet_impl(ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__frb__health_check_impl(ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__frb__get_version_impl(ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__frb__greet_impl(ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__frb__health_check_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
