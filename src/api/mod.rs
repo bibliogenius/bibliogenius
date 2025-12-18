@@ -117,6 +117,7 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/copies", post(copy::create_copy))
         .route("/books/:id/copies", get(copy::get_book_copies))
         .route("/copies/:id", axum::routing::delete(copy::delete_copy))
+        .route("/copies/:id", axum::routing::put(copy::update_copy))
         // Contacts
         .route(
             "/contacts",

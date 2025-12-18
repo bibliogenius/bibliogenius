@@ -10,7 +10,14 @@ pub struct Model {
     pub library_id: i32,
     pub acquisition_date: Option<String>,
     pub notes: Option<String>,
-    pub status: String, // available, borrowed, wanted, lost, temporary
+    /// Availability status of this physical copy.
+    /// Valid values:
+    /// - `available`: On shelf, can be loaned
+    /// - `loaned`: Currently lent to someone (has active Loan)
+    /// - `borrowed`: Borrowed from another library (P2P)
+    /// - `lost`: Copy is lost
+    /// - `wanted`: Wishlist - don't own yet
+    pub status: String,
     pub is_temporary: bool,
     pub created_at: String,
     pub updated_at: String,

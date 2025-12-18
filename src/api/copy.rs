@@ -147,3 +147,62 @@ pub async fn delete_copy(
             .into_response(),
     }
 }
+
+/// DTO for partial copy updates
+#[derive(Debug, Deserialize)]
+pub struct UpdateCopyDto {
+    pub status: Option<String>,
+    pub notes: Option<String>,
+    pub acquisition_date: Option<String>,
+}
+
+/// Update a copy (mainly for status changes)
+pub async fn update_copy(
+    State(db): State<DatabaseConnection>,
+    Path(id): Path<i32>,
+    Json(payload): Json<UpdateCopyDto>,
+) -> impl IntoResponse {
+    // Find existing copy
+    let copy = match Copy::find_by_id(id).one(&db).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Copy not found"})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Database error: {}", e)})),
+            )
+                .into_response()
+        }
+    };
+
+    // Update fields
+    let mut active: copy_model::ActiveModel = copy.into();
+    if let Some(status) = payload.status {
+        active.status = Set(status);
+    }
+    if let Some(notes) = payload.notes {
+        active.notes = Set(Some(notes));
+    }
+    if let Some(date) = payload.acquisition_date {
+        active.acquisition_date = Set(Some(date));
+    }
+    active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+
+    match active.update(&db).await {
+        Ok(model) => {
+            let dto = CopyDto::from(model);
+            (StatusCode::OK, Json(serde_json::json!({"copy": dto}))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to update copy: {}", e)})),
+        )
+            .into_response(),
+    }
+}

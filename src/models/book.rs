@@ -19,6 +19,15 @@ pub struct Model {
     pub cataloguing_notes: Option<String>,
     pub source_data: Option<String>,
     pub shelf_position: Option<i32>,
+    /// Personal reading progress status.
+    /// Valid values:
+    /// - `to_read`: Haven't started yet
+    /// - `reading`: Currently reading
+    /// - `read`: Finished reading
+    /// - `wanting`: Wishlist (want to read someday)
+    /// - `abandoned`: Stopped reading
+    ///
+    /// NOTE: Do NOT use `lent`/`borrowed` here - those belong to Copy.status
     #[sea_orm(default_value = "to_read")]
     pub reading_status: String,
     pub finished_reading_at: Option<String>,
