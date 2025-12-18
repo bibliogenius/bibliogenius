@@ -4,6 +4,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use chrono::Utc;
 use futures::future::join_all;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
@@ -162,6 +163,7 @@ pub struct IncomingConnectionRequest {
 /// Receive an incoming connection request from a remote peer
 /// This forwards the request to the local Hub to create an 'incoming' peer record
 pub async fn receive_connection_request(
+    State(db): State<DatabaseConnection>,
     Json(payload): Json<IncomingConnectionRequest>,
 ) -> impl IntoResponse {
     // Forward to local Hub
@@ -193,11 +195,51 @@ pub async fn receive_connection_request(
                     .into_response()
             }
         }
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "Failed to contact local Hub" })),
-        )
-            .into_response(),
+        Err(_) => {
+            // Fallback: Handle locally if Hub is unreachable (P2P mode)
+            // Check if peer exists locally
+            let existing = peer::Entity::find()
+                .filter(peer::Column::Url.eq(&payload.url))
+                .one(&db)
+                .await;
+
+            match existing {
+                Ok(Some(_)) => (
+                    StatusCode::OK,
+                    Json(json!({ "message": "Peer already exists locally" })),
+                )
+                    .into_response(),
+                Ok(None) => {
+                    // Create new peer (pending approval conceptually, strict P2P)
+                    let new_peer = peer::ActiveModel {
+                        name: Set(payload.name),
+                        url: Set(payload.url),
+                        auto_approve: Set(false),
+                        created_at: Set(Utc::now().to_rfc3339()),
+                        updated_at: Set(Utc::now().to_rfc3339()),
+                        ..Default::default()
+                    };
+
+                    match new_peer.insert(&db).await {
+                        Ok(_) => (
+                            StatusCode::OK,
+                            Json(json!({ "message": "Connection request saved locally" })),
+                        )
+                            .into_response(),
+                        Err(e) => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": format!("Failed to save peer locally: {}", e) })),
+                        )
+                            .into_response(),
+                    }
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("Database error: {}", e) })),
+                )
+                    .into_response(),
+            }
+        }
     }
 }
 
@@ -259,7 +301,115 @@ pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoRespon
     }
 
     let peers = peer::Entity::find().all(&db).await.unwrap_or(vec![]);
-    (StatusCode::OK, Json(peers)).into_response()
+
+    // Convert to JSON with computed status field
+    let peers_with_status: Vec<serde_json::Value> = peers
+        .into_iter()
+        .map(|p| {
+            let status = if p.auto_approve {
+                "connected"
+            } else {
+                "pending"
+            };
+            json!({
+                "id": p.id,
+                "name": p.name,
+                "url": p.url,
+                "public_key": p.public_key,
+                "latitude": p.latitude,
+                "longitude": p.longitude,
+                "auto_approve": p.auto_approve,
+                "status": status,
+                "last_seen": p.last_seen,
+               "created_at": p.created_at,
+                "updated_at": p.updated_at,
+            })
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "data": peers_with_status
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct UpdatePeerStatusRequest {
+    status: String, // "active" (accept) or "rejected"
+}
+
+/// Update a peer's status (accept or reject a connection request)
+pub async fn update_peer_status(
+    State(db): State<DatabaseConnection>,
+    Path(peer_id): Path<i32>,
+    Json(payload): Json<UpdatePeerStatusRequest>,
+) -> impl IntoResponse {
+    // Find the peer
+    let peer = match peer::Entity::find_by_id(peer_id).one(&db).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "Peer not found" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Database error: {}", e) })),
+            )
+                .into_response()
+        }
+    };
+
+    // Update status based on action
+    let auto_approve = payload.status == "active" || payload.status == "accepted";
+
+    let mut active_model: peer::ActiveModel = peer.into();
+    active_model.auto_approve = Set(auto_approve);
+    active_model.updated_at = Set(chrono::Utc::now().to_rfc3339());
+
+    match active_model.update(&db).await {
+        Ok(updated) => {
+            tracing::info!("✅ Peer {} status updated to: {}", peer_id, payload.status);
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "message": "Peer status updated",
+                    "peer": updated,
+                    "auto_approve": auto_approve
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to update peer: {}", e) })),
+        )
+            .into_response(),
+    }
+}
+
+/// Delete a peer (reject and remove)
+pub async fn delete_peer(
+    State(db): State<DatabaseConnection>,
+    Path(peer_id): Path<i32>,
+) -> impl IntoResponse {
+    match peer::Entity::delete_by_id(peer_id).exec(&db).await {
+        Ok(_) => {
+            tracing::info!("🗑️ Peer {} deleted", peer_id);
+            (StatusCode::OK, Json(json!({ "message": "Peer deleted" }))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to delete peer: {}", e) })),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Deserialize)]

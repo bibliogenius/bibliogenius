@@ -202,6 +202,95 @@ pub fn greet(name: String) -> String {
     format!("Hello, {}! Welcome to BiblioGenius.", name)
 }
 
+// ============ mDNS Local Discovery (FFI) ============
+
+/// Discovered peer on local network (FFI-compatible)
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbDiscoveredPeer {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub addresses: Vec<String>,
+    pub library_id: Option<String>,
+    pub discovered_at: String,
+}
+
+impl From<crate::services::mdns::DiscoveredPeer> for FrbDiscoveredPeer {
+    fn from(peer: crate::services::mdns::DiscoveredPeer) -> Self {
+        FrbDiscoveredPeer {
+            name: peer.name,
+            host: peer.host,
+            port: peer.port,
+            addresses: peer.addresses,
+            library_id: peer.library_id,
+            discovered_at: peer.discovered_at,
+        }
+    }
+}
+
+/// Check if mDNS discovery service is currently active
+/// This is a sync function that can be called to check status
+#[frb(sync)]
+pub fn is_mdns_available() -> bool {
+    crate::services::mdns::is_mdns_active()
+}
+
+/// Get the mDNS service type used for discovery
+#[frb(sync)]
+pub fn get_mdns_service_type() -> String {
+    "_bibliogenius._tcp.local.".to_string()
+}
+
+/// Get locally discovered peers via mDNS
+/// This returns peers that have been found on the local network
+pub async fn get_local_peers_ffi() -> Result<Vec<FrbDiscoveredPeer>, String> {
+    let peers = crate::services::mdns::get_local_peers();
+    tracing::info!(
+        "🔍 mDNS FFI: get_local_peers_ffi returning {} peers",
+        peers.len()
+    );
+    for peer in &peers {
+        tracing::info!(
+            "  📚 Peer: {} at {:?}:{}",
+            peer.name,
+            peer.addresses.first(),
+            peer.port
+        );
+    }
+    Ok(peers.into_iter().map(FrbDiscoveredPeer::from).collect())
+}
+
+/// Initialize mDNS service for discovery
+/// Must be called to start announcing and discovering peers
+pub async fn init_mdns_ffi(
+    library_name: String,
+    port: u16,
+    library_id: Option<String>,
+) -> Result<String, String> {
+    tracing::info!(
+        "🚀 mDNS FFI: init_mdns_ffi called with name='{}', port={}",
+        library_name,
+        port
+    );
+
+    match crate::services::mdns::init_mdns(&library_name, port, library_id) {
+        Ok(_) => {
+            tracing::info!("✅ mDNS FFI: Service started successfully");
+            Ok("mDNS service started".to_string())
+        }
+        Err(e) => {
+            tracing::error!("❌ mDNS FFI: Failed to start - {}", e);
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Stop mDNS service
+pub async fn stop_mdns_ffi() -> Result<String, String> {
+    crate::services::mdns::stop_mdns();
+    Ok("mDNS service stopped".to_string())
+}
+
 // ============ Initializers & Converters ============
 
 impl From<FrbBook> for crate::models::Book {
@@ -591,4 +680,69 @@ pub async fn reset_app() -> Result<String, String> {
     delete_all!(user);
 
     Ok("App reset successfully - all data cleared".to_string())
+}
+
+// ============ HTTP Server (FFI) ============
+
+/// Start the HTTP server on the specified port (FFI)
+/// This is required for P2P functionality in standalone mode
+/// If the specified port is occupied, tries the next 10 ports automatically
+pub async fn start_server(port: u16) -> Result<u16, String> {
+    let db = db().ok_or("Database not initialized")?.clone();
+
+    // Try the specified port and fall back to alternatives if occupied
+    let max_attempts = 10;
+    let mut last_error = String::new();
+
+    for offset in 0..max_attempts {
+        let try_port = port.saturating_add(offset);
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], try_port));
+
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                let actual_port = listener
+                    .local_addr()
+                    .map_err(|e| format!("Failed to get local address: {}", e))?
+                    .port();
+
+                let api = crate::api::api_router(db);
+                let app = axum::Router::new().nest("/api", api);
+
+                // Spawn server in background
+                tokio::spawn(async move {
+                    if let Err(e) = axum::serve(listener, app).await {
+                        tracing::error!("❌ FFI Server Error: {}", e);
+                    }
+                });
+
+                if offset > 0 {
+                    tracing::info!(
+                        "✅ FFI: Port {} was occupied, server started on port {}",
+                        port,
+                        actual_port
+                    );
+                } else {
+                    tracing::info!("✅ FFI: Server started on port {}", actual_port);
+                }
+                return Ok(actual_port);
+            }
+            Err(e) => {
+                last_error = format!("{}", e);
+                if e.kind() == std::io::ErrorKind::AddrInUse {
+                    tracing::debug!("Port {} occupied, trying {}", try_port, try_port + 1);
+                    continue;
+                } else {
+                    // Non-recoverable error
+                    return Err(format!("Failed to bind to port {}: {}", try_port, e));
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "Failed to bind to any port from {} to {}: {}",
+        port,
+        port + max_attempts - 1,
+        last_error
+    ))
 }
