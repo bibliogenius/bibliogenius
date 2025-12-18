@@ -87,10 +87,11 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/peers/:id/request", post(peer::request_book)) // Send request
         .route("/peers/request", post(peer::receive_request)) // Receive request
         .route("/peers/requests", get(peer::list_requests)) // List incoming requests
+        .route("/peers/requests/incoming", post(peer::receive_loan_request)) // Receive incoming P2P loan request
         .route(
             "/peers/requests/outgoing",
-            get(peer::list_outgoing_requests),
-        ) // List outgoing requests
+            get(peer::list_outgoing_requests).post(peer::create_outgoing_request),
+        ) // List/Create outgoing requests
         .route(
             "/peers/requests/outgoing/:id",
             axum::routing::delete(peer::delete_outgoing_request),

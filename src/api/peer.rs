@@ -1239,18 +1239,52 @@ pub async fn update_request_status(
         };
 
         // 2. Find Book and Available Copy
+        tracing::info!(
+            "Looking for book with ISBN: '{}' for request {}",
+            req.book_isbn,
+            req.id
+        );
         let book = match book::Entity::find()
             .filter(book::Column::Isbn.eq(&req.book_isbn))
             .one(&db)
             .await
         {
-            Ok(Some(b)) => b,
-            _ => {
+            Ok(Some(b)) => {
+                tracing::info!("Found book: {} (id={})", b.title, b.id);
+                b
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "Book not found for ISBN: '{}'. Checking by title: '{}'",
+                    req.book_isbn,
+                    req.book_title
+                );
+                // Fallback: Try to find by title if ISBN lookup fails
+                match book::Entity::find()
+                    .filter(book::Column::Title.eq(&req.book_title))
+                    .one(&db)
+                    .await
+                {
+                    Ok(Some(b)) => {
+                        tracing::info!("Found book by title: {} (id={})", b.title, b.id);
+                        b
+                    }
+                    _ => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "error": format!("Book not found (ISBN: '{}', Title: '{}')", req.book_isbn, req.book_title) })),
+                        )
+                            .into_response()
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("DB error looking up book: {}", e);
                 return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": "Book not found" })),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("DB error: {}", e) })),
                 )
-                    .into_response()
+                    .into_response();
             }
         };
 
@@ -1556,6 +1590,154 @@ pub async fn delete_outgoing_request(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct IncomingLoanRequest {
+    pub from_name: String,
+    pub from_url: String,
+    pub book_isbn: String,
+    pub book_title: String,
+}
+
+pub async fn receive_loan_request(
+    State(db): State<DatabaseConnection>,
+    Json(payload): Json<IncomingLoanRequest>,
+) -> impl IntoResponse {
+    use crate::models::p2p_request;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    // 1. Find or Create Peer
+    let peer = match peer::Entity::find()
+        .filter(peer::Column::Url.eq(&payload.from_url))
+        .one(&db)
+        .await
+    {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            let new_peer = peer::ActiveModel {
+                name: Set(payload.from_name),
+                url: Set(payload.from_url),
+                auto_approve: Set(false),
+                created_at: Set(Utc::now().to_rfc3339()),
+                updated_at: Set(Utc::now().to_rfc3339()),
+                ..Default::default()
+            };
+            match new_peer.insert(&db).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("Failed to create peer: {}", e) })),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Database error: {}", e) })),
+            )
+                .into_response()
+        }
+    };
+
+    // 2. Create Incoming Request
+    let request_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    let new_request = p2p_request::ActiveModel {
+        id: Set(request_id),
+        from_peer_id: Set(peer.id),
+        book_isbn: Set(payload.book_isbn),
+        book_title: Set(payload.book_title),
+        status: Set("pending".to_owned()),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+
+    match new_request.insert(&db).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({ "message": "Loan request received" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to save request: {}", e) })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct OutgoingLoanRequestDto {
+    pub to_peer_url: String,
+    pub book_isbn: String,
+    pub book_title: String,
+}
+
+pub async fn create_outgoing_request(
+    State(db): State<DatabaseConnection>,
+    Json(payload): Json<OutgoingLoanRequestDto>,
+) -> impl IntoResponse {
+    use crate::models::p2p_outgoing_request;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    // 1. Find Peer by URL
+    let peer = match peer::Entity::find()
+        .filter(peer::Column::Url.eq(&payload.to_peer_url))
+        .one(&db)
+        .await
+    {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "Peer not found locally" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Database error: {}", e) })),
+            )
+                .into_response()
+        }
+    };
+
+    // 2. Create Outgoing Request Log
+    let request_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    let new_request = p2p_outgoing_request::ActiveModel {
+        id: Set(request_id),
+        to_peer_id: Set(peer.id),
+        book_isbn: Set(payload.book_isbn),
+        book_title: Set(payload.book_title),
+        status: Set("pending".to_owned()),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+
+    match new_request.insert(&db).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({ "message": "Outgoing request logged" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to save outgoing request: {}", e) })),
         )
             .into_response(),
     }
