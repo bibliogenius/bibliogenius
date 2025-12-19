@@ -10,6 +10,9 @@ pub struct Model {
     pub entity_id: i32,
     pub operation: String,
     pub payload: Option<String>,
+    #[sea_orm(default_value = "pending")]
+    pub status: String, // pending, applied, failed, skipped
+    pub error_message: Option<String>,
     pub created_at: String,
 }
 

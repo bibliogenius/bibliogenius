@@ -21,3 +21,9 @@ pub async fn log_operation(
     operation_log::Entity::insert(log).exec(db).await?;
     Ok(())
 }
+pub mod processor;
+
+/// Iroh P2P POC - Experimental
+/// Enable with feature flag when ready to test
+#[cfg(feature = "iroh_poc")]
+pub mod iroh_poc;

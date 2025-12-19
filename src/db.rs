@@ -722,5 +722,21 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 024: Add status and error_message to operation_log
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE operation_log ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'"
+                .to_owned(),
+        ))
+        .await;
+
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE operation_log ADD COLUMN error_message TEXT".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }

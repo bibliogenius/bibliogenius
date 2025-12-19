@@ -467,14 +467,41 @@ pub async fn mcp_config() -> impl IntoResponse {
         .unwrap_or_else(|_| "/path/to/bibliogenius".to_string());
 
     // Get the database URL from environment
+    // Default to Application Support directory (same as Flutter app)
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        // Try to construct a reasonable default
-        if let Ok(home) = std::env::var("HOME") {
-            format!(
-                "sqlite://{}/Sites/bibliotech/bibliogenius/bibliogenius.db?mode=rwc",
-                home
-            )
-        } else {
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(home) = std::env::var("HOME") {
+                // macOS: Application Support/BiblioGenius or Documents (Flutter uses getApplicationDocumentsDirectory)
+                // Flutter on macOS sandboxed app uses: ~/Library/Containers/com.example.bibliogeniusApp/Data/Documents/
+                // Flutter on macOS debug uses: ~/Library/Application Support/bibliogenius.db
+                // For compatibility, try Documents first (where Flutter puts it)
+                format!("sqlite://{}/Documents/bibliogenius.db?mode=rwc", home)
+            } else {
+                "sqlite:///path/to/bibliogenius.db?mode=rwc".to_string()
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
+                format!("sqlite://{}/BiblioGenius/bibliogenius.db?mode=rwc", appdata)
+            } else {
+                "sqlite:///path/to/bibliogenius.db?mode=rwc".to_string()
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(home) = std::env::var("HOME") {
+                format!(
+                    "sqlite://{}/.local/share/bibliogenius/bibliogenius.db?mode=rwc",
+                    home
+                )
+            } else {
+                "sqlite:///path/to/bibliogenius.db?mode=rwc".to_string()
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
             "sqlite:///path/to/bibliogenius.db?mode=rwc".to_string()
         }
     });

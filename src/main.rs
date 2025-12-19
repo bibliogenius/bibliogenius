@@ -105,6 +105,13 @@ async fn main() {
         }
     }
 
+    // [P2P] Start Operation Processor
+    let processor_db = db.clone();
+    tokio::spawn(async move {
+        // We use the fully qualified path to ensure we hit the right module
+        bibliogenius::sync::processor::run_processor(processor_db).await;
+    });
+
     // Build API router
     let api_router = api::api_router(db);
 
