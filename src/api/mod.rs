@@ -25,6 +25,9 @@ pub mod setup;
 pub mod tag;
 pub mod user;
 
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
 use axum::{
     routing::{get, post, put},
     Router,
@@ -166,6 +169,7 @@ pub fn api_router(db: DatabaseConnection) -> Router {
             "/integrations/search_unified",
             get(integrations::search_unified),
         )
+        .route("/integrations/mcp-config", get(integrations::mcp_config))
         // Gamification
         .route("/user/status", get(gamification::get_user_status))
         // Export

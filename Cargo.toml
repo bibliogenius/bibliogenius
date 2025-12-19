@@ -14,8 +14,9 @@ path = "src/main.rs"
 required-features = ["desktop"]
 
 [features]
-default = ["desktop"]
+default = ["desktop", "mcp"]
 desktop = []
+mcp = []
 
 [dependencies]
 # Flutter Rust Bridge
@@ -39,9 +40,8 @@ sea-orm = { version = "0.12", features = ["sqlx-sqlite", "runtime-tokio-native-t
 reqwest = { version = "0.11", features = ["json"] }
 quick-xml = { version = "0.31", features = ["serialize"] }
 uuid = { version = "1.4", features = ["v4", "fast-rng", "macro-diagnostics"] }
-# The following line was part of the instruction's code edit, but it is syntactically incorrect as a standalone entry.
-# It appears to be the features part of quick-xml that was separated.
-# { version = "0.31", features = ["serialize"] }
+# Invalid lines removed
+
 
 # CSV parsing
 csv = "1.3"
@@ -72,6 +72,11 @@ totp-rs = { version = "5.7.0", features = ["qr", "otpauth", "gen_secret"] }
 # Local discovery (mDNS)
 mdns-sd = "0.11"
 hostname = "0.4"
+
+# MCP Server
+# MCP Server - Manual implementation using serde_json for POC
+# rmcp dependency removed to avoid compilation issues
+
 
 [dev-dependencies]
 wiremock = "0.6"

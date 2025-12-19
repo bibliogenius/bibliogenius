@@ -73,7 +73,7 @@ async fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "bibliogenius=debug,tower_http=debug".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
     // Load configuration
@@ -92,6 +92,16 @@ async fn main() {
             tracing::error!("Failed to seed data: {}", e);
         } else {
             tracing::info!("Demo data seeded successfully.");
+        }
+    }
+
+    // [MCP] Start MCP Server if --mcp flag is present
+    #[cfg(feature = "mcp")]
+    {
+        if std::env::args().any(|arg| arg == "--mcp") {
+            tracing::info!("Starting in MCP Mode (Stdio)...");
+            api::mcp::start_server(db).await;
+            return;
         }
     }
 

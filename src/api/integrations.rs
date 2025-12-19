@@ -457,3 +457,51 @@ fn calculate_relevance(
 
     score
 }
+
+/// MCP Configuration endpoint for AI Assistant integrations (Claude Desktop, Cursor, Continue, etc.)
+/// Returns a ready-to-use JSON configuration with dynamic paths
+pub async fn mcp_config() -> impl IntoResponse {
+    // Get the current executable path
+    let binary_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "/path/to/bibliogenius".to_string());
+
+    // Get the database URL from environment
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        // Try to construct a reasonable default
+        if let Ok(home) = std::env::var("HOME") {
+            format!(
+                "sqlite://{}/Sites/bibliotech/bibliogenius/bibliogenius.db?mode=rwc",
+                home
+            )
+        } else {
+            "sqlite:///path/to/bibliogenius.db?mode=rwc".to_string()
+        }
+    });
+
+    let config = json!({
+        "mcpServers": {
+            "bibliogenius": {
+                "command": binary_path,
+                "args": ["--mcp"],
+                "env": {
+                    "DATABASE_URL": database_url
+                }
+            }
+        }
+    });
+
+    (StatusCode::OK, Json(json!({
+        "config": config,
+        "config_json": serde_json::to_string_pretty(&config).unwrap_or_default(),
+        "compatible_clients": [
+            "Claude Desktop",
+            "Cursor",
+            "Continue.dev",
+            "Cline (VS Code)",
+            "Zed Editor",
+            "Sourcegraph Cody"
+        ],
+        "instructions": "Paste this configuration into your AI assistant's MCP configuration file (e.g., claude_desktop_config.json for Claude Desktop)."
+    }))).into_response()
+}

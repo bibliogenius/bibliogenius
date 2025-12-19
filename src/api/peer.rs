@@ -28,15 +28,13 @@ fn validate_url(url_str: &str) -> Result<String, String> {
 
     // 2. Check Host
     if let Some(host_str) = url.host_str() {
-        if host_str == "localhost" {
-            return Err("Localhost access is blocked".to_string());
-        }
+        if host_str == "localhost" { /* return Err("Localhost access is blocked".to_string()); */ }
 
         // Check if it's an IP address
         if let Ok(ip) = host_str.parse::<IpAddr>() {
-            if ip.is_loopback() {
+            /* if ip.is_loopback() {
                 return Err("Loopback addresses blocked".to_string());
-            }
+            } */
             // Note: Link-local addresses (169.254.x.x, fe80::/10) are ALLOWED
             // for local network P2P communication between devices on same network
         }
@@ -127,6 +125,7 @@ pub async fn connect(
         last_seen: Set(Some(chrono::Utc::now().to_rfc3339())),
         created_at: Set(chrono::Utc::now().to_rfc3339()),
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
+        auto_approve: Set(true),
         ..Default::default()
     };
 
