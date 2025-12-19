@@ -11,5 +11,6 @@ pub mod models;
 pub mod modules;
 pub mod openlibrary;
 pub mod seed;
+pub mod server;
 pub mod services;
 pub mod sync;

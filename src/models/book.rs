@@ -36,6 +36,11 @@ pub struct Model {
     pub created_at: String,
     pub updated_at: String,
     pub user_rating: Option<i32>, // 0-10 scale, NULL = not rated
+    /// Whether I physically own this book.
+    /// - `true`: I have this book → a Copy should exist
+    /// - `false`: Wishlist/wanted → no Copy
+    #[sea_orm(default_value = "true")]
+    pub owned: bool,
 }
 
 // ... (Relation enum and Related impls omit for brevity) ...
@@ -103,6 +108,8 @@ pub struct Book {
     pub large_cover_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_rating: Option<i32>, // 0-10 scale
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owned: Option<bool>, // Whether I own this book (default true)
 }
 
 impl From<Model> for Book {
@@ -133,6 +140,7 @@ impl From<Model> for Book {
             cover_url: model.cover_url, // Use stored cover_url
             large_cover_url: None,
             user_rating: model.user_rating,
+            owned: Some(model.owned),
         }
     }
 }
@@ -162,6 +170,7 @@ impl From<Book> for ActiveModel {
             created_at: NotSet,
             updated_at: NotSet,
             user_rating: book.user_rating.map_or(NotSet, |r| Set(Some(r))),
+            owned: book.owned.map_or(NotSet, Set),
         }
     }
 }

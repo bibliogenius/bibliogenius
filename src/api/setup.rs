@@ -27,18 +27,31 @@ pub async fn setup(
 ) -> impl IntoResponse {
     let now = chrono::Utc::now();
 
-    // Update or create installation profile
+    // Update or create installation profile using insert with on_conflict
     let profile = installation_profile::ActiveModel {
         id: Set(1),
         profile_type: Set(req.profile_type.clone()),
         enabled_modules: Set("[]".to_string()), // Start with no modules
-        theme: Set(req.theme.or(Some("default".to_string()))),
+        theme: Set(req.theme.clone().or(Some("default".to_string()))),
         avatar_config: Set(None),
         updated_at: Set(now.to_rfc3339()),
         created_at: Set(now.to_rfc3339()),
     };
 
-    if let Err(e) = profile.save(&db).await {
+    if let Err(e) = installation_profile::Entity::insert(profile)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::column(installation_profile::Column::Id)
+                .update_columns([
+                    installation_profile::Column::ProfileType,
+                    installation_profile::Column::EnabledModules,
+                    installation_profile::Column::Theme,
+                    installation_profile::Column::UpdatedAt,
+                ])
+                .to_owned(),
+        )
+        .exec(&db)
+        .await
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(SetupResponse {
@@ -49,7 +62,7 @@ pub async fn setup(
             .into_response();
     }
 
-    // Update or create library config
+    // Update or create library config using insert with on_conflict
     let config = library_config::ActiveModel {
         id: Set(1),
         name: Set(req.library_name.clone()),
@@ -63,7 +76,23 @@ pub async fn setup(
         created_at: Set(now.to_rfc3339()),
     };
 
-    if let Err(e) = config.save(&db).await {
+    if let Err(e) = library_config::Entity::insert(config)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::column(library_config::Column::Id)
+                .update_columns([
+                    library_config::Column::Name,
+                    library_config::Column::Description,
+                    library_config::Column::Latitude,
+                    library_config::Column::Longitude,
+                    library_config::Column::ShareLocation,
+                    library_config::Column::ShowBorrowedBooks,
+                    library_config::Column::UpdatedAt,
+                ])
+                .to_owned(),
+        )
+        .exec(&db)
+        .await
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(SetupResponse {
@@ -74,17 +103,24 @@ pub async fn setup(
             .into_response();
     }
 
-    // Create admin user if not exists
+    // Create admin user if not exists (using raw SQL to avoid totp_secret column issue)
     use crate::auth::hash_password;
     use crate::models::user;
+    use sea_orm::ConnectionTrait;
 
-    let admin_exists = user::Entity::find()
-        .filter(user::Column::Username.eq("admin"))
-        .one(&db)
+    // Check if admin exists using raw query
+    let admin_exists = match db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT COUNT(*) FROM users WHERE username = 'admin'".to_string(),
+        ))
         .await
-        .unwrap_or(None);
+    {
+        Ok(Some(row)) => row.try_get_by_index::<i32>(0).unwrap_or(0) > 0,
+        _ => false,
+    };
 
-    if admin_exists.is_none() {
+    if !admin_exists {
         tracing::info!("Admin user not found, creating...");
         let password_hash = hash_password("admin").unwrap();
         let admin = user::ActiveModel {
@@ -112,34 +148,60 @@ pub async fn setup(
         tracing::info!("Admin user already exists");
     }
 
-    // Create default library if not exists (Required for copies)
+    // Create default library using on_conflict (Required for copies)
     use crate::models::library;
-    let admin_user = user::Entity::find()
-        .filter(user::Column::Username.eq("admin"))
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap();
 
-    let library_exists = library::Entity::find_by_id(1)
-        .one(&db)
+    // Get admin user ID using raw query to avoid totp_secret column issue
+    let admin_user_id: Option<i32> = match db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT id FROM users WHERE username = 'admin' LIMIT 1".to_string(),
+        ))
         .await
-        .unwrap_or(None);
-    if library_exists.is_none() {
-        tracing::info!("Default library not found, creating...");
-        let new_library = library::ActiveModel {
-            id: Set(1),
-            name: Set(req.library_name.clone()),
-            description: Set(req.library_description.clone()),
-            owner_id: Set(admin_user.id),
-            created_at: Set(now.to_rfc3339()),
-            updated_at: Set(now.to_rfc3339()),
-        };
-        if let Err(e) = new_library.insert(&db).await {
-            tracing::error!("Failed to create default library: {}", e);
-        } else {
-            tracing::info!("Default library created successfully");
+    {
+        Ok(Some(row)) => row.try_get_by_index::<i32>(0).ok(),
+        _ => None,
+    };
+
+    let admin_id = match admin_user_id {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(SetupResponse {
+                    success: false,
+                    message: "Admin user not found after creation".to_string(),
+                }),
+            )
+                .into_response();
         }
+    };
+
+    let new_library = library::ActiveModel {
+        id: Set(1),
+        name: Set(req.library_name.clone()),
+        description: Set(req.library_description.clone()),
+        owner_id: Set(admin_id),
+        created_at: Set(now.to_rfc3339()),
+        updated_at: Set(now.to_rfc3339()),
+    };
+
+    if let Err(e) = library::Entity::insert(new_library)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::column(library::Column::Id)
+                .update_columns([
+                    library::Column::Name,
+                    library::Column::Description,
+                    library::Column::UpdatedAt,
+                ])
+                .to_owned(),
+        )
+        .exec(&db)
+        .await
+    {
+        tracing::error!("Failed to create default library: {}", e);
+    } else {
+        tracing::info!("Default library created/updated successfully");
     }
 
     (

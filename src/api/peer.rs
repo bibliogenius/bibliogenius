@@ -37,18 +37,8 @@ fn validate_url(url_str: &str) -> Result<String, String> {
             if ip.is_loopback() {
                 return Err("Loopback addresses blocked".to_string());
             }
-            // Check for Link-Local (IPv4 169.254.x.x)
-            if let IpAddr::V4(ipv4) = ip {
-                if ipv4.is_link_local() {
-                    return Err("Link-local addresses blocked".to_string());
-                }
-            }
-            // IPv6 Link-Local (fe80::/10) - Rust's is_unicast_link_local() covers this
-            if let IpAddr::V6(ipv6) = ip {
-                if (ipv6.segments()[0] & 0xffc0) == 0xfe80 {
-                    return Err("Link-local addresses blocked".to_string());
-                }
-            }
+            // Note: Link-local addresses (169.254.x.x, fe80::/10) are ALLOWED
+            // for local network P2P communication between devices on same network
         }
     }
 
@@ -1394,6 +1384,51 @@ pub async fn update_request_status(
         let mut active_copy: copy::ActiveModel = copy.into();
         active_copy.status = Set("loaned".to_string());
         let _ = active_copy.update(&db).await;
+
+        // 5. Notify borrower that loan was accepted
+        let peer_url = peer.url.clone();
+        let book_isbn = book.isbn.clone();
+        let book_title = book.title.clone();
+        let book_cover = book.cover_url.clone();
+        let due_date = (chrono::Utc::now() + chrono::Duration::days(14))
+            .format("%Y-%m-%d")
+            .to_string();
+
+        // Get library name for lender identification
+        let lender_name = match crate::models::library::Entity::find_by_id(1).one(&db).await {
+            Ok(Some(lib)) => lib.name,
+            _ => "Unknown Library".to_string(),
+        };
+
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let confirm_result = client
+                .post(format!("{}/api/peers/loans/confirm", peer_url))
+                .json(&serde_json::json!({
+                    "isbn": book_isbn,
+                    "title": book_title,
+                    "author": Option::<String>::None, // TODO: fetch from relation
+                    "cover_url": book_cover,
+                    "lender_name": lender_name,
+                    "due_date": due_date,
+                }))
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await;
+
+            match confirm_result {
+                Ok(resp) => {
+                    tracing::info!(
+                        "📤 Loan confirmation sent to {}: {}",
+                        peer_url,
+                        resp.status()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ Failed to send loan confirmation to {}: {}", peer_url, e);
+                }
+            }
+        });
     } else if new_status == "returned" && req.status == "accepted" {
         // Handle Return
         // Find the loan associated with this peer (contact) and book
@@ -1740,5 +1775,132 @@ pub async fn create_outgoing_request(
             Json(json!({ "error": format!("Failed to save outgoing request: {}", e) })),
         )
             .into_response(),
+    }
+}
+
+// ============ P2P LOAN CONFIRMATION ============
+
+#[derive(Debug, Deserialize)]
+pub struct LoanConfirmation {
+    pub isbn: Option<String>,
+    pub title: String,
+    pub author: Option<String>,
+    pub cover_url: Option<String>,
+    pub lender_name: String,
+    pub due_date: String,
+}
+
+/// Receive loan confirmation from lender
+/// Creates the book (if not exists) and a borrowed copy in the borrower's library
+pub async fn receive_loan_confirmation(
+    State(db): State<DatabaseConnection>,
+    Json(payload): Json<LoanConfirmation>,
+) -> impl IntoResponse {
+    use crate::models::{book, copy};
+    use chrono::Utc;
+
+    tracing::info!(
+        "📚 Received loan confirmation: '{}' from {}",
+        payload.title,
+        payload.lender_name
+    );
+
+    // 1. Find or create book
+    let existing_book = if let Some(ref isbn) = payload.isbn {
+        book::Entity::find()
+            .filter(book::Column::Isbn.eq(isbn))
+            .one(&db)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        book::Entity::find()
+            .filter(book::Column::Title.eq(&payload.title))
+            .one(&db)
+            .await
+            .ok()
+            .flatten()
+    };
+
+    let book_id = match existing_book {
+        Some(b) => {
+            tracing::info!("Book already exists: id={}", b.id);
+            b.id
+        }
+        None => {
+            // Create new book
+            let now = Utc::now().to_rfc3339();
+            // Note: author is a relation, not a direct field on books table
+            // Store author info in summary for now
+            let summary_text = payload.author.clone().map(|a| format!("Auteur: {}", a));
+            let new_book = book::ActiveModel {
+                title: Set(payload.title.clone()),
+                isbn: Set(payload.isbn.clone()),
+                summary: Set(summary_text),
+                cover_url: Set(payload.cover_url.clone()),
+                owned: Set(false), // It's a borrowed book, not owned
+                created_at: Set(now.clone()),
+                updated_at: Set(now),
+                ..Default::default()
+            };
+
+            match new_book.insert(&db).await {
+                Ok(b) => {
+                    tracing::info!("Created new book: id={}", b.id);
+                    b.id
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create book: {}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("Failed to create book: {}", e) })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+
+    // 2. Create borrowed copy
+    let now = Utc::now().to_rfc3339();
+    let new_copy = copy::ActiveModel {
+        book_id: Set(book_id),
+        library_id: Set(1), // Default library
+        status: Set("borrowed".to_string()),
+        is_temporary: Set(true),
+        notes: Set(Some(format!(
+            "Emprunté de {} jusqu'au {}",
+            payload.lender_name, payload.due_date
+        ))),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+
+    match new_copy.insert(&db).await {
+        Ok(c) => {
+            tracing::info!(
+                "✅ Created borrowed copy: id={} for book_id={}",
+                c.id,
+                book_id
+            );
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "message": "Loan confirmed",
+                    "book_id": book_id,
+                    "copy_id": c.id
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to create borrowed copy: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Failed to create copy: {}", e) })),
+            )
+                .into_response()
+        }
     }
 }

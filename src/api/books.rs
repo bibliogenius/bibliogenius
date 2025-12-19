@@ -173,6 +173,13 @@ pub async fn create_book(
         .as_ref()
         .map(|s| serde_json::to_string(s).unwrap_or_else(|_| "[]".to_string()));
 
+    // Determine owned status: false for 'wanting', true otherwise
+    let reading_status = book
+        .reading_status
+        .clone()
+        .unwrap_or_else(|| "to_read".to_string());
+    let owned = book.owned.unwrap_or_else(|| reading_status != "wanting");
+
     let new_book = ActiveModel {
         title: Set(book.title.clone()),
         isbn: Set(book.isbn),
@@ -185,9 +192,10 @@ pub async fn create_book(
         marc_record: Set(book.marc_record),
         cataloguing_notes: Set(book.cataloguing_notes),
         source_data: Set(book.source_data),
-        reading_status: Set(book.reading_status.unwrap_or_else(|| "to_read".to_string())),
+        reading_status: Set(reading_status),
         started_reading_at: Set(book.started_reading_at.flatten()),
         finished_reading_at: Set(book.finished_reading_at.flatten()),
+        owned: Set(owned),
         created_at: Set(now.to_rfc3339()),
         updated_at: Set(now.to_rfc3339()),
         ..Default::default()
@@ -252,17 +260,19 @@ pub async fn create_book(
             )
             .await;
 
-            // Create default copy
-            let copy = crate::models::copy::ActiveModel {
-                book_id: Set(model.id),
-                library_id: Set(1), // Default library ID
-                status: Set("available".to_string()),
-                is_temporary: Set(false),
-                created_at: Set(now.to_rfc3339()),
-                updated_at: Set(now.to_rfc3339()),
-                ..Default::default()
-            };
-            let _ = copy.insert(&db).await;
+            // Create default copy only if owned
+            if model.owned {
+                let copy = crate::models::copy::ActiveModel {
+                    book_id: Set(model.id),
+                    library_id: Set(1), // Default library ID
+                    status: Set("available".to_string()),
+                    is_temporary: Set(false),
+                    created_at: Set(now.to_rfc3339()),
+                    updated_at: Set(now.to_rfc3339()),
+                    ..Default::default()
+                };
+                let _ = copy.insert(&db).await;
+            }
 
             (
                 StatusCode::CREATED,
@@ -388,17 +398,62 @@ pub async fn update_book(
         book.user_rating = Set(Some(rating));
     }
 
+    // Handle owned field - track if we need to create/delete copies
+    let old_owned = match &book.owned {
+        sea_orm::ActiveValue::Unchanged(v) => *v,
+        sea_orm::ActiveValue::Set(v) => *v,
+        _ => true,
+    };
+    let new_owned = book_data.owned.unwrap_or(old_owned);
+    if new_owned != old_owned {
+        book.owned = Set(new_owned);
+    }
+
     book.updated_at = Set(now.to_rfc3339());
 
     match book.update(&db).await {
-        Ok(model) => (
-            StatusCode::OK,
-            Json(json!({
-                "message": "Book updated successfully",
-                "book": Book::from(model)
-            })),
-        )
-            .into_response(),
+        Ok(model) => {
+            // Handle owned change: create or delete copies
+            if new_owned != old_owned {
+                use crate::models::copy::{self as copy_model, Entity as CopyEntity};
+                use sea_orm::{ColumnTrait, QueryFilter};
+
+                if new_owned {
+                    // owned: false -> true: create a copy if none exists
+                    let existing = CopyEntity::find()
+                        .filter(copy_model::Column::BookId.eq(id))
+                        .one(&db)
+                        .await;
+                    if matches!(existing, Ok(None)) {
+                        let copy = copy_model::ActiveModel {
+                            book_id: Set(id),
+                            library_id: Set(1),
+                            status: Set("available".to_string()),
+                            is_temporary: Set(false),
+                            created_at: Set(now.to_rfc3339()),
+                            updated_at: Set(now.to_rfc3339()),
+                            ..Default::default()
+                        };
+                        let _ = copy.insert(&db).await;
+                    }
+                } else {
+                    // owned: true -> false: delete all copies for this book
+                    let _ = CopyEntity::delete_many()
+                        .filter(copy_model::Column::BookId.eq(id))
+                        .exec(&db)
+                        .await;
+                }
+            }
+
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "message": "Book updated successfully",
+                    "book": Book::from(model)
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),

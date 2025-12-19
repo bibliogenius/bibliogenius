@@ -89,6 +89,10 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/peers/requests", get(peer::list_requests)) // List incoming requests
         .route("/peers/requests/incoming", post(peer::receive_loan_request)) // Receive incoming P2P loan request
         .route(
+            "/peers/loans/confirm",
+            post(peer::receive_loan_confirmation),
+        ) // Receive loan confirmation from lender
+        .route(
             "/peers/requests/outgoing",
             get(peer::list_outgoing_requests).post(peer::create_outgoing_request),
         ) // List/Create outgoing requests

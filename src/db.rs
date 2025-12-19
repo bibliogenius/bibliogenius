@@ -691,5 +691,36 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 023: Add owned field to books (controls automatic copy creation)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE books ADD COLUMN owned INTEGER NOT NULL DEFAULT 1".to_owned(),
+        ))
+        .await;
+
+    // Set owned=0 for books with reading_status='wanting' (wishlist items)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "UPDATE books SET owned = 0 WHERE reading_status = 'wanting'".to_owned(),
+        ))
+        .await;
+
+    // Backfill: Create copies for books that have owned=1 but no copy
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"
+            INSERT INTO copies (book_id, library_id, status, is_temporary, created_at, updated_at)
+            SELECT b.id, 1, 'available', 0, datetime('now'), datetime('now')
+            FROM books b
+            LEFT JOIN copies c ON c.book_id = b.id
+            WHERE c.id IS NULL AND b.owned = 1
+            "#
+            .to_owned(),
+        ))
+        .await;
+
     Ok(())
 }

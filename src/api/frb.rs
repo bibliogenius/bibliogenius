@@ -84,6 +84,7 @@ pub struct FrbBook {
     pub updated_at: Option<String>,
     pub finished_reading_at: Option<String>,
     pub started_reading_at: Option<String>,
+    pub owned: bool, // Added for copy management
 }
 
 /// Convert domain Book to FFI-safe FrbBook
@@ -109,6 +110,7 @@ impl From<crate::models::Book> for FrbBook {
             updated_at: None, // Not available in Book DTO
             finished_reading_at: book.finished_reading_at.flatten(),
             started_reading_at: book.started_reading_at.flatten(),
+            owned: book.owned.unwrap_or(true), // Default to owned if None (legacy/missing)
         }
     }
 }
@@ -322,6 +324,7 @@ impl From<FrbBook> for crate::models::Book {
             finished_reading_at: frb_book.finished_reading_at.map(Some),
             started_reading_at: frb_book.started_reading_at.map(Some),
             source: None,
+            owned: Some(frb_book.owned),
         }
     }
 }
