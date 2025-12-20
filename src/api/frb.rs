@@ -527,6 +527,15 @@ pub async fn update_contact(contact: FrbContact) -> Result<FrbContact, String> {
     }
 }
 
+/// Delete a contact by ID (soft delete)
+pub async fn delete_contact(id: i32) -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+    match crate::services::contact_service::delete_contact(db, id).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("{:?}", e)),
+    }
+}
+
 // ============ Loans API ============
 
 /// Simplified loan structure for FFI
