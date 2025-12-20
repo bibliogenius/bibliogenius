@@ -146,6 +146,7 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
+            totp_secret TEXT,
             role TEXT NOT NULL DEFAULT 'user',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -154,6 +155,14 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         .to_owned(),
     ))
     .await?;
+
+    // Migration: Add totp_secret column if missing (for existing databases)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE users ADD COLUMN totp_secret TEXT".to_owned(),
+        ))
+        .await;
 
     // Create authors table
     db.execute(Statement::from_string(

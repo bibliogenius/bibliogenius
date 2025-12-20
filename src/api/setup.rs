@@ -13,6 +13,8 @@ pub struct SetupRequest {
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
     pub share_location: Option<bool>,
+    pub admin_username: Option<String>,
+    pub admin_password: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,11 +110,24 @@ pub async fn setup(
     use crate::models::user;
     use sea_orm::ConnectionTrait;
 
-    // Check if admin exists using raw query
+    // Get username and password from request, with defaults for backward compatibility
+    let admin_username = req
+        .admin_username
+        .clone()
+        .unwrap_or_else(|| "admin".to_string());
+    let admin_password = req
+        .admin_password
+        .clone()
+        .unwrap_or_else(|| "admin".to_string());
+
+    // Check if user with this username already exists
     let admin_exists = match db
         .query_one(sea_orm::Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
-            "SELECT COUNT(*) FROM users WHERE username = 'admin'".to_string(),
+            format!(
+                "SELECT COUNT(*) FROM users WHERE username = '{}'",
+                admin_username
+            ),
         ))
         .await
     {
@@ -121,10 +136,10 @@ pub async fn setup(
     };
 
     if !admin_exists {
-        tracing::info!("Admin user not found, creating...");
-        let password_hash = hash_password("admin").unwrap();
+        tracing::info!("Admin user '{}' not found, creating...", admin_username);
+        let password_hash = hash_password(&admin_password).unwrap();
         let admin = user::ActiveModel {
-            username: Set("admin".to_string()),
+            username: Set(admin_username.clone()),
             password_hash: Set(password_hash),
             role: Set("admin".to_string()),
             created_at: Set(now.to_rfc3339()),
@@ -143,9 +158,9 @@ pub async fn setup(
             )
                 .into_response();
         }
-        tracing::info!("Admin user created successfully");
+        tracing::info!("Admin user '{}' created successfully", admin_username);
     } else {
-        tracing::info!("Admin user already exists");
+        tracing::info!("Admin user '{}' already exists", admin_username);
     }
 
     // Create default library using on_conflict (Required for copies)
@@ -155,7 +170,10 @@ pub async fn setup(
     let admin_user_id: Option<i32> = match db
         .query_one(sea_orm::Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
-            "SELECT id FROM users WHERE username = 'admin' LIMIT 1".to_string(),
+            format!(
+                "SELECT id FROM users WHERE username = '{}' LIMIT 1",
+                admin_username
+            ),
         ))
         .await
     {
