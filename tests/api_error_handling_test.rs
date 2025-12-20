@@ -5,7 +5,7 @@ use axum::{
 };
 use bibliogenius::api;
 use bibliogenius::db;
-use sea_orm::{DatabaseConnection, Set};
+use sea_orm::DatabaseConnection;
 use tower::util::ServiceExt; // for `oneshot`
 
 // Helper to create a test database

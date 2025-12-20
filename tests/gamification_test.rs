@@ -4,9 +4,9 @@
 use bibliogenius::db;
 use bibliogenius::models::{
     book, gamification_achievements, gamification_config, gamification_progress,
-    gamification_streaks, loan, user,
+    gamification_streaks, user,
 };
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+use sea_orm::{DatabaseConnection, EntityTrait, Set};
 
 // Helper to create a test database
 async fn setup_test_db() -> DatabaseConnection {
@@ -55,10 +55,10 @@ async fn create_test_books(db: &DatabaseConnection, count: usize, reading_status
 #[tokio::test]
 async fn test_gamification_tables_created() {
     let db = setup_test_db().await;
-    let user_id = create_test_admin(&db).await;
+    let _user_id = create_test_admin(&db).await;
 
     // Verify gamification tables exist by querying them
-    let config = gamification_config::Entity::find()
+    let _config = gamification_config::Entity::find()
         .one(&db)
         .await
         .expect("Failed to query gamification_config");
@@ -66,17 +66,17 @@ async fn test_gamification_tables_created() {
     // Config may or may not exist depending on migration behavior
     // The important thing is that the query doesn't fail (table exists)
 
-    let progress = gamification_progress::Entity::find()
+    let _progress = gamification_progress::Entity::find()
         .one(&db)
         .await
         .expect("Failed to query gamification_progress");
 
-    let achievements = gamification_achievements::Entity::find()
+    let _achievements = gamification_achievements::Entity::find()
         .one(&db)
         .await
         .expect("Failed to query gamification_achievements");
 
-    let streaks = gamification_streaks::Entity::find()
+    let _streaks = gamification_streaks::Entity::find()
         .one(&db)
         .await
         .expect("Failed to query gamification_streaks");

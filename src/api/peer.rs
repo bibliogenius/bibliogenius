@@ -31,7 +31,7 @@ fn validate_url(url_str: &str) -> Result<String, String> {
         if host_str == "localhost" { /* return Err("Localhost access is blocked".to_string()); */ }
 
         // Check if it's an IP address
-        if let Ok(ip) = host_str.parse::<IpAddr>() {
+        if let Ok(_ip) = host_str.parse::<IpAddr>() {
             /* if ip.is_loopback() {
                 return Err("Loopback addresses blocked".to_string());
             } */

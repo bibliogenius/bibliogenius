@@ -1,6 +1,6 @@
 use crate::models::{installation_profile, library_config};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 

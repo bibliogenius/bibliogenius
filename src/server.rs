@@ -5,7 +5,6 @@ use axum::Router;
 use sea_orm::DatabaseConnection;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::api;

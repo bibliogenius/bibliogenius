@@ -1,4 +1,3 @@
-use bibliogenius::api;
 use bibliogenius::db;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
@@ -348,7 +347,7 @@ async fn test_cannot_accept_request_without_available_copy() {
 
     // Setup: Create book WITHOUT a copy
     let admin_id = create_test_admin(&db).await;
-    let library_id = create_test_library(&db, admin_id, "Main Library").await;
+    let _library_id = create_test_library(&db, admin_id, "Main Library").await;
     let book_id = create_test_book(&db, "Test Book", "123456789").await;
 
     // Create a peer and request
@@ -459,7 +458,7 @@ async fn test_copy_creation_requires_valid_library() {
     let db = setup_test_db().await;
 
     let admin_id = create_test_admin(&db).await;
-    let library_id = create_test_library(&db, admin_id, "Main Library").await;
+    let _library_id = create_test_library(&db, admin_id, "Main Library").await;
     let book_id = create_test_book(&db, "Test Book", "123").await;
 
     // Try to create copy with INVALID library_id (foreign key violation)
