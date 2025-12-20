@@ -273,7 +273,8 @@ pub async fn search_unified(Query(params): Query<UnifiedSearchQuery>) -> impl In
             };
 
             for item in enriched {
-                let author_name = item.authors.as_ref().map(|a| a.join(", "));
+                let authors = item.authors.clone();
+                let author_name = authors.as_ref().map(|a| a.join(", "));
 
                 let book = book::Book {
                     id: None,
@@ -299,6 +300,7 @@ pub async fn search_unified(Query(params): Query<UnifiedSearchQuery>) -> impl In
                     reading_status: Some("to_read".to_string()),
                     source: Some("Inventaire".to_string()),
                     author: author_name,
+                    authors,
                     cover_url: item.image,
                     large_cover_url: None,
                     finished_reading_at: None,

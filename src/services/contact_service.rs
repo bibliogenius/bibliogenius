@@ -75,7 +75,8 @@ pub async fn list_contacts(
     db: &DatabaseConnection,
     filter: ContactFilter,
 ) -> Result<Vec<ContactDto>, ServiceError> {
-    let mut query = Contact::find();
+    // Start with only active contacts
+    let mut query = Contact::find().filter(contact_model::Column::IsActive.eq(true));
 
     if let Some(library_id) = filter.library_id {
         query = query.filter(contact_model::Column::LibraryOwnerId.eq(library_id));

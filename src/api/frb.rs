@@ -317,7 +317,8 @@ impl From<FrbBook> for crate::models::Book {
             reading_status: frb_book.reading_status,
             user_rating: frb_book.user_rating,
             shelf_position: frb_book.shelf_position,
-            author: frb_book.author,
+            author: frb_book.author.clone(),
+            authors: frb_book.author.map(|a| vec![a]), // Convert single author to array
             cover_url: frb_book.cover_url,
             large_cover_url: frb_book.large_cover_url,
             // Default other fields
@@ -523,6 +524,15 @@ pub async fn update_contact(contact: FrbContact) -> Result<FrbContact, String> {
 
     match crate::services::contact_service::update_contact(db, dto).await {
         Ok(updated) => Ok(FrbContact::from(updated)),
+        Err(e) => Err(format!("{:?}", e)),
+    }
+}
+
+/// Delete a contact by ID
+pub async fn delete_contact(id: i32) -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+    match crate::services::contact_service::delete_contact(db, id).await {
+        Ok(_) => Ok(()),
         Err(e) => Err(format!("{:?}", e)),
     }
 }

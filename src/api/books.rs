@@ -15,6 +15,10 @@ pub struct BookFilter {
     pub author: Option<String>,
     pub title: Option<String>,
     pub tag: Option<String>,
+    pub q: Option<String>,
+    pub sort: Option<String>,
+    pub page: Option<u64>,
+    pub limit: Option<u64>,
 }
 
 #[utoipa::path(
@@ -24,7 +28,11 @@ pub struct BookFilter {
         ("status" = Option<String>, Query, description = "Reading status"),
         ("author" = Option<String>, Query, description = "Filter by author name"),
         ("title" = Option<String>, Query, description = "Filter by title"),
-        ("tag" = Option<String>, Query, description = "Filter by subject/tag")
+        ("tag" = Option<String>, Query, description = "Filter by subject/tag"),
+        ("q" = Option<String>, Query, description = "Unified search (Title, ISBN, Subjects)"),
+        ("sort" = Option<String>, Query, description = "Sort by: author_asc, title_asc"),
+        ("page" = Option<u64>, Query, description = "Page number (0-indexed)"),
+        ("limit" = Option<u64>, Query, description = "Items per page")
     ),
     responses(
         (status = 200, description = "List all books")
@@ -34,7 +42,7 @@ pub async fn list_books(
     State(db): State<DatabaseConnection>,
     axum::extract::Query(filter): axum::extract::Query<BookFilter>,
 ) -> Result<Json<Value>, StatusCode> {
-    use sea_orm::{ColumnTrait, ModelTrait, QueryFilter, QueryOrder};
+    use sea_orm::{ColumnTrait, Condition, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder};
 
     tracing::info!(
         "List books request - Filters: status={:?}, title={:?}, tag={:?}",
@@ -58,21 +66,65 @@ pub async fn list_books(
     }
 
     // Tag filter (searching in JSON subjects array via simple text match for compatibility)
-    if let Some(tag) = &filter.tag {
-        if !tag.is_empty() {
-            query = query.filter(crate::models::book::Column::Subjects.contains(tag));
+    if let Some(tag_query) = &filter.tag {
+        if !tag_query.is_empty() {
+            query = query.filter(crate::models::book::Column::Subjects.contains(tag_query));
+        }
+    }
+
+    if let Some(q) = &filter.q {
+        if !q.is_empty() {
+            let cond = Condition::any()
+                .add(crate::models::book::Column::Title.contains(q))
+                .add(crate::models::book::Column::Isbn.contains(q))
+                .add(crate::models::book::Column::Subjects.contains(q));
+            query = query.filter(cond);
         }
     }
 
     // ... (existing code, ensure imports are correct or just use crate::models::book::Column etc)
 
-    let books = query
-        .order_by_asc(crate::models::book::Column::ShelfPosition)
-        .all(&db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // --- SORTING (Database Level) ---
+    match filter.sort.as_deref() {
+        Some("title_asc") => {
+            query = query.order_by_asc(crate::models::book::Column::Title);
+        }
+        Some("title_desc") => {
+            query = query.order_by_desc(crate::models::book::Column::Title);
+        }
+        Some("recent") => {
+            query = query.order_by_desc(crate::models::book::Column::CreatedAt);
+        }
+        // "author_asc" is hard to do at DB level without joins.
+        // For now, if author sorting is requested with pagination,
+        // we might NOT sort by author correctly across pages (it will sort by ID/Shelf then paginate).
+        // Improvements: Implement join-based sort or complex query.
+        _ => {
+            query = query.order_by_asc(crate::models::book::Column::ShelfPosition);
+        }
+    }
 
-    tracing::info!("DB query returned {} books before filtering", books.len());
+    // --- PAGINATION & FETCHING ---
+    let (books, total_count) = if let Some(limit) = filter.limit {
+        let page = filter.page.unwrap_or(0);
+        let paginator = query.paginate(&db, limit);
+        let total = paginator.num_items().await.unwrap_or(0);
+        let items = paginator.fetch_page(page).await.unwrap_or(vec![]);
+        (items, total)
+    } else {
+        let items = query
+            .all(&db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let total = items.len() as u64;
+        (items, total)
+    };
+
+    tracing::info!(
+        "DB query returned {} books (Total: {})",
+        books.len(),
+        total_count
+    );
 
     let mut book_dtos = Vec::new();
 
@@ -86,13 +138,9 @@ pub async fn list_books(
             .await
         {
             if !authors.is_empty() {
-                book_dto.author = Some(
-                    authors
-                        .into_iter()
-                        .map(|a| a.name)
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                );
+                let author_names: Vec<String> = authors.into_iter().map(|a| a.name).collect();
+                book_dto.author = Some(author_names.join(", ")); // Backward compat
+                book_dto.authors = Some(author_names); // New array field
             }
         }
 
@@ -104,53 +152,38 @@ pub async fn list_books(
             ));
         }
 
-        // DEFENSIVE: Apply status filter in-memory as safety net
-        if let Some(status_filter) = &filter.status {
-            if !status_filter.is_empty() {
-                if let Some(book_status) = &book_dto.reading_status {
-                    if book_status != status_filter {
-                        tracing::debug!(
-                            "Filtering out book '{}' - status '{}' != '{}'",
-                            book_dto.title,
-                            book_status,
-                            status_filter
-                        );
-                        continue;
-                    }
-                } else {
-                    tracing::debug!("Filtering out book '{}' - no status", book_dto.title);
-                    continue;
-                }
-            }
-        }
-
-        // Apply author filter in-memory (simplified for now)
-        if let Some(author_query) = &filter.author {
-            if !author_query.is_empty() {
-                if let Some(authors) = &book_dto.author {
-                    if !authors
-                        .to_lowercase()
-                        .contains(&author_query.to_lowercase())
-                    {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
-        }
+        // Note: We skip the "DEFENSIVE" in-memory filtering here for performance.
+        // We rely on DB filters. If DB filters are correct, we don't need double-check.
+        // Also, pagination makes in-memory filtering impossible (as we only have a slice).
 
         book_dtos.push(book_dto);
     }
 
-    tracing::info!(
-        "Returning {} books after all filters applied",
-        book_dtos.len()
-    );
+    // Apply in-memory sorting ONLY if we fetched everything (no limit) OR if it's a sort we couldn't do in DB?
+    // Actually, if we paginate, we CANNOT sort in memory.
+    // So for "author_asc", if paginated, it will just be "unsorted" (or shelf/ID sorted).
+    // The user must accept this limitation for now or we implement complex DB sort later.
+    // However, if NO LIMIT is provided (Local Library), we can still do in-memory sort to support 'author_asc'.
+
+    if filter.limit.is_none() {
+        if let Some(sort_order) = &filter.sort {
+            if sort_order == "author_asc" {
+                book_dtos.sort_by(|a, b| {
+                    let author_a = a.author.as_deref().unwrap_or("").to_lowercase();
+                    let author_b = b.author.as_deref().unwrap_or("").to_lowercase();
+                    if author_a == author_b {
+                        a.title.to_lowercase().cmp(&b.title.to_lowercase())
+                    } else {
+                        author_a.cmp(&author_b)
+                    }
+                });
+            }
+        }
+    }
 
     Ok(Json(json!({
         "books": book_dtos,
-        "total": book_dtos.len()
+        "total": total_count
     })))
 }
 
@@ -203,51 +236,60 @@ pub async fn create_book(
 
     match new_book.insert(&db).await {
         Ok(model) => {
-            // Handle author if provided
-            if let Some(author_name) = book.author {
+            // Handle authors - support both single author and authors array
+            // Preference: use authors array if provided, fall back to single author
+            let author_names: Vec<String> = if let Some(ref authors) = book.authors {
+                authors.clone()
+            } else if let Some(ref author) = book.author {
+                // Split comma-separated for backward compat
+                author
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            if !author_names.is_empty() {
                 use crate::models::author::{ActiveModel as AuthorActive, Entity as AuthorEntity};
                 use crate::models::book_authors::ActiveModel as BookAuthorActive;
                 use sea_orm::{ColumnTrait, QueryFilter};
 
-                // Find or create author
-                let author = match AuthorEntity::find()
-                    .filter(crate::models::author::Column::Name.eq(&author_name))
-                    .one(&db)
-                    .await
-                {
-                    Ok(Some(existing)) => existing,
-                    _ => {
-                        // Create new author
-                        let new_author = AuthorActive {
-                            name: Set(author_name),
-                            created_at: Set(now.to_rfc3339()),
-                            updated_at: Set(now.to_rfc3339()),
-                            ..Default::default()
-                        };
-                        match new_author.insert(&db).await {
-                            Ok(created) => created,
-                            Err(_) => {
-                                // If author creation fails, continue without author
-                                return (
-                                    StatusCode::CREATED,
-                                    Json(json!({
-                                        "message": "Book created successfully (author failed)",
-                                        "book": Book::from(model)
-                                    })),
-                                )
-                                    .into_response();
+                for author_name in author_names {
+                    // Find or create author
+                    let author = match AuthorEntity::find()
+                        .filter(crate::models::author::Column::Name.eq(&author_name))
+                        .one(&db)
+                        .await
+                    {
+                        Ok(Some(existing)) => existing,
+                        _ => {
+                            // Create new author
+                            let new_author = AuthorActive {
+                                name: Set(author_name),
+                                created_at: Set(now.to_rfc3339()),
+                                updated_at: Set(now.to_rfc3339()),
+                                ..Default::default()
+                            };
+                            match new_author.insert(&db).await {
+                                Ok(created) => created,
+                                Err(e) => {
+                                    tracing::warn!("Failed to create author: {}", e);
+                                    continue; // Skip this author but continue with others
+                                }
                             }
                         }
-                    }
-                };
+                    };
 
-                // Create book-author relation
-                let book_author = BookAuthorActive {
-                    book_id: Set(model.id),
-                    author_id: Set(author.id),
-                    ..Default::default()
-                };
-                let _ = book_author.insert(&db).await;
+                    // Create book-author relation
+                    let book_author = BookAuthorActive {
+                        book_id: Set(model.id),
+                        author_id: Set(author.id),
+                        ..Default::default()
+                    };
+                    let _ = book_author.insert(&db).await;
+                }
             }
 
             // Log operation
@@ -539,13 +581,9 @@ pub async fn get_book(
                 .await
             {
                 if !authors.is_empty() {
-                    book_dto.author = Some(
-                        authors
-                            .into_iter()
-                            .map(|a| a.name)
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    );
+                    let author_names: Vec<String> = authors.into_iter().map(|a| a.name).collect();
+                    book_dto.author = Some(author_names.join(", ")); // Backward compat
+                    book_dto.authors = Some(author_names); // New array field
                 }
             }
 

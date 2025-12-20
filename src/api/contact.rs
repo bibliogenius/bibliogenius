@@ -52,7 +52,8 @@ pub async fn list_contacts(
     State(db): State<DatabaseConnection>,
     Query(params): Query<ContactsQuery>,
 ) -> impl IntoResponse {
-    let mut query = Contact::find();
+    // Start with only active contacts
+    let mut query = Contact::find().filter(contact_model::Column::IsActive.eq(true));
 
     if let Some(library_id) = params.library_id {
         query = query.filter(contact_model::Column::LibraryOwnerId.eq(library_id));

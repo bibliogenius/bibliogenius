@@ -103,6 +103,8 @@ pub struct Book {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub authors: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cover_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub large_cover_url: Option<String>,
@@ -136,7 +138,8 @@ impl From<Model> for Book {
             finished_reading_at: Some(model.finished_reading_at),
             started_reading_at: Some(model.started_reading_at),
             source: Some("Local".to_string()),
-            author: None,               // TODO: Fetch from relation
+            author: None,               // Populated by API handlers
+            authors: None,              // Populated by API handlers
             cover_url: model.cover_url, // Use stored cover_url
             large_cover_url: None,
             user_rating: model.user_rating,

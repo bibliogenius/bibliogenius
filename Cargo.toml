@@ -2,6 +2,9 @@
 name = "bibliogenius"
 version = "1.0.0-alpha.1"
 edition = "2021"
+ 
+ [lints.rust]
+ unexpected_cfgs = { level = "allow", check-cfg = ['cfg(frb_expand)'] }
 
 [lib]
 name = "bibliogenius"

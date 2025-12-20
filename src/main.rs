@@ -20,8 +20,8 @@ fn find_available_port(preferred_port: u16) -> Option<u16> {
 }
 
 /// Write the selected port to a file for the Flutter app to read
-fn write_port_file(port: u16) -> std::io::Result<()> {
-    let port_file = get_port_file_path();
+fn write_port_file(port: u16, profile: &str) -> std::io::Result<()> {
+    let port_file = get_port_file_path(profile);
 
     // Create parent directory if it doesn't exist
     if let Some(parent) = port_file.parent() {
@@ -32,7 +32,12 @@ fn write_port_file(port: u16) -> std::io::Result<()> {
 }
 
 /// Get the path to the port file
-fn get_port_file_path() -> PathBuf {
+fn get_port_file_path(profile: &str) -> PathBuf {
+    let filename = if profile == "default" {
+        "backend_port.txt".to_string()
+    } else {
+        format!("backend_port_{}.txt", profile)
+    };
     // On macOS: ~/Library/Caches/BiblioGenius/backend_port.txt
     // On Linux: ~/.cache/bibliogenius/backend_port.txt
     // On Windows: %LOCALAPPDATA%\BiblioGenius\backend_port.txt
@@ -44,7 +49,7 @@ fn get_port_file_path() -> PathBuf {
             .join("Library")
             .join("Caches")
             .join("BiblioGenius")
-            .join("backend_port.txt")
+            .join(filename)
     }
 
     #[cfg(target_os = "linux")]
@@ -53,15 +58,13 @@ fn get_port_file_path() -> PathBuf {
         PathBuf::from(home)
             .join(".cache")
             .join("bibliogenius")
-            .join("backend_port.txt")
+            .join(filename)
     }
 
     #[cfg(target_os = "windows")]
     {
         let appdata = std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA not set");
-        PathBuf::from(appdata)
-            .join("BiblioGenius")
-            .join("backend_port.txt")
+        PathBuf::from(appdata).join("BiblioGenius").join(filename)
     }
 }
 
@@ -78,6 +81,15 @@ async fn main() {
 
     // Load configuration
     dotenvy::dotenv().ok();
+
+    // Check for --profile CLI argument
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|arg| arg == "--profile") {
+        if let Some(val) = args.get(pos + 1) {
+            std::env::set_var("PROFILE", val);
+        }
+    }
+
     let config = config::Config::from_env();
 
     // Initialize database
@@ -150,10 +162,13 @@ async fn main() {
     }
 
     // Write port to file for Flutter app
-    if let Err(e) = write_port_file(port) {
+    if let Err(e) = write_port_file(port, &config.profile) {
         tracing::error!("Failed to write port file: {}", e);
     } else {
-        tracing::info!("Port file written: {:?}", get_port_file_path());
+        tracing::info!(
+            "Port file written: {:?}",
+            get_port_file_path(&config.profile)
+        );
     }
 
     // Initialize mDNS for local network discovery (if enabled)
