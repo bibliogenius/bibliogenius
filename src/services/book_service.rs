@@ -2,6 +2,7 @@
 //!
 //! This module contains all book-related operations extracted from Axum handlers.
 //! It can be called directly via FFI or through HTTP handlers.
+#![allow(clippy::needless_update)] // SeaORM ActiveModels require ..Default::default()
 
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter,

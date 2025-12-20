@@ -1,3 +1,4 @@
+#![allow(clippy::needless_update)] // SeaORM ActiveModels require ..Default::default()
 use crate::models::{operation_log, peer};
 use axum::{
     extract::{Json, Path, State},
