@@ -312,6 +312,9 @@ pub async fn update_book(
     if let Some(cover) = book_data.cover_url {
         book.cover_url = Set(Some(cover));
     }
+    if let Some(owned_value) = book_data.owned {
+        book.owned = Set(owned_value);
+    }
 
     book.updated_at = Set(now.to_rfc3339());
 
