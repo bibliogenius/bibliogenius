@@ -18,6 +18,9 @@ default = ["desktop", "mcp"]
 desktop = []
 mcp = []
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
+
 [dependencies]
 # Flutter Rust Bridge
 flutter_rust_bridge = "=2.11.1"
