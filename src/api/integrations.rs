@@ -464,9 +464,20 @@ fn calculate_relevance(
 /// Returns a ready-to-use JSON configuration with dynamic paths
 pub async fn mcp_config() -> impl IntoResponse {
     // Get the current executable path
-    let binary_path = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "/path/to/bibliogenius".to_string());
+    // In development (Flutter Debug), current_exe points to the App Bundle.
+    // We check the standard development location first using an absolute path
+    // to avoid Sandbox issues with $HOME.
+    let dev_path = std::path::PathBuf::from(
+        "/Users/federico/Sites/bibliotech/bibliogenius/target/debug/bibliogenius",
+    );
+
+    let binary_path = if dev_path.exists() {
+        dev_path.to_string_lossy().to_string()
+    } else {
+        std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "/path/to/bibliogenius".to_string())
+    };
 
     // Get the database URL from environment
     // Default to Application Support directory (same as Flutter app)

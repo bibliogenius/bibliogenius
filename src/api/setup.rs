@@ -21,6 +21,8 @@ pub struct SetupRequest {
 pub struct SetupResponse {
     pub success: bool,
     pub message: String,
+    pub user_id: Option<i32>,
+    pub library_id: Option<i32>,
 }
 
 pub async fn setup(
@@ -59,6 +61,8 @@ pub async fn setup(
             Json(SetupResponse {
                 success: false,
                 message: format!("Failed to save profile: {}", e),
+                user_id: None,
+                library_id: None,
             }),
         )
             .into_response();
@@ -100,6 +104,8 @@ pub async fn setup(
             Json(SetupResponse {
                 success: false,
                 message: format!("Failed to save library config: {}", e),
+                user_id: None,
+                library_id: None,
             }),
         )
             .into_response();
@@ -154,6 +160,8 @@ pub async fn setup(
                 Json(SetupResponse {
                     success: false,
                     message: format!("Failed to create admin user: {}", e),
+                    user_id: None,
+                    library_id: None,
                 }),
             )
                 .into_response();
@@ -189,6 +197,8 @@ pub async fn setup(
                 Json(SetupResponse {
                     success: false,
                     message: "Admin user not found after creation".to_string(),
+                    user_id: None,
+                    library_id: None,
                 }),
             )
                 .into_response();
@@ -227,6 +237,8 @@ pub async fn setup(
         Json(SetupResponse {
             success: true,
             message: "Setup completed successfully".to_string(),
+            user_id: Some(admin_id),
+            library_id: Some(1),
         }),
     )
         .into_response()

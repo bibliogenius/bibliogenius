@@ -115,48 +115,6 @@ impl From<crate::models::Book> for FrbBook {
     }
 }
 
-/// Simplified contact structure for FFI
-#[frb(dart_metadata=("freezed"))]
-pub struct FrbContact {
-    pub id: Option<i32>,
-    pub contact_type: String,
-    pub name: String,
-    pub first_name: Option<String>,
-    pub email: Option<String>,
-    pub phone: Option<String>,
-    pub address: Option<String>,
-    pub street_address: Option<String>,
-    pub postal_code: Option<String>,
-    pub city: Option<String>,
-    pub country: Option<String>,
-    pub latitude: Option<f64>,
-    pub longitude: Option<f64>,
-    pub notes: Option<String>,
-    pub is_active: bool,
-}
-
-impl From<crate::services::contact_service::ContactDto> for FrbContact {
-    fn from(c: crate::services::contact_service::ContactDto) -> Self {
-        FrbContact {
-            id: c.id,
-            contact_type: c.contact_type,
-            name: c.name,
-            first_name: c.first_name,
-            email: c.email,
-            phone: c.phone,
-            address: c.address,
-            street_address: c.street_address,
-            postal_code: c.postal_code,
-            city: c.city,
-            country: c.country,
-            latitude: c.latitude,
-            longitude: c.longitude,
-            notes: c.notes,
-            is_active: c.is_active,
-        }
-    }
-}
-
 // ============ Initialization ============
 
 /// Initialize the FFI backend with database at the given path
@@ -423,6 +381,75 @@ pub async fn get_all_tags() -> Result<Vec<(String, i64)>, String> {
     }
 }
 
+/// Simplified contact structure for FFI
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbContact {
+    pub id: Option<i32>,
+    pub contact_type: String,
+    pub name: String,
+    pub first_name: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub address: Option<String>,
+    pub street_address: Option<String>,
+    pub postal_code: Option<String>,
+    pub city: Option<String>,
+    pub country: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub notes: Option<String>,
+    pub user_id: Option<i32>,
+    pub library_owner_id: Option<i32>,
+    pub is_active: bool,
+}
+
+impl From<crate::services::contact_service::ContactDto> for FrbContact {
+    fn from(c: crate::services::contact_service::ContactDto) -> Self {
+        FrbContact {
+            id: c.id,
+            contact_type: c.contact_type,
+            name: c.name,
+            first_name: c.first_name,
+            email: c.email,
+            phone: c.phone,
+            address: c.address,
+            street_address: c.street_address,
+            postal_code: c.postal_code,
+            city: c.city,
+            country: c.country,
+            latitude: c.latitude,
+            longitude: c.longitude,
+            notes: c.notes,
+            user_id: c.user_id,
+            library_owner_id: c.library_owner_id,
+            is_active: c.is_active,
+        }
+    }
+}
+
+/// Reorder books by updating shelf positions
+pub async fn reorder_books(book_ids: Vec<i32>) -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+
+    // In a real app, this should be transactional.
+    // For now, we just iterate and update.
+    for (index, book_id) in book_ids.iter().enumerate() {
+        use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+        match crate::models::book::Entity::find_by_id(*book_id)
+            .one(db)
+            .await
+        {
+            Ok(Some(book)) => {
+                let mut active: crate::models::book::ActiveModel = book.into();
+                active.shelf_position = Set(Some(index as i32));
+                let _ = active.update(db).await;
+            }
+            _ => continue,
+        }
+    }
+    Ok(())
+}
+
 // ============ Contacts API ============
 
 /// Get all contacts with optional filters
@@ -486,8 +513,8 @@ pub async fn create_contact(contact: FrbContact) -> Result<FrbContact, String> {
         latitude: contact.latitude,
         longitude: contact.longitude,
         notes: contact.notes,
-        user_id: Some(1),          // Default user ID for FFI mode
-        library_owner_id: Some(1), // Default library ID for FFI mode
+        user_id: contact.user_id,
+        library_owner_id: contact.library_owner_id.or(Some(1)), // Fallback to 1 if not provided
         is_active: contact.is_active,
     };
 
@@ -517,8 +544,8 @@ pub async fn update_contact(contact: FrbContact) -> Result<FrbContact, String> {
         latitude: contact.latitude,
         longitude: contact.longitude,
         notes: contact.notes,
-        user_id: Some(1),          // Default user ID for FFI mode
-        library_owner_id: Some(1), // Default library ID for FFI mode
+        user_id: contact.user_id,
+        library_owner_id: contact.library_owner_id.or(Some(1)),
         is_active: contact.is_active,
     };
 
@@ -528,7 +555,7 @@ pub async fn update_contact(contact: FrbContact) -> Result<FrbContact, String> {
     }
 }
 
-/// Delete a contact by ID
+/// Delete a contact by ID (soft delete)
 pub async fn delete_contact(id: i32) -> Result<(), String> {
     let db = db().ok_or("Database not initialized")?;
     match crate::services::contact_service::delete_contact(db, id).await {

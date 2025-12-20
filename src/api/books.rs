@@ -1,3 +1,4 @@
+#![allow(clippy::needless_update)] // SeaORM ActiveModels require ..Default::default()
 use axum::{
     extract::{Json, State},
     http::StatusCode,

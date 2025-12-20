@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1500738578;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1589577116;
 
 // Section: executor
 
@@ -831,6 +831,42 @@ fn wire__crate__api__frb__is_mdns_available_impl(
         },
     )
 }
+fn wire__crate__api__frb__reorder_books_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "reorder_books",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_book_ids = <Vec<i32>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::reorder_books(api_book_ids).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__frb__reset_app_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1132,6 +1168,8 @@ impl SseDecode for crate::api::frb::FrbContact {
         let mut var_latitude = <Option<f64>>::sse_decode(deserializer);
         let mut var_longitude = <Option<f64>>::sse_decode(deserializer);
         let mut var_notes = <Option<String>>::sse_decode(deserializer);
+        let mut var_userId = <Option<i32>>::sse_decode(deserializer);
+        let mut var_libraryOwnerId = <Option<i32>>::sse_decode(deserializer);
         let mut var_isActive = <bool>::sse_decode(deserializer);
         return crate::api::frb::FrbContact {
             id: var_id,
@@ -1148,6 +1186,8 @@ impl SseDecode for crate::api::frb::FrbContact {
             latitude: var_latitude,
             longitude: var_longitude,
             notes: var_notes,
+            user_id: var_userId,
+            library_owner_id: var_libraryOwnerId,
             is_active: var_isActive,
         };
     }
@@ -1279,6 +1319,18 @@ impl SseDecode for Vec<crate::api::frb::FrbLoan> {
     }
 }
 
+impl SseDecode for Vec<i32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<i32>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1390,12 +1442,13 @@ fn pde_ffi_dispatcher_primary_impl(
         15 => wire__crate__api__frb__get_local_peers_ffi_impl(port, ptr, rust_vec_len, data_len),
         20 => wire__crate__api__frb__init_backend_impl(port, ptr, rust_vec_len, data_len),
         21 => wire__crate__api__frb__init_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__frb__reorder_books_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1469,6 +1522,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbContact {
             self.latitude.into_into_dart().into_dart(),
             self.longitude.into_into_dart().into_dart(),
             self.notes.into_into_dart().into_dart(),
+            self.user_id.into_into_dart().into_dart(),
+            self.library_owner_id.into_into_dart().into_dart(),
             self.is_active.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -1595,6 +1650,8 @@ impl SseEncode for crate::api::frb::FrbContact {
         <Option<f64>>::sse_encode(self.latitude, serializer);
         <Option<f64>>::sse_encode(self.longitude, serializer);
         <Option<String>>::sse_encode(self.notes, serializer);
+        <Option<i32>>::sse_encode(self.user_id, serializer);
+        <Option<i32>>::sse_encode(self.library_owner_id, serializer);
         <bool>::sse_encode(self.is_active, serializer);
     }
 }
@@ -1688,6 +1745,16 @@ impl SseEncode for Vec<crate::api::frb::FrbLoan> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::frb::FrbLoan>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<i32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <i32>::sse_encode(item, serializer);
         }
     }
 }
