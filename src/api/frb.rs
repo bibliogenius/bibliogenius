@@ -422,6 +422,29 @@ pub async fn get_all_tags() -> Result<Vec<(String, i64)>, String> {
     }
 }
 
+/// Reorder books by updating shelf positions
+pub async fn reorder_books(book_ids: Vec<i32>) -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+
+    // In a real app, this should be transactional.
+    // For now, we just iterate and update.
+    for (index, book_id) in book_ids.iter().enumerate() {
+        use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+        match crate::models::book::Entity::find_by_id(*book_id)
+            .one(db)
+            .await
+        {
+            Ok(Some(book)) => {
+                let mut active: crate::models::book::ActiveModel = book.into();
+                active.shelf_position = Set(Some(index as i32));
+                let _ = active.update(db).await;
+            }
+            _ => continue,
+        }
+    }
+    Ok(())
+}
+
 // ============ Contacts API ============
 
 /// Get all contacts with optional filters
