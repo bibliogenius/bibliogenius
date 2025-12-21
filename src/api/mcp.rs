@@ -1,4 +1,4 @@
-use crate::models::book;
+use crate::models::{author, book, book_authors};
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QuerySelect,
 };
@@ -133,7 +133,7 @@ async fn handle_request(
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "query": { "type": "string", "description": "Search query (title or partial match)" }
+                                "query": { "type": "string", "description": "Search query (matches title or author name)" }
                             },
                             "required": ["query"]
                         }
@@ -161,32 +161,90 @@ async fn handle_request(
                     "search_books" => {
                         let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
 
-                        // Perform search in DB
-                        let books = book::Entity::find()
+                        // 1. Search by title
+                        let books_by_title = book::Entity::find()
                             .filter(book::Column::Title.contains(query))
-                            .limit(5)
+                            .limit(10)
                             .all(db)
                             .await
                             .unwrap_or_default();
 
-                        let book_list: Vec<String> = books
-                            .into_iter()
-                            .map(|b| {
-                                format!(
-                                    "- {} ({}): {}",
-                                    b.title,
-                                    b.publication_year.unwrap_or(0),
-                                    b.summary.unwrap_or("No summary".to_string())
-                                )
-                            })
-                            .collect();
+                        // 2. Search by author name - find authors matching query
+                        let matching_authors = author::Entity::find()
+                            .filter(author::Column::Name.contains(query))
+                            .all(db)
+                            .await
+                            .unwrap_or_default();
+
+                        // 3. Find books by those authors
+                        let mut books_by_author: Vec<book::Model> = Vec::new();
+                        for auth in &matching_authors {
+                            let author_books = book_authors::Entity::find()
+                                .filter(book_authors::Column::AuthorId.eq(auth.id))
+                                .all(db)
+                                .await
+                                .unwrap_or_default();
+
+                            for ba in author_books {
+                                if let Ok(Some(b)) =
+                                    book::Entity::find_by_id(ba.book_id).one(db).await
+                                {
+                                    books_by_author.push(b);
+                                }
+                            }
+                        }
+
+                        // 4. Combine and dedupe results
+                        let mut all_books = books_by_title;
+                        for b in books_by_author {
+                            if !all_books.iter().any(|existing| existing.id == b.id) {
+                                all_books.push(b);
+                            }
+                        }
+
+                        // Limit to 10 results
+                        all_books.truncate(10);
+
+                        // 5. Format output with author names
+                        let mut book_list: Vec<String> = Vec::new();
+                        for b in all_books {
+                            // Fetch authors for this book
+                            let book_author_links = book_authors::Entity::find()
+                                .filter(book_authors::Column::BookId.eq(b.id))
+                                .all(db)
+                                .await
+                                .unwrap_or_default();
+
+                            let mut author_names: Vec<String> = Vec::new();
+                            for ba in book_author_links {
+                                if let Ok(Some(auth)) =
+                                    author::Entity::find_by_id(ba.author_id).one(db).await
+                                {
+                                    author_names.push(auth.name);
+                                }
+                            }
+
+                            let author_str = if author_names.is_empty() {
+                                "Unknown author".to_string()
+                            } else {
+                                author_names.join(", ")
+                            };
+
+                            book_list.push(format!(
+                                "- {} by {} ({}): {}",
+                                b.title,
+                                author_str,
+                                b.publication_year.unwrap_or(0),
+                                b.summary.clone().unwrap_or("No summary".to_string())
+                            ));
+                        }
 
                         if book_list.is_empty() {
                             serde_json::json!({
                                 "content": [
                                     {
                                         "type": "text",
-                                        "text": format!("No books found matching '{}'", query)
+                                        "text": format!("No books found matching '{}' in title or author", query)
                                     }
                                 ]
                             })
@@ -195,7 +253,7 @@ async fn handle_request(
                                 "content": [
                                     {
                                         "type": "text",
-                                        "text": format!("Found {} books:\n{}", book_list.len(), book_list.join("\n"))
+                                        "text": format!("Found {} books matching '{}':\n{}", book_list.len(), query, book_list.join("\n"))
                                     }
                                 ]
                             })
