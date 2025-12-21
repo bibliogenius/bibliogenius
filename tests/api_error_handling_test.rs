@@ -3,8 +3,8 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
-use bibliogenius::api;
-use bibliogenius::db;
+use rust_lib_app::api;
+use rust_lib_app::db;
 use sea_orm::DatabaseConnection;
 use tower::util::ServiceExt; // for `oneshot`
 

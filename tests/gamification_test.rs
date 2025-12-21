@@ -1,8 +1,8 @@
 //! Gamification V3 API Tests
 //! Tests for the new 3-track gamification system
 
-use bibliogenius::db;
-use bibliogenius::models::{
+use rust_lib_app::db;
+use rust_lib_app::models::{
     book, gamification_achievements, gamification_config, gamification_progress,
     gamification_streaks, user,
 };

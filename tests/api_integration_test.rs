@@ -1,4 +1,4 @@
-use bibliogenius::db;
+use rust_lib_app::db;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
     Set,
@@ -18,7 +18,7 @@ async fn setup_test_db() -> DatabaseConnection {
 // Helper to create a test admin user
 async fn create_test_admin(db: &DatabaseConnection) -> i32 {
     let now = chrono::Utc::now().to_rfc3339();
-    let user = bibliogenius::models::user::ActiveModel {
+    let user = rust_lib_app::models::user::ActiveModel {
         username: Set("admin".to_string()),
         password_hash: Set("$2b$12$dummy_hash".to_string()),
         role: Set("admin".to_string()),
@@ -26,7 +26,7 @@ async fn create_test_admin(db: &DatabaseConnection) -> i32 {
         updated_at: Set(now),
         ..Default::default()
     };
-    let res = bibliogenius::models::user::Entity::insert(user)
+    let res = rust_lib_app::models::user::Entity::insert(user)
         .exec(db)
         .await
         .expect("Failed to create admin user");
@@ -36,7 +36,7 @@ async fn create_test_admin(db: &DatabaseConnection) -> i32 {
 // Helper to create a test library
 async fn create_test_library(db: &DatabaseConnection, owner_id: i32, name: &str) -> i32 {
     let now = chrono::Utc::now().to_rfc3339();
-    let library = bibliogenius::models::library::ActiveModel {
+    let library = rust_lib_app::models::library::ActiveModel {
         name: Set(name.to_string()),
         description: Set(Some("Test library".to_string())),
         owner_id: Set(owner_id),
@@ -44,7 +44,7 @@ async fn create_test_library(db: &DatabaseConnection, owner_id: i32, name: &str)
         updated_at: Set(now),
         ..Default::default()
     };
-    let res = bibliogenius::models::library::Entity::insert(library)
+    let res = rust_lib_app::models::library::Entity::insert(library)
         .exec(db)
         .await
         .expect("Failed to create library");
@@ -54,14 +54,14 @@ async fn create_test_library(db: &DatabaseConnection, owner_id: i32, name: &str)
 // Helper to create a test book
 async fn create_test_book(db: &DatabaseConnection, title: &str, isbn: &str) -> i32 {
     let now = chrono::Utc::now().to_rfc3339();
-    let book = bibliogenius::models::book::ActiveModel {
+    let book = rust_lib_app::models::book::ActiveModel {
         title: Set(title.to_string()),
         isbn: Set(Some(isbn.to_string())),
         created_at: Set(now.clone()),
         updated_at: Set(now),
         ..Default::default()
     };
-    let res = bibliogenius::models::book::Entity::insert(book)
+    let res = rust_lib_app::models::book::Entity::insert(book)
         .exec(db)
         .await
         .expect("Failed to create book");
@@ -76,7 +76,7 @@ async fn create_test_copy(
     status: &str,
 ) -> i32 {
     let now = chrono::Utc::now().to_rfc3339();
-    let copy = bibliogenius::models::copy::ActiveModel {
+    let copy = rust_lib_app::models::copy::ActiveModel {
         book_id: Set(book_id),
         library_id: Set(library_id),
         status: Set(status.to_string()),
@@ -85,7 +85,7 @@ async fn create_test_copy(
         updated_at: Set(now),
         ..Default::default()
     };
-    let res = bibliogenius::models::copy::Entity::insert(copy)
+    let res = rust_lib_app::models::copy::Entity::insert(copy)
         .exec(db)
         .await
         .expect("Failed to create copy");
@@ -95,14 +95,14 @@ async fn create_test_copy(
 // Helper to create a test peer
 async fn create_test_peer(db: &DatabaseConnection, name: &str, url: &str) -> i32 {
     let now = chrono::Utc::now().to_rfc3339();
-    let peer = bibliogenius::models::peer::ActiveModel {
+    let peer = rust_lib_app::models::peer::ActiveModel {
         name: Set(name.to_string()),
         url: Set(url.to_string()),
         created_at: Set(now.clone()),
         updated_at: Set(now),
         ..Default::default()
     };
-    let res = bibliogenius::models::peer::Entity::insert(peer)
+    let res = rust_lib_app::models::peer::Entity::insert(peer)
         .exec(db)
         .await
         .expect("Failed to create peer");
@@ -119,7 +119,7 @@ async fn create_test_request(
     status: &str,
 ) {
     let now = chrono::Utc::now().to_rfc3339();
-    let request = bibliogenius::models::p2p_request::ActiveModel {
+    let request = rust_lib_app::models::p2p_request::ActiveModel {
         id: Set(id.to_string()),
         from_peer_id: Set(peer_id),
         book_isbn: Set(isbn.to_string()),
@@ -128,7 +128,7 @@ async fn create_test_request(
         created_at: Set(now.clone()),
         updated_at: Set(now),
     };
-    bibliogenius::models::p2p_request::Entity::insert(request)
+    rust_lib_app::models::p2p_request::Entity::insert(request)
         .exec(db)
         .await
         .expect("Failed to create request");
@@ -139,21 +139,21 @@ async fn test_book_crud() {
     let db = setup_test_db().await;
 
     // 1. Create Book
-    let book = bibliogenius::models::book::ActiveModel {
+    let book = rust_lib_app::models::book::ActiveModel {
         title: Set("Test Book".to_string()),
         isbn: Set(Some("1234567890".to_string())),
         created_at: Set(chrono::Utc::now().to_rfc3339()),
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
         ..Default::default()
     };
-    let inserted = bibliogenius::models::book::Entity::insert(book)
+    let inserted = rust_lib_app::models::book::Entity::insert(book)
         .exec(&db)
         .await
         .expect("Insert failed");
     let book_id = inserted.last_insert_id;
 
     // 2. Read Book
-    let fetched = bibliogenius::models::book::Entity::find_by_id(book_id)
+    let fetched = rust_lib_app::models::book::Entity::find_by_id(book_id)
         .one(&db)
         .await
         .expect("Find failed");
@@ -161,8 +161,8 @@ async fn test_book_crud() {
     assert_eq!(fetched.unwrap().title, "Test Book");
 
     // 3. Update Book
-    let mut active: bibliogenius::models::book::ActiveModel =
-        bibliogenius::models::book::Entity::find_by_id(book_id)
+    let mut active: rust_lib_app::models::book::ActiveModel =
+        rust_lib_app::models::book::Entity::find_by_id(book_id)
             .one(&db)
             .await
             .unwrap()
@@ -171,7 +171,7 @@ async fn test_book_crud() {
     active.title = Set("Updated Title".to_string());
     active.update(&db).await.expect("Update failed");
 
-    let updated = bibliogenius::models::book::Entity::find_by_id(book_id)
+    let updated = rust_lib_app::models::book::Entity::find_by_id(book_id)
         .one(&db)
         .await
         .unwrap()
@@ -179,11 +179,11 @@ async fn test_book_crud() {
     assert_eq!(updated.title, "Updated Title");
 
     // 4. Delete Book
-    bibliogenius::models::book::Entity::delete_by_id(book_id)
+    rust_lib_app::models::book::Entity::delete_by_id(book_id)
         .exec(&db)
         .await
         .expect("Delete failed");
-    let deleted = bibliogenius::models::book::Entity::find_by_id(book_id)
+    let deleted = rust_lib_app::models::book::Entity::find_by_id(book_id)
         .one(&db)
         .await
         .unwrap();
@@ -195,19 +195,19 @@ async fn test_p2p_connect() {
     let db = setup_test_db().await;
 
     // Register a peer
-    let peer = bibliogenius::models::peer::ActiveModel {
+    let peer = rust_lib_app::models::peer::ActiveModel {
         name: Set("Test Peer".to_string()),
         url: Set("http://localhost:9000".to_string()),
         created_at: Set(chrono::Utc::now().to_rfc3339()),
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
         ..Default::default()
     };
-    let res = bibliogenius::models::peer::Entity::insert(peer)
+    let res = rust_lib_app::models::peer::Entity::insert(peer)
         .exec(&db)
         .await
         .expect("Insert peer failed");
 
-    let saved = bibliogenius::models::peer::Entity::find_by_id(res.last_insert_id)
+    let saved = rust_lib_app::models::peer::Entity::find_by_id(res.last_insert_id)
         .one(&db)
         .await
         .unwrap();
@@ -223,14 +223,14 @@ async fn test_inventory_sync() {
     let mock_server = MockServer::start().await;
 
     // 2. Create Peer pointing to Mock Server
-    let peer = bibliogenius::models::peer::ActiveModel {
+    let peer = rust_lib_app::models::peer::ActiveModel {
         name: Set("Mock Peer".to_string()),
         url: Set(mock_server.uri()),
         created_at: Set(chrono::Utc::now().to_rfc3339()),
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
         ..Default::default()
     };
-    let res = bibliogenius::models::peer::Entity::insert(peer)
+    let res = rust_lib_app::models::peer::Entity::insert(peer)
         .exec(&db)
         .await
         .expect("Insert peer failed");
@@ -270,7 +270,7 @@ async fn test_inventory_sync() {
     assert_eq!(data["books"].as_array().unwrap().len(), 2);
 
     // Now verify DB insertion logic
-    use bibliogenius::models::peer_book;
+    use rust_lib_app::models::peer_book;
     for book in data["books"].as_array().unwrap() {
         let cache = peer_book::ActiveModel {
             peer_id: Set(peer_id),
@@ -298,7 +298,7 @@ async fn test_borrow_request_auto_approve() {
     let db = setup_test_db().await;
 
     // 1. Create Peer with auto_approve = true
-    let peer = bibliogenius::models::peer::ActiveModel {
+    let peer = rust_lib_app::models::peer::ActiveModel {
         name: Set("Trusted Peer".to_string()),
         url: Set("http://trusted.com".to_string()),
         auto_approve: Set(true),
@@ -306,7 +306,7 @@ async fn test_borrow_request_auto_approve() {
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
         ..Default::default()
     };
-    let res = bibliogenius::models::peer::Entity::insert(peer)
+    let res = rust_lib_app::models::peer::Entity::insert(peer)
         .exec(&db)
         .await
         .unwrap();
@@ -315,7 +315,7 @@ async fn test_borrow_request_auto_approve() {
     // 2. Simulate Incoming Request Logic
     let initial_status = if true { "accepted" } else { "pending" }; // Logic from receive_request
 
-    let request = bibliogenius::models::p2p_request::ActiveModel {
+    let request = rust_lib_app::models::p2p_request::ActiveModel {
         id: Set("req-123".to_string()),
         from_peer_id: Set(peer_id),
         book_isbn: Set("999".to_string()),
@@ -324,13 +324,13 @@ async fn test_borrow_request_auto_approve() {
         created_at: Set(chrono::Utc::now().to_rfc3339()),
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
     };
-    bibliogenius::models::p2p_request::Entity::insert(request)
+    rust_lib_app::models::p2p_request::Entity::insert(request)
         .exec(&db)
         .await
         .unwrap();
 
     // 3. Verify Status
-    let saved = bibliogenius::models::p2p_request::Entity::find_by_id("req-123")
+    let saved = rust_lib_app::models::p2p_request::Entity::find_by_id("req-123")
         .one(&db)
         .await
         .unwrap()
@@ -355,7 +355,7 @@ async fn test_cannot_accept_request_without_available_copy() {
     create_test_request(&db, "req-1", peer_id, "123456789", "Test Book", "pending").await;
 
     // Try to find an available copy (should fail)
-    use bibliogenius::models::copy;
+    use rust_lib_app::models::copy;
     let available_copy = copy::Entity::find()
         .filter(copy::Column::BookId.eq(book_id))
         .filter(copy::Column::Status.eq("available"))
@@ -382,7 +382,7 @@ async fn test_can_accept_request_with_available_copy() {
     create_test_request(&db, "req-2", peer_id, "123456789", "Test Book", "pending").await;
 
     // Try to find an available copy (should succeed)
-    use bibliogenius::models::copy;
+    use rust_lib_app::models::copy;
     let available_copy = copy::Entity::find()
         .filter(copy::Column::BookId.eq(book_id))
         .filter(copy::Column::Status.eq("available"))
@@ -410,7 +410,7 @@ async fn test_cannot_accept_request_when_copy_is_borrowed() {
     create_test_request(&db, "req-3", peer_id, "123456789", "Test Book", "pending").await;
 
     // Try to find an available copy (should fail because copy is borrowed)
-    use bibliogenius::models::copy;
+    use rust_lib_app::models::copy;
     let available_copy = copy::Entity::find()
         .filter(copy::Column::BookId.eq(book_id))
         .filter(copy::Column::Status.eq("available"))
@@ -436,7 +436,7 @@ async fn test_library_exists_after_admin_creation() {
     let library_id = create_test_library(&db, admin_id, "Test Library").await;
 
     // Verify library was created successfully
-    use bibliogenius::models::library;
+    use rust_lib_app::models::library;
     let created_library = library::Entity::find_by_id(library_id)
         .one(&db)
         .await
@@ -463,7 +463,7 @@ async fn test_copy_creation_requires_valid_library() {
 
     // Try to create copy with INVALID library_id (foreign key violation)
     let now = chrono::Utc::now().to_rfc3339();
-    let invalid_copy = bibliogenius::models::copy::ActiveModel {
+    let invalid_copy = rust_lib_app::models::copy::ActiveModel {
         book_id: Set(book_id),
         library_id: Set(999), // Non-existent library
         status: Set("available".to_string()),
@@ -473,7 +473,7 @@ async fn test_copy_creation_requires_valid_library() {
         ..Default::default()
     };
 
-    let result = bibliogenius::models::copy::Entity::insert(invalid_copy)
+    let result = rust_lib_app::models::copy::Entity::insert(invalid_copy)
         .exec(&db)
         .await;
 
@@ -492,7 +492,7 @@ async fn test_sync_clears_old_peer_books() {
     let peer_id = create_test_peer(&db, "Test Peer", "http://peer:8000").await;
 
     // Insert old cache entries
-    use bibliogenius::models::peer_book;
+    use rust_lib_app::models::peer_book;
     let old_book = peer_book::ActiveModel {
         peer_id: Set(peer_id),
         remote_book_id: Set(1),
@@ -555,7 +555,7 @@ async fn test_search_unified_endpoint() {
     // For now, let's just ensure the route is registered and returns 200 OK (with potentially empty list if no network or no match).
     // This confirms the wiring is correct.
 
-    let app = bibliogenius::api::api_router(db);
+    let app = rust_lib_app::api::api_router(db);
 
     let response = app
         .oneshot(

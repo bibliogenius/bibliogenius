@@ -5,7 +5,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use bibliogenius::{api, config, db, seed};
+use rust_lib_app::{api, config, db, seed};
 
 /// Find an available port starting from the preferred port
 fn find_available_port(preferred_port: u16) -> Option<u16> {
@@ -109,14 +109,14 @@ async fn main() {
     let processor_db = db.clone();
     tokio::spawn(async move {
         // We use the fully qualified path to ensure we hit the right module
-        bibliogenius::sync::processor::run_processor(processor_db).await;
+        rust_lib_app::sync::processor::run_processor(processor_db).await;
     });
 
     // Build API router
     let api_router = api::api_router(db);
 
     // Swagger UI
-    use bibliogenius::api_docs::ApiDoc;
+    use rust_lib_app::api_docs::ApiDoc;
     use utoipa::OpenApi;
     use utoipa_swagger_ui::SwaggerUi;
 
@@ -166,7 +166,7 @@ async fn main() {
         let library_name =
             std::env::var("LIBRARY_NAME").unwrap_or_else(|_| "BiblioGenius Library".to_string());
 
-        match bibliogenius::services::init_mdns(&library_name, port, None) {
+        match rust_lib_app::services::init_mdns(&library_name, port, None) {
             Ok(()) => {
                 tracing::info!("📡 mDNS service started - library discoverable on local network");
             }

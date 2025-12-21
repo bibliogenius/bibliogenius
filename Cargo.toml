@@ -4,7 +4,7 @@ version = "0.5.0-alpha.1"
 edition = "2021"
 
 [lib]
-name = "bibliogenius"
+name = "rust_lib_app"
 crate-type = ["cdylib", "staticlib", "lib"]
 
 # The binary is only for desktop - requires "desktop" feature
