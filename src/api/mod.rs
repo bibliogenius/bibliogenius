@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod auth;
 pub mod author;
 pub mod batch;
@@ -36,6 +37,8 @@ use sea_orm::DatabaseConnection;
 
 pub fn api_router(db: DatabaseConnection) -> Router {
     Router::new()
+        // Admin
+        .route("/admin/shutdown", post(admin::shutdown))
         // Health check
         .route("/health", get(health::health_check))
         // Auth

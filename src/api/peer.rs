@@ -78,7 +78,6 @@ pub struct ConnectRequest {
 
 pub async fn connect(
     State(db): State<DatabaseConnection>,
-    _claims: crate::auth::Claims,
     Json(payload): Json<ConnectRequest>,
 ) -> impl IntoResponse {
     // 1. Validate URL
@@ -236,10 +235,7 @@ pub async fn receive_connection_request(
     }
 }
 
-pub async fn list_peers(
-    State(db): State<DatabaseConnection>,
-    _claims: crate::auth::Claims,
-) -> impl IntoResponse {
+pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoResponse {
     // 1. Sync with Hub if HUB_URL is set
     if let Ok(hub_url) = std::env::var("HUB_URL") {
         let client = get_safe_client();
@@ -340,7 +336,6 @@ pub struct UpdatePeerStatusRequest {
 /// Update a peer's status (accept or reject a connection request)
 pub async fn update_peer_status(
     State(db): State<DatabaseConnection>,
-    _claims: crate::auth::Claims,
     Path(peer_id): Path<i32>,
     Json(payload): Json<UpdatePeerStatusRequest>,
 ) -> impl IntoResponse {
@@ -391,10 +386,8 @@ pub async fn update_peer_status(
     }
 }
 
-/// Delete a peer (reject and remove)
 pub async fn delete_peer(
     State(db): State<DatabaseConnection>,
-    _claims: crate::auth::Claims,
     Path(peer_id): Path<i32>,
 ) -> impl IntoResponse {
     match peer::Entity::delete_by_id(peer_id).exec(&db).await {
