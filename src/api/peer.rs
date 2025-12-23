@@ -386,6 +386,70 @@ pub async fn update_peer_status(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdatePeerUrlRequest {
+    pub url: String,
+}
+
+/// Update a peer's URL (for mDNS IP changes)
+/// Security: Only pending peers can have their URL updated
+pub async fn update_peer_url(
+    State(db): State<DatabaseConnection>,
+    Path(peer_id): Path<i32>,
+    Json(payload): Json<UpdatePeerUrlRequest>,
+) -> impl IntoResponse {
+    // Find the peer
+    let peer = match peer::Entity::find_by_id(peer_id).one(&db).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "Peer not found" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Database error: {}", e) })),
+            )
+                .into_response()
+        }
+    };
+
+    // Security: Only update URL for pending peers
+    if peer.auto_approve {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "Cannot update URL for connected peers" })),
+        )
+            .into_response();
+    }
+
+    let mut active_model: peer::ActiveModel = peer.into();
+    active_model.url = Set(payload.url.clone());
+    active_model.updated_at = Set(chrono::Utc::now().to_rfc3339());
+
+    match active_model.update(&db).await {
+        Ok(updated) => {
+            tracing::info!("✅ Peer {} URL updated to: {}", peer_id, payload.url);
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "message": "Peer URL updated",
+                    "peer": updated
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to update peer: {}", e) })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn delete_peer(
     State(db): State<DatabaseConnection>,
     Path(peer_id): Path<i32>,

@@ -79,6 +79,7 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/peers", get(peer::list_peers))
         .route("/peers/:id", axum::routing::delete(peer::delete_peer)) // Delete peer
         .route("/peers/:id/status", put(peer::update_peer_status)) // Accept/reject peer
+        .route("/peers/:id/url", put(peer::update_peer_url)) // Update peer URL (mDNS IP changes)
         .route("/peers/connect", post(peer::connect))
         .route("/peers/incoming", post(peer::receive_connection_request)) // Receive incoming connection
         .route("/peers/push", post(peer::push_operations))
