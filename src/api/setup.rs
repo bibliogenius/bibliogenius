@@ -312,7 +312,10 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
         .into_response()
 }
 
-pub async fn reset_app(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+pub async fn reset_app(
+    State(db): State<DatabaseConnection>,
+    _claims: crate::auth::Claims,
+) -> impl IntoResponse {
     use crate::models::{
         author, book, book_authors, book_tags, contact, copy, installation_profile, library,
         library_config, loan, operation_log, p2p_outgoing_request, p2p_request, peer, peer_book,

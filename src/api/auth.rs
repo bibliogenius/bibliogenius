@@ -130,16 +130,8 @@ pub struct MfaSetupResponse {
 
 pub async fn setup_2fa(
     State(_db): State<DatabaseConnection>,
-    headers: axum::http::HeaderMap,
+    claims: crate::auth::Claims,
 ) -> impl IntoResponse {
-    // Extract user from token
-    let token = headers
-        .get("Authorization")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .replace("Bearer ", "");
-    let claims = crate::auth::decode_jwt(&token).unwrap();
     let username = claims.sub;
 
     let secret = Secret::generate_secret();
@@ -175,17 +167,9 @@ pub struct MfaVerifyRequest {
 
 pub async fn verify_2fa(
     State(db): State<DatabaseConnection>,
-    headers: axum::http::HeaderMap,
+    claims: crate::auth::Claims,
     Json(payload): Json<MfaVerifyRequest>,
 ) -> impl IntoResponse {
-    let token = headers
-        .get("Authorization")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .replace("Bearer ", "");
-    let claims = crate::auth::decode_jwt(&token).unwrap();
-
     // Verify code against secret
     // Payload secret is the one sent from setup (Base32 string)
     let secret = Secret::Encoded(payload.secret.clone());
@@ -269,37 +253,9 @@ pub struct MeResponse {
 
 pub async fn get_me(
     State(db): State<DatabaseConnection>,
-    headers: axum::http::HeaderMap,
+    claims: crate::auth::Claims,
 ) -> impl IntoResponse {
-    // 1. Extract token
-    let auth_header = headers.get("Authorization");
-    if auth_header.is_none() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Missing token"})),
-        )
-            .into_response();
-    }
-
-    let token = auth_header
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .replace("Bearer ", "");
-
-    // 2. Decode token
-    let claims = match crate::auth::decode_jwt(&token) {
-        Ok(c) => c,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Invalid token"})),
-            )
-                .into_response()
-        }
-    };
-
-    // 3. Fetch User
+    // 1. Fetch User
     let user = match user::Entity::find()
         .filter(user::Column::Username.eq(&claims.sub))
         .one(&db)

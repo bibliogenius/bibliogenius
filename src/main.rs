@@ -120,6 +120,14 @@ async fn main() {
     use utoipa::OpenApi;
     use utoipa_swagger_ui::SwaggerUi;
 
+    let mut cors_allowed_origins = Vec::new();
+    for origin in &config.cors_allowed_origins {
+        match origin.parse::<axum::http::HeaderValue>() {
+            Ok(v) => cors_allowed_origins.push(v),
+            Err(e) => tracing::error!("Failed to parse CORS origin '{}': {}", origin, e),
+        }
+    }
+
     let app = Router::new()
         .merge(SwaggerUi::new("/api/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .nest("/api", api_router)
@@ -127,13 +135,7 @@ async fn main() {
         // CORS
         .layer(
             CorsLayer::new()
-                .allow_origin(
-                    config
-                        .cors_allowed_origins
-                        .iter()
-                        .map(|origin| origin.parse::<axum::http::HeaderValue>().unwrap())
-                        .collect::<Vec<_>>(),
-                )
+                .allow_origin(cors_allowed_origins)
                 .allow_methods(Any)
                 .allow_headers(Any),
         );

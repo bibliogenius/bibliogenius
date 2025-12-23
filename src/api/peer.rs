@@ -29,13 +29,15 @@ fn validate_url(url_str: &str) -> Result<String, String> {
 
     // 2. Check Host
     if let Some(host_str) = url.host_str() {
-        if host_str == "localhost" { /* return Err("Localhost access is blocked".to_string()); */ }
+        if host_str == "localhost" {
+            return Err("Localhost access is blocked".to_string());
+        }
 
         // Check if it's an IP address
-        if let Ok(_ip) = host_str.parse::<IpAddr>() {
-            /* if ip.is_loopback() {
+        if let Ok(ip) = host_str.parse::<IpAddr>() {
+            if ip.is_loopback() {
                 return Err("Loopback addresses blocked".to_string());
-            } */
+            }
             // Note: Link-local addresses (169.254.x.x, fe80::/10) are ALLOWED
             // for local network P2P communication between devices on same network
         }
@@ -76,6 +78,7 @@ pub struct ConnectRequest {
 
 pub async fn connect(
     State(db): State<DatabaseConnection>,
+    _claims: crate::auth::Claims,
     Json(payload): Json<ConnectRequest>,
 ) -> impl IntoResponse {
     // 1. Validate URL
@@ -233,7 +236,10 @@ pub async fn receive_connection_request(
     }
 }
 
-pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+pub async fn list_peers(
+    State(db): State<DatabaseConnection>,
+    _claims: crate::auth::Claims,
+) -> impl IntoResponse {
     // 1. Sync with Hub if HUB_URL is set
     if let Ok(hub_url) = std::env::var("HUB_URL") {
         let client = get_safe_client();
@@ -334,6 +340,7 @@ pub struct UpdatePeerStatusRequest {
 /// Update a peer's status (accept or reject a connection request)
 pub async fn update_peer_status(
     State(db): State<DatabaseConnection>,
+    _claims: crate::auth::Claims,
     Path(peer_id): Path<i32>,
     Json(payload): Json<UpdatePeerStatusRequest>,
 ) -> impl IntoResponse {
@@ -387,6 +394,7 @@ pub async fn update_peer_status(
 /// Delete a peer (reject and remove)
 pub async fn delete_peer(
     State(db): State<DatabaseConnection>,
+    _claims: crate::auth::Claims,
     Path(peer_id): Path<i32>,
 ) -> impl IntoResponse {
     match peer::Entity::delete_by_id(peer_id).exec(&db).await {
