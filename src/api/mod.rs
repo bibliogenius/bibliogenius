@@ -112,6 +112,14 @@ pub fn api_router(db: DatabaseConnection) -> Router {
             "/peers/requests/:id",
             axum::routing::delete(peer::delete_request),
         ) // Delete request
+        .route(
+            "/peers/requests/cancel/:id",
+            axum::routing::delete(peer::cancel_request),
+        ) // Receive cancellation notification from peer
+        .route(
+            "/peers/requests/status/:id",
+            put(peer::update_outgoing_status),
+        ) // Receive status update notification from lender
         // Local Discovery (mDNS)
         .route("/discovery/local", get(discovery::list_local_peers))
         .route("/discovery/status", get(discovery::mdns_status))

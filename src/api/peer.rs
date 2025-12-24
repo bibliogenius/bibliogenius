@@ -295,14 +295,10 @@ pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoRespon
     let peers = peer::Entity::find().all(&db).await.unwrap_or(vec![]);
 
     // Convert to JSON with computed status field
+    // V1 Simplification: All peers are considered "connected" (no pending workflow)
     let peers_with_status: Vec<serde_json::Value> = peers
         .into_iter()
         .map(|p| {
-            let status = if p.auto_approve {
-                "connected"
-            } else {
-                "pending"
-            };
             json!({
                 "id": p.id,
                 "name": p.name,
@@ -311,7 +307,7 @@ pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoRespon
                 "latitude": p.latitude,
                 "longitude": p.longitude,
                 "auto_approve": p.auto_approve,
-                "status": status,
+                "status": "connected",
                 "last_seen": p.last_seen,
                "created_at": p.created_at,
                 "updated_at": p.updated_at,
@@ -1567,6 +1563,45 @@ pub async fn update_request_status(
     active.status = Set(new_status.to_string());
     active.updated_at = Set(chrono::Utc::now().to_rfc3339());
 
+    // Notify borrower of status change
+    let peer_for_notify = peer::Entity::find_by_id(req.from_peer_id)
+        .one(&db)
+        .await
+        .ok()
+        .flatten();
+
+    if let Some(peer) = peer_for_notify {
+        let peer_url = peer.url.clone();
+        let request_id = req.id.clone();
+        let status_to_send = new_status.to_string();
+
+        tokio::spawn(async move {
+            let client = get_safe_client();
+            let notify_url = format!("{}/api/peers/requests/status/{}", peer_url, request_id);
+
+            tracing::info!(
+                "📡 Notifying borrower {} of status change: {} -> {}",
+                peer_url,
+                request_id,
+                status_to_send
+            );
+
+            match client
+                .put(&notify_url)
+                .json(&serde_json::json!({ "status": status_to_send }))
+                .send()
+                .await
+            {
+                Ok(res) => {
+                    tracing::info!("✅ Borrower notified: {}", res.status());
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ Failed to notify borrower: {}", e);
+                }
+            }
+        });
+    }
+
     match active.update(&db).await {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => (
@@ -1672,21 +1707,79 @@ pub async fn delete_outgoing_request(
 ) -> impl IntoResponse {
     use crate::models::p2p_outgoing_request;
 
-    match p2p_outgoing_request::Entity::delete_by_id(id)
+    // 1. First, retrieve the request to get the peer info
+    let request = match p2p_outgoing_request::Entity::find_by_id(&id).one(&db).await {
+        Ok(Some(req)) => req,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "Request not found" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Get the peer URL to notify them
+    let peer = match peer::Entity::find_by_id(request.to_peer_id).one(&db).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            tracing::warn!(
+                "Peer {} not found for outgoing request {}",
+                request.to_peer_id,
+                id
+            );
+            // Peer not found, just delete locally
+            let _ = p2p_outgoing_request::Entity::delete_by_id(&id)
+                .exec(&db)
+                .await;
+            return StatusCode::OK.into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    // 3. Notify the peer about the cancellation (best effort)
+    let client = get_safe_client();
+    let cancel_url = format!("{}/api/peers/requests/cancel/{}", peer.url, id);
+
+    tracing::info!(
+        "📡 Notifying peer {} of request cancellation: {}",
+        peer.name,
+        cancel_url
+    );
+
+    match client.delete(&cancel_url).send().await {
+        Ok(res) => {
+            if res.status().is_success() {
+                tracing::info!("✅ Peer notified successfully");
+            } else {
+                tracing::warn!("⚠️ Peer notification returned: {}", res.status());
+            }
+        }
+        Err(e) => {
+            tracing::warn!("⚠️ Failed to notify peer (may be offline): {}", e);
+            // Continue with local deletion anyway
+        }
+    }
+
+    // 4. Delete locally
+    match p2p_outgoing_request::Entity::delete_by_id(&id)
         .exec(&db)
         .await
     {
-        Ok(res) => {
-            if res.rows_affected == 0 {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({ "error": "Request not found" })),
-                )
-                    .into_response()
-            } else {
-                StatusCode::OK.into_response()
-            }
-        }
+        Ok(_) => StatusCode::OK.into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -1695,10 +1788,106 @@ pub async fn delete_outgoing_request(
     }
 }
 
+/// Receive cancellation notification from a peer who cancelled their outgoing request
+pub async fn cancel_request(
+    State(db): State<DatabaseConnection>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    use crate::models::p2p_request;
+
+    tracing::info!("📨 Received cancellation notification for request: {}", id);
+
+    // Delete the incoming request that matches this ID
+    match p2p_request::Entity::delete_by_id(&id).exec(&db).await {
+        Ok(res) => {
+            if res.rows_affected == 0 {
+                tracing::warn!("Cancellation target not found: {}", id);
+                // Return OK anyway - idempotent behavior
+                StatusCode::OK.into_response()
+            } else {
+                tracing::info!("✅ Request {} cancelled successfully", id);
+                StatusCode::OK.into_response()
+            }
+        }
+        Err(e) => {
+            tracing::error!("❌ Failed to cancel request: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Receive status update notification from lender (updates local outgoing request)
+pub async fn update_outgoing_status(
+    State(db): State<DatabaseConnection>,
+    Path(id): Path<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use crate::models::p2p_outgoing_request;
+
+    let new_status = match payload.get("status").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Missing status field" })),
+            )
+                .into_response();
+        }
+    };
+
+    tracing::info!(
+        "📨 Received status update for outgoing request {}: {}",
+        id,
+        new_status
+    );
+
+    // Find the outgoing request
+    let request = match p2p_outgoing_request::Entity::find_by_id(&id).one(&db).await {
+        Ok(Some(req)) => req,
+        Ok(None) => {
+            tracing::warn!("Outgoing request not found: {}", id);
+            // Return OK anyway - idempotent
+            return StatusCode::OK.into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    // Update the status
+    let mut active: p2p_outgoing_request::ActiveModel = request.into();
+    active.status = Set(new_status.to_string());
+    active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+
+    match active.update(&db).await {
+        Ok(_) => {
+            tracing::info!("✅ Outgoing request {} updated to {}", id, new_status);
+            StatusCode::OK.into_response()
+        }
+        Err(e) => {
+            tracing::error!("❌ Failed to update outgoing request: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct IncomingLoanRequest {
     pub from_name: String,
     pub from_url: String,
+    pub library_uuid: Option<String>, // For P2P deduplication
     pub book_isbn: String,
     pub book_title: String,
 }
@@ -1711,17 +1900,45 @@ pub async fn receive_loan_request(
     use chrono::Utc;
     use uuid::Uuid;
 
-    // 1. Find or Create Peer
-    let peer = match peer::Entity::find()
-        .filter(peer::Column::Url.eq(&payload.from_url))
-        .one(&db)
-        .await
-    {
-        Ok(Some(p)) => p,
+    // 1. Find or Create Peer (deduplicate by library_uuid if provided)
+    let existing_peer = if let Some(ref uuid) = payload.library_uuid {
+        // Try to find by UUID first (more stable)
+        peer::Entity::find()
+            .filter(peer::Column::LibraryUuid.eq(uuid))
+            .one(&db)
+            .await
+    } else {
+        // Fallback to URL matching
+        peer::Entity::find()
+            .filter(peer::Column::Url.eq(&payload.from_url))
+            .one(&db)
+            .await
+    };
+
+    let peer = match existing_peer {
+        Ok(Some(mut p)) => {
+            // Update URL if changed (IP might have changed)
+            if p.url != payload.from_url {
+                tracing::info!(
+                    "📝 Updating peer {} URL: {} -> {}",
+                    p.name,
+                    p.url,
+                    payload.from_url
+                );
+                let mut active: peer::ActiveModel = p.clone().into();
+                active.url = Set(payload.from_url.clone());
+                active.updated_at = Set(Utc::now().to_rfc3339());
+                if let Ok(updated) = active.update(&db).await {
+                    p = updated;
+                }
+            }
+            p
+        }
         Ok(None) => {
             let new_peer = peer::ActiveModel {
                 name: Set(payload.from_name),
                 url: Set(payload.from_url),
+                library_uuid: Set(payload.library_uuid),
                 auto_approve: Set(false),
                 created_at: Set(Utc::now().to_rfc3339()),
                 updated_at: Set(Utc::now().to_rfc3339()),
@@ -1752,7 +1969,7 @@ pub async fn receive_loan_request(
     let now = Utc::now().to_rfc3339();
 
     let new_request = p2p_request::ActiveModel {
-        id: Set(request_id),
+        id: Set(request_id.clone()),
         from_peer_id: Set(peer.id),
         book_isbn: Set(payload.book_isbn),
         book_title: Set(payload.book_title),
@@ -1765,7 +1982,7 @@ pub async fn receive_loan_request(
     match new_request.insert(&db).await {
         Ok(_) => (
             StatusCode::OK,
-            Json(json!({ "message": "Loan request received" })),
+            Json(json!({ "message": "Loan request received", "request_id": request_id })),
         )
             .into_response(),
         Err(e) => (
@@ -1781,6 +1998,7 @@ pub struct OutgoingLoanRequestDto {
     pub to_peer_url: String,
     pub book_isbn: String,
     pub book_title: String,
+    pub request_id: Option<String>, // ID from remote peer for sync
 }
 
 pub async fn create_outgoing_request(
@@ -1791,7 +2009,7 @@ pub async fn create_outgoing_request(
     use chrono::Utc;
     use uuid::Uuid;
 
-    // 1. Find Peer by URL
+    // 1. Find Peer by URL, or auto-create if not found
     let peer = match peer::Entity::find()
         .filter(peer::Column::Url.eq(&payload.to_peer_url))
         .one(&db)
@@ -1799,11 +2017,29 @@ pub async fn create_outgoing_request(
     {
         Ok(Some(p)) => p,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "Peer not found locally" })),
-            )
-                .into_response()
+            // Auto-create peer from URL (will be updated on next mDNS discovery)
+            tracing::info!(
+                "📝 Auto-creating peer for outgoing request: {}",
+                payload.to_peer_url
+            );
+            let new_peer = peer::ActiveModel {
+                name: Set("Réseau local".to_string()), // Placeholder name
+                url: Set(payload.to_peer_url.clone()),
+                auto_approve: Set(false),
+                created_at: Set(Utc::now().to_rfc3339()),
+                updated_at: Set(Utc::now().to_rfc3339()),
+                ..Default::default()
+            };
+            match new_peer.insert(&db).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("Failed to create peer: {}", e) })),
+                    )
+                        .into_response()
+                }
+            }
         }
         Err(e) => {
             return (
@@ -1815,7 +2051,10 @@ pub async fn create_outgoing_request(
     };
 
     // 2. Create Outgoing Request Log
-    let request_id = Uuid::new_v4().to_string();
+    // Use request_id from remote peer if provided (for sync), otherwise generate new
+    let request_id = payload
+        .request_id
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     let now = Utc::now().to_rfc3339();
 
     let new_request = p2p_outgoing_request::ActiveModel {
