@@ -48,6 +48,9 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/auth/me", get(auth::get_me))
         .route("/auth/2fa/setup", post(auth::setup_2fa))
         .route("/auth/2fa/verify", post(auth::verify_2fa))
+        // Pairing
+        .route("/auth/pairing/code", post(auth::pairing_generate_code))
+        .route("/auth/pairing/verify", post(auth::pairing_verify_code))
         // Library config
         .route("/library/config", get(library::get_config))
         .route("/library/config", post(library::update_config))
@@ -73,6 +76,7 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         // Tags
         .route("/tags", get(tag::list_tags))
         .route("/tags", post(tag::create_tag))
+        .route("/tags/tree", get(tag::list_tags_tree))
         .route("/tags/:id", get(tag::get_tag))
         .route("/tags/:id", axum::routing::delete(tag::delete_tag))
         // Peers
