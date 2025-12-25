@@ -2,9 +2,9 @@
 name = "bibliogenius"
 version = "0.5.0-alpha.1"
 edition = "2021"
- 
- [lints.rust]
- unexpected_cfgs = { level = "allow", check-cfg = ['cfg(frb_expand)'] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(frb_expand)'] }
 
 [lib]
 name = "rust_lib_app"
@@ -20,9 +20,6 @@ required-features = ["desktop"]
 default = ["desktop", "mcp"]
 desktop = []
 mcp = []
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
 
 [dependencies]
 # Flutter Rust Bridge
@@ -40,10 +37,17 @@ serde_json = "1.0"
 
 # Database
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite"] }
-sea-orm = { version = "0.12", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
+sea-orm = { version = "0.12", features = [
+    "sqlx-sqlite",
+    "runtime-tokio-rustls",
+    "macros",
+] }
 
 # HTTP client
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.11", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 quick-xml = { version = "0.31", features = ["serialize"] }
 uuid = { version = "1.4", features = ["v4", "fast-rng", "macro-diagnostics"] }
 # Invalid lines removed
@@ -88,4 +92,7 @@ hostname = "0.4"
 [dev-dependencies]
 wiremock = "0.6"
 tokio = { version = "1.0", features = ["full"] }
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.11", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
