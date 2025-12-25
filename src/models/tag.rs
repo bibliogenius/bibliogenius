@@ -19,6 +19,8 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(has_many = "super::book::Entity")]
     Book,
+    #[sea_orm(belongs_to = "Entity", from = "Column::ParentId", to = "Column::Id")]
+    Parent,
 }
 
 impl Related<super::book::Entity> for Entity {

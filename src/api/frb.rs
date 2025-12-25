@@ -371,12 +371,145 @@ pub async fn count_books() -> Result<i64, String> {
     }
 }
 
-/// Get all unique tags with counts
-pub async fn get_all_tags() -> Result<Vec<(String, i64)>, String> {
+/// Simplified tag structure for FFI
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbTag {
+    pub id: i32,
+    pub name: String,
+    pub parent_id: Option<i32>,
+    pub count: i64,
+}
+
+/// Get all tags with hierarchy info
+pub async fn get_all_tags() -> Result<Vec<FrbTag>, String> {
     let db = db().ok_or("Database not initialized")?;
 
-    match crate::services::book_service::list_tags(db).await {
-        Ok(tags) => Ok(tags.into_iter().map(|t| (t.name, t.count as i64)).collect()),
+    // 1. Fetch hierarchical tags from DB
+    use crate::models::tag;
+    use sea_orm::{EntityTrait, QueryOrder};
+    let db_tags = tag::Entity::find()
+        .order_by_asc(tag::Column::Name)
+        .all(db)
+        .await
+        .map_err(|e| format!("{:?}", e))?;
+
+    // 2. Fetch counts from legacy book subjects (JSON)
+    // We reuse the logic from `list_tags` because `book_tags` table might be empty
+    let books = crate::models::book::Entity::find()
+        .all(db)
+        .await
+        .map_err(|e| format!("{:?}", e))?;
+
+    let mut tag_counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for book in books {
+        if let Some(subjects_json) = book.subjects {
+            if let Ok(subjects) = serde_json::from_str::<Vec<String>>(&subjects_json) {
+                for subject in subjects {
+                    if !subject.trim().is_empty() {
+                        *tag_counts.entry(subject.trim().to_string()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Merge: Prioritize DB hierarchy, add legacy tags as roots if missing
+    let mut result = Vec::new();
+    let mut processed_names = std::collections::HashSet::new();
+
+    // Add DB tags
+    for t in db_tags {
+        let count = *tag_counts.get(&t.name).unwrap_or(&0);
+        processed_names.insert(t.name.clone());
+        result.push(FrbTag {
+            id: t.id,
+            name: t.name,
+            parent_id: t.parent_id,
+            count,
+        });
+    }
+
+    // Add remaining legacy tags (as orphans)
+    // Give them negative IDs to distinguish from DB tags (which are positive)
+    let mut next_legacy_id = -1;
+    for (name, count) in tag_counts {
+        if !processed_names.contains(&name) {
+            result.push(FrbTag {
+                id: next_legacy_id,
+                name,
+                parent_id: None,
+                count,
+            });
+            next_legacy_id -= 1;
+        }
+    }
+
+    // Sort by name
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(result)
+}
+
+/// Create a new tag
+pub async fn create_tag(name: String, parent_id: Option<i32>) -> Result<FrbTag, String> {
+    let db = db().ok_or("Database not initialized")?;
+    use crate::models::tag;
+    use sea_orm::{ActiveModelTrait, Set};
+
+    let new_tag = tag::ActiveModel {
+        name: Set(name),
+        parent_id: Set(parent_id),
+        created_at: Set(chrono::Utc::now().to_rfc3339()),
+        updated_at: Set(chrono::Utc::now().to_rfc3339()),
+        ..Default::default()
+    };
+
+    match new_tag.insert(db).await {
+        Ok(t) => Ok(FrbTag {
+            id: t.id,
+            name: t.name,
+            parent_id: t.parent_id,
+            count: 0,
+        }),
+        Err(e) => Err(format!("{:?}", e)),
+    }
+}
+
+/// Update a tag
+pub async fn update_tag(id: i32, name: String, parent_id: Option<i32>) -> Result<FrbTag, String> {
+    let db = db().ok_or("Database not initialized")?;
+    use crate::models::tag;
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+    let tag = tag::Entity::find_by_id(id).one(db).await.map_err(|e| format!("{:?}", e))?;
+    let Some(tag) = tag else {
+        return Err("Tag not found".to_string());
+    };
+
+    let mut active: tag::ActiveModel = tag.into();
+    active.name = Set(name);
+    active.parent_id = Set(parent_id);
+    active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+
+    match active.update(db).await {
+        Ok(t) => Ok(FrbTag {
+            id: t.id,
+            name: t.name,
+            parent_id: t.parent_id,
+            count: 0, // We don't query count on update
+        }),
+        Err(e) => Err(format!("{:?}", e)),
+    }
+}
+
+/// Delete a tag
+pub async fn delete_tag(id: i32) -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+    use crate::models::tag;
+    use sea_orm::EntityTrait;
+
+    match tag::Entity::delete_by_id(id).exec(db).await {
+        Ok(_) => Ok(()),
         Err(e) => Err(format!("{:?}", e)),
     }
 }
