@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod auth;
 pub mod author;
 pub mod batch;
@@ -36,6 +37,8 @@ use sea_orm::DatabaseConnection;
 
 pub fn api_router(db: DatabaseConnection) -> Router {
     Router::new()
+        // Admin
+        .route("/admin/shutdown", post(admin::shutdown))
         // Health check
         .route("/health", get(health::health_check))
         // Auth
@@ -45,6 +48,9 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/auth/me", get(auth::get_me))
         .route("/auth/2fa/setup", post(auth::setup_2fa))
         .route("/auth/2fa/verify", post(auth::verify_2fa))
+        // Pairing
+        .route("/auth/pairing/code", post(auth::pairing_generate_code))
+        .route("/auth/pairing/verify", post(auth::pairing_verify_code))
         // Library config
         .route("/library/config", get(library::get_config))
         .route("/library/config", post(library::update_config))
@@ -70,12 +76,14 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         // Tags
         .route("/tags", get(tag::list_tags))
         .route("/tags", post(tag::create_tag))
+        .route("/tags/tree", get(tag::list_tags_tree))
         .route("/tags/:id", get(tag::get_tag))
         .route("/tags/:id", axum::routing::delete(tag::delete_tag))
         // Peers
         .route("/peers", get(peer::list_peers))
         .route("/peers/:id", axum::routing::delete(peer::delete_peer)) // Delete peer
         .route("/peers/:id/status", put(peer::update_peer_status)) // Accept/reject peer
+        .route("/peers/:id/url", put(peer::update_peer_url)) // Update peer URL (mDNS IP changes)
         .route("/peers/connect", post(peer::connect))
         .route("/peers/incoming", post(peer::receive_connection_request)) // Receive incoming connection
         .route("/peers/push", post(peer::push_operations))
@@ -108,6 +116,14 @@ pub fn api_router(db: DatabaseConnection) -> Router {
             "/peers/requests/:id",
             axum::routing::delete(peer::delete_request),
         ) // Delete request
+        .route(
+            "/peers/requests/cancel/:id",
+            axum::routing::delete(peer::cancel_request),
+        ) // Receive cancellation notification from peer
+        .route(
+            "/peers/requests/status/:id",
+            put(peer::update_outgoing_status),
+        ) // Receive status update notification from lender
         // Local Discovery (mDNS)
         .route("/discovery/local", get(discovery::list_local_peers))
         .route("/discovery/status", get(discovery::mdns_status))

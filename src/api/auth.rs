@@ -130,16 +130,8 @@ pub struct MfaSetupResponse {
 
 pub async fn setup_2fa(
     State(_db): State<DatabaseConnection>,
-    headers: axum::http::HeaderMap,
+    claims: crate::auth::Claims,
 ) -> impl IntoResponse {
-    // Extract user from token
-    let token = headers
-        .get("Authorization")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .replace("Bearer ", "");
-    let claims = crate::auth::decode_jwt(&token).unwrap();
     let username = claims.sub;
 
     let secret = Secret::generate_secret();
@@ -175,17 +167,9 @@ pub struct MfaVerifyRequest {
 
 pub async fn verify_2fa(
     State(db): State<DatabaseConnection>,
-    headers: axum::http::HeaderMap,
+    claims: crate::auth::Claims,
     Json(payload): Json<MfaVerifyRequest>,
 ) -> impl IntoResponse {
-    let token = headers
-        .get("Authorization")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .replace("Bearer ", "");
-    let claims = crate::auth::decode_jwt(&token).unwrap();
-
     // Verify code against secret
     // Payload secret is the one sent from setup (Base32 string)
     let secret = Secret::Encoded(payload.secret.clone());
@@ -269,37 +253,9 @@ pub struct MeResponse {
 
 pub async fn get_me(
     State(db): State<DatabaseConnection>,
-    headers: axum::http::HeaderMap,
+    claims: crate::auth::Claims,
 ) -> impl IntoResponse {
-    // 1. Extract token
-    let auth_header = headers.get("Authorization");
-    if auth_header.is_none() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Missing token"})),
-        )
-            .into_response();
-    }
-
-    let token = auth_header
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .replace("Bearer ", "");
-
-    // 2. Decode token
-    let claims = match crate::auth::decode_jwt(&token) {
-        Ok(c) => c,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Invalid token"})),
-            )
-                .into_response()
-        }
-    };
-
-    // 3. Fetch User
+    // 1. Fetch User
     let user = match user::Entity::find()
         .filter(user::Column::Username.eq(&claims.sub))
         .one(&db)
@@ -349,6 +305,139 @@ pub async fn get_me(
             role: user.role,
             mfa_enabled: user.totp_secret.is_some(),
         }),
+    )
+        .into_response()
+}
+// --- Pairing / Device Linking ---
+
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+// In-memory store for active pairing codes: code -> (uuid, secret, ip, created_at)
+// Code: 6 digits (e.g. "123456")
+struct PairingSession {
+    uuid: String,
+    secret: String, // Pairing/Sync secret
+    ip: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+static PAIRING_CODES: Lazy<Mutex<HashMap<String, PairingSession>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Serialize)]
+pub struct PairingCodeResponse {
+    code: String,
+    expires_in: u64,
+}
+
+/// Start Manual Pairing: Generate 6-digit code
+pub async fn pairing_generate_code(
+    State(_db): State<DatabaseConnection>,
+    // TODO: Verify admin/owner permission via claims?
+    // claims: crate::auth::Claims,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use rand::Rng;
+
+    // Payload should contain current library_uuid and some secret (or we generate one)
+    // Actually, "pairing_secret" is what we want to share.
+    // Ideally user provides the UUID they want to share.
+    let uuid = payload
+        .get("uuid")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let secret = payload
+        .get("secret")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    // IP might be needed for direct connection
+    let ip = payload
+        .get("ip")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    if uuid.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Missing uuid"})),
+        )
+            .into_response();
+    }
+
+    // Generate 6-digit code
+    let mut rng = rand::thread_rng();
+    let code: u32 = rng.gen_range(100_000..999_999);
+    let code_str = code.to_string();
+
+    {
+        let mut store = PAIRING_CODES.lock().unwrap();
+        // Cleanup old codes (older than 5 min)
+        let now = chrono::Utc::now();
+        store.retain(|_, v| (now - v.created_at).num_minutes() < 5);
+
+        store.insert(
+            code_str.clone(),
+            PairingSession {
+                uuid,
+                secret,
+                ip,
+                created_at: now,
+            },
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(PairingCodeResponse {
+            code: code_str,
+            expires_in: 300, // 5 minutes
+        }),
+    )
+        .into_response()
+}
+
+/// Verify Pairing Code (Target calls Source via HTTP)
+/// Input: { "code": "123456" }
+/// Output: { "uuid": "...", "secret": "..." }
+pub async fn pairing_verify_code(
+    State(_db): State<DatabaseConnection>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let code = payload
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+
+    let store = PAIRING_CODES.lock().unwrap();
+    if let Some(session) = store.get(code) {
+        // Verify expiration
+        if (chrono::Utc::now() - session.created_at).num_minutes() >= 5 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Code expired"})),
+            )
+                .into_response();
+        }
+
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "uuid": session.uuid,
+                "secret": session.secret,
+                "ip": session.ip
+            })),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({"error": "Invalid code"})),
     )
         .into_response()
 }

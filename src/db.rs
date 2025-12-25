@@ -747,5 +747,51 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 025: Add library_uuid to peers for P2P deduplication
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peers ADD COLUMN library_uuid TEXT".to_owned(),
+        ))
+        .await;
+
+    // Create index for library_uuid lookups
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE INDEX IF NOT EXISTS idx_peers_library_uuid ON peers(library_uuid)".to_owned(),
+        ))
+        .await;
+
+    // Migration 026: Add hierarchical tags support (parent_id for tree structure, path for fast lookups)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE tags ADD COLUMN parent_id INTEGER REFERENCES tags(id) ON DELETE SET NULL"
+                .to_owned(),
+        ))
+        .await;
+
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE tags ADD COLUMN path TEXT DEFAULT ''".to_owned(),
+        ))
+        .await;
+
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id)".to_owned(),
+        ))
+        .await;
+
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE INDEX IF NOT EXISTS idx_tags_path ON tags(path)".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }

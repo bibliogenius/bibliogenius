@@ -8,6 +8,9 @@ pub struct Model {
     pub id: i32,
     #[sea_orm(unique)]
     pub name: String,
+    pub parent_id: Option<i32>,
+    #[serde(default)]
+    pub path: String,
     pub created_at: String,
     pub updated_at: String,
 }

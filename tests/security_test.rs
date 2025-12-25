@@ -3,9 +3,9 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
-use bibliogenius::api;
-use bibliogenius::auth::{create_jwt, decode_jwt, hash_password, verify_password};
-use bibliogenius::db;
+use rust_lib_app::api;
+use rust_lib_app::auth::{create_jwt, decode_jwt, hash_password, verify_password};
+use rust_lib_app::db;
 use sea_orm::{DatabaseConnection, EntityTrait, Set};
 use tower::util::ServiceExt; // for `oneshot`
 
@@ -47,7 +47,7 @@ async fn test_login_flow() {
     let password = "admin_password";
     let hash = hash_password(password).unwrap();
 
-    let user = bibliogenius::models::user::ActiveModel {
+    let user = rust_lib_app::models::user::ActiveModel {
         username: Set("admin".to_string()),
         password_hash: Set(hash),
         role: Set("admin".to_string()),
@@ -55,7 +55,7 @@ async fn test_login_flow() {
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
         ..Default::default()
     };
-    bibliogenius::models::user::Entity::insert(user)
+    rust_lib_app::models::user::Entity::insert(user)
         .exec(&db)
         .await
         .expect("Failed to create user");

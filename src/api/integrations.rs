@@ -89,7 +89,11 @@ struct OpenLibraryDoc {
 
 pub async fn search_external(query: &crate::api::search::SearchQuery) -> Vec<book::Model> {
     let mut books = Vec::new();
-    let client = reqwest::Client::new();
+    // Add timeout to prevent hanging when OpenLibrary is down
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     // Build Open Library Query
     let mut q_parts = Vec::new();

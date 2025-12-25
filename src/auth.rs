@@ -7,11 +7,52 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 use serde::{Deserialize, Serialize};
 use std::env;
 
+use axum::{
+    async_trait,
+    extract::{FromRequestParts, Json},
+    http::{request::Parts, StatusCode},
+};
+use serde_json::json;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String, // username
     pub role: String,
     pub exp: usize,
+}
+
+#[async_trait]
+impl<S> FromRequestParts<S> for Claims
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let auth_header = parts
+            .headers
+            .get("Authorization")
+            .and_then(|h| h.to_str().ok())
+            .ok_or((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Missing Authorization header" })),
+            ))?;
+
+        if !auth_header.starts_with("Bearer ") {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Invalid Authorization header format" })),
+            ));
+        }
+
+        let token = &auth_header[7..];
+        decode_jwt(token).map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Invalid or expired token" })),
+            )
+        })
+    }
 }
 
 pub fn hash_password(password: &str) -> Result<String, String> {
@@ -31,8 +72,18 @@ pub fn verify_password(password: &str, password_hash: &str) -> Result<bool, Stri
         .is_ok())
 }
 
+fn get_jwt_secret() -> String {
+    env::var("JWT_SECRET").unwrap_or_else(|_| {
+        if cfg!(debug_assertions) {
+            "secret".to_string()
+        } else {
+            panic!("JWT_SECRET environment variable must be set in production");
+        }
+    })
+}
+
 pub fn create_jwt(username: &str, role: &str) -> Result<String, String> {
-    let secret = env::var("JWT_SECRET").unwrap_or_else(|_| "secret".to_string());
+    let secret = get_jwt_secret();
     let expiration = Utc::now()
         .checked_add_signed(Duration::hours(24))
         .expect("valid timestamp")
@@ -53,7 +104,7 @@ pub fn create_jwt(username: &str, role: &str) -> Result<String, String> {
 }
 
 pub fn decode_jwt(token: &str) -> Result<Claims, String> {
-    let secret = env::var("JWT_SECRET").unwrap_or_else(|_| "secret".to_string());
+    let secret = get_jwt_secret();
     decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),

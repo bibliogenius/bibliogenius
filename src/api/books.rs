@@ -198,6 +198,7 @@ pub async fn list_books(
 )]
 pub async fn create_book(
     State(db): State<DatabaseConnection>,
+    _claims: crate::auth::Claims,
     Json(book): Json<Book>,
 ) -> impl IntoResponse {
     let now = chrono::Utc::now();
@@ -347,6 +348,7 @@ pub async fn create_book(
 )]
 pub async fn delete_book(
     State(db): State<DatabaseConnection>,
+    _claims: crate::auth::Claims,
     axum::extract::Path(id): axum::extract::Path<i32>,
 ) -> impl IntoResponse {
     match BookEntity::delete_by_id(id).exec(&db).await {
@@ -377,6 +379,7 @@ pub async fn delete_book(
 )]
 pub async fn update_book(
     State(db): State<DatabaseConnection>,
+    _claims: crate::auth::Claims,
     axum::extract::Path(id): axum::extract::Path<i32>,
     Json(book_data): Json<Book>,
 ) -> impl IntoResponse {
@@ -632,6 +635,7 @@ pub struct ReorderRequest {
 )]
 pub async fn reorder_books(
     State(db): State<DatabaseConnection>,
+    _claims: crate::auth::Claims,
     Json(payload): Json<ReorderRequest>,
 ) -> impl IntoResponse {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};

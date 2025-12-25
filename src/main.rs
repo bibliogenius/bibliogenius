@@ -5,7 +5,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use bibliogenius::{api, config, db, seed};
+use rust_lib_app::{api, config, db, seed};
 
 /// Find an available port starting from the preferred port
 fn find_available_port(preferred_port: u16) -> Option<u16> {
@@ -121,16 +121,24 @@ async fn main() {
     let processor_db = db.clone();
     tokio::spawn(async move {
         // We use the fully qualified path to ensure we hit the right module
-        bibliogenius::sync::processor::run_processor(processor_db).await;
+        rust_lib_app::sync::processor::run_processor(processor_db).await;
     });
 
     // Build API router
     let api_router = api::api_router(db);
 
     // Swagger UI
-    use bibliogenius::api_docs::ApiDoc;
+    use rust_lib_app::api_docs::ApiDoc;
     use utoipa::OpenApi;
     use utoipa_swagger_ui::SwaggerUi;
+
+    let mut cors_allowed_origins = Vec::new();
+    for origin in &config.cors_allowed_origins {
+        match origin.parse::<axum::http::HeaderValue>() {
+            Ok(v) => cors_allowed_origins.push(v),
+            Err(e) => tracing::error!("Failed to parse CORS origin '{}': {}", origin, e),
+        }
+    }
 
     let app = Router::new()
         .merge(SwaggerUi::new("/api/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
@@ -139,13 +147,7 @@ async fn main() {
         // CORS
         .layer(
             CorsLayer::new()
-                .allow_origin(
-                    config
-                        .cors_allowed_origins
-                        .iter()
-                        .map(|origin| origin.parse::<axum::http::HeaderValue>().unwrap())
-                        .collect::<Vec<_>>(),
-                )
+                .allow_origin(cors_allowed_origins)
                 .allow_methods(Any)
                 .allow_headers(Any),
         );
@@ -181,7 +183,7 @@ async fn main() {
         let library_name =
             std::env::var("LIBRARY_NAME").unwrap_or_else(|_| "BiblioGenius Library".to_string());
 
-        match bibliogenius::services::init_mdns(&library_name, port, None) {
+        match rust_lib_app::services::init_mdns(&library_name, port, None) {
             Ok(()) => {
                 tracing::info!("📡 mDNS service started - library discoverable on local network");
             }
