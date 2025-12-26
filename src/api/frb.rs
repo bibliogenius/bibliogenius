@@ -481,7 +481,10 @@ pub async fn update_tag(id: i32, name: String, parent_id: Option<i32>) -> Result
     use crate::models::tag;
     use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
-    let tag = tag::Entity::find_by_id(id).one(db).await.map_err(|e| format!("{:?}", e))?;
+    let tag = tag::Entity::find_by_id(id)
+        .one(db)
+        .await
+        .map_err(|e| format!("{:?}", e))?;
     let Some(tag) = tag else {
         return Err("Tag not found".to_string());
     };
