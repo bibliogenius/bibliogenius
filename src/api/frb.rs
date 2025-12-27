@@ -8,6 +8,7 @@ use flutter_rust_bridge::frb;
 use sea_orm::DatabaseConnection;
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;
+use tower_http::cors::{Any, CorsLayer};
 
 // Global database connection (initialized once on app start)
 static DB: OnceLock<DatabaseConnection> = OnceLock::new();
@@ -887,7 +888,13 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                     .port();
 
                 let api = crate::api::api_router(db);
-                let app = axum::Router::new().nest("/api", api);
+                // Allow CORS for all origins/methods/headers for P2P ease
+                let cors = CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(Any)
+                    .allow_headers(Any);
+
+                let app = axum::Router::new().nest("/api", api).layer(cors);
 
                 // Spawn server in background
                 tokio::spawn(async move {

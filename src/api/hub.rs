@@ -45,7 +45,7 @@ pub async fn register_with_hub(
     // Prepare registration data
     let registration = HubRegistration {
         library_name: library_config.name,
-        url: "http://localhost:8000".to_string(), // TODO: Get from config
+        url: crate::utils::net::get_public_url(8000),
         tags: library_config.tags,
         description: library_config.description,
     };

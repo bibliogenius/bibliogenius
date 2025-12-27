@@ -981,7 +981,7 @@ pub async fn request_book(
     let res = client
         .post(&url)
         .json(&json!({
-            "from_peer_url": "http://localhost:8000", // TODO: Get from config
+            "from_peer_url": crate::utils::net::get_public_url(8000),
             "from_peer_name": my_config.name,
             "book_isbn": payload.book_isbn,
             "book_title": payload.book_title
@@ -1101,7 +1101,7 @@ pub async fn request_book_by_url(
     let res = client
         .post(&url)
         .json(&json!({
-            "from_peer_url": "http://localhost:8000", // TODO: Get from config or dynamic
+            "from_peer_url": crate::utils::net::get_public_url(8000),
             "from_peer_name": my_config.name,
             "book_isbn": payload.book_isbn,
             "book_title": payload.book_title
@@ -1180,7 +1180,16 @@ pub async fn receive_request(
                 updated_at: Set(chrono::Utc::now().to_rfc3339()),
                 ..Default::default()
             };
-            new_peer.insert(&db).await.unwrap()
+            match new_peer.insert(&db).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("Failed to create peer: {}", e) })),
+                    )
+                        .into_response()
+                }
+            }
         }
         Err(_) => {
             return (
@@ -1409,7 +1418,16 @@ pub async fn update_request_status(
                     updated_at: Set(chrono::Utc::now().to_rfc3339()),
                     ..Default::default()
                 };
-                new_contact.insert(&db).await.unwrap()
+                match new_contact.insert(&db).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": format!("Failed to create contact: {}", e) })),
+                        )
+                            .into_response()
+                    }
+                }
             }
             Err(_) => {
                 return (
@@ -1497,64 +1515,75 @@ pub async fn update_request_status(
         // We have to infer: Find active loan for this book's copy where contact matches peer.
 
         // 1. Find Peer/Contact
-        let peer = peer::Entity::find_by_id(req.from_peer_id)
-            .one(&db)
-            .await
-            .unwrap()
-            .unwrap();
+        let peer = match peer::Entity::find_by_id(req.from_peer_id).one(&db).await {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "Peer not found" })),
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response()
+            }
+        };
 
         let contact = contact::Entity::find()
             .filter(contact::Column::Name.eq(&peer.name))
             .filter(contact::Column::Type.eq("Library"))
             .one(&db)
             .await
-            .unwrap(); // Should exist if accepted
+            .unwrap_or(None);
 
         if let Some(contact) = contact {
-            // 2. Find Book
             let book = book::Entity::find()
                 .filter(book::Column::Isbn.eq(&req.book_isbn))
                 .one(&db)
                 .await
-                .unwrap()
-                .unwrap();
+                .unwrap_or(None);
 
-            // 3. Find Active Loan for any copy of this book for this contact
-            // Join Loan -> Copy -> Book
-            // SeaORM doesn't support deep join easily in find() without defining relations.
-            // We can iterate copies of book.
-            let copies = copy::Entity::find()
-                .filter(copy::Column::BookId.eq(book.id))
-                .all(&db)
-                .await
-                .unwrap();
+            if let Some(book) = book {
+                // 3. Find Active Loan for any copy of this book for this contact
+                let copies = copy::Entity::find()
+                    .filter(copy::Column::BookId.eq(book.id))
+                    .all(&db)
+                    .await
+                    .unwrap_or(vec![]);
 
-            let copy_ids: Vec<i32> = copies.iter().map(|c| c.id).collect();
+                let copy_ids: Vec<i32> = copies.iter().map(|c| c.id).collect();
 
-            let active_loan = loan::Entity::find()
-                .filter(loan::Column::ContactId.eq(contact.id))
-                .filter(loan::Column::Status.eq("active"))
-                .filter(loan::Column::CopyId.is_in(copy_ids))
-                .one(&db)
-                .await
-                .unwrap();
-
-            if let Some(l) = active_loan {
-                let mut active_loan: loan::ActiveModel = l.clone().into();
-                active_loan.status = Set("returned".to_string());
-                active_loan.return_date = Set(Some(chrono::Utc::now().to_rfc3339()));
-                active_loan.updated_at = Set(chrono::Utc::now().to_rfc3339());
-                let _ = active_loan.update(&db).await;
-
-                // Update Copy
-                let copy = copy::Entity::find_by_id(l.copy_id)
+                let active_loan = loan::Entity::find()
+                    .filter(loan::Column::ContactId.eq(contact.id))
+                    .filter(loan::Column::Status.eq("active"))
+                    .filter(loan::Column::CopyId.is_in(copy_ids))
                     .one(&db)
                     .await
-                    .unwrap()
-                    .unwrap();
-                let mut active_copy: copy::ActiveModel = copy.into();
-                active_copy.status = Set("available".to_string());
-                let _ = active_copy.update(&db).await;
+                    .unwrap_or(None);
+
+                if let Some(l) = active_loan {
+                    let mut active_loan: loan::ActiveModel = l.clone().into();
+                    active_loan.status = Set("returned".to_string());
+                    active_loan.return_date = Set(Some(chrono::Utc::now().to_rfc3339()));
+                    active_loan.updated_at = Set(chrono::Utc::now().to_rfc3339());
+                    let _ = active_loan.update(&db).await;
+
+                    // Update Copy
+                    if let Some(copy) = copy::Entity::find_by_id(l.copy_id)
+                        .one(&db)
+                        .await
+                        .ok()
+                        .flatten()
+                    {
+                        let mut active_copy: copy::ActiveModel = copy.into();
+                        active_copy.status = Set("available".to_string());
+                        let _ = active_copy.update(&db).await;
+                    }
+                }
             }
         }
     }
