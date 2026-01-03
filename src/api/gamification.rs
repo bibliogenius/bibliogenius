@@ -9,17 +9,18 @@ use crate::models::{
 };
 
 // Track thresholds configuration
-const COLLECTOR_THRESHOLDS: [i32; 3] = [10, 50, 200]; // Bronze, Silver, Gold
-const COLLECTOR_STEP: i32 = 50; // Books per prestige level
+// All tracks: 6 levels - Novice (25), Apprenti (50), Bronze (100), Argent (250), Or (500), Platine (1000)
+const COLLECTOR_THRESHOLDS: [i32; 6] = [25, 50, 100, 250, 500, 1000];
+const COLLECTOR_STEP: i32 = 250; // Books per prestige level after Platine
 
-const READER_THRESHOLDS: [i32; 3] = [5, 20, 100];
-const READER_STEP: i32 = 20; // Reads per prestige level
+const READER_THRESHOLDS: [i32; 6] = [25, 50, 100, 250, 500, 1000];
+const READER_STEP: i32 = 250; // Reads per prestige level
 
-const LENDER_THRESHOLDS: [i32; 3] = [5, 20, 50];
-const LENDER_STEP: i32 = 10; // Loans per prestige level
+const LENDER_THRESHOLDS: [i32; 6] = [25, 50, 100, 250, 500, 1000];
+const LENDER_STEP: i32 = 250; // Loans per prestige level
 
-const CATALOGUER_THRESHOLDS: [i32; 3] = [10, 50, 100]; // Books with custom shelf order (Cataloguer track)
-const CATALOGUER_STEP: i32 = 20; // Organized books per prestige level
+const CATALOGUER_THRESHOLDS: [i32; 6] = [25, 50, 100, 250, 500, 1000];
+const CATALOGUER_STEP: i32 = 250; // Organized books per prestige level
 
 #[derive(Serialize)]
 pub struct TrackProgress {
@@ -66,19 +67,19 @@ pub struct TracksStatus {
 
 fn calculate_track_progress(
     current: i64,
-    thresholds: &[i32; 3],
+    thresholds: &[i32; 6],
     prestige_step: i32,
 ) -> TrackProgress {
     let current_val = current as i32;
 
-    // Check for Prestige Levels (Level > 3)
-    if current_val >= thresholds[2] {
-        let excess = current_val - thresholds[2];
+    // Check for Prestige Levels (Level > 6)
+    if current_val >= thresholds[5] {
+        let excess = current_val - thresholds[5];
         let prestige_levels = excess / prestige_step;
-        let level = 3 + prestige_levels;
+        let level = 6 + prestige_levels;
 
         let current_step_progress = excess % prestige_step;
-        let next_threshold = thresholds[2] + (prestige_levels + 1) * prestige_step;
+        let next_threshold = thresholds[5] + (prestige_levels + 1) * prestige_step;
 
         let progress = current_step_progress as f32 / prestige_step as f32;
 
@@ -90,20 +91,29 @@ fn calculate_track_progress(
         };
     }
 
-    // Standard levels (0-3)
-    let (level, next_threshold) = if current_val >= thresholds[1] {
-        (2, thresholds[2]) // Bibliophile, progressing to Érudit
+    // Standard levels (0-6)
+    let (level, next_threshold) = if current_val >= thresholds[4] {
+        (5, thresholds[5]) // Or, progressing to Platine
+    } else if current_val >= thresholds[3] {
+        (4, thresholds[4]) // Argent, progressing to Or
+    } else if current_val >= thresholds[2] {
+        (3, thresholds[3]) // Bronze, progressing to Argent
+    } else if current_val >= thresholds[1] {
+        (2, thresholds[2]) // Apprenti, progressing to Bronze
     } else if current_val >= thresholds[0] {
-        (1, thresholds[1]) // Initié, progressing to Bibliophile
+        (1, thresholds[1]) // Novice, progressing to Apprenti
     } else {
-        (0, thresholds[0]) // Curieux, progressing to Initié
+        (0, thresholds[0]) // Curieux, progressing to Novice
     };
 
     let prev_threshold = match level {
         0 => 0,
         1 => thresholds[0],
         2 => thresholds[1],
-        _ => thresholds[2],
+        3 => thresholds[2],
+        4 => thresholds[3],
+        5 => thresholds[4],
+        _ => thresholds[5],
     };
 
     let range = (next_threshold - prev_threshold) as f32;
