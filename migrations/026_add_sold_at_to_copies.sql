@@ -1,0 +1,1 @@
+ALTER TABLE copies ADD COLUMN sold_at TEXT;

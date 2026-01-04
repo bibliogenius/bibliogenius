@@ -146,21 +146,17 @@ pub async fn record_sale(
         status: Set("completed".to_owned()),
         notes: Set(dto.notes),
         created_at: Set(now.clone()),
-        updated_at: Set(now),
+        updated_at: Set(now.clone()),
         ..Default::default()
     };
 
     let saved_sale = new_sale.insert(db).await?;
 
-    // 3. Optionally update Copy status to 'sold'
-    // For now, we keep it as-is to allow multiple sales of the same copy
-    // (e.g., if tracking stock quantities in the future)
-    // Uncomment the following to mark copy as sold:
-    /*
-    let mut copy_active: copy::ActiveModel = copy.into();
+    // 3. Update Copy status to 'sold' and set sold_at
+    let mut copy_active: copy::ActiveModel = _copy.into();
     copy_active.status = Set("sold".to_owned());
+    copy_active.sold_at = Set(Some(now));
     copy_active.update(db).await?;
-    */
 
     Ok(saved_sale)
 }
@@ -184,22 +180,18 @@ pub async fn cancel_sale(db: &DatabaseConnection, id: i32) -> Result<sale::Model
     // 2. Update Sale
     let mut sale_active: sale::ActiveModel = sale.clone().into();
     sale_active.status = Set("cancelled".to_owned());
-    sale_active.updated_at = Set(now);
+    sale_active.updated_at = Set(now.clone());
 
     let updated_sale = sale_active.update(db).await?;
 
-    // 3. Optionally update Copy status back to 'available'
-    // (if it was marked as 'sold' previously)
-    /*
-    let copy = Copy::find_by_id(sale.copy_id)
-        .one(db)
-        .await?
-        .ok_or(ServiceError::NotFound)?;
-
-    let mut copy_active: copy::ActiveModel = copy.into();
-    copy_active.status = Set("available".to_owned());
-    copy_active.update(db).await?;
-    */
+    // 3. Update Copy status back to 'available' and clear sold_at
+    if let Some(copy_model) = Copy::find_by_id(sale.copy_id).one(db).await? {
+        let mut copy_active: copy::ActiveModel = copy_model.into();
+        copy_active.status = Set("available".to_owned());
+        copy_active.sold_at = Set(None);
+        copy_active.updated_at = Set(now);
+        copy_active.update(db).await?;
+    }
 
     Ok(updated_sale)
 }

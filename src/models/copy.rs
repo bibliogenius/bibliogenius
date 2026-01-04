@@ -17,10 +17,13 @@ pub struct Model {
     /// - `borrowed`: Borrowed from another library (P2P)
     /// - `lost`: Copy is lost
     /// - `wanted`: Wishlist - don't own yet
+    /// - `sold`: Already sold (bookseller module)
     pub status: String,
     pub is_temporary: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// Detailed sale date if status is 'sold'
+    pub sold_at: Option<String>,
     /// Price of this specific copy (EUR). Used by bookseller profile.
     /// If set, this overrides the book's default price.
     /// If NULL, the price from the parent book is used.

@@ -412,18 +412,10 @@ pub async fn update_book(
     // Ensure title is updated if provided, or fallback to existing?
     // Frontend is now sending title, so we can set it.
     book.title = Set(book_data.title);
-    if let Some(isbn) = book_data.isbn {
-        book.isbn = Set(Some(isbn));
-    }
-    if let Some(summary) = book_data.summary {
-        book.summary = Set(Some(summary));
-    }
-    if let Some(publisher) = book_data.publisher {
-        book.publisher = Set(Some(publisher));
-    }
-    if let Some(year) = book_data.publication_year {
-        book.publication_year = Set(Some(year));
-    }
+    book.isbn = Set(book_data.isbn);
+    book.summary = Set(book_data.summary);
+    book.publisher = Set(book_data.publisher);
+    book.publication_year = Set(book_data.publication_year);
     if let Some(status) = book_data.reading_status {
         book.reading_status = Set(status);
     }
@@ -441,9 +433,7 @@ pub async fn update_book(
     }
 
     // Handle user_rating update
-    if let Some(rating) = book_data.user_rating {
-        book.user_rating = Set(Some(rating));
-    }
+    book.user_rating = Set(book_data.user_rating);
 
     // Handle owned field - track if we need to create/delete copies
     let old_owned = match &book.owned {
@@ -456,9 +446,7 @@ pub async fn update_book(
         book.owned = Set(new_owned);
     }
 
-    if let Some(price) = book_data.price {
-        book.price = Set(Some(price));
-    }
+    book.price = Set(book_data.price);
 
     book.updated_at = Set(now.to_rfc3339());
 

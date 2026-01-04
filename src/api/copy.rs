@@ -19,6 +19,7 @@ pub struct CopyDto {
     pub is_temporary: bool,
     pub book_title: Option<String>,
     pub price: Option<f64>,
+    pub sold_at: Option<String>,
 }
 
 impl From<copy_model::Model> for CopyDto {
@@ -33,6 +34,7 @@ impl From<copy_model::Model> for CopyDto {
             is_temporary: model.is_temporary,
             book_title: None,
             price: model.price,
+            sold_at: model.sold_at,
         }
     }
 }
@@ -155,9 +157,9 @@ pub async fn delete_copy(
 #[derive(Debug, Deserialize)]
 pub struct UpdateCopyDto {
     pub status: Option<String>,
-    pub notes: Option<String>,
-    pub acquisition_date: Option<String>,
-    pub price: Option<f64>,
+    pub notes: Option<Option<String>>,
+    pub acquisition_date: Option<Option<String>>,
+    pub price: Option<Option<f64>>,
 }
 
 /// Update a copy (mainly for status changes)
@@ -190,14 +192,17 @@ pub async fn update_copy(
     if let Some(status) = payload.status {
         active.status = Set(status);
     }
+
     if let Some(notes) = payload.notes {
-        active.notes = Set(Some(notes));
+        active.notes = Set(notes);
     }
+
     if let Some(date) = payload.acquisition_date {
-        active.acquisition_date = Set(Some(date));
+        active.acquisition_date = Set(date);
     }
+
     if let Some(price) = payload.price {
-        active.price = Set(Some(price));
+        active.price = Set(price);
     }
     active.updated_at = Set(chrono::Utc::now().to_rfc3339());
 

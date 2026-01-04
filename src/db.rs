@@ -839,5 +839,13 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     ))
     .await?;
 
+    // Migration 030: Add sold_at to copies
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE copies ADD COLUMN sold_at TEXT".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }

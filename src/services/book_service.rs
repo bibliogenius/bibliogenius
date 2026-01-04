@@ -217,6 +217,8 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
             .unwrap_or_else(|| "to_read".to_string())),
         started_reading_at: Set(book.started_reading_at.clone().flatten()),
         finished_reading_at: Set(book.finished_reading_at.clone().flatten()),
+        owned: Set(book.owned.unwrap_or(true)),
+        price: Set(book.price),
         created_at: Set(now.to_rfc3339()),
         updated_at: Set(now.to_rfc3339()),
         ..Default::default()
@@ -280,19 +282,10 @@ pub async fn update_book(
     let mut book: BookActiveModel = book_model.into();
 
     book.title = Set(book_data.title);
-
-    if let Some(isbn) = book_data.isbn {
-        book.isbn = Set(Some(isbn));
-    }
-    if let Some(summary) = book_data.summary {
-        book.summary = Set(Some(summary));
-    }
-    if let Some(publisher) = book_data.publisher {
-        book.publisher = Set(Some(publisher));
-    }
-    if let Some(year) = book_data.publication_year {
-        book.publication_year = Set(Some(year));
-    }
+    book.isbn = Set(book_data.isbn);
+    book.summary = Set(book_data.summary);
+    book.publisher = Set(book_data.publisher);
+    book.publication_year = Set(book_data.publication_year);
     if let Some(status) = book_data.reading_status {
         book.reading_status = Set(status);
     }
@@ -306,15 +299,12 @@ pub async fn update_book(
         let subjects_json = serde_json::to_string(&subjects).unwrap_or_else(|_| "[]".to_string());
         book.subjects = Set(Some(subjects_json));
     }
-    if let Some(rating) = book_data.user_rating {
-        book.user_rating = Set(Some(rating));
-    }
-    if let Some(cover) = book_data.cover_url {
-        book.cover_url = Set(Some(cover));
-    }
+    book.user_rating = Set(book_data.user_rating);
+    book.cover_url = Set(book_data.cover_url);
     if let Some(owned_value) = book_data.owned {
         book.owned = Set(owned_value);
     }
+    book.price = Set(book_data.price);
 
     book.updated_at = Set(now.to_rfc3339());
 
