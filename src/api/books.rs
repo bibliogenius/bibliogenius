@@ -231,6 +231,7 @@ pub async fn create_book(
         started_reading_at: Set(book.started_reading_at.flatten()),
         finished_reading_at: Set(book.finished_reading_at.flatten()),
         owned: Set(owned),
+        price: Set(book.price),
         created_at: Set(now.to_rfc3339()),
         updated_at: Set(now.to_rfc3339()),
         ..Default::default()
@@ -453,6 +454,10 @@ pub async fn update_book(
     let new_owned = book_data.owned.unwrap_or(old_owned);
     if new_owned != old_owned {
         book.owned = Set(new_owned);
+    }
+
+    if let Some(price) = book_data.price {
+        book.price = Set(Some(price));
     }
 
     book.updated_at = Set(now.to_rfc3339());

@@ -1241,6 +1241,7 @@ impl SseDecode for crate::api::frb::FrbBook {
         let mut var_finishedReadingAt = <Option<String>>::sse_decode(deserializer);
         let mut var_startedReadingAt = <Option<String>>::sse_decode(deserializer);
         let mut var_owned = <bool>::sse_decode(deserializer);
+        let mut var_price = <Option<f64>>::sse_decode(deserializer);
         return crate::api::frb::FrbBook {
             id: var_id,
             title: var_title,
@@ -1260,6 +1261,7 @@ impl SseDecode for crate::api::frb::FrbBook {
             finished_reading_at: var_finishedReadingAt,
             started_reading_at: var_startedReadingAt,
             owned: var_owned,
+            price: var_price,
         };
     }
 }
@@ -1617,6 +1619,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbBook {
             self.finished_reading_at.into_into_dart().into_dart(),
             self.started_reading_at.into_into_dart().into_dart(),
             self.owned.into_into_dart().into_dart(),
+            self.price.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1771,6 +1774,7 @@ impl SseEncode for crate::api::frb::FrbBook {
         <Option<String>>::sse_encode(self.finished_reading_at, serializer);
         <Option<String>>::sse_encode(self.started_reading_at, serializer);
         <bool>::sse_encode(self.owned, serializer);
+        <Option<f64>>::sse_encode(self.price, serializer);
     }
 }
 

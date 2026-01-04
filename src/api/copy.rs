@@ -18,6 +18,7 @@ pub struct CopyDto {
     pub status: String,
     pub is_temporary: bool,
     pub book_title: Option<String>,
+    pub price: Option<f64>,
 }
 
 impl From<copy_model::Model> for CopyDto {
@@ -31,6 +32,7 @@ impl From<copy_model::Model> for CopyDto {
             status: model.status,
             is_temporary: model.is_temporary,
             book_title: None,
+            price: model.price,
         }
     }
 }
@@ -78,6 +80,7 @@ pub async fn create_copy(
         notes: Set(copy_dto.notes),
         status: Set(copy_dto.status),
         is_temporary: Set(copy_dto.is_temporary),
+        price: Set(copy_dto.price),
         created_at: Set(now.clone()),
         updated_at: Set(now),
         ..Default::default()
@@ -154,6 +157,7 @@ pub struct UpdateCopyDto {
     pub status: Option<String>,
     pub notes: Option<String>,
     pub acquisition_date: Option<String>,
+    pub price: Option<f64>,
 }
 
 /// Update a copy (mainly for status changes)
@@ -191,6 +195,9 @@ pub async fn update_copy(
     }
     if let Some(date) = payload.acquisition_date {
         active.acquisition_date = Set(Some(date));
+    }
+    if let Some(price) = payload.price {
+        active.price = Set(Some(price));
     }
     active.updated_at = Set(chrono::Utc::now().to_rfc3339());
 

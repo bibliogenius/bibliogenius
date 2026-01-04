@@ -85,7 +85,8 @@ pub struct FrbBook {
     pub updated_at: Option<String>,
     pub finished_reading_at: Option<String>,
     pub started_reading_at: Option<String>,
-    pub owned: bool, // Added for copy management
+    pub owned: bool,        // Added for copy management
+    pub price: Option<f64>, // Added for bookseller profile
 }
 
 /// Convert domain Book to FFI-safe FrbBook
@@ -112,6 +113,7 @@ impl From<crate::models::Book> for FrbBook {
             finished_reading_at: book.finished_reading_at.flatten(),
             started_reading_at: book.started_reading_at.flatten(),
             owned: book.owned.unwrap_or(true), // Default to owned if None (legacy/missing)
+            price: book.price,
         }
     }
 }
@@ -290,7 +292,7 @@ impl From<FrbBook> for crate::models::Book {
             started_reading_at: frb_book.started_reading_at.map(Some),
             source: None,
             owned: Some(frb_book.owned),
-            price: None, // Price not exposed in FFI layer yet
+            price: frb_book.price, // Price now exposed in FFI layer
         }
     }
 }
