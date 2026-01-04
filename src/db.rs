@@ -793,5 +793,51 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 027: Add price to books
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE books ADD COLUMN price REAL".to_owned(),
+        ))
+        .await;
+
+    // Migration 028: Add price to copies
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE copies ADD COLUMN price REAL".to_owned(),
+        ))
+        .await;
+
+    // Migration 029: Create sales table
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS sales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            copy_id INTEGER NOT NULL,
+            contact_id INTEGER,
+            library_id INTEGER NOT NULL,
+            sale_date TEXT NOT NULL,
+            sale_price REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'completed',
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (copy_id) REFERENCES copies(id) ON DELETE CASCADE,
+            FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL,
+            FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_sales_copy_id ON sales(copy_id);
+        CREATE INDEX IF NOT EXISTS idx_sales_contact_id ON sales(contact_id);
+        CREATE INDEX IF NOT EXISTS idx_sales_library_id ON sales(library_id);
+        CREATE INDEX IF NOT EXISTS idx_sales_status ON sales(status);
+        CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(sale_date);
+        CREATE INDEX IF NOT EXISTS idx_sales_created_at ON sales(created_at);
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
     Ok(())
 }
