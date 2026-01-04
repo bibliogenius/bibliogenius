@@ -50,45 +50,10 @@ jobs:
           name: bibliogenius-macos-universal
           path: target/release/bibliogenius-macos-universal
 
-  # Build for Android
-  build-android:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./bibliogenius-app
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: '17'
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-          flutter-version: '3.19.0'
-
-      - name: Get Dependencies
-        run: flutter pub get
-
-      - name: Build APK
-        run: flutter build apk --release --no-tree-shake-icons
-
-      - name: Rename APK
-        run: mv build/app/outputs/flutter-apk/app-release.apk ../bibliogenius-android.apk
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bibliogenius-android
-          path: bibliogenius-android.apk
 
   # Create GitHub Release
   create-release:
-    needs: [build-linux, build-macos, build-android]
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -105,10 +70,6 @@ jobs:
         with:
           name: bibliogenius-macos-universal
 
-      - name: Download Android Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: bibliogenius-android
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -116,7 +77,7 @@ jobs:
           files: |
             bibliogenius-linux-x64
             bibliogenius-macos-universal
-            bibliogenius-android.apk
+            bibliogenius-macos-universal
           draft: true
           prerelease: false
           generate_release_notes: true
