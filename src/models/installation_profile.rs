@@ -6,12 +6,14 @@ use serde::{Deserialize, Serialize};
 pub enum InstallationProfile {
     Individual,
     Professional,
+    Bookseller,
 }
 
 impl From<String> for InstallationProfile {
     fn from(s: String) -> Self {
         match s.as_str() {
             "professional" => InstallationProfile::Professional,
+            "bookseller" => InstallationProfile::Bookseller,
             _ => InstallationProfile::Individual,
         }
     }
@@ -22,6 +24,7 @@ impl std::fmt::Display for InstallationProfile {
         match self {
             InstallationProfile::Individual => write!(f, "individual"),
             InstallationProfile::Professional => write!(f, "professional"),
+            InstallationProfile::Bookseller => write!(f, "bookseller"),
         }
     }
 }

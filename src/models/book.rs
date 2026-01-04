@@ -41,6 +41,9 @@ pub struct Model {
     /// - `false`: Wishlist/wanted → no Copy
     #[sea_orm(default_value = "true")]
     pub owned: bool,
+    /// Price of the book (EUR). Used by bookseller profile.
+    /// If set, this is the default price for all copies of this book.
+    pub price: Option<f64>,
 }
 
 // ... (Relation enum and Related impls omit for brevity) ...
@@ -112,6 +115,8 @@ pub struct Book {
     pub user_rating: Option<i32>, // 0-10 scale
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owned: Option<bool>, // Whether I own this book (default true)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price: Option<f64>, // Price in EUR (for bookseller profile)
 }
 
 impl From<Model> for Book {
@@ -144,6 +149,7 @@ impl From<Model> for Book {
             large_cover_url: None,
             user_rating: model.user_rating,
             owned: Some(model.owned),
+            price: model.price,
         }
     }
 }
@@ -174,6 +180,7 @@ impl From<Book> for ActiveModel {
             updated_at: NotSet,
             user_rating: book.user_rating.map_or(NotSet, |r| Set(Some(r))),
             owned: book.owned.map_or(NotSet, Set),
+            price: book.price.map_or(NotSet, |p| Set(Some(p))),
         }
     }
 }

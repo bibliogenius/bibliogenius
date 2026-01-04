@@ -20,6 +20,7 @@ pub mod loan;
 pub mod lookup;
 pub mod peer;
 pub mod profile;
+pub mod sales; // Sales endpoints for bookseller profile
 pub mod scan;
 pub mod search;
 pub mod setup;
@@ -156,6 +157,10 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         // P2P routes
         .route("/loans", get(loan::list_loans).post(loan::create_loan))
         .route("/loans/:id/return", put(loan::return_loan))
+        // Sales (Bookseller profile)
+        .route("/sales", get(sales::list_sales).post(sales::create_sale))
+        .route("/sales/:id", axum::routing::delete(sales::cancel_sale))
+        .route("/statistics/sales", get(sales::get_sales_statistics))
         // Lookup
         .route("/lookup/:isbn", get(lookup::lookup_book))
         // Data Import/Export

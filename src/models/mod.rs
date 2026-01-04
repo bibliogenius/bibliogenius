@@ -17,6 +17,7 @@ pub mod p2p_outgoing_request;
 pub mod p2p_request;
 pub mod peer;
 pub mod peer_book;
+pub mod sale; // Nouveau module pour les ventes (profil Libraire)
 pub mod tag;
 pub mod user;
 

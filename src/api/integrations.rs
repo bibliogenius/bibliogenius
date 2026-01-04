@@ -170,6 +170,7 @@ pub async fn search_external(query: &crate::api::search::SearchQuery) -> Vec<boo
                     updated_at: chrono::Utc::now().to_rfc3339(),
                     user_rating: None,
                     owned: true, // External search results are assumed owned
+                    price: None, // No price from external search
                 };
                 books.push(book);
             }
@@ -311,6 +312,7 @@ pub async fn search_unified(Query(params): Query<UnifiedSearchQuery>) -> impl In
                     started_reading_at: None,
                     user_rating: None,
                     owned: Some(true), // Search results default to owned
+                    price: None,       // No price from Inventaire
                 };
                 results.push(book);
             }

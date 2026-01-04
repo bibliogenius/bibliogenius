@@ -290,6 +290,7 @@ impl From<FrbBook> for crate::models::Book {
             started_reading_at: frb_book.started_reading_at.map(Some),
             source: None,
             owned: Some(frb_book.owned),
+            price: None, // Price not exposed in FFI layer yet
         }
     }
 }

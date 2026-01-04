@@ -21,6 +21,10 @@ pub struct Model {
     pub is_temporary: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// Price of this specific copy (EUR). Used by bookseller profile.
+    /// If set, this overrides the book's default price.
+    /// If NULL, the price from the parent book is used.
+    pub price: Option<f64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
