@@ -193,7 +193,8 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/integrations/mcp-config", get(integrations::mcp_config))
         // Gamification
         .route("/user/status", get(gamification::get_user_status))
-        // Export
+        // Export/Import
         .route("/export", get(export::export_data))
+        .route("/import", post(export::import_data))
         .with_state(db)
 }
