@@ -142,9 +142,8 @@ pub async fn import_data(
     if let Some(loans) = backup.loans {
         for loan in loans {
             let active = loan.into_active_model();
-            match active.insert(&db).await {
-                Ok(_) => loans_count += 1,
-                Err(_) => {}
+            if let Ok(_) = active.insert(&db).await {
+                loans_count += 1;
             }
         }
     }
