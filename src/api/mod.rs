@@ -4,6 +4,7 @@ pub mod author;
 pub mod batch;
 pub mod books;
 pub mod chat;
+pub mod collections;
 pub mod contact;
 pub mod copy;
 pub mod data;
@@ -69,6 +70,15 @@ pub fn api_router(db: DatabaseConnection) -> Router {
                 .delete(books::delete_book),
         )
         .route("/books/reorder", axum::routing::patch(books::reorder_books))
+        // Collections
+        .route(
+            "/collections",
+            get(collections::list_collections).post(collections::create_collection),
+        )
+        .route(
+            "/collections/:id",
+            get(collections::get_collection).delete(collections::delete_collection),
+        )
         // Authors
         .route("/authors", get(author::list_authors))
         .route("/authors", post(author::create_author))

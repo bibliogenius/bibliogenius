@@ -2,6 +2,8 @@ pub mod author;
 pub mod book;
 pub mod book_authors;
 pub mod book_tags;
+pub mod collection;
+pub mod collection_book;
 pub mod contact;
 pub mod copy;
 pub mod gamification_achievements;
