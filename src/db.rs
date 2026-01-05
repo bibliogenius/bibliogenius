@@ -847,5 +847,40 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 031: Create collections and collection_books tables
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS collections (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            source TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS collection_books (
+            collection_id TEXT NOT NULL,
+            book_id INTEGER NOT NULL,
+            added_at TEXT NOT NULL,
+            PRIMARY KEY (collection_id, book_id),
+            FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_collection_books_collection ON collection_books(collection_id);
+        CREATE INDEX IF NOT EXISTS idx_collection_books_book ON collection_books(book_id);
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
     Ok(())
 }

@@ -5,16 +5,10 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(table_name = "collection_books")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub id: String, // UUID
     pub collection_id: String,
-    #[sea_orm(indexed)]
-    pub isbn: Option<String>,
-    pub title: String,
-    pub author: Option<String>,
-    pub status: String, // 'owned', 'wanted', 'ignored'
-    pub cover_url: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub book_id: i32,
+    pub added_at: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -27,11 +21,25 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     Collection,
+    #[sea_orm(
+        belongs_to = "super::book::Entity",
+        from = "Column::BookId",
+        to = "super::book::Column::Id",
+        on_update = "NoAction",
+        on_delete = "Cascade"
+    )]
+    Book,
 }
 
 impl Related<super::collection::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Collection.def()
+    }
+}
+
+impl Related<super::book::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Book.def()
     }
 }
 

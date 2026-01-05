@@ -33,7 +33,7 @@ cargo test
 
 ## API Endpoints
 
-```
+```http
 GET  /api/health              # Health check
 GET  /api/library/config      # Get library info
 POST /api/library/config      # Update library info
@@ -50,11 +50,12 @@ GET  /api/hub/discover        # Discover peers
 
 ## 🗺️ Roadmap
 
-| Version | Status | Focus |
-|---------|--------|-------|
-| **In Development** | ✅ Current | Personal library + LAN sync |
-| v1.0.0 | Q1 2026 | Stable P2P on local network |
-| v2.0.0 | Q2-Q3 2026 | Global P2P (libp2p) + Social |
+| Version          | Status     | Focus                                         |
+|------------------|------------|-----------------------------------------------|
+| **In Development** | ✅ Current | Personal library + LAN sync                   |
+| v1.0.0           | Q1 2026    | Stable P2P on local network                   |
+| v1.x             | Q2 2026    | Dynamic AI Bibliographies (Data.BnF + Gemini) |
+| v2.0.0           | Q2-Q3 2026 | Global P2P (libp2p) + Social                  |
 
 ## Repository
 

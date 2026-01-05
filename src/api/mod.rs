@@ -70,6 +70,10 @@ pub fn api_router(db: DatabaseConnection) -> Router {
                 .delete(books::delete_book),
         )
         .route("/books/reorder", axum::routing::patch(books::reorder_books))
+        .route(
+            "/books/:id/collections",
+            get(collections::get_book_collections).put(collections::update_book_collections),
+        )
         // Collections
         .route(
             "/collections",
@@ -78,6 +82,15 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route(
             "/collections/:id",
             get(collections::get_collection).delete(collections::delete_collection),
+        )
+        .route(
+            "/collections/:id/books",
+            get(collections::get_collection_books).post(collections::import_collection),
+        )
+        .route(
+            "/collections/:collection_id/books/:book_id",
+            axum::routing::delete(collections::remove_book_from_collection)
+                .post(collections::add_book_to_collection),
         )
         // Authors
         .route("/authors", get(author::list_authors))
