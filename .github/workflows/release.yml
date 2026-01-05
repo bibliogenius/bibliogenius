@@ -77,7 +77,6 @@ jobs:
           files: |
             bibliogenius-linux-x64
             bibliogenius-macos-universal
-            bibliogenius-macos-universal
           draft: true
           prerelease: false
           generate_release_notes: true
