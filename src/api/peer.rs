@@ -7,7 +7,10 @@ use axum::{
 };
 use chrono::Utc;
 use futures::future::join_all;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
+    Set,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::IpAddr;
@@ -1851,7 +1854,7 @@ pub async fn update_outgoing_status(
     Path(id): Path<String>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    use crate::models::p2p_outgoing_request;
+    use crate::models::{book, copy, p2p_outgoing_request};
 
     let new_status = match payload.get("status").and_then(|v| v.as_str()) {
         Some(s) => s,
@@ -1887,6 +1890,9 @@ pub async fn update_outgoing_status(
         }
     };
 
+    // Clone book_isbn before converting to ActiveModel (need it for cleanup)
+    let book_isbn = request.book_isbn.clone();
+
     // Update the status
     let mut active: p2p_outgoing_request::ActiveModel = request.into();
     active.status = Set(new_status.to_string());
@@ -1895,6 +1901,62 @@ pub async fn update_outgoing_status(
     match active.update(&db).await {
         Ok(_) => {
             tracing::info!("✅ Outgoing request {} updated to {}", id, new_status);
+
+            // If the loan is returned, clean up the borrowed copy
+            if new_status == "returned" {
+                tracing::info!("🧹 Cleaning up borrowed copy for book ISBN: {}", book_isbn);
+
+                // 1. Find the book by ISBN
+                if let Ok(Some(book)) = book::Entity::find()
+                    .filter(book::Column::Isbn.eq(&book_isbn))
+                    .one(&db)
+                    .await
+                {
+                    // 2. Find and delete the borrowed copy
+                    if let Ok(Some(borrowed_copy)) = copy::Entity::find()
+                        .filter(copy::Column::BookId.eq(book.id))
+                        .filter(copy::Column::Status.eq("borrowed"))
+                        .one(&db)
+                        .await
+                    {
+                        if let Err(e) = copy::Entity::delete_by_id(borrowed_copy.id).exec(&db).await
+                        {
+                            tracing::warn!("⚠️ Failed to delete borrowed copy: {}", e);
+                        } else {
+                            tracing::info!(
+                                "✅ Deleted borrowed copy {} for book {}",
+                                borrowed_copy.id,
+                                book.id
+                            );
+                        }
+                    }
+
+                    // 3. Check if book should be deleted
+                    // Conditions: owned=false, reading_status != wishlist, no copies left
+                    let should_delete_book = !book.owned
+                        && book.reading_status != "READING_STATUS_WISHLIST"
+                        && copy::Entity::find()
+                            .filter(copy::Column::BookId.eq(book.id))
+                            .count(&db)
+                            .await
+                            .unwrap_or(1)
+                            == 0;
+
+                    if should_delete_book {
+                        tracing::info!(
+                            "🗑️ Book {} (ISBN: {}) has no more copies, not owned, not in wishlist - deleting",
+                            book.id,
+                            book_isbn
+                        );
+                        if let Err(e) = book::Entity::delete_by_id(book.id).exec(&db).await {
+                            tracing::warn!("⚠️ Failed to delete book: {}", e);
+                        } else {
+                            tracing::info!("✅ Deleted book {} after loan return", book.id);
+                        }
+                    }
+                }
+            }
+
             StatusCode::OK.into_response()
         }
         Err(e) => {

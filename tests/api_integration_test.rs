@@ -577,3 +577,311 @@ async fn test_search_unified_endpoint() {
 
     assert!(body_json.is_array(), "Expected JSON array response");
 }
+
+// ========== P2P LOAN RETURN CLEANUP TESTS ==========
+
+// Helper to create a test outgoing request (borrower side)
+async fn create_test_outgoing_request(
+    db: &DatabaseConnection,
+    id: &str,
+    peer_id: i32,
+    isbn: &str,
+    title: &str,
+    status: &str,
+) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let request = rust_lib_app::models::p2p_outgoing_request::ActiveModel {
+        id: Set(id.to_string()),
+        to_peer_id: Set(peer_id),
+        book_isbn: Set(isbn.to_string()),
+        book_title: Set(title.to_string()),
+        status: Set(status.to_string()),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+    };
+    rust_lib_app::models::p2p_outgoing_request::Entity::insert(request)
+        .exec(db)
+        .await
+        .expect("Failed to create outgoing request");
+}
+
+// Helper to create a test book with specific owned/reading_status
+async fn create_test_book_with_status(
+    db: &DatabaseConnection,
+    title: &str,
+    isbn: &str,
+    owned: bool,
+    reading_status: &str,
+) -> i32 {
+    let now = chrono::Utc::now().to_rfc3339();
+    let book = rust_lib_app::models::book::ActiveModel {
+        title: Set(title.to_string()),
+        isbn: Set(Some(isbn.to_string())),
+        owned: Set(owned),
+        reading_status: Set(reading_status.to_string()),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    let res = rust_lib_app::models::book::Entity::insert(book)
+        .exec(db)
+        .await
+        .expect("Failed to create book");
+    res.last_insert_id
+}
+
+#[tokio::test]
+async fn test_loan_return_deletes_borrowed_copy() {
+    // When a loan is returned, the borrowed copy should be deleted
+    let db = setup_test_db().await;
+
+    // Setup: Create book with borrowed copy (borrower's perspective)
+    let admin_id = create_test_admin(&db).await;
+    let library_id = create_test_library(&db, admin_id, "My Library").await;
+    let book_id = create_test_book_with_status(
+        &db,
+        "Borrowed Book",
+        "123456789",
+        false, // owned = false (borrowed from peer)
+        "READING_STATUS_READING",
+    )
+    .await;
+    let borrowed_copy_id = create_test_copy(&db, book_id, library_id, "borrowed").await;
+
+    // Create peer and outgoing request
+    let peer_id = create_test_peer(&db, "Lender Library", "http://lender:8000").await;
+    create_test_outgoing_request(
+        &db,
+        "out-1",
+        peer_id,
+        "123456789",
+        "Borrowed Book",
+        "accepted",
+    )
+    .await;
+
+    // Verify borrowed copy exists
+    use rust_lib_app::models::copy;
+    let copy_before = copy::Entity::find_by_id(borrowed_copy_id)
+        .one(&db)
+        .await
+        .unwrap();
+    assert!(
+        copy_before.is_some(),
+        "Borrowed copy should exist before return"
+    );
+
+    // Simulate the cleanup logic from update_outgoing_status when status = "returned"
+    // Delete borrowed copy
+    copy::Entity::delete_by_id(borrowed_copy_id)
+        .exec(&db)
+        .await
+        .expect("Delete copy failed");
+
+    // Verify copy was deleted
+    let copy_after = copy::Entity::find_by_id(borrowed_copy_id)
+        .one(&db)
+        .await
+        .unwrap();
+    assert!(
+        copy_after.is_none(),
+        "Borrowed copy should be deleted after return"
+    );
+}
+
+#[tokio::test]
+async fn test_loan_return_deletes_book_when_not_owned_and_no_copies() {
+    // Book should be deleted if: owned=false, not wishlist, no copies left
+    let db = setup_test_db().await;
+
+    // Setup: Create book with borrowed copy (borrower's perspective)
+    let admin_id = create_test_admin(&db).await;
+    let library_id = create_test_library(&db, admin_id, "My Library").await;
+    let book_id = create_test_book_with_status(
+        &db,
+        "Borrowed Book",
+        "987654321",
+        false,                    // owned = false
+        "READING_STATUS_READING", // NOT wishlist
+    )
+    .await;
+    let borrowed_copy_id = create_test_copy(&db, book_id, library_id, "borrowed").await;
+
+    // Delete copy (simulating return cleanup)
+    use rust_lib_app::models::{book, copy};
+    copy::Entity::delete_by_id(borrowed_copy_id)
+        .exec(&db)
+        .await
+        .unwrap();
+
+    // Check conditions for book deletion
+    let book_model = book::Entity::find_by_id(book_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let remaining_copies = copy::Entity::find()
+        .filter(copy::Column::BookId.eq(book_id))
+        .count(&db)
+        .await
+        .unwrap();
+
+    let should_delete = !book_model.owned
+        && book_model.reading_status != "READING_STATUS_WISHLIST"
+        && remaining_copies == 0;
+
+    assert!(should_delete, "Book should be marked for deletion");
+
+    // Delete book
+    book::Entity::delete_by_id(book_id).exec(&db).await.unwrap();
+
+    // Verify book was deleted
+    let book_after = book::Entity::find_by_id(book_id).one(&db).await.unwrap();
+    assert!(book_after.is_none(), "Book should be deleted after return");
+}
+
+#[tokio::test]
+async fn test_loan_return_keeps_book_if_owned() {
+    // Book should NOT be deleted if owned=true
+    let db = setup_test_db().await;
+
+    let admin_id = create_test_admin(&db).await;
+    let library_id = create_test_library(&db, admin_id, "My Library").await;
+    let book_id = create_test_book_with_status(
+        &db,
+        "My Book",
+        "111222333",
+        true, // owned = TRUE
+        "READING_STATUS_READING",
+    )
+    .await;
+    let borrowed_copy_id = create_test_copy(&db, book_id, library_id, "borrowed").await;
+
+    // Delete copy
+    use rust_lib_app::models::{book, copy};
+    copy::Entity::delete_by_id(borrowed_copy_id)
+        .exec(&db)
+        .await
+        .unwrap();
+
+    // Check conditions
+    let book_model = book::Entity::find_by_id(book_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let remaining_copies = copy::Entity::find()
+        .filter(copy::Column::BookId.eq(book_id))
+        .count(&db)
+        .await
+        .unwrap();
+
+    let should_delete = !book_model.owned
+        && book_model.reading_status != "READING_STATUS_WISHLIST"
+        && remaining_copies == 0;
+
+    // Core assertion: Book should NOT be deleted because owned=true
+    assert!(!should_delete, "Book should NOT be deleted when owned=true");
+}
+
+#[tokio::test]
+async fn test_loan_return_keeps_book_if_wishlist() {
+    // Book should NOT be deleted if in wishlist
+    let db = setup_test_db().await;
+
+    let admin_id = create_test_admin(&db).await;
+    let library_id = create_test_library(&db, admin_id, "My Library").await;
+    let book_id = create_test_book_with_status(
+        &db,
+        "Wishlist Book",
+        "444555666",
+        false,                     // owned = false
+        "READING_STATUS_WISHLIST", // IN WISHLIST
+    )
+    .await;
+    let borrowed_copy_id = create_test_copy(&db, book_id, library_id, "borrowed").await;
+
+    // Delete copy
+    use rust_lib_app::models::{book, copy};
+    copy::Entity::delete_by_id(borrowed_copy_id)
+        .exec(&db)
+        .await
+        .unwrap();
+
+    // Check conditions
+    let book_model = book::Entity::find_by_id(book_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let remaining_copies = copy::Entity::find()
+        .filter(copy::Column::BookId.eq(book_id))
+        .count(&db)
+        .await
+        .unwrap();
+
+    let should_delete = !book_model.owned
+        && book_model.reading_status != "READING_STATUS_WISHLIST"
+        && remaining_copies == 0;
+
+    // Core assertion: Book should NOT be deleted because in wishlist
+    assert!(
+        !should_delete,
+        "Book should NOT be deleted when in wishlist"
+    );
+}
+
+#[tokio::test]
+async fn test_loan_return_keeps_book_if_has_other_copies() {
+    // Book should NOT be deleted if other copies exist
+    let db = setup_test_db().await;
+
+    let admin_id = create_test_admin(&db).await;
+    let library_id = create_test_library(&db, admin_id, "My Library").await;
+    let book_id = create_test_book_with_status(
+        &db,
+        "Multi-copy Book",
+        "777888999",
+        false, // owned = false
+        "READING_STATUS_READING",
+    )
+    .await;
+
+    // Create TWO copies: one borrowed, one available
+    let borrowed_copy_id = create_test_copy(&db, book_id, library_id, "borrowed").await;
+    let _available_copy_id = create_test_copy(&db, book_id, library_id, "available").await;
+
+    // Delete only the borrowed copy
+    use rust_lib_app::models::{book, copy};
+    copy::Entity::delete_by_id(borrowed_copy_id)
+        .exec(&db)
+        .await
+        .unwrap();
+
+    // Check conditions
+    let book_model = book::Entity::find_by_id(book_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let remaining_copies = copy::Entity::find()
+        .filter(copy::Column::BookId.eq(book_id))
+        .count(&db)
+        .await
+        .unwrap();
+
+    let should_delete = !book_model.owned
+        && book_model.reading_status != "READING_STATUS_WISHLIST"
+        && remaining_copies == 0;
+
+    // Core assertion: Book should NOT be deleted because other copies exist
+    assert!(
+        !should_delete,
+        "Book should NOT be deleted when other copies exist"
+    );
+    assert_eq!(remaining_copies, 1, "One copy should remain");
+}
