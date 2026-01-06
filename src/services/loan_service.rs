@@ -161,9 +161,9 @@ pub async fn create_loan(
 
     let saved_loan = new_loan.insert(db).await?;
 
-    // 3. Update Copy status to 'borrowed'
+    // 3. Update Copy status to 'loaned'
     let mut copy_active: copy::ActiveModel = copy.into();
-    copy_active.status = Set("borrowed".to_owned());
+    copy_active.status = Set("loaned".to_owned());
     copy_active.update(db).await?;
 
     Ok(saved_loan)

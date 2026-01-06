@@ -454,6 +454,34 @@ pub async fn update_peer_url(
             .into_response();
     }
 
+    // Check if URL is already taken by another peer
+    if let Ok(Some(existing_peer)) = peer::Entity::find()
+        .filter(peer::Column::Url.eq(&payload.url))
+        .filter(peer::Column::Id.ne(peer_id))
+        .one(&db)
+        .await
+    {
+        // If the existing peer currently holding this URL is pending (not auto_approve),
+        // we can assume it's a stale entry (e.g. from a previous mDNS discovery on this IP)
+        // and delete it to free up the URL.
+        if !existing_peer.auto_approve {
+            tracing::info!(
+                "♻️ deleting stale peer {} to free up URL {}",
+                existing_peer.id,
+                payload.url
+            );
+            let _ = peer::Entity::delete_by_id(existing_peer.id).exec(&db).await;
+        } else {
+            // If it's an approved peer, we can't just delete it.
+            // This is a genuine conflict (two trusted peers on same IP? or same peer different ID?)
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "URL already in use by another trusted peer" })),
+            )
+                .into_response();
+        }
+    }
+
     let mut active_model: peer::ActiveModel = peer.into();
     active_model.url = Set(payload.url.clone());
     active_model.updated_at = Set(chrono::Utc::now().to_rfc3339());
@@ -2040,6 +2068,28 @@ pub async fn receive_loan_request(
                     p.url,
                     payload.from_url
                 );
+
+                // Check for conflict: Does another peer already use this new URL?
+                let conflict_peer = peer::Entity::find()
+                    .filter(peer::Column::Url.eq(&payload.from_url))
+                    .one(&db)
+                    .await
+                    .unwrap_or(None);
+
+                if let Some(conflict) = conflict_peer {
+                    // If conflict is NOT the same peer (ids differ), we have a problem.
+                    // Since URLs must be unique and we trust the new incoming request (it's active right now),
+                    // we assume the old entry holding this IP is stale.
+                    if conflict.id != p.id {
+                        tracing::warn!(
+                            "⚠️ Found stale peer {} holding URL {}. Deleting it.",
+                            conflict.name,
+                            payload.from_url
+                        );
+                        let _ = peer::Entity::delete_by_id(conflict.id).exec(&db).await;
+                    }
+                }
+
                 let mut active: peer::ActiveModel = p.clone().into();
                 active.url = Set(payload.from_url.clone());
                 active.updated_at = Set(Utc::now().to_rfc3339());
@@ -2050,6 +2100,22 @@ pub async fn receive_loan_request(
             p
         }
         Ok(None) => {
+            // Creating new peer. Check if URL is already taken by a stale peer (since UUID didn't match)
+            let conflict_peer = peer::Entity::find()
+                .filter(peer::Column::Url.eq(&payload.from_url))
+                .one(&db)
+                .await
+                .unwrap_or(None);
+
+            if let Some(conflict) = conflict_peer {
+                tracing::warn!(
+                    "⚠️ New peer claims URL {} held by old peer {}. Deleting old peer.",
+                    payload.from_url,
+                    conflict.name
+                );
+                let _ = peer::Entity::delete_by_id(conflict.id).exec(&db).await;
+            }
+
             let new_peer = peer::ActiveModel {
                 name: Set(payload.from_name),
                 url: Set(payload.from_url),
