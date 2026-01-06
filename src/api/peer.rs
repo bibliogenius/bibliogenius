@@ -11,6 +11,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Qu
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::IpAddr;
+use tracing::{error, info};
 use url::Url;
 
 /// Validate URL to prevent SSRF
@@ -1462,7 +1463,18 @@ pub async fn update_request_status(
         // Update Copy status
         let mut active_copy: copy::ActiveModel = copy.into();
         active_copy.status = Set("lent".to_string());
-        let _ = active_copy.update(&db).await;
+        info!(
+            "Updating copy {} status to 'lent' for loan acceptance",
+            active_copy.id.clone().unwrap()
+        );
+        if let Err(e) = active_copy.update(&db).await {
+            error!("Failed to update copy status to 'lent': {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Failed to update copy status: {}", e) })),
+            )
+                .into_response();
+        }
 
         // 5. Notify borrower that loan was accepted
         let peer_url = peer.url.clone();
