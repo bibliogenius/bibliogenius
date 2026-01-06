@@ -31,7 +31,7 @@ impl Config {
             cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
                 .ok()
                 .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
-                .unwrap_or_else(|| vec![]),
+                .unwrap_or_else(Vec::new),
             profile,
         }
     }

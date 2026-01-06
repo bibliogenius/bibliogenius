@@ -109,9 +109,8 @@ pub async fn import_data(
         for book in books {
             let active = book.into_active_model();
             // Try insert, if conflict on primary key, do nothing (already exists)
-            match active.insert(&db).await {
-                Ok(_) => books_count += 1,
-                Err(_) => {} // Already exists, skip
+            if let Ok(_) = active.insert(&db).await {
+                books_count += 1;
             }
         }
     }
@@ -120,9 +119,8 @@ pub async fn import_data(
     if let Some(copies) = backup.copies {
         for copy in copies {
             let active = copy.into_active_model();
-            match active.insert(&db).await {
-                Ok(_) => copies_count += 1,
-                Err(_) => {}
+            if let Ok(_) = active.insert(&db).await {
+                copies_count += 1;
             }
         }
     }
@@ -131,9 +129,8 @@ pub async fn import_data(
     if let Some(contacts) = backup.contacts {
         for contact in contacts {
             let active = contact.into_active_model();
-            match active.insert(&db).await {
-                Ok(_) => contacts_count += 1,
-                Err(_) => {}
+            if let Ok(_) = active.insert(&db).await {
+                contacts_count += 1;
             }
         }
     }
@@ -152,9 +149,8 @@ pub async fn import_data(
     if let Some(tags) = backup.tags {
         for tag in tags {
             let active = tag.into_active_model();
-            match active.insert(&db).await {
-                Ok(_) => tags_count += 1,
-                Err(_) => {}
+            if let Ok(_) = active.insert(&db).await {
+                tags_count += 1;
             }
         }
     }
