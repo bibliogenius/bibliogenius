@@ -13,7 +13,7 @@ pub struct Model {
     /// Availability status of this physical copy.
     /// Valid values:
     /// - `available`: On shelf, can be loaned
-    /// - `loaned`: Currently lent to someone (has active Loan)
+    /// - `lent`: Currently lent to someone (has active Loan)
     /// - `borrowed`: Borrowed from another library (P2P)
     /// - `lost`: Copy is lost
     /// - `wanted`: Wishlist - don't own yet

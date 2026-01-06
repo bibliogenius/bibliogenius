@@ -241,15 +241,16 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
     )
     .await;
 
-    // Create default copy only for individual/kid profiles, not for librarians
+    // Create default copy only for individual/kid profiles AND only if book is owned
     // Librarians manage copies manually through inventory
+    // Wishlist items (owned=false) should not have copies
     if let Ok(Some(profile)) = crate::models::installation_profile::Entity::find_by_id(1)
         .one(db)
         .await
     {
         let is_individual_profile =
             profile.profile_type == "individual" || profile.profile_type == "kid";
-        if is_individual_profile {
+        if is_individual_profile && model.owned {
             let copy = crate::models::copy::ActiveModel {
                 book_id: Set(model.id),
                 library_id: Set(1),

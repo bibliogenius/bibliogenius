@@ -1461,7 +1461,7 @@ pub async fn update_request_status(
 
         // Update Copy status
         let mut active_copy: copy::ActiveModel = copy.into();
-        active_copy.status = Set("loaned".to_string());
+        active_copy.status = Set("lent".to_string());
         let _ = active_copy.update(&db).await;
 
         // 5. Notify borrower that loan was accepted
