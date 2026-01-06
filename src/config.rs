@@ -31,15 +31,7 @@ impl Config {
             cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
                 .ok()
                 .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
-                .unwrap_or_else(|| {
-                    vec![
-                        "http://localhost:8080".to_string(),
-                        "http://127.0.0.1:8080".to_string(),
-                        "http://localhost:3000".to_string(),
-                        "http://localhost:8083".to_string(),
-                        "http://127.0.0.1:8083".to_string(),
-                    ]
-                }),
+                .unwrap_or_else(|| vec![]),
             profile,
         }
     }

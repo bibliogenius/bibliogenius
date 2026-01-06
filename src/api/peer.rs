@@ -948,6 +948,7 @@ pub async fn request_book(
         .exec(&db)
         .await
     {
+        tracing::error!("❌ Failed to save outgoing status: {}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -957,6 +958,7 @@ pub async fn request_book(
 
     // 3. Send request to peer
     if let Err(e) = validate_url(&peer.url) {
+        tracing::error!("❌ Invalid peer URL for request: {} ({})", peer.url, e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
@@ -971,11 +973,12 @@ pub async fn request_book(
     let my_config = match crate::models::library_config::Entity::find().one(&db).await {
         Ok(Some(config)) => config,
         _ => {
+            tracing::error!("❌ Library config not found when sending request");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "Library config not found" })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1365,30 +1368,11 @@ pub async fn update_request_status(
                     .unwrap_or(None);
 
                 if any_copy.is_none() {
-                    tracing::info!("Self-healing: Creating missing copy for book {}", book.id);
-                    // No copies exist at all (legacy data), create one!
-                    let now = chrono::Utc::now().to_rfc3339();
-                    let new_copy = copy::ActiveModel {
-                        book_id: Set(book.id),
-                        library_id: Set(1), // Default library
-                        status: Set("available".to_string()),
-                        is_temporary: Set(false),
-                        created_at: Set(now.clone()),
-                        updated_at: Set(now),
-                        ..Default::default()
-                    };
-
-                    match new_copy.insert(&db).await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            tracing::error!("Failed to auto-create copy: {}", e);
-                            return (
-                                StatusCode::CONFLICT,
-                                Json(json!({ "error": "No available copies and failed to create one" })),
-                            )
-                                .into_response();
-                        }
-                    }
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({ "error": "No copy found" })),
+                    )
+                        .into_response();
                 } else {
                     // Copies exist but none are available (truly borrowed)
                     return (
@@ -1462,9 +1446,9 @@ pub async fn update_request_status(
 
         // Update Copy status
         let mut active_copy: copy::ActiveModel = copy.into();
-        active_copy.status = Set("lent".to_string());
+        active_copy.status = Set("loaned".to_string());
         info!(
-            "Updating copy {} status to 'lent' for loan acceptance",
+            "Updating copy {} status to 'loaned' for loan acceptance",
             active_copy.id.clone().unwrap()
         );
         if let Err(e) = active_copy.update(&db).await {

@@ -179,9 +179,7 @@ async fn main() {
         .unwrap_or(true); // Enabled by default
 
     if mdns_enabled {
-        // Get library name from database or use default
-        let library_name =
-            std::env::var("LIBRARY_NAME").unwrap_or_else(|_| "BiblioGenius Library".to_string());
+        let library_name = "BiblioGenius Library".to_string();
 
         match rust_lib_app::services::init_mdns(&library_name, port, None) {
             Ok(()) => {
