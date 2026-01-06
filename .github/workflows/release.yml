@@ -55,6 +55,7 @@ jobs:
   create-release:
     needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
+    if: "!contains(github.ref, '-ci')"
     permissions:
       contents: write
     steps:
