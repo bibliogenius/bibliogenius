@@ -358,7 +358,31 @@ pub async fn update_peer_status(
         }
     };
 
-    // Update status based on action
+    // If rejecting, delete the peer entirely
+    if payload.status == "rejected" {
+        match peer::Entity::delete_by_id(peer_id).exec(&db).await {
+            Ok(_) => {
+                tracing::info!("🗑️ Peer {} rejected and deleted", peer_id);
+                return (
+                    StatusCode::OK,
+                    Json(json!({
+                        "message": "Peer rejected and removed",
+                        "peer_id": peer_id
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("Failed to delete peer: {}", e) })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Update auto_approve for accept/active
     let auto_approve = payload.status == "active" || payload.status == "accepted";
 
     let mut active_model: peer::ActiveModel = peer.into();
@@ -367,11 +391,15 @@ pub async fn update_peer_status(
 
     match active_model.update(&db).await {
         Ok(updated) => {
-            tracing::info!("✅ Peer {} status updated to: {}", peer_id, payload.status);
+            tracing::info!(
+                "✅ Peer {} accepted, auto_approve={}",
+                peer_id,
+                auto_approve
+            );
             (
                 StatusCode::OK,
                 Json(json!({
-                    "message": "Peer status updated",
+                    "message": "Peer accepted",
                     "peer": updated,
                     "auto_approve": auto_approve
                 })),

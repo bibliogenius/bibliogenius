@@ -109,7 +109,7 @@ pub async fn import_data(
         for book in books {
             let active = book.into_active_model();
             // Try insert, if conflict on primary key, do nothing (already exists)
-            if let Ok(_) = active.insert(&db).await {
+            if (active.insert(&db).await).is_ok() {
                 books_count += 1;
             }
         }
@@ -119,7 +119,7 @@ pub async fn import_data(
     if let Some(copies) = backup.copies {
         for copy in copies {
             let active = copy.into_active_model();
-            if let Ok(_) = active.insert(&db).await {
+            if (active.insert(&db).await).is_ok() {
                 copies_count += 1;
             }
         }
@@ -129,7 +129,7 @@ pub async fn import_data(
     if let Some(contacts) = backup.contacts {
         for contact in contacts {
             let active = contact.into_active_model();
-            if let Ok(_) = active.insert(&db).await {
+            if (active.insert(&db).await).is_ok() {
                 contacts_count += 1;
             }
         }
@@ -139,7 +139,7 @@ pub async fn import_data(
     if let Some(loans) = backup.loans {
         for loan in loans {
             let active = loan.into_active_model();
-            if let Ok(_) = active.insert(&db).await {
+            if (active.insert(&db).await).is_ok() {
                 loans_count += 1;
             }
         }
@@ -149,7 +149,7 @@ pub async fn import_data(
     if let Some(tags) = backup.tags {
         for tag in tags {
             let active = tag.into_active_model();
-            if let Ok(_) = active.insert(&db).await {
+            if (active.insert(&db).await).is_ok() {
                 tags_count += 1;
             }
         }
