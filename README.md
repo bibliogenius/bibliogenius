@@ -81,7 +81,7 @@ GET  /api/hub/discover        # Discover peers
 | ------------------ | ---------- | --------------------------------------------- |
 | **In Development** | ✅ Current | Personal library + LAN sync                   |
 | v1.0.0             | Q1 2026    | Stable P2P on local network                   |
-| v1.x               | Q2 2026    | Dynamic AI Bibliographies (Data.BnF + Gemini) |
+| v1.x               | Q2 2026    | Dynamic AI Bibliographies                     |
 | v2.0.0             | Q2-Q3 2026 | Global P2P (libp2p) + Social                  |
 
 ## Repository
