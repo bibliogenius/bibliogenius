@@ -1,6 +1,6 @@
 [package]
 name = "bibliogenius"
-version = "0.6.2-alpha.27"
+version = "0.6.2-alpha.28"
 edition = "2021"
 
 [lints.rust]
