@@ -10,6 +10,8 @@ pub struct UpdateProfileRequest {
     pub profile_type: String,
     #[serde(default)]
     pub avatar_config: Option<serde_json::Value>,
+    #[serde(default)]
+    pub fallback_preferences: Option<std::collections::HashMap<String, bool>>,
 }
 
 pub async fn update_profile(
@@ -36,13 +38,33 @@ pub async fn update_profile(
         .unwrap_or(None);
 
     if let Some(existing_profile) = profile {
-        let mut active: ActiveModel = existing_profile.into();
+        let mut active: ActiveModel = existing_profile.clone().into();
         active.profile_type = Set(req.profile_type.clone());
 
         if let Some(avatar_config) = req.avatar_config {
             active.avatar_config = Set(Some(
                 serde_json::to_string(&avatar_config).unwrap_or_default(),
             ));
+        }
+
+        // Handle fallback preferences
+        if let Some(prefs) = req.fallback_preferences {
+            let mut modules: Vec<String> =
+                serde_json::from_str(&existing_profile.enabled_modules).unwrap_or_default();
+
+            for (provider, enabled) in prefs {
+                let disable_flag = format!("disable_fallback:{}", provider);
+                if enabled {
+                    // Remove disable flag
+                    modules.retain(|m| m != &disable_flag);
+                } else {
+                    // Add disable flag if not present
+                    if !modules.contains(&disable_flag) {
+                        modules.push(disable_flag);
+                    }
+                }
+            }
+            active.enabled_modules = Set(serde_json::to_string(&modules).unwrap_or_default());
         }
 
         active.updated_at = Set(chrono::Utc::now().to_rfc3339());
