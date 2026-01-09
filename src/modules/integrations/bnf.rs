@@ -204,6 +204,111 @@ fn generate_bnf_cover_url(bnf_uri: &str) -> Option<String> {
     None
 }
 
+/// Search for a book by ISBN on data.bnf.fr
+pub async fn lookup_bnf_isbn(isbn: &str) -> Result<Option<BnfBook>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    // SPARQL query to search for exact ISBN
+    let sparql_query = format!(
+        r#"
+PREFIX dcterms: <http://purl.org/dc/terms/>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX bnf-onto: <http://data.bnf.fr/ontology/bnf-onto/>
+PREFIX rdarelationships: <http://rdvocab.info/RDARelationshipsWEMI/>
+
+SELECT DISTINCT ?work ?title ?authorName ?publisher ?date ?isbn ?description
+WHERE {{
+    ?manifestation bnf-onto:isbn "{isbn}" .
+    ?work rdarelationships:expressionManifested ?manifestation ;
+          dcterms:title ?title .
+    
+    OPTIONAL {{
+        ?work dcterms:creator ?author .
+        ?author foaf:name ?authorName .
+    }}
+    
+    OPTIONAL {{
+        ?manifestation dcterms:publisher ?publisherEntity .
+        ?publisherEntity foaf:name ?publisher .
+    }}
+    
+    OPTIONAL {{
+        ?manifestation dcterms:date ?date .
+    }}
+    
+    OPTIONAL {{
+        ?work dcterms:description ?description .
+    }}
+}}
+LIMIT 1
+"#,
+        isbn = isbn.replace('-', "")
+    );
+
+    let response = client
+        .get("https://data.bnf.fr/sparql")
+        .query(&[
+            ("query", sparql_query.as_str()),
+            ("format", "application/sparql-results+json"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("BNF API request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "BNF API returned error status: {}",
+            response.status()
+        ));
+    }
+
+    let sparql_result: SparqlResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse BNF response: {}", e))?;
+
+    if let Some(binding) = sparql_result.results.bindings.first() {
+        let uri = binding
+            .work
+            .as_ref()
+            .map(|w| w.value.clone())
+            .unwrap_or_default();
+
+        let title = binding
+            .title
+            .as_ref()
+            .map(|t| t.value.clone())
+            .unwrap_or_default();
+
+        // Parse year from date string
+        let year = binding.date.as_ref().and_then(|d| {
+            d.value
+                .split('-')
+                .next()
+                .and_then(|y| y.parse::<i32>().ok())
+        });
+
+        let cover_url = generate_bnf_cover_url(&uri);
+
+        Ok(Some(BnfBook {
+            title,
+            author: binding.author_name.as_ref().map(|a| a.value.clone()),
+            publisher: binding.publisher.as_ref().map(|p| p.value.clone()),
+            publication_year: year,
+            isbn: Some(isbn.to_string()),
+            cover_url,
+            bnf_uri: uri,
+            description: binding.description.as_ref().map(|d| d.value.clone()),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +317,5 @@ mod tests {
     async fn test_search_bnf() {
         let results = search_bnf("Victor Hugo").await;
         assert!(results.is_ok());
-        // May or may not have results depending on BNF availability
     }
 }

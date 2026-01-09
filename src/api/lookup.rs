@@ -6,15 +6,20 @@ use axum::{
 };
 use sea_orm::DatabaseConnection;
 
+#[derive(serde::Deserialize)]
+pub struct LookupParams {
+    pub lang: Option<String>,
+}
+
 pub async fn lookup_book(
     State(db): State<DatabaseConnection>,
     Path(isbn): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<LookupParams>,
 ) -> impl IntoResponse {
     use crate::models::installation_profile::Entity as ProfileEntity;
     use sea_orm::EntityTrait;
 
     // Load profile config to check enabled providers
-    // Default to true if profile load fails (fail open)
     let (enable_openlibrary, enable_google) =
         if let Ok(Some(profile_model)) = ProfileEntity::find_by_id(1).one(&db).await {
             let modules: Vec<String> =
@@ -24,16 +29,15 @@ pub async fn lookup_book(
                 modules.contains(&"enable_google_books".to_string()),
             )
         } else {
-            (true, false) // Default: OL enabled, GB disabled
+            (true, false)
         };
 
-    // 1. Try Inventaire (single source of truth for metadata)
+    // 1. Try Inventaire
     if let Ok(mut inv_metadata) = crate::inventaire_client::fetch_inventaire_metadata(&isbn).await {
-        // 2. Enrich with OpenLibrary cover if missing and enabled
+        // ... (enrichment logic kept same) ...
         if inv_metadata.cover_url.is_none() && enable_openlibrary {
             inv_metadata.cover_url = crate::openlibrary::fetch_cover_url(&isbn).await;
         }
-        // 3. Enrich with Google Books if still missing and enabled
         if inv_metadata.cover_url.is_none() && enable_google {
             inv_metadata.cover_url = crate::google_books::fetch_cover_url(&isbn).await;
         }
@@ -49,23 +53,58 @@ pub async fn lookup_book(
         return (StatusCode::OK, Json(metadata)).into_response();
     }
 
-    // 3. Fallback to OpenLibrary (only if Inventaire completely fails)
+    // 2. Fallback to OpenLibrary
     if enable_openlibrary {
         match crate::openlibrary::fetch_book_metadata(&isbn).await {
             Ok(mut metadata) => {
-                // Try Google Books for cover if missing and enabled
                 if metadata.cover_url.is_none() && enable_google {
                     metadata.cover_url = crate::google_books::fetch_cover_url(&isbn).await;
                 }
                 return (StatusCode::OK, Json(metadata)).into_response();
             }
-            Err(_) => {
-                // Continue to next fallback
+            Err(_) => {}
+        }
+    }
+
+    // 3. Fallback to BNF (If French context)
+    let clean_isbn = isbn.replace('-', "");
+    let is_french_isbn = clean_isbn.starts_with("9782") || clean_isbn.starts_with("97910");
+    let user_lang_is_french = params.lang.as_deref().unwrap_or("").starts_with("fr");
+
+    if is_french_isbn || user_lang_is_french {
+        match crate::modules::integrations::bnf::lookup_bnf_isbn(&clean_isbn).await {
+            Ok(Some(bnf_book)) => {
+                let authors = bnf_book
+                    .author
+                    .map(|name| {
+                        vec![crate::inventaire_client::AuthorMetadata {
+                            name,
+                            birth_year: None,
+                            death_year: None,
+                            image_url: None,
+                            bio: None,
+                        }]
+                    })
+                    .unwrap_or_default();
+
+                let metadata = crate::openlibrary::BookMetadata {
+                    title: bnf_book.title,
+                    authors,
+                    publisher: bnf_book.publisher,
+                    publication_year: bnf_book.publication_year.map(|y| y.to_string()),
+                    cover_url: bnf_book.cover_url,
+                    summary: bnf_book.description,
+                };
+                return (StatusCode::OK, Json(metadata)).into_response();
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("BNF lookup failed for {}: {}", isbn, e);
             }
         }
     }
 
-    // 4. Fallback to Google Books (if both Inventaire and OpenLibrary failed/disabled)
+    // 4. Fallback to Google Books
     if enable_google {
         match crate::google_books::fetch_book_metadata(&isbn).await {
             Ok(metadata) => (StatusCode::OK, Json(metadata)).into_response(),
