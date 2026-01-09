@@ -78,6 +78,11 @@ pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
             .as_ref()
             .map(|a| {
                 a.iter()
+                    .filter(|auth| {
+                        let n = auth.name.trim();
+                        !n.eq_ignore_ascii_case("unknown author")
+                            && !n.eq_ignore_ascii_case("unknown")
+                    })
                     .map(|auth| AuthorMetadata {
                         name: auth.name.clone(),
                         birth_year: None,
@@ -149,6 +154,10 @@ pub async fn search_books(query: &str) -> Result<Vec<BookMetadata>, String> {
                 .author_name
                 .unwrap_or_default()
                 .into_iter()
+                .filter(|name| {
+                    let n = name.trim();
+                    !n.eq_ignore_ascii_case("unknown author") && !n.eq_ignore_ascii_case("unknown")
+                })
                 .map(|name| AuthorMetadata {
                     name,
                     birth_year: None,

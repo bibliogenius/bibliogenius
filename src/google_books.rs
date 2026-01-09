@@ -62,6 +62,11 @@ pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
                 .as_ref()
                 .map(|list| {
                     list.iter()
+                        .filter(|name| {
+                            let n = name.trim();
+                            !n.eq_ignore_ascii_case("unknown author")
+                                && !n.eq_ignore_ascii_case("unknown")
+                        })
                         .map(|name| AuthorMetadata {
                             name: name.clone(),
                             birth_year: None,
