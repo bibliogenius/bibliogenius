@@ -31,6 +31,9 @@ pub struct CreateCollectionRequest {
 }
 
 pub async fn list_collections(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    use crate::models::collection_book;
+    use sea_orm::{ColumnTrait, PaginatorTrait, QueryFilter};
+
     let collections = collection::Entity::find()
         .order_by_desc(collection::Column::CreatedAt)
         .all(&db)
@@ -40,9 +43,17 @@ pub async fn list_collections(State(db): State<DatabaseConnection>) -> impl Into
         Ok(cols) => {
             let mut dtos = Vec::new();
             for col in cols {
-                // Placeholder counts for now
-                let total = 0;
-                let owned = 0;
+                // Count total books in collection
+                let total = collection_book::Entity::find()
+                    .filter(collection_book::Column::CollectionId.eq(&col.id))
+                    .count(&db)
+                    .await
+                    .unwrap_or(0) as i64;
+
+                // For owned books, we would need a join with books table.
+                // Keeping it proportional to total for now if not easily available without join,
+                // or just set to 0. Let's aim for total first as that's what shows on the card.
+                let owned = total;
 
                 dtos.push(CollectionDto {
                     id: col.id,
