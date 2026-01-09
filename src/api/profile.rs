@@ -51,6 +51,8 @@ pub async fn update_profile(
         if let Some(prefs) = req.fallback_preferences {
             let mut modules: Vec<String> =
                 serde_json::from_str(&existing_profile.enabled_modules).unwrap_or_default();
+            println!("DEBUG PROFILE: Initial modules: {:?}", modules);
+            println!("DEBUG PROFILE: Received prefs: {:?}", prefs);
 
             for (provider, enabled) in prefs {
                 if provider == "google_books" {
