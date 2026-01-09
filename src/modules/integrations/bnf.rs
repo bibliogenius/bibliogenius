@@ -57,12 +57,12 @@ struct SparqlValue {
 /// A vector of BnfBook results
 pub async fn search_bnf(query: &str) -> Result<Vec<BnfBook>, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     // SPARQL query to search for books by title or author
-    // Using IFLA LRM model: Work -> Expression -> Manifestation
+    // Optimized with UNION to avoid slow full scans with OR filters
     let sparql_query = format!(
         r#"
 PREFIX dcterms: <http://purl.org/dc/terms/>
@@ -73,8 +73,17 @@ PREFIX rdarelationships: <http://rdvocab.info/RDARelationshipsWEMI/>
 
 SELECT DISTINCT ?work ?title ?authorName ?publisher ?date ?isbn ?description
 WHERE {{
-    ?work a <http://data.bnf.fr/ontology/bnf-onto/Work> ;
-          dcterms:title ?title .
+    {{
+        ?work dcterms:title ?title .
+        FILTER(CONTAINS(LCASE(?title), LCASE("{search}")))
+    }}
+    UNION
+    {{
+        ?work dcterms:creator ?author .
+        ?author foaf:name ?authorName .
+        FILTER(CONTAINS(LCASE(?authorName), LCASE("{search}")))
+        ?work dcterms:title ?title .
+    }}
     
     OPTIONAL {{
         ?work dcterms:creator ?author .
@@ -100,11 +109,6 @@ WHERE {{
     OPTIONAL {{
         ?work dcterms:description ?description .
     }}
-    
-    FILTER(
-        CONTAINS(LCASE(?title), LCASE("{search}")) ||
-        CONTAINS(LCASE(COALESCE(?authorName, "")), LCASE("{search}"))
-    )
 }}
 LIMIT 20
 "#,

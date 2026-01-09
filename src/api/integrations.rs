@@ -287,7 +287,6 @@ pub async fn search_unified(
         if let Ok(Some(profile_model)) = ProfileEntity::find_by_id(1).one(&db).await {
             let modules: Vec<String> =
                 serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
-            println!("DEBUG SEARCH: modules={:?}", modules);
             (
                 !modules.contains(&"disable_fallback:inventaire".to_string()),
                 !modules.contains(&"disable_fallback:bnf".to_string()),
@@ -368,12 +367,8 @@ pub async fn search_unified(
         }
     }
 
-    // 2b. Search BNF (data.bnf.fr) for French users
-    let user_lang_check = params.lang.as_deref().unwrap_or("").to_lowercase();
-    let is_french =
-        user_lang_check == "fr" || user_lang_check == "fra" || user_lang_check == "french";
-
-    if enable_bnf && is_french && !inv_query.trim().is_empty() {
+    // 2b. Search BNF (data.bnf.fr)
+    if enable_bnf && !inv_query.trim().is_empty() {
         match crate::modules::integrations::bnf::search_bnf(&inv_query).await {
             Ok(bnf_results) => {
                 for bnf_book in bnf_results {
