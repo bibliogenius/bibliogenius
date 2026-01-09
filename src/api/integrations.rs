@@ -87,94 +87,121 @@ struct OpenLibraryDoc {
     language: Option<Vec<String>>,
 }
 
-pub async fn search_external(query: &crate::api::search::SearchQuery) -> Vec<book::Model> {
+pub async fn search_external(
+    query: &crate::api::search::SearchQuery,
+    db: &DatabaseConnection,
+) -> Vec<book::Model> {
+    // Check if OpenLibrary fallback is enabled
+    use crate::models::installation_profile::Entity as ProfileEntity;
+    use sea_orm::EntityTrait;
+
+    let (enable_openlibrary, enable_google) =
+        if let Ok(Some(profile_model)) = ProfileEntity::find_by_id(1).one(db).await {
+            let modules: Vec<String> =
+                serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
+            (
+                !modules.contains(&"disable_fallback:openlibrary".to_string()),
+                modules.contains(&"enable_google_books".to_string()),
+            )
+        } else {
+            (true, false)
+        };
+
     let mut books = Vec::new();
-    // Add timeout to prevent hanging when OpenLibrary is down
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
 
-    // Build Open Library Query
-    let mut q_parts = Vec::new();
+    if enable_openlibrary {
+        // Add timeout to prevent hanging when OpenLibrary is down
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
 
-    // If we have a generic query 'q', use it directly
-    if let Some(q) = &query.q {
-        q_parts.push(format!("q={}", urlencoding::encode(q)));
-    } else {
-        // Otherwise use specific fields
-        if let Some(t) = &query.title {
-            q_parts.push(format!("title:{}", t));
-        }
-        if let Some(a) = &query.author {
-            q_parts.push(format!("author:{}", a));
-        }
-        if let Some(s) = &query.subjects {
-            q_parts.push(format!("subject:{}", s));
-        }
-    }
+        // Build Open Library Query
+        let mut q_parts = Vec::new();
 
-    if q_parts.is_empty() {
-        return books;
-    }
-
-    let q_str = q_parts.join("&");
-    // If using generic q, the params are already encoded and formatted
-    let url = if query.q.is_some() {
-        format!("https://openlibrary.org/search.json?{}&limit=5", q_str)
-    } else {
-        // Fallback for specific fields (legacy construction)
-        let q_str_legacy = q_parts.join(" AND ");
-        format!(
-            "https://openlibrary.org/search.json?q={}&limit=5",
-            urlencoding::encode(&q_str_legacy)
-        )
-    };
-
-    if let Ok(res) = client.get(&url).send().await {
-        if let Ok(data) = res.json::<OpenLibrarySearchResponse>().await {
-            for doc in data.docs {
-                let isbn = doc.isbn.as_ref().and_then(|v| v.first()).cloned();
-
-                // Map to our Book Model (store additional data in source_data)
-                let source_data = serde_json::json!({
-                    "authors": doc.author_name.clone().unwrap_or_default(),
-                    "cover_id": doc.cover_i,
-                    "source": "openlibrary",
-                    "languages": doc.language.clone().unwrap_or_default()
-                });
-
-                let cover_url = doc
-                    .cover_i
-                    .map(|id| format!("https://covers.openlibrary.org/b/id/{}-M.jpg", id));
-
-                let book = book::Model {
-                    id: 0, // Placeholder ID
-                    title: doc.title,
-                    isbn,
-                    publisher: doc.publisher.map(|v| v.join(", ")),
-                    publication_year: doc.first_publish_year,
-                    summary: None,
-                    dewey_decimal: None,
-                    lcc: None,
-                    subjects: None,
-                    marc_record: None,
-                    cataloguing_notes: None,
-                    source_data: Some(source_data.to_string()),
-                    shelf_position: None,
-                    cover_url,
-                    reading_status: "to_read".to_string(),
-                    finished_reading_at: None,
-                    started_reading_at: None,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    updated_at: chrono::Utc::now().to_rfc3339(),
-                    user_rating: None,
-                    owned: true, // External search results are assumed owned
-                    price: None, // No price from external search
-                };
-                books.push(book);
+        // If we have a generic query 'q', use it directly
+        if let Some(q) = &query.q {
+            q_parts.push(format!("q={}", urlencoding::encode(q)));
+        } else {
+            // Otherwise use specific fields
+            if let Some(t) = &query.title {
+                q_parts.push(format!("title:{}", t));
+            }
+            if let Some(a) = &query.author {
+                q_parts.push(format!("author:{}", a));
+            }
+            if let Some(s) = &query.subjects {
+                q_parts.push(format!("subject:{}", s));
             }
         }
+
+        if q_parts.is_empty() {
+            return books;
+        }
+
+        let q_str = q_parts.join("&");
+        // If using generic q, the params are already encoded and formatted
+        let url = if query.q.is_some() {
+            format!("https://openlibrary.org/search.json?{}&limit=5", q_str)
+        } else {
+            // Fallback for specific fields (legacy construction)
+            let q_str_legacy = q_parts.join(" AND ");
+            format!(
+                "https://openlibrary.org/search.json?q={}&limit=5",
+                urlencoding::encode(&q_str_legacy)
+            )
+        };
+
+        if let Ok(res) = client.get(&url).send().await {
+            if let Ok(data) = res.json::<OpenLibrarySearchResponse>().await {
+                for doc in data.docs {
+                    let isbn = doc.isbn.as_ref().and_then(|v| v.first()).cloned();
+
+                    // Map to our Book Model (store additional data in source_data)
+                    let source_data = serde_json::json!({
+                        "authors": doc.author_name.clone().unwrap_or_default(),
+                        "cover_id": doc.cover_i,
+                        "source": "openlibrary",
+                        "languages": doc.language.clone().unwrap_or_default()
+                    });
+
+                    let cover_url = doc
+                        .cover_i
+                        .map(|id| format!("https://covers.openlibrary.org/b/id/{}-M.jpg", id));
+
+                    let book = book::Model {
+                        id: 0, // Placeholder ID
+                        title: doc.title,
+                        isbn,
+                        publisher: doc.publisher.map(|v| v.join(", ")),
+                        publication_year: doc.first_publish_year,
+                        summary: None,
+                        dewey_decimal: None,
+                        lcc: None,
+                        subjects: None,
+                        marc_record: None,
+                        cataloguing_notes: None,
+                        source_data: Some(source_data.to_string()),
+                        shelf_position: None,
+                        cover_url,
+                        reading_status: "to_read".to_string(),
+                        finished_reading_at: None,
+                        started_reading_at: None,
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        updated_at: chrono::Utc::now().to_rfc3339(),
+                        user_rating: None,
+                        owned: true, // External search results are assumed owned
+                        price: None, // No price from external search
+                    };
+                    books.push(book);
+                }
+            }
+        }
+    }
+
+    if enable_google {
+        let gb_results = crate::google_books::search_books(query).await;
+        books.extend(gb_results);
     }
 
     books
@@ -247,7 +274,10 @@ pub struct UnifiedSearchQuery {
     pub lang: Option<String>, // User's preferred language (e.g., "fr", "en")
 }
 
-pub async fn search_unified(Query(params): Query<UnifiedSearchQuery>) -> impl IntoResponse {
+pub async fn search_unified(
+    State(db): State<DatabaseConnection>,
+    Query(params): Query<UnifiedSearchQuery>,
+) -> impl IntoResponse {
     let mut results: Vec<book::Book> = Vec::new();
 
     // 1. Build Query String for Inventaire (General Search)
@@ -340,7 +370,7 @@ pub async fn search_unified(Query(params): Query<UnifiedSearchQuery>) -> impl In
         || search_query.publisher.is_some()
         || search_query.subjects.is_some()
     {
-        let ol_results = search_external(&search_query).await;
+        let ol_results = search_external(&search_query, &db).await;
         for model in ol_results {
             // Convert Model to Book DTO and enrich
             let mut dto = book::Book::from(model.clone());

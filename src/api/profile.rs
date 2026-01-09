@@ -53,14 +53,25 @@ pub async fn update_profile(
                 serde_json::from_str(&existing_profile.enabled_modules).unwrap_or_default();
 
             for (provider, enabled) in prefs {
-                let disable_flag = format!("disable_fallback:{}", provider);
-                if enabled {
-                    // Remove disable flag
-                    modules.retain(|m| m != &disable_flag);
+                if provider == "google_books" {
+                    let enable_flag = "enable_google_books".to_string();
+                    if enabled {
+                        if !modules.contains(&enable_flag) {
+                            modules.push(enable_flag);
+                        }
+                    } else {
+                        modules.retain(|m| m != &enable_flag);
+                    }
                 } else {
-                    // Add disable flag if not present
-                    if !modules.contains(&disable_flag) {
-                        modules.push(disable_flag);
+                    let disable_flag = format!("disable_fallback:{}", provider);
+                    if enabled {
+                        // Remove disable flag
+                        modules.retain(|m| m != &disable_flag);
+                    } else {
+                        // Add disable flag if not present
+                        if !modules.contains(&disable_flag) {
+                            modules.push(disable_flag);
+                        }
                     }
                 }
             }

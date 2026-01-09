@@ -93,7 +93,7 @@ pub async fn search_books(
 
     // 2. Public Search (Open Library)
     if source_list.contains(&"public") {
-        let external_models = crate::api::integrations::search_external(&params).await;
+        let external_models = crate::api::integrations::search_external(&params, &db).await;
         let mut dtos: Vec<book::Book> = external_models
             .into_iter()
             .map(|m| {

@@ -127,3 +127,95 @@ pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
 
     None
 }
+
+pub async fn search_books(
+    query: &crate::api::search::SearchQuery,
+) -> Vec<crate::models::book::Model> {
+    let mut q_parts = Vec::new();
+
+    if let Some(q) = &query.q {
+        q_parts.push(urlencoding::encode(q).to_string());
+    } else {
+        if let Some(t) = &query.title {
+            q_parts.push(format!("intitle:{}", urlencoding::encode(t)));
+        }
+        if let Some(a) = &query.author {
+            q_parts.push(format!("inauthor:{}", urlencoding::encode(a)));
+        }
+        if let Some(p) = &query.publisher {
+            q_parts.push(format!("inpublisher:{}", urlencoding::encode(p)));
+        }
+        if let Some(s) = &query.subjects {
+            q_parts.push(format!("subject:{}", urlencoding::encode(s)));
+        }
+    }
+
+    if q_parts.is_empty() {
+        return Vec::new();
+    }
+
+    let q_str = q_parts.join("+"); // Google Books uses + or space
+    let url = format!(
+        "https://www.googleapis.com/books/v1/volumes?q={}&maxResults=10",
+        q_str
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let mut books = Vec::new();
+
+    if let Ok(resp) = client.get(&url).send().await {
+        if let Ok(parsed) = resp.json::<GoogleBooksResponse>().await {
+            if let Some(items) = parsed.items {
+                for item in items {
+                    let info = item.volume_info;
+
+                    // Convert to Book Model
+                    let cover_url = info
+                        .image_links
+                        .as_ref()
+                        .and_then(|l| l.thumbnail.clone())
+                        .map(|url| url.replace("http://", "https://"));
+
+                    let source_data = serde_json::json!({
+                       "source": "google_books",
+                       "authors": info.authors.clone().unwrap_or_default(),
+                    });
+
+                    let book = crate::models::book::Model {
+                        id: 0,
+                        title: info.title,
+                        isbn: None, // We could try to extract ISBN from industryIdentifiers if needed
+                        publisher: info.publisher,
+                        publication_year: info
+                            .published_date
+                            .map(|d| d.chars().take(4).collect::<String>().parse().ok())
+                            .flatten(),
+                        summary: info.description,
+                        dewey_decimal: None,
+                        lcc: None,
+                        subjects: None,
+                        marc_record: None,
+                        cataloguing_notes: None,
+                        source_data: Some(source_data.to_string()),
+                        shelf_position: None,
+                        cover_url,
+                        reading_status: "to_read".to_string(),
+                        finished_reading_at: None,
+                        started_reading_at: None,
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        updated_at: chrono::Utc::now().to_rfc3339(),
+                        user_rating: None,
+                        owned: true,
+                        price: None,
+                    };
+                    books.push(book);
+                }
+            }
+        }
+    }
+    books
+}

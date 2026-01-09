@@ -12,12 +12,38 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> Result<Json<Val
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let enabled_modules = if let Ok(Some(profile)) =
+        crate::models::installation_profile::Entity::find_by_id(1)
+            .one(&db)
+            .await
+    {
+        serde_json::from_str::<Vec<String>>(&profile.enabled_modules).unwrap_or_default()
+    } else {
+        vec![]
+    };
+
     match config {
-        Some(cfg) => Ok(Json(json!(LibraryConfig::from(cfg)))),
+        Some(cfg) => {
+            let mut json_val = serde_json::to_value(LibraryConfig::from(cfg))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            if let Some(obj) = json_val.as_object_mut() {
+                obj.insert("enabled_modules".to_string(), json!(enabled_modules));
+                // Also add profile_type for convenience if passing it here
+                if let Ok(Some(profile)) =
+                    crate::models::installation_profile::Entity::find_by_id(1)
+                        .one(&db)
+                        .await
+                {
+                    obj.insert("profile_type".to_string(), json!(profile.profile_type));
+                }
+            }
+            Ok(Json(json_val))
+        }
         None => Ok(Json(json!({
             "name": "My Library",
             "description": null,
-            "tags": []
+            "tags": [],
+            "enabled_modules": enabled_modules
         }))),
     }
 }

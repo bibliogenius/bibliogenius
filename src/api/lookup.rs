@@ -10,7 +10,7 @@ pub async fn lookup_book(
     State(db): State<DatabaseConnection>,
     Path(isbn): Path<String>,
 ) -> impl IntoResponse {
-    use crate::models::installation_profile::{Entity as ProfileEntity, ProfileConfig};
+    use crate::models::installation_profile::Entity as ProfileEntity;
     use sea_orm::EntityTrait;
 
     // Load profile config to check enabled providers
@@ -21,10 +21,10 @@ pub async fn lookup_book(
                 serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
             (
                 !modules.contains(&"disable_fallback:openlibrary".to_string()),
-                !modules.contains(&"disable_fallback:google_books".to_string()),
+                modules.contains(&"enable_google_books".to_string()),
             )
         } else {
-            (true, true)
+            (true, false) // Default: OL enabled, GB disabled
         };
 
     // 1. Try Inventaire (single source of truth for metadata)
