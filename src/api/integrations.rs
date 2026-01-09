@@ -366,53 +366,52 @@ pub async fn search_unified(
     }
 
     // 2b. Search BNF (data.bnf.fr) for French users
-    // 2b. Search BNF (data.bnf.fr) for French users
     let user_lang_check = params.lang.as_deref().unwrap_or("").to_lowercase();
-    let is_french = user_lang_check == "fr" || user_lang_check == "fra" || user_lang_check == "french";
+    let is_french =
+        user_lang_check == "fr" || user_lang_check == "fra" || user_lang_check == "french";
 
     if enable_bnf && is_french && !inv_query.trim().is_empty() {
-            match crate::modules::integrations::bnf::search_bnf(&inv_query).await {
-                Ok(bnf_results) => {
-                    for bnf_book in bnf_results {
-                        let book = book::Book {
-                            id: None,
-                            title: bnf_book.title,
-                            isbn: bnf_book.isbn,
-                            publisher: bnf_book.publisher,
-                            publication_year: bnf_book.publication_year,
-                            summary: bnf_book.description,
-                            dewey_decimal: None,
-                            lcc: None,
-                            subjects: None,
-                            marc_record: None,
-                            cataloguing_notes: None,
-                            source_data: Some(
-                                serde_json::json!({
-                                    "source": "bnf",
-                                    "bnf_uri": bnf_book.bnf_uri,
-                                    "languages": ["fr"]
-                                })
-                                .to_string(),
-                            ),
-                            shelf_position: None,
-                            reading_status: Some("to_read".to_string()),
-                            source: Some("BNF".to_string()),
-                            author: bnf_book.author.clone(),
-                            authors: bnf_book.author.map(|a| vec![a]),
-                            cover_url: bnf_book.cover_url,
-                            large_cover_url: None,
-                            finished_reading_at: None,
-                            started_reading_at: None,
-                            user_rating: None,
-                            owned: Some(true),
-                            price: None,
-                        };
-                        results.push(book);
-                    }
+        match crate::modules::integrations::bnf::search_bnf(&inv_query).await {
+            Ok(bnf_results) => {
+                for bnf_book in bnf_results {
+                    let book = book::Book {
+                        id: None,
+                        title: bnf_book.title,
+                        isbn: bnf_book.isbn,
+                        publisher: bnf_book.publisher,
+                        publication_year: bnf_book.publication_year,
+                        summary: bnf_book.description,
+                        dewey_decimal: None,
+                        lcc: None,
+                        subjects: None,
+                        marc_record: None,
+                        cataloguing_notes: None,
+                        source_data: Some(
+                            serde_json::json!({
+                                "source": "bnf",
+                                "bnf_uri": bnf_book.bnf_uri,
+                                "languages": ["fr"]
+                            })
+                            .to_string(),
+                        ),
+                        shelf_position: None,
+                        reading_status: Some("to_read".to_string()),
+                        source: Some("BNF".to_string()),
+                        author: bnf_book.author.clone(),
+                        authors: bnf_book.author.map(|a| vec![a]),
+                        cover_url: bnf_book.cover_url,
+                        large_cover_url: None,
+                        finished_reading_at: None,
+                        started_reading_at: None,
+                        user_rating: None,
+                        owned: Some(true),
+                        price: None,
+                    };
+                    results.push(book);
                 }
-                Err(e) => {
-                    eprintln!("BNF search failed: {}", e);
-                }
+            }
+            Err(e) => {
+                eprintln!("BNF search failed: {}", e);
             }
         }
     }
