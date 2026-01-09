@@ -32,10 +32,16 @@ pub async fn lookup_book(Path(isbn): Path<String>) -> impl IntoResponse {
             }
             (StatusCode::OK, Json(metadata)).into_response()
         }
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e })),
-        )
-            .into_response(),
+        Err(_) => {
+            // 4. Fallback to Google Books (if both Inventaire and OpenLibrary failed)
+            match crate::google_books::fetch_book_metadata(&isbn).await {
+                Ok(metadata) => (StatusCode::OK, Json(metadata)).into_response(),
+                Err(e) => (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": format!("Book found nowhere: {}", e) })),
+                )
+                    .into_response(),
+            }
+        }
     }
 }
