@@ -20,37 +20,43 @@ pub async fn lookup_book(
     use sea_orm::EntityTrait;
 
     // Load profile config to check enabled providers
-    let (enable_openlibrary, enable_google) =
+    let (enable_openlibrary, enable_google, enable_inventaire, enable_bnf) =
         if let Ok(Some(profile_model)) = ProfileEntity::find_by_id(1).one(&db).await {
             let modules: Vec<String> =
                 serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
             (
                 !modules.contains(&"disable_fallback:openlibrary".to_string()),
                 modules.contains(&"enable_google_books".to_string()),
+                !modules.contains(&"disable_fallback:inventaire".to_string()),
+                !modules.contains(&"disable_fallback:bnf".to_string()),
             )
         } else {
-            (true, false)
+            (true, false, true, true)
         };
 
     // 1. Try Inventaire
-    if let Ok(mut inv_metadata) = crate::inventaire_client::fetch_inventaire_metadata(&isbn).await {
-        // ... (enrichment logic kept same) ...
-        if inv_metadata.cover_url.is_none() && enable_openlibrary {
-            inv_metadata.cover_url = crate::openlibrary::fetch_cover_url(&isbn).await;
-        }
-        if inv_metadata.cover_url.is_none() && enable_google {
-            inv_metadata.cover_url = crate::google_books::fetch_cover_url(&isbn).await;
-        }
+    if enable_inventaire {
+        if let Ok(mut inv_metadata) =
+            crate::inventaire_client::fetch_inventaire_metadata(&isbn).await
+        {
+            // ... (enrichment logic kept same) ...
+            if inv_metadata.cover_url.is_none() && enable_openlibrary {
+                inv_metadata.cover_url = crate::openlibrary::fetch_cover_url(&isbn).await;
+            }
+            if inv_metadata.cover_url.is_none() && enable_google {
+                inv_metadata.cover_url = crate::google_books::fetch_cover_url(&isbn).await;
+            }
 
-        let metadata = crate::openlibrary::BookMetadata {
-            title: inv_metadata.title,
-            authors: inv_metadata.authors,
-            publisher: inv_metadata.publisher,
-            publication_year: inv_metadata.publication_year,
-            cover_url: inv_metadata.cover_url,
-            summary: inv_metadata.summary,
-        };
-        return (StatusCode::OK, Json(metadata)).into_response();
+            let metadata = crate::openlibrary::BookMetadata {
+                title: inv_metadata.title,
+                authors: inv_metadata.authors,
+                publisher: inv_metadata.publisher,
+                publication_year: inv_metadata.publication_year,
+                cover_url: inv_metadata.cover_url,
+                summary: inv_metadata.summary,
+            };
+            return (StatusCode::OK, Json(metadata)).into_response();
+        }
     }
 
     // 2. Fallback to OpenLibrary
@@ -66,14 +72,15 @@ pub async fn lookup_book(
         }
     }
 
-    // 3. Fallback to BNF (If French context)
+    // 3. Fallback to BNF (If French context AND enabled)
     let clean_isbn = isbn.replace('-', "");
     let is_french_isbn = clean_isbn.starts_with("9782") || clean_isbn.starts_with("97910");
     let user_lang_is_french = params.lang.as_deref().unwrap_or("").starts_with("fr");
 
-    if is_french_isbn || user_lang_is_french {
+    if enable_bnf && (is_french_isbn || user_lang_is_french) {
         match crate::modules::integrations::bnf::lookup_bnf_isbn(&clean_isbn).await {
             Ok(Some(bnf_book)) => {
+                // ... (conversion logic) ...
                 let authors = bnf_book
                     .author
                     .map(|name| {
