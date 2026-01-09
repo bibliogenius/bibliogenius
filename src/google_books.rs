@@ -197,8 +197,7 @@ pub async fn search_books(
                         publisher: info.publisher,
                         publication_year: info
                             .published_date
-                            .map(|d| d.chars().take(4).collect::<String>().parse().ok())
-                            .flatten(),
+                            .and_then(|d| d.chars().take(4).collect::<String>().parse().ok()),
                         summary: info.description,
                         dewey_decimal: None,
                         lcc: None,
