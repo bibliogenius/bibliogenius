@@ -283,16 +283,19 @@ pub async fn search_unified(
     use crate::models::installation_profile::Entity as ProfileEntity;
     use sea_orm::EntityTrait;
     // Load profile config to check enabled providers
-    let (enable_inventaire, enable_bnf) =
+    let (enable_inventaire, enable_bnf, enable_openlibrary) =
         if let Ok(Some(profile_model)) = ProfileEntity::find_by_id(1).one(&db).await {
             let modules: Vec<String> =
                 serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
+            println!("DEBUG SEARCH: modules={:?}", modules);
             (
                 !modules.contains(&"disable_fallback:inventaire".to_string()),
                 !modules.contains(&"disable_fallback:bnf".to_string()),
+                !modules.contains(&"disable_fallback:openlibrary".to_string()),
             )
         } else {
-            (true, true)
+            println!("DEBUG SEARCH: Profile not found");
+            (true, true, true)
         };
 
     // 1. Build Query String for Inventaire (General Search)
@@ -431,11 +434,13 @@ pub async fn search_unified(
     };
 
     // Only call if we have something to search
-    if search_query.q.is_some()
-        || search_query.title.is_some()
-        || search_query.author.is_some()
-        || search_query.publisher.is_some()
-        || search_query.subjects.is_some()
+    // Only call if we have something to search AND OpenLibrary is enabled
+    if enable_openlibrary
+        && (search_query.q.is_some()
+            || search_query.title.is_some()
+            || search_query.author.is_some()
+            || search_query.publisher.is_some()
+            || search_query.subjects.is_some())
     {
         let ol_results = search_external(&search_query, &db).await;
         for model in ol_results {
