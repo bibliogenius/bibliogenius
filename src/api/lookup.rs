@@ -7,6 +7,10 @@ pub async fn lookup_book(Path(isbn): Path<String>) -> impl IntoResponse {
         if inv_metadata.cover_url.is_none() {
             inv_metadata.cover_url = crate::openlibrary::fetch_cover_url(&isbn).await;
         }
+        // 3. Enrich with Google Books if still missing
+        if inv_metadata.cover_url.is_none() {
+            inv_metadata.cover_url = crate::google_books::fetch_cover_url(&isbn).await;
+        }
 
         let metadata = crate::openlibrary::BookMetadata {
             title: inv_metadata.title,
@@ -21,7 +25,13 @@ pub async fn lookup_book(Path(isbn): Path<String>) -> impl IntoResponse {
 
     // 3. Fallback to OpenLibrary (only if Inventaire completely fails)
     match crate::openlibrary::fetch_book_metadata(&isbn).await {
-        Ok(metadata) => (StatusCode::OK, Json(metadata)).into_response(),
+        Ok(mut metadata) => {
+            // Try Google Books for cover if missing
+            if metadata.cover_url.is_none() {
+                metadata.cover_url = crate::google_books::fetch_cover_url(&isbn).await;
+            }
+            (StatusCode::OK, Json(metadata)).into_response()
+        }
         Err(e) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": e })),
