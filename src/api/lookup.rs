@@ -61,14 +61,11 @@ pub async fn lookup_book(
 
     // 2. Fallback to OpenLibrary
     if enable_openlibrary {
-        match crate::openlibrary::fetch_book_metadata(&isbn).await {
-            Ok(mut metadata) => {
-                if metadata.cover_url.is_none() && enable_google {
-                    metadata.cover_url = crate::google_books::fetch_cover_url(&isbn).await;
-                }
-                return (StatusCode::OK, Json(metadata)).into_response();
+        if let Ok(mut metadata) = crate::openlibrary::fetch_book_metadata(&isbn).await {
+            if metadata.cover_url.is_none() && enable_google {
+                metadata.cover_url = crate::google_books::fetch_cover_url(&isbn).await;
             }
-            Err(_) => {}
+            return (StatusCode::OK, Json(metadata)).into_response();
         }
     }
 

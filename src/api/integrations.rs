@@ -280,6 +280,21 @@ pub async fn search_unified(
 ) -> impl IntoResponse {
     let mut results: Vec<book::Book> = Vec::new();
 
+    use crate::models::installation_profile::Entity as ProfileEntity;
+    use sea_orm::EntityTrait;
+    // Load profile config to check enabled providers
+    let (enable_inventaire, enable_bnf) =
+        if let Ok(Some(profile_model)) = ProfileEntity::find_by_id(1).one(&db).await {
+            let modules: Vec<String> =
+                serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
+            (
+                !modules.contains(&"disable_fallback:inventaire".to_string()),
+                !modules.contains(&"disable_fallback:bnf".to_string()),
+            )
+        } else {
+            (true, true)
+        };
+
     // 1. Build Query String for Inventaire (General Search)
     let mut inv_query_parts = Vec::new();
     if let Some(q) = &params.q {
@@ -295,7 +310,8 @@ pub async fn search_unified(
     let inv_query = inv_query_parts.join(" ");
 
     // 2. Try Inventaire if we have a query string
-    if !inv_query.trim().is_empty() {
+    // 2. Try Inventaire if we have a query string AND enabled
+    if enable_inventaire && !inv_query.trim().is_empty() {
         if let Ok(inv_results) = crate::inventaire_client::search_inventaire(&inv_query).await {
             // Enrich results with author names
             let enriched = match crate::inventaire_client::enrich_search_results(inv_results).await
@@ -350,9 +366,11 @@ pub async fn search_unified(
     }
 
     // 2b. Search BNF (data.bnf.fr) for French users
+    // 2b. Search BNF (data.bnf.fr) for French users
     let user_lang_check = params.lang.as_deref().unwrap_or("").to_lowercase();
-    if user_lang_check == "fr" || user_lang_check == "fra" || user_lang_check == "french" {
-        if !inv_query.trim().is_empty() {
+    let is_french = user_lang_check == "fr" || user_lang_check == "fra" || user_lang_check == "french";
+
+    if enable_bnf && is_french && !inv_query.trim().is_empty() {
             match crate::modules::integrations::bnf::search_bnf(&inv_query).await {
                 Ok(bnf_results) => {
                     for bnf_book in bnf_results {
