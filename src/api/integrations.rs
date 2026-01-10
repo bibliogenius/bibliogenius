@@ -299,122 +299,32 @@ pub async fn search_unified(
 
     // 1. Build Query String for Inventaire (General Search)
     let mut inv_query_parts = Vec::new();
-    if let Some(q) = &params.q {
-        inv_query_parts.push(q.clone());
-    }
+    // Prioritize specific fields if available, but fallback to 'q'
     if let Some(t) = &params.title {
         inv_query_parts.push(t.clone());
+    } else if let Some(q) = &params.q {
+        // If no title, use q as part of title-like search for Inventaire
+        inv_query_parts.push(q.clone());
     }
+
     if let Some(a) = &params.author {
         inv_query_parts.push(a.clone());
     }
 
     let inv_query = inv_query_parts.join(" ");
+    // If constructed query is empty, try using raw 'q' as a fallback
+    let final_inv_query = if inv_query.trim().is_empty() {
+        params.q.clone().unwrap_or_default()
+    } else {
+        inv_query
+    };
 
-    // 2. Try Inventaire if we have a query string
-    // 2. Try Inventaire if we have a query string AND enabled
-    if enable_inventaire && !inv_query.trim().is_empty() {
-        if let Ok(inv_results) = crate::inventaire_client::search_inventaire(&inv_query).await {
-            // Enrich results with author names
-            let enriched = match crate::inventaire_client::enrich_search_results(inv_results).await
-            {
-                Ok(res) => res,
-                Err(e) => {
-                    eprintln!("Inventaire enrichment failed: {}", e);
-                    Vec::new()
-                }
-            };
+    // 3. Execute Searches in Parallel (Inventaire, BNF, OpenLibrary)
+    // We clone necessary data for each async task to avoid borrow checker issues with async blocks
+    let inv_query_str = final_inv_query.clone();
+    let bnf_query_str = final_inv_query.clone();
+    let db_clone = db.clone();
 
-            for item in enriched {
-                let authors = item.authors.clone();
-                let author_name = authors.as_ref().map(|a| a.join(", "));
-
-                let book = book::Book {
-                    id: None,
-                    title: item.label,
-                    isbn: None,
-                    publisher: None,
-                    publication_year: None,
-                    summary: item.description,
-                    dewey_decimal: None,
-                    lcc: None,
-                    subjects: None,
-                    marc_record: None,
-                    cataloguing_notes: None,
-                    source_data: Some(
-                        serde_json::json!({
-                            "source": "inventaire",
-                            "uri": item.uri,
-                            "image_url": item.image
-                        })
-                        .to_string(),
-                    ),
-                    shelf_position: None,
-                    reading_status: Some("to_read".to_string()),
-                    source: Some("Inventaire".to_string()),
-                    author: author_name,
-                    authors,
-                    cover_url: item.image,
-                    large_cover_url: None,
-                    finished_reading_at: None,
-                    started_reading_at: None,
-                    user_rating: None,
-                    owned: Some(true), // Search results default to owned
-                    price: None,       // No price from Inventaire
-                };
-                results.push(book);
-            }
-        }
-    }
-
-    // 2b. Search BNF (data.bnf.fr)
-    if enable_bnf && !inv_query.trim().is_empty() {
-        match crate::modules::integrations::bnf::search_bnf(&inv_query).await {
-            Ok(bnf_results) => {
-                for bnf_book in bnf_results {
-                    let book = book::Book {
-                        id: None,
-                        title: bnf_book.title,
-                        isbn: bnf_book.isbn,
-                        publisher: bnf_book.publisher,
-                        publication_year: bnf_book.publication_year,
-                        summary: bnf_book.description,
-                        dewey_decimal: None,
-                        lcc: None,
-                        subjects: None,
-                        marc_record: None,
-                        cataloguing_notes: None,
-                        source_data: Some(
-                            serde_json::json!({
-                                "source": "bnf",
-                                "bnf_uri": bnf_book.bnf_uri,
-                                "languages": ["fr"]
-                            })
-                            .to_string(),
-                        ),
-                        shelf_position: None,
-                        reading_status: Some("to_read".to_string()),
-                        source: Some("BNF".to_string()),
-                        author: bnf_book.author.clone(),
-                        authors: bnf_book.author.map(|a| vec![a]),
-                        cover_url: bnf_book.cover_url,
-                        large_cover_url: None,
-                        finished_reading_at: None,
-                        started_reading_at: None,
-                        user_rating: None,
-                        owned: Some(true),
-                        price: None,
-                    };
-                    results.push(book);
-                }
-            }
-            Err(e) => {
-                eprintln!("BNF search failed: {}", e);
-            }
-        }
-    }
-
-    // 3. Always Search OpenLibrary (via search_external) for better coverage
     // Construct SearchQuery for search_external
     let search_query = crate::api::search::SearchQuery {
         q: params.q.clone(), // Use generic query explicitly
@@ -427,51 +337,176 @@ pub async fn search_unified(
         subjects: params.subject.clone(),
         sources: None,
     };
+    // Clone search_query for the task
+    let ol_query = search_query.clone();
 
-    // Only call if we have something to search
-    // Only call if we have something to search AND OpenLibrary is enabled
-    if enable_openlibrary
-        && (search_query.q.is_some()
-            || search_query.title.is_some()
-            || search_query.author.is_some()
-            || search_query.publisher.is_some()
-            || search_query.subjects.is_some())
-    {
-        let ol_results = search_external(&search_query, &db).await;
-        for model in ol_results {
-            // Convert Model to Book DTO and enrich
-            let mut dto = book::Book::from(model.clone());
+    // Determine if we should run OL search
+    let run_ol = enable_openlibrary
+        && (ol_query.q.is_some()
+            || ol_query.title.is_some()
+            || ol_query.author.is_some()
+            || ol_query.publisher.is_some()
+            || ol_query.subjects.is_some());
 
-            // Extract author and cover from source_data if present (search_external puts them there)
-            if let Some(source_data_str) = &model.source_data {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str) {
-                    if let Some(authors) = json.get("authors").and_then(|a| a.as_array()) {
-                        let author_str = authors
-                            .iter()
-                            .map(|v| v.as_str().unwrap_or("").to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        if !author_str.is_empty() {
-                            dto.author = Some(author_str);
+    let (inv_res, bnf_res, ol_res) = tokio::join!(
+        // Task 1: Inventaire
+        async move {
+            if enable_inventaire && !inv_query_str.trim().is_empty() {
+                match crate::inventaire_client::search_inventaire(&inv_query_str).await {
+                    Ok(inv_results) => {
+                        // Enrich results (also async)
+                        match crate::inventaire_client::enrich_search_results(inv_results).await {
+                            Ok(res) => Ok(res),
+                            Err(e) => Err(format!("Inventaire enrichment failed: {}", e)),
                         }
                     }
-                    if let Some(cover_id) = json.get("cover_id").and_then(|v| v.as_i64()) {
-                        dto.cover_url = Some(format!(
-                            "https://covers.openlibrary.org/b/id/{}-L.jpg",
-                            cover_id
-                        ));
+                    Err(e) => Err(format!("Inventaire search failed: {}", e)),
+                }
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        // Task 2: BNF
+        async move {
+            if enable_bnf && !bnf_query_str.trim().is_empty() {
+                crate::modules::integrations::bnf::search_bnf(&bnf_query_str).await
+            } else {
+                Ok(Vec::new()) // Return empty vec if disabled
+            }
+        },
+        // Task 3: OpenLibrary
+        async move {
+            if run_ol {
+                search_external(&ol_query, &db_clone).await
+            } else {
+                Vec::new()
+            }
+        }
+    );
+
+    // 4. Process Results
+
+    // Process Inventaire Results
+    if let Ok(enriched) = inv_res {
+        for item in enriched {
+            let authors = item.authors.clone();
+            let author_name = authors.as_ref().map(|a| a.join(", "));
+
+            let book = book::Book {
+                id: None,
+                title: item.label,
+                isbn: None,
+                publisher: None,
+                publication_year: None,
+                summary: item.description,
+                dewey_decimal: None,
+                lcc: None,
+                subjects: None,
+                marc_record: None,
+                cataloguing_notes: None,
+                source_data: Some(
+                    serde_json::json!({
+                        "source": "inventaire",
+                        "uri": item.uri,
+                        "image_url": item.image
+                    })
+                    .to_string(),
+                ),
+                shelf_position: None,
+                reading_status: Some("to_read".to_string()),
+                source: Some("Inventaire".to_string()),
+                author: author_name,
+                authors,
+                cover_url: item.image,
+                large_cover_url: None,
+                finished_reading_at: None,
+                started_reading_at: None,
+                user_rating: None,
+                owned: Some(true),
+                price: None,
+            };
+            results.push(book);
+        }
+    } else if let Err(e) = inv_res {
+        eprintln!("DEBUG SEARCH: {}", e);
+    }
+
+    // Process BNF Results
+    match bnf_res {
+        Ok(bnf_results) => {
+            for bnf_book in bnf_results {
+                let book = book::Book {
+                    id: None,
+                    title: bnf_book.title,
+                    isbn: bnf_book.isbn,
+                    publisher: bnf_book.publisher,
+                    publication_year: bnf_book.publication_year,
+                    summary: bnf_book.description,
+                    dewey_decimal: None,
+                    lcc: None,
+                    subjects: None,
+                    marc_record: None,
+                    cataloguing_notes: None,
+                    source_data: Some(
+                        serde_json::json!({
+                            "source": "bnf",
+                            "bnf_uri": bnf_book.bnf_uri,
+                            "languages": ["fr"]
+                        })
+                        .to_string(),
+                    ),
+                    shelf_position: None,
+                    reading_status: Some("to_read".to_string()),
+                    source: Some("BNF".to_string()),
+                    author: bnf_book.author.clone(),
+                    authors: bnf_book.author.map(|a| vec![a]),
+                    cover_url: bnf_book.cover_url,
+                    large_cover_url: None,
+                    finished_reading_at: None,
+                    started_reading_at: None,
+                    user_rating: None,
+                    owned: Some(true),
+                    price: None,
+                };
+                results.push(book);
+            }
+        }
+        Err(e) => eprintln!("BNF search error: {}", e),
+    }
+
+    // Process OpenLibrary Results
+    for model in ol_res {
+        // Convert Model to Book DTO and enrich
+        let mut dto = book::Book::from(model.clone());
+
+        // Extract author and cover from source_data
+        if let Some(source_data_str) = &model.source_data {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str) {
+                if let Some(authors) = json.get("authors").and_then(|a| a.as_array()) {
+                    let author_str = authors
+                        .iter()
+                        .map(|v| v.as_str().unwrap_or("").to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if !author_str.is_empty() {
+                        dto.author = Some(author_str);
                     }
                 }
+                if let Some(cover_id) = json.get("cover_id").and_then(|v| v.as_i64()) {
+                    dto.cover_url = Some(format!(
+                        "https://covers.openlibrary.org/b/id/{}-L.jpg",
+                        cover_id
+                    ));
+                }
             }
-            dto.source = Some("Open Library".to_string());
-            results.push(dto);
         }
+        dto.source = Some("Open Library".to_string());
+        results.push(dto);
     }
 
     // 4. Sort Results by Relevance
     // Prioritize:
     // 1. Language matches user preference
-    // 2. Author matches query author (if provided)
     // 3. Title matches query title (if provided)
     // 4. Author matches general query 'q'
 
@@ -518,6 +553,15 @@ fn calculate_relevance(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // Source boost for French users: Prioritize BNF (national library) for French content
+    if user_lang == "fr" || user_lang == "fra" || user_lang == "fre" {
+        if let Some(source) = &book.source {
+            if source == "BNF" {
+                score += 50; // National library bonus for French users
             }
         }
     }

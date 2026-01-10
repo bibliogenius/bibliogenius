@@ -135,9 +135,29 @@ pub async fn get_user_status(State(db): State<DatabaseConnection>) -> impl IntoR
     // 1. Count books (Collector Track)
     let books_count = book::Entity::find().count(&db).await.unwrap_or(0) as i64;
 
+    // DEBUG: Print actual statuses in DB to debug 0 count
+    use sea_orm::QuerySelect;
+    let statuses: Vec<String> = book::Entity::find()
+        .select_only()
+        .column(book::Column::ReadingStatus)
+        .distinct()
+        .into_tuple()
+        .all(&db)
+        .await
+        .unwrap_or_default();
+    println!("DEBUG GAMIFICATION: Found statuses in DB: {:?}", statuses);
+
     // 2. Count books with reading_status = 'read' (Reader Track)
     let read_count = book::Entity::find()
-        .filter(book::Column::ReadingStatus.eq("read"))
+        .filter(
+            sea_orm::Condition::any()
+                .add(book::Column::ReadingStatus.eq("read"))
+                .add(book::Column::ReadingStatus.eq("Read"))
+                .add(book::Column::ReadingStatus.eq("READ"))
+                .add(book::Column::ReadingStatus.eq("READING_STATUS_READ"))
+                .add(book::Column::ReadingStatus.eq("reading_status_read"))
+                .add(book::Column::ReadingStatus.eq("ReadingStatusRead")),
+        )
         .count(&db)
         .await
         .unwrap_or(0) as i64;

@@ -57,7 +57,7 @@ struct SparqlValue {
 /// A vector of BnfBook results
 pub async fn search_bnf(query: &str) -> Result<Vec<BnfBook>, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
