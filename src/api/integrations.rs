@@ -86,6 +86,8 @@ struct OpenLibraryDoc {
     cover_i: Option<i32>,
     language: Option<Vec<String>>,
     edition_key: Option<Vec<String>>, // For fetching ISBN from editions
+    #[serde(flatten)]
+    extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 // Helper to check if language matches (handles 2-letter vs 3-letter codes)
@@ -231,6 +233,14 @@ pub async fn search_external(
             if let Ok(data) = res.json::<OpenLibrarySearchResponse>().await {
                 for doc in data.docs {
                     let isbn = doc.isbn.as_ref().and_then(|v| v.first()).cloned();
+
+                    // Debug keys if edition_key is missing
+                    if doc.edition_key.is_none() {
+                        println!(
+                            "DEBUG SEARCH: Missing edition_key. Available keys: {:?}",
+                            doc.extra.keys()
+                        );
+                    }
 
                     // Map to our Book Model (store additional data in source_data)
                     let source_data = serde_json::json!({
