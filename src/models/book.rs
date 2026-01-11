@@ -117,6 +117,8 @@ pub struct Book {
     pub owned: Option<bool>, // Whether I own this book (default true)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price: Option<f64>, // Price in EUR (for bookseller profile)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>, // Language code (e.g., "fr", "en", "fre", "eng")
 }
 
 impl From<Model> for Book {
@@ -124,6 +126,19 @@ impl From<Model> for Book {
         let subjects: Option<Vec<String>> = model
             .subjects
             .map(|s| serde_json::from_str(&s).unwrap_or_default());
+
+        // Extract language from source_data if available
+        let language: Option<String> = model.source_data.as_ref().and_then(|sd| {
+            serde_json::from_str::<serde_json::Value>(sd)
+                .ok()
+                .and_then(|json| {
+                    json.get("languages")
+                        .and_then(|l| l.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+        });
 
         Self {
             id: Some(model.id),
@@ -150,6 +165,7 @@ impl From<Model> for Book {
             user_rating: model.user_rating,
             owned: Some(model.owned),
             price: model.price,
+            language,
         }
     }
 }

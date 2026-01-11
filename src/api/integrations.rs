@@ -302,16 +302,13 @@ pub async fn search_unified(
     // Apply source filter if provided (overrides profile settings)
     if let Some(ref filter) = params.source {
         let sources: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
+        // When user explicitly selects sources, use ONLY those (truly override profile)
         enable_inventaire =
-            enable_inventaire && sources.iter().any(|s| s.eq_ignore_ascii_case("inventaire"));
-        enable_bnf = enable_bnf
-            && sources
-                .iter()
-                .any(|s| s.eq_ignore_ascii_case("bnf") || s.eq_ignore_ascii_case("data.bnf.fr"));
-        enable_openlibrary = enable_openlibrary
-            && sources.iter().any(|s| {
-                s.eq_ignore_ascii_case("openlibrary") || s.eq_ignore_ascii_case("open library")
-            });
+            sources.iter().any(|s| s.eq_ignore_ascii_case("inventaire"));
+        enable_bnf =
+            sources.iter().any(|s| s.eq_ignore_ascii_case("bnf") || s.eq_ignore_ascii_case("data.bnf.fr"));
+        enable_openlibrary =
+            sources.iter().any(|s| s.eq_ignore_ascii_case("openlibrary") || s.eq_ignore_ascii_case("open library"));
         println!("DEBUG SEARCH: Source filter applied: {:?}", sources);
     }
 
@@ -342,6 +339,12 @@ pub async fn search_unified(
         inv_query
     };
 
+    println!(
+        "DEBUG SEARCH: Query params - title: {:?}, author: {:?}, q: {:?}, source: {:?}",
+        params.title, params.author, params.q, params.source
+    );
+    println!("DEBUG SEARCH: Final query string: '{}'", final_inv_query);
+
     // 3. Execute Searches in Parallel (Inventaire, BNF, OpenLibrary)
     // We clone necessary data for each async task to avoid borrow checker issues with async blocks
     let inv_query_str = final_inv_query.clone();
@@ -371,9 +374,9 @@ pub async fn search_unified(
             || ol_query.publisher.is_some()
             || ol_query.subjects.is_some());
 
-    // Execute Inventaire and OpenLibrary in parallel FIRST (these are fast)
-    // Then execute BNF separately to avoid blocking other results with slow SPARQL queries
-    let (inv_res, ol_res) = tokio::join!(
+    // Execute ALL sources in parallel with individual error isolation
+    // This ensures one slow/failing source doesn't block or crash others
+    let (inv_res, ol_res, bnf_res) = tokio::join!(
         // Task 1: Inventaire
         async move {
             if enable_inventaire && !inv_query_str.trim().is_empty() {
@@ -398,15 +401,26 @@ pub async fn search_unified(
             } else {
                 Vec::new()
             }
+        },
+        // Task 3: BNF (wrapped in timeout for extra safety)
+        async move {
+            if enable_bnf && !bnf_query_str.trim().is_empty() {
+                // Use tokio timeout to prevent BNF from blocking indefinitely
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    crate::modules::integrations::bnf::search_bnf(&bnf_query_str)
+                ).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        eprintln!("DEBUG SEARCH: BNF search timed out");
+                        Ok(Vec::new())
+                    }
+                }
+            } else {
+                Ok(Vec::new())
+            }
         }
     );
-
-    // Execute BNF AFTER other sources (slower, should not block fast results)
-    let bnf_res = if enable_bnf && !bnf_query_str.trim().is_empty() {
-        crate::modules::integrations::bnf::search_bnf(&bnf_query_str).await
-    } else {
-        Ok(Vec::new())
-    };
 
     // 4. Process Results
 
@@ -452,6 +466,7 @@ pub async fn search_unified(
                 user_rating: None,
                 owned: Some(true),
                 price: None,
+                language: None, // Inventaire doesn't provide language info
             };
             results.push(book);
         }
@@ -496,6 +511,7 @@ pub async fn search_unified(
                     user_rating: None,
                     owned: Some(true),
                     price: None,
+                    language: Some("fr".to_string()), // BNF is French National Library
                 };
                 results.push(book);
             }
@@ -512,7 +528,7 @@ pub async fn search_unified(
         // Convert Model to Book DTO and enrich
         let mut dto = book::Book::from(model.clone());
 
-        // Extract author and cover from source_data
+        // Extract author, cover, and language from source_data
         if let Some(source_data_str) = &model.source_data {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str) {
                 if let Some(authors) = json.get("authors").and_then(|a| a.as_array()) {
@@ -531,25 +547,64 @@ pub async fn search_unified(
                         cover_id
                     ));
                 }
+                // Extract first language
+                if let Some(languages) = json.get("languages").and_then(|l| l.as_array()) {
+                    if let Some(first_lang) = languages.first().and_then(|v| v.as_str()) {
+                        dto.language = Some(first_lang.to_string());
+                    }
+                }
             }
         }
         dto.source = Some("Open Library".to_string());
         results.push(dto);
     }
 
-    println!("DEBUG SEARCH: Total aggregated results: {}", results.len());
-
-    // 4. Sort Results by Relevance
-    // Prioritize:
-    // 1. Language matches user preference
-    // 3. Title matches query title (if provided)
-    // 4. Author matches general query 'q'
+    println!("DEBUG SEARCH: Total aggregated results before filtering: {}", results.len());
 
     let query_author = params.author.as_deref().unwrap_or("").to_lowercase();
     let query_title = params.title.as_deref().unwrap_or("").to_lowercase();
     let query_q = params.q.as_deref().unwrap_or("").to_lowercase();
     let user_lang = params.lang.as_deref().unwrap_or("").to_lowercase();
 
+    // 4. Filter by language if specified
+    // Only keep results that match the user's language preference
+    // Results without language info are kept (we can't determine their language)
+    if !user_lang.is_empty() {
+        results.retain(|book| {
+            // Check the language field first
+            if let Some(ref lang) = book.language {
+                let book_lang = lang.to_lowercase();
+                if lang_matches(&book_lang, &user_lang) {
+                    return true;
+                }
+            }
+            // Fallback: check source_data for languages array
+            if let Some(ref source_data_str) = book.source_data {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str) {
+                    if let Some(languages) = json.get("languages").and_then(|l| l.as_array()) {
+                        for lang_val in languages {
+                            if let Some(lang_str) = lang_val.as_str() {
+                                if lang_matches(&lang_str.to_lowercase(), &user_lang) {
+                                    return true;
+                                }
+                            }
+                        }
+                        // Has languages array but none match - filter out
+                        return false;
+                    }
+                }
+            }
+            // No language info - keep the result (can't determine language)
+            true
+        });
+        println!("DEBUG SEARCH: Results after language filter '{}': {}", user_lang, results.len());
+    }
+
+    // 5. Sort Results by Relevance
+    // Prioritize:
+    // 1. Language matches user preference
+    // 2. Title matches query title (if provided)
+    // 3. Author matches general query 'q'
     results.sort_by(|a, b| {
         let score_a = calculate_relevance(a, &query_author, &query_title, &query_q, &user_lang);
         let score_b = calculate_relevance(b, &query_author, &query_title, &query_q, &user_lang);

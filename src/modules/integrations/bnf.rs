@@ -75,9 +75,8 @@ struct SparqlValue {
 pub async fn search_bnf(query: &str) -> Result<Vec<BnfBook>, String> {
     let cache_key = query.to_lowercase().trim().to_string();
 
-    // Check cache first
-    {
-        let cache = BNF_CACHE.lock().unwrap();
+    // Check cache first (use try_lock to avoid blocking/panics)
+    if let Ok(cache) = BNF_CACHE.try_lock() {
         if let Some(entry) = cache.get(&cache_key) {
             if entry.created_at.elapsed() < CACHE_TTL {
                 tracing::debug!("BNF cache hit for query: {}", query);
@@ -223,9 +222,8 @@ LIMIT 20
     }
 
     // Store in cache (with LRU-style eviction if full)
-    {
-        let mut cache = BNF_CACHE.lock().unwrap();
-
+    // Use try_lock to avoid blocking - cache write is optional
+    if let Ok(mut cache) = BNF_CACHE.try_lock() {
         // Evict oldest entries if cache is full
         if cache.len() >= MAX_CACHE_ENTRIES {
             // Remove expired entries first
