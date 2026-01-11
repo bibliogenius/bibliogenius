@@ -21,6 +21,15 @@ struct GoogleVolumeInfo {
     description: Option<String>,
     #[serde(rename = "imageLinks")]
     image_links: Option<GoogleImageLinks>,
+    #[serde(rename = "industryIdentifiers")]
+    industry_identifiers: Option<Vec<GoogleIndustryIdentifier>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleIndustryIdentifier {
+    #[serde(rename = "type")]
+    id_type: String,
+    identifier: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +194,27 @@ pub async fn search_books(
                         .and_then(|l| l.thumbnail.clone())
                         .map(|url| url.replace("http://", "https://"));
 
+                    // Extract ISBN from industryIdentifiers (prefer ISBN_13 over ISBN_10)
+                    let isbn = info.industry_identifiers.as_ref().and_then(|ids| {
+                        // First try to find ISBN_13
+                        let found = ids.iter()
+                            .find(|id| id.id_type == "ISBN_13")
+                            .or_else(|| ids.iter().find(|id| id.id_type == "ISBN_10"))
+                            .map(|id| id.identifier.replace("-", ""));
+
+                        if let Some(ref isbn) = found {
+                            println!("DEBUG GOOGLE_BOOKS: Found ISBN {} for '{}'", isbn, info.title);
+                        } else {
+                            println!("DEBUG GOOGLE_BOOKS: No ISBN found for '{}' (identifiers: {:?})",
+                                info.title, ids.iter().map(|i| &i.id_type).collect::<Vec<_>>());
+                        }
+                        found
+                    });
+
+                    if info.industry_identifiers.is_none() {
+                        println!("DEBUG GOOGLE_BOOKS: No industryIdentifiers at all for '{}'", info.title);
+                    }
+
                     let source_data = serde_json::json!({
                        "source": "google_books",
                        "authors": info.authors.clone().unwrap_or_default(),
@@ -193,7 +223,7 @@ pub async fn search_books(
                     let book = crate::models::book::Model {
                         id: 0,
                         title: info.title,
-                        isbn: None, // We could try to extract ISBN from industryIdentifiers if needed
+                        isbn,
                         publisher: info.publisher,
                         publication_year: info
                             .published_date
@@ -221,5 +251,24 @@ pub async fn search_books(
             }
         }
     }
+
+    // Deduplicate results - Google Books often returns the same book multiple times
+    // (different formats like hardcover/paperback/ebook with identical data)
+    let mut seen = std::collections::HashSet::new();
+    books.retain(|book| {
+        // Create dedup key: prefer ISBN, fallback to title+publisher+year
+        let key = if let Some(ref isbn) = book.isbn {
+            isbn.clone()
+        } else {
+            format!(
+                "{}|{}|{}",
+                book.title.to_lowercase(),
+                book.publisher.as_deref().unwrap_or("").to_lowercase(),
+                book.publication_year.unwrap_or(0)
+            )
+        };
+        seen.insert(key)
+    });
+
     books
 }

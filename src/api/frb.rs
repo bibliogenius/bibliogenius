@@ -302,6 +302,12 @@ impl From<FrbBook> for crate::models::Book {
 
 /// Create a new book
 pub async fn create_book(book: FrbBook) -> Result<FrbBook, String> {
+    println!("DEBUG FFI: create_book received: {:?}", book.title);
+    if let Some(ref isbn) = book.isbn {
+        println!("DEBUG FFI: create_book received ISBN: {}", isbn);
+    } else {
+        println!("DEBUG FFI: create_book received NO ISBN");
+    }
     let db = db().ok_or("Database not initialized")?;
     let book_dto: crate::models::Book = book.into();
 
@@ -337,7 +343,10 @@ pub async fn get_book_by_id(id: i32) -> Result<FrbBook, String> {
     let db = db().ok_or("Database not initialized")?;
 
     match crate::services::book_service::get_book(db, id).await {
-        Ok(book) => Ok(FrbBook::from(book)),
+        Ok(book) => {
+            println!("DEBUG FFI get_book_by_id({}): cover_url={:?}", id, book.cover_url);
+            Ok(FrbBook::from(book))
+        }
         Err(crate::services::book_service::ServiceError::NotFound) => {
             Err("Book not found".to_string())
         }

@@ -164,7 +164,6 @@ async fn fetch_isbn_from_edition(edition_key: &str) -> Option<String> {
 }
 
 /// Fetch ISBN from OpenLibrary Work API (get first edition)
-
 async fn fetch_isbn_from_work(work_key: &str) -> Option<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(4))
@@ -294,50 +293,55 @@ pub async fn search_external(
         };
 
         if let Ok(res) = client.get(&url).send().await {
-            if let Ok(data) = res.json::<OpenLibrarySearchResponse>().await {
-                for doc in data.docs {
-                    let isbn = doc.isbn.as_ref().and_then(|v| v.first()).cloned();
+            match res.json::<OpenLibrarySearchResponse>().await {
+                Ok(data) => {
+                    for doc in data.docs {
+                        let isbn = doc.isbn.as_ref().and_then(|v| v.first()).cloned();
 
-                    // Map to our Book Model (store additional data in source_data)
-                    let source_data = serde_json::json!({
-                        "authors": doc.author_name.clone().unwrap_or_default(),
-                        "cover_id": doc.cover_i,
-                        "source": "openlibrary",
-                        "languages": doc.language.clone().unwrap_or_default(),
-                        "isbns": doc.isbn.clone().unwrap_or_default(),
-                        "edition_key": doc.edition_key.as_ref().and_then(|k| k.first()).cloned(),
-                        "key": doc.key
-                    });
+                        // Map to our Book Model (store additional data in source_data)
+                        let source_data = serde_json::json!({
+                            "authors": doc.author_name.clone().unwrap_or_default(),
+                            "cover_id": doc.cover_i,
+                            "source": "openlibrary",
+                            "languages": doc.language.clone().unwrap_or_default(),
+                            "isbns": doc.isbn.clone().unwrap_or_default(),
+                            "edition_key": doc.edition_key.as_ref().and_then(|k| k.first()).cloned(),
+                            "key": doc.key
+                        });
 
-                    let cover_url = doc
-                        .cover_i
-                        .map(|id| format!("https://covers.openlibrary.org/b/id/{}-M.jpg", id));
+                        let cover_url = doc
+                            .cover_i
+                            .map(|id| format!("https://covers.openlibrary.org/b/id/{}-M.jpg", id));
 
-                    let book = book::Model {
-                        id: 0, // Placeholder ID
-                        title: doc.title,
-                        isbn,
-                        publisher: doc.publisher.map(|v| v.join(", ")),
-                        publication_year: doc.first_publish_year,
-                        summary: None,
-                        dewey_decimal: None,
-                        lcc: None,
-                        subjects: None,
-                        marc_record: None,
-                        cataloguing_notes: None,
-                        source_data: Some(source_data.to_string()),
-                        shelf_position: None,
-                        cover_url,
-                        reading_status: "to_read".to_string(),
-                        finished_reading_at: None,
-                        started_reading_at: None,
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                        updated_at: chrono::Utc::now().to_rfc3339(),
-                        user_rating: None,
-                        owned: true, // External search results are assumed owned
-                        price: None, // No price from external search
-                    };
-                    books.push(book);
+                        let book = book::Model {
+                            id: 0, // Placeholder ID
+                            title: doc.title,
+                            isbn,
+                            publisher: doc.publisher.map(|v| v.join(", ")),
+                            publication_year: doc.first_publish_year,
+                            summary: None,
+                            dewey_decimal: None,
+                            lcc: None,
+                            subjects: None,
+                            marc_record: None,
+                            cataloguing_notes: None,
+                            source_data: Some(source_data.to_string()),
+                            shelf_position: None,
+                            cover_url,
+                            reading_status: "to_read".to_string(),
+                            finished_reading_at: None,
+                            started_reading_at: None,
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                            updated_at: chrono::Utc::now().to_rfc3339(),
+                            user_rating: None,
+                            owned: true, // External search results are assumed owned
+                            price: None, // No price from external search
+                        };
+                        books.push(book);
+                    }
+                }
+                Err(e) => {
+                    println!("DEBUG SEARCH: Failed to parse OpenLibrary response: {}", e);
                 }
             }
         }
@@ -745,7 +749,14 @@ pub async fn search_unified(
                     }
                 }
                 // Second fallback: fetch from edition API if still no ISBN
-                if dto.isbn.is_none() {
+                // ONLY if this is an Open Library result
+                let is_openlibrary = json
+                    .get("source")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s == "openlibrary")
+                    .unwrap_or(true); // Default to true if source not specified (legacy)
+
+                if is_openlibrary && dto.isbn.is_none() {
                     if let Some(edition_key) = json.get("edition_key").and_then(|k| k.as_str()) {
                         println!(
                             "DEBUG SEARCH: Trying edition fallback for key: {}",
@@ -766,7 +777,7 @@ pub async fn search_unified(
                 }
 
                 // Third fallback: fetch from Work API if still no ISBN
-                if dto.isbn.is_none() {
+                if is_openlibrary && dto.isbn.is_none() {
                     if let Some(work_key) = json.get("key").and_then(|k| k.as_str()) {
                         println!("DEBUG SEARCH: Trying work fallback for key: {}", work_key);
                         if let Some(fetched_isbn) = fetch_isbn_from_work(work_key).await {
@@ -780,9 +791,23 @@ pub async fn search_unified(
                         }
                     }
                 }
+
+                // Set source based on the actual data
+                if let Some(source_str) = json.get("source").and_then(|s| s.as_str()) {
+                    if source_str == "google_books" {
+                        dto.source = Some("Google Books".to_string());
+                    } else {
+                        dto.source = Some("Open Library".to_string());
+                    }
+                } else {
+                    dto.source = Some("Open Library".to_string());
+                }
             }
         }
-        dto.source = Some("Open Library".to_string());
+        // dto.source is now set inside the block above based on data
+        if dto.source.is_none() {
+            dto.source = Some("Open Library".to_string());
+        }
         results.push(dto);
     }
 
@@ -812,14 +837,19 @@ pub async fn search_unified(
             if let Some(ref source_data_str) = book.source_data {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str) {
                     if let Some(languages) = json.get("languages").and_then(|l| l.as_array()) {
+                        // If languages array is empty, we can't filter -> Keep it
+                        if languages.is_empty() {
+                            return true;
+                        }
+
                         for lang_val in languages {
                             if let Some(lang_str) = lang_val.as_str() {
-                                if lang_matches(&lang_str.to_lowercase(), &user_lang) {
+                                if lang_matches(lang_str, &user_lang) {
                                     return true;
                                 }
                             }
                         }
-                        // Has languages array but none match - filter out
+                        // Has languages array (and not empty) but none match - filter out
                         return false;
                     }
                 }
