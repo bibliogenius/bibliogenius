@@ -465,13 +465,23 @@ pub async fn enrich_search_results(
 
                             if !edition_uris.is_empty() {
                                 // Fetch edition entities to get ISBN
-                                if let Ok(edition_entities) = fetch_entities_batch(&client, &edition_uris).await {
+                                if let Ok(edition_entities) =
+                                    fetch_entities_batch(&client, &edition_uris).await
+                                {
                                     for (_, entity) in edition_entities {
                                         // Try ISBN-13 first, then ISBN-10
-                                        if let Some(isbn) = entity.claims.isbn_13
+                                        if let Some(isbn) = entity
+                                            .claims
+                                            .isbn_13
                                             .as_ref()
                                             .and_then(|v| v.first().cloned())
-                                            .or_else(|| entity.claims.isbn_10.as_ref().and_then(|v| v.first().cloned()))
+                                            .or_else(|| {
+                                                entity
+                                                    .claims
+                                                    .isbn_10
+                                                    .as_ref()
+                                                    .and_then(|v| v.first().cloned())
+                                            })
                                         {
                                             result.isbn = Some(isbn);
                                             break; // Found an ISBN, stop

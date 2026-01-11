@@ -82,7 +82,11 @@ pub async fn lookup_book(
         tracing::debug!("Trying Inventaire for ISBN {}", isbn);
         match crate::inventaire_client::fetch_inventaire_metadata(&isbn).await {
             Ok(mut inv_metadata) => {
-                tracing::info!("Inventaire found book for ISBN {}: {}", isbn, inv_metadata.title);
+                tracing::info!(
+                    "Inventaire found book for ISBN {}: {}",
+                    isbn,
+                    inv_metadata.title
+                );
                 // Enrich with cover from other sources if missing
                 if inv_metadata.cover_url.is_none() && enable_openlibrary {
                     inv_metadata.cover_url = crate::openlibrary::fetch_cover_url(&isbn).await;
@@ -112,7 +116,11 @@ pub async fn lookup_book(
         tracing::debug!("Trying OpenLibrary for ISBN {}", isbn);
         match crate::openlibrary::fetch_book_metadata(&isbn).await {
             Ok(mut metadata) => {
-                tracing::info!("OpenLibrary found book for ISBN {}: {}", isbn, metadata.title);
+                tracing::info!(
+                    "OpenLibrary found book for ISBN {}: {}",
+                    isbn,
+                    metadata.title
+                );
                 if metadata.cover_url.is_none() && enable_google {
                     metadata.cover_url = crate::google_books::fetch_cover_url(&isbn).await;
                 }

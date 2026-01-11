@@ -912,7 +912,10 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                             tracing::error!("❌ FFI Server Error on port {}: {}", server_port, e);
                         }
                     }
-                    tracing::error!("💀 FFI Server task ended on port {} - server is no longer running!", server_port);
+                    tracing::error!(
+                        "💀 FFI Server task ended on port {} - server is no longer running!",
+                        server_port
+                    );
                 });
 
                 if offset > 0 {
