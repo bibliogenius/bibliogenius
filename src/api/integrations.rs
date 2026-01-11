@@ -195,7 +195,8 @@ pub async fn search_external(
                         "authors": doc.author_name.clone().unwrap_or_default(),
                         "cover_id": doc.cover_i,
                         "source": "openlibrary",
-                        "languages": doc.language.clone().unwrap_or_default()
+                        "languages": doc.language.clone().unwrap_or_default(),
+                        "isbns": doc.isbn.clone().unwrap_or_default()
                     });
 
                     let cover_url = doc
@@ -415,21 +416,19 @@ pub async fn search_unified(
         async move {
             if enable_inventaire && !inv_query_str.trim().is_empty() {
                 // Use tokio timeout to prevent Inventaire from blocking indefinitely
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(8),
-                    async {
-                        match crate::inventaire_client::search_inventaire(&inv_query_str).await {
-                            Ok(inv_results) => {
-                                // Enrich results (also async)
-                                match crate::inventaire_client::enrich_search_results(inv_results).await {
-                                    Ok(res) => Ok(res),
-                                    Err(e) => Err(format!("Inventaire enrichment failed: {}", e)),
-                                }
+                match tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                    match crate::inventaire_client::search_inventaire(&inv_query_str).await {
+                        Ok(inv_results) => {
+                            // Enrich results (also async)
+                            match crate::inventaire_client::enrich_search_results(inv_results).await
+                            {
+                                Ok(res) => Ok(res),
+                                Err(e) => Err(format!("Inventaire enrichment failed: {}", e)),
                             }
-                            Err(e) => Err(format!("Inventaire search failed: {}", e)),
                         }
+                        Err(e) => Err(format!("Inventaire search failed: {}", e)),
                     }
-                )
+                })
                 .await
                 {
                     Ok(result) => result,
@@ -624,6 +623,15 @@ pub async fn search_unified(
                 if let Some(languages) = json.get("languages").and_then(|l| l.as_array()) {
                     if let Some(first_lang) = languages.first().and_then(|v| v.as_str()) {
                         dto.language = Some(first_lang.to_string());
+                    }
+                }
+                // Fallback: extract ISBN from source_data if model.isbn was None
+                if dto.isbn.is_none() {
+                    if let Some(isbns) = json.get("isbns").and_then(|i| i.as_array()) {
+                        if let Some(first_isbn) = isbns.first().and_then(|v| v.as_str()) {
+                            dto.isbn = Some(first_isbn.to_string());
+                            println!("DEBUG SEARCH: Fallback ISBN extracted: {}", first_isbn);
+                        }
                     }
                 }
             }
