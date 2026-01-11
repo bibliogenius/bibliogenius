@@ -85,6 +85,7 @@ struct OpenLibraryDoc {
     isbn: Option<Vec<String>>,
     cover_i: Option<i32>,
     language: Option<Vec<String>>,
+    edition_key: Option<Vec<String>>, // For fetching ISBN from editions
 }
 
 // Helper to check if language matches (handles 2-letter vs 3-letter codes)
@@ -118,6 +119,47 @@ fn lang_matches(book_lang: &str, user_lang: &str) -> bool {
             | ("it", "ita")
             | ("ita", "it")
     )
+}
+
+/// Fetch ISBN from OpenLibrary edition API when search results don't include one
+async fn fetch_isbn_from_edition(edition_key: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    let url = format!("https://openlibrary.org/books/{}.json", edition_key);
+
+    #[derive(serde::Deserialize)]
+    struct EditionResponse {
+        isbn_13: Option<Vec<String>>,
+        isbn_10: Option<Vec<String>>,
+    }
+
+    if let Ok(res) = client.get(&url).send().await {
+        if let Ok(edition) = res.json::<EditionResponse>().await {
+            // Prefer ISBN-13 over ISBN-10
+            if let Some(isbns) = edition.isbn_13 {
+                if let Some(isbn) = isbns.first() {
+                    println!(
+                        "DEBUG: Fetched ISBN-13 {} from edition {}",
+                        isbn, edition_key
+                    );
+                    return Some(isbn.clone());
+                }
+            }
+            if let Some(isbns) = edition.isbn_10 {
+                if let Some(isbn) = isbns.first() {
+                    println!(
+                        "DEBUG: Fetched ISBN-10 {} from edition {}",
+                        isbn, edition_key
+                    );
+                    return Some(isbn.clone());
+                }
+            }
+        }
+    }
+    None
 }
 
 pub async fn search_external(
@@ -196,7 +238,8 @@ pub async fn search_external(
                         "cover_id": doc.cover_i,
                         "source": "openlibrary",
                         "languages": doc.language.clone().unwrap_or_default(),
-                        "isbns": doc.isbn.clone().unwrap_or_default()
+                        "isbns": doc.isbn.clone().unwrap_or_default(),
+                        "edition_key": doc.edition_key.as_ref().and_then(|k| k.first()).cloned()
                     });
 
                     let cover_url = doc
@@ -631,6 +674,14 @@ pub async fn search_unified(
                         if let Some(first_isbn) = isbns.first().and_then(|v| v.as_str()) {
                             dto.isbn = Some(first_isbn.to_string());
                             println!("DEBUG SEARCH: Fallback ISBN extracted: {}", first_isbn);
+                        }
+                    }
+                }
+                // Second fallback: fetch from edition API if still no ISBN
+                if dto.isbn.is_none() {
+                    if let Some(edition_key) = json.get("edition_key").and_then(|k| k.as_str()) {
+                        if let Some(fetched_isbn) = fetch_isbn_from_edition(edition_key).await {
+                            dto.isbn = Some(fetched_isbn);
                         }
                     }
                 }
