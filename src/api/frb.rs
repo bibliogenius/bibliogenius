@@ -293,6 +293,7 @@ impl From<FrbBook> for crate::models::Book {
             source: None,
             owned: Some(frb_book.owned),
             price: frb_book.price, // Price now exposed in FFI layer
+            language: None,
         }
     }
 }

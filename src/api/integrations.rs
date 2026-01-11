@@ -87,6 +87,29 @@ struct OpenLibraryDoc {
     language: Option<Vec<String>>,
 }
 
+// Helper to check if language matches (handles 2-letter vs 3-letter codes)
+fn lang_matches(book_lang: &str, user_lang: &str) -> bool {
+    if user_lang.is_empty() {
+        return true;
+    }
+    let b = book_lang.to_lowercase();
+    let u = user_lang.to_lowercase();
+
+    if b == u {
+        return true;
+    }
+
+    // Simple mapping for common languages
+    match (b.as_str(), u.as_str()) {
+        ("en", "eng") | ("eng", "en") => true,
+        ("fr", "fre") | ("fre", "fr") | ("fra", "fr") | ("fr", "fra") => true,
+        ("de", "ger") | ("ger", "de") | ("deu", "de") | ("de", "deu") => true,
+        ("es", "spa") | ("spa", "es") => true,
+        ("it", "ita") | ("ita", "it") => true,
+        _ => false,
+    }
+}
+
 pub async fn search_external(
     query: &crate::api::search::SearchQuery,
     db: &DatabaseConnection,
@@ -303,12 +326,13 @@ pub async fn search_unified(
     if let Some(ref filter) = params.source {
         let sources: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
         // When user explicitly selects sources, use ONLY those (truly override profile)
-        enable_inventaire =
-            sources.iter().any(|s| s.eq_ignore_ascii_case("inventaire"));
-        enable_bnf =
-            sources.iter().any(|s| s.eq_ignore_ascii_case("bnf") || s.eq_ignore_ascii_case("data.bnf.fr"));
-        enable_openlibrary =
-            sources.iter().any(|s| s.eq_ignore_ascii_case("openlibrary") || s.eq_ignore_ascii_case("open library"));
+        enable_inventaire = sources.iter().any(|s| s.eq_ignore_ascii_case("inventaire"));
+        enable_bnf = sources
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case("bnf") || s.eq_ignore_ascii_case("data.bnf.fr"));
+        enable_openlibrary = sources.iter().any(|s| {
+            s.eq_ignore_ascii_case("openlibrary") || s.eq_ignore_ascii_case("open library")
+        });
         println!("DEBUG SEARCH: Source filter applied: {:?}", sources);
     }
 
@@ -408,8 +432,10 @@ pub async fn search_unified(
                 // Use tokio timeout to prevent BNF from blocking indefinitely
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(8),
-                    crate::modules::integrations::bnf::search_bnf(&bnf_query_str)
-                ).await {
+                    crate::modules::integrations::bnf::search_bnf(&bnf_query_str),
+                )
+                .await
+                {
                     Ok(result) => result,
                     Err(_) => {
                         eprintln!("DEBUG SEARCH: BNF search timed out");
@@ -559,7 +585,10 @@ pub async fn search_unified(
         results.push(dto);
     }
 
-    println!("DEBUG SEARCH: Total aggregated results before filtering: {}", results.len());
+    println!(
+        "DEBUG SEARCH: Total aggregated results before filtering: {}",
+        results.len()
+    );
 
     let query_author = params.author.as_deref().unwrap_or("").to_lowercase();
     let query_title = params.title.as_deref().unwrap_or("").to_lowercase();
@@ -597,7 +626,11 @@ pub async fn search_unified(
             // No language info - keep the result (can't determine language)
             true
         });
-        println!("DEBUG SEARCH: Results after language filter '{}': {}", user_lang, results.len());
+        println!(
+            "DEBUG SEARCH: Results after language filter '{}': {}",
+            user_lang,
+            results.len()
+        );
     }
 
     // 5. Sort Results by Relevance
