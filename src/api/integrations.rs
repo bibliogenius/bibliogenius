@@ -100,14 +100,24 @@ fn lang_matches(book_lang: &str, user_lang: &str) -> bool {
     }
 
     // Simple mapping for common languages
-    match (b.as_str(), u.as_str()) {
-        ("en", "eng") | ("eng", "en") => true,
-        ("fr", "fre") | ("fre", "fr") | ("fra", "fr") | ("fr", "fra") => true,
-        ("de", "ger") | ("ger", "de") | ("deu", "de") | ("de", "deu") => true,
-        ("es", "spa") | ("spa", "es") => true,
-        ("it", "ita") | ("ita", "it") => true,
-        _ => false,
-    }
+    // Simple mapping for common languages
+    matches!(
+        (b.as_str(), u.as_str()),
+        ("en", "eng")
+            | ("eng", "en")
+            | ("fr", "fre")
+            | ("fre", "fr")
+            | ("fra", "fr")
+            | ("fr", "fra")
+            | ("de", "ger")
+            | ("ger", "de")
+            | ("deu", "de")
+            | ("de", "deu")
+            | ("es", "spa")
+            | ("spa", "es")
+            | ("it", "ita")
+            | ("ita", "it")
+    )
 }
 
 pub async fn search_external(
