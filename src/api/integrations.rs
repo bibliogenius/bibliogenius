@@ -411,27 +411,52 @@ pub async fn search_unified(
     // Execute ALL sources in parallel with individual error isolation
     // This ensures one slow/failing source doesn't block or crash others
     let (inv_res, ol_res, bnf_res) = tokio::join!(
-        // Task 1: Inventaire
+        // Task 1: Inventaire (wrapped in timeout to prevent blocking)
         async move {
             if enable_inventaire && !inv_query_str.trim().is_empty() {
-                match crate::inventaire_client::search_inventaire(&inv_query_str).await {
-                    Ok(inv_results) => {
-                        // Enrich results (also async)
-                        match crate::inventaire_client::enrich_search_results(inv_results).await {
-                            Ok(res) => Ok(res),
-                            Err(e) => Err(format!("Inventaire enrichment failed: {}", e)),
+                // Use tokio timeout to prevent Inventaire from blocking indefinitely
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    async {
+                        match crate::inventaire_client::search_inventaire(&inv_query_str).await {
+                            Ok(inv_results) => {
+                                // Enrich results (also async)
+                                match crate::inventaire_client::enrich_search_results(inv_results).await {
+                                    Ok(res) => Ok(res),
+                                    Err(e) => Err(format!("Inventaire enrichment failed: {}", e)),
+                                }
+                            }
+                            Err(e) => Err(format!("Inventaire search failed: {}", e)),
                         }
                     }
-                    Err(e) => Err(format!("Inventaire search failed: {}", e)),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        eprintln!("DEBUG SEARCH: Inventaire search timed out");
+                        Ok(Vec::new())
+                    }
                 }
             } else {
                 Ok(Vec::new())
             }
         },
-        // Task 2: OpenLibrary
+        // Task 2: OpenLibrary (wrapped in timeout to prevent blocking)
         async move {
             if run_ol {
-                search_external(&ol_query, &db_clone).await
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    search_external(&ol_query, &db_clone),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        eprintln!("DEBUG SEARCH: OpenLibrary search timed out");
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new()
             }
@@ -467,13 +492,17 @@ pub async fn search_unified(
             enriched.len()
         );
         for item in enriched {
+            println!(
+                "DEBUG SEARCH: Inventaire item '{}' - ISBN: {:?}",
+                item.label, item.isbn
+            );
             let authors = item.authors.clone();
             let author_name = authors.as_ref().map(|a| a.join(", "));
 
             let book = book::Book {
                 id: None,
                 title: item.label.clone(),
-                isbn: None,
+                isbn: item.isbn.clone(), // Now populated by enrichment
                 publisher: None,
                 publication_year: None,
                 summary: item.description.clone(),
@@ -515,6 +544,10 @@ pub async fn search_unified(
         Ok(ref bnf_results) => {
             println!("DEBUG SEARCH: BNF returned {} results", bnf_results.len());
             for bnf_book in bnf_results {
+                println!(
+                    "DEBUG SEARCH: BNF item '{}' - ISBN: {:?}",
+                    bnf_book.title, bnf_book.isbn
+                );
                 let book = book::Book {
                     id: None,
                     title: bnf_book.title.clone(),
@@ -561,6 +594,10 @@ pub async fn search_unified(
         ol_res.len()
     );
     for model in ol_res {
+        println!(
+            "DEBUG SEARCH: OpenLibrary item '{}' - ISBN: {:?}",
+            model.title, model.isbn
+        );
         // Convert Model to Book DTO and enrich
         let mut dto = book::Book::from(model.clone());
 

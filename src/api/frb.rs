@@ -900,11 +900,19 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
 
                 let app = axum::Router::new().nest("/api", api).layer(cors);
 
-                // Spawn server in background
+                // Spawn server in background with panic catching
+                let server_port = actual_port;
                 tokio::spawn(async move {
-                    if let Err(e) = axum::serve(listener, app).await {
-                        tracing::error!("❌ FFI Server Error: {}", e);
+                    tracing::info!("🚀 FFI Server task starting on port {}", server_port);
+                    match axum::serve(listener, app).await {
+                        Ok(()) => {
+                            tracing::warn!("⚠️ FFI Server task exited normally on port {} (this is unexpected)", server_port);
+                        }
+                        Err(e) => {
+                            tracing::error!("❌ FFI Server Error on port {}: {}", server_port, e);
+                        }
                     }
+                    tracing::error!("💀 FFI Server task ended on port {} - server is no longer running!", server_port);
                 });
 
                 if offset > 0 {

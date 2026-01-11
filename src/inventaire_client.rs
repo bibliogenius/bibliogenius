@@ -54,6 +54,10 @@ pub struct Claims {
     pub birth_date: Option<Vec<String>>,
     #[serde(rename = "wdt:P570")] // Death Date
     pub death_date: Option<Vec<String>>,
+    #[serde(rename = "wdt:P212")] // ISBN-13
+    pub isbn_13: Option<Vec<String>>,
+    #[serde(rename = "wdt:P957")] // ISBN-10
+    pub isbn_10: Option<Vec<String>>,
 }
 
 const USER_AGENT: &str = "BiblioGenius/1.0 (federico@bibliogenius.org)";
@@ -61,6 +65,7 @@ const USER_AGENT: &str = "BiblioGenius/1.0 (federico@bibliogenius.org)";
 pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<InventaireMetadata, String> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
+        .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| format!("Failed to build client: {}", e))?;
 
@@ -271,11 +276,13 @@ pub struct InventaireSearchResult {
     pub description: Option<String>,
     pub image: Option<String>,
     pub authors: Option<Vec<String>>, // Added authors field
+    pub isbn: Option<String>,         // ISBN from first edition
 }
 
 pub async fn search_inventaire(query: &str) -> Result<Vec<InventaireSearchResult>, String> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
+        .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| format!("Failed to build client: {}", e))?;
 
@@ -302,7 +309,7 @@ pub async fn search_inventaire(query: &str) -> Result<Vec<InventaireSearchResult
     let parsed: InventaireSearchResponse =
         serde_json::from_str(&body).map_err(|e| format!("Parse error: {}", e))?;
 
-    // Fix image URLs to be absolute
+    // Fix image URLs to be absolute and initialize isbn to None
     let results = parsed
         .results
         .into_iter()
@@ -313,6 +320,10 @@ pub async fn search_inventaire(query: &str) -> Result<Vec<InventaireSearchResult
                 } else {
                     item.image = Some(img);
                 }
+            }
+            // ISBN will be populated by enrich_search_results
+            if item.isbn.is_none() {
+                item.isbn = None;
             }
             item
         })
@@ -330,6 +341,7 @@ pub async fn enrich_search_results(
 
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
+        .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| format!("Failed to build client: {}", e))?;
 
@@ -423,6 +435,55 @@ pub async fn enrich_search_results(
             }
         }
         enriched_results.push(result);
+    }
+
+    // 6. Fetch editions to get ISBNs for each work
+    // Use reverse-claims to find editions that have this work as parent
+    for result in &mut enriched_results {
+        if result.isbn.is_some() {
+            continue; // Already has ISBN
+        }
+
+        // Fetch editions for this work using reverse-claims API
+        let editions_url = format!(
+            "https://inventaire.io/api/entities?action=reverse-claims&property=wdt:P629&value={}",
+            urlencoding::encode(&result.uri)
+        );
+
+        if let Ok(resp) = client.get(&editions_url).send().await {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.text().await {
+                    // Response is { "uris": ["inv:xxx", "inv:yyy"] }
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                        if let Some(uris) = json.get("uris").and_then(|u| u.as_array()) {
+                            // Take first few edition URIs to fetch
+                            let edition_uris: Vec<String> = uris
+                                .iter()
+                                .take(3) // Limit to first 3 editions
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect();
+
+                            if !edition_uris.is_empty() {
+                                // Fetch edition entities to get ISBN
+                                if let Ok(edition_entities) = fetch_entities_batch(&client, &edition_uris).await {
+                                    for (_, entity) in edition_entities {
+                                        // Try ISBN-13 first, then ISBN-10
+                                        if let Some(isbn) = entity.claims.isbn_13
+                                            .as_ref()
+                                            .and_then(|v| v.first().cloned())
+                                            .or_else(|| entity.claims.isbn_10.as_ref().and_then(|v| v.first().cloned()))
+                                        {
+                                            result.isbn = Some(isbn);
+                                            break; // Found an ISBN, stop
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(enriched_results)
