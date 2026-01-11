@@ -272,6 +272,7 @@ pub struct UnifiedSearchQuery {
     pub publisher: Option<String>,
     pub subject: Option<String>,
     pub lang: Option<String>, // User's preferred language (e.g., "fr", "en")
+    pub source: Option<String>, // Filter to specific source: "inventaire", "bnf", "openlibrary", or comma-separated
 }
 
 pub async fn search_unified(
@@ -282,20 +283,42 @@ pub async fn search_unified(
 
     use crate::models::installation_profile::Entity as ProfileEntity;
     use sea_orm::EntityTrait;
+
     // Load profile config to check enabled providers
-    let (enable_inventaire, enable_bnf, enable_openlibrary) =
+    let (mut enable_inventaire, mut enable_bnf, mut enable_openlibrary) =
         if let Ok(Some(profile_model)) = ProfileEntity::find_by_id(1).one(&db).await {
             let modules: Vec<String> =
                 serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
-            (
-                !modules.contains(&"disable_fallback:inventaire".to_string()),
-                !modules.contains(&"disable_fallback:bnf".to_string()),
-                !modules.contains(&"disable_fallback:openlibrary".to_string()),
-            )
+            println!("DEBUG SEARCH: Loaded modules: {:?}", modules);
+            let inv = !modules.contains(&"disable_fallback:inventaire".to_string());
+            let bnf = !modules.contains(&"disable_fallback:bnf".to_string());
+            let ol = !modules.contains(&"disable_fallback:openlibrary".to_string());
+            (inv, bnf, ol)
         } else {
-            println!("DEBUG SEARCH: Profile not found");
+            println!("DEBUG SEARCH: Profile not found, using defaults (all enabled)");
             (true, true, true)
         };
+
+    // Apply source filter if provided (overrides profile settings)
+    if let Some(ref filter) = params.source {
+        let sources: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
+        enable_inventaire =
+            enable_inventaire && sources.iter().any(|s| s.eq_ignore_ascii_case("inventaire"));
+        enable_bnf = enable_bnf
+            && sources
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case("bnf") || s.eq_ignore_ascii_case("data.bnf.fr"));
+        enable_openlibrary = enable_openlibrary
+            && sources.iter().any(|s| {
+                s.eq_ignore_ascii_case("openlibrary") || s.eq_ignore_ascii_case("open library")
+            });
+        println!("DEBUG SEARCH: Source filter applied: {:?}", sources);
+    }
+
+    println!(
+        "DEBUG SEARCH: Sources enabled - Inventaire: {}, BNF: {}, OpenLibrary: {}",
+        enable_inventaire, enable_bnf, enable_openlibrary
+    );
 
     // 1. Build Query String for Inventaire (General Search)
     let mut inv_query_parts = Vec::new();
@@ -348,7 +371,9 @@ pub async fn search_unified(
             || ol_query.publisher.is_some()
             || ol_query.subjects.is_some());
 
-    let (inv_res, bnf_res, ol_res) = tokio::join!(
+    // Execute Inventaire and OpenLibrary in parallel FIRST (these are fast)
+    // Then execute BNF separately to avoid blocking other results with slow SPARQL queries
+    let (inv_res, ol_res) = tokio::join!(
         // Task 1: Inventaire
         async move {
             if enable_inventaire && !inv_query_str.trim().is_empty() {
@@ -366,15 +391,7 @@ pub async fn search_unified(
                 Ok(Vec::new())
             }
         },
-        // Task 2: BNF
-        async move {
-            if enable_bnf && !bnf_query_str.trim().is_empty() {
-                crate::modules::integrations::bnf::search_bnf(&bnf_query_str).await
-            } else {
-                Ok(Vec::new()) // Return empty vec if disabled
-            }
-        },
-        // Task 3: OpenLibrary
+        // Task 2: OpenLibrary
         async move {
             if run_ol {
                 search_external(&ol_query, &db_clone).await
@@ -384,21 +401,32 @@ pub async fn search_unified(
         }
     );
 
+    // Execute BNF AFTER other sources (slower, should not block fast results)
+    let bnf_res = if enable_bnf && !bnf_query_str.trim().is_empty() {
+        crate::modules::integrations::bnf::search_bnf(&bnf_query_str).await
+    } else {
+        Ok(Vec::new())
+    };
+
     // 4. Process Results
 
     // Process Inventaire Results
-    if let Ok(enriched) = inv_res {
+    if let Ok(ref enriched) = inv_res {
+        println!(
+            "DEBUG SEARCH: Inventaire returned {} results",
+            enriched.len()
+        );
         for item in enriched {
             let authors = item.authors.clone();
             let author_name = authors.as_ref().map(|a| a.join(", "));
 
             let book = book::Book {
                 id: None,
-                title: item.label,
+                title: item.label.clone(),
                 isbn: None,
                 publisher: None,
                 publication_year: None,
-                summary: item.description,
+                summary: item.description.clone(),
                 dewey_decimal: None,
                 lcc: None,
                 subjects: None,
@@ -417,7 +445,7 @@ pub async fn search_unified(
                 source: Some("Inventaire".to_string()),
                 author: author_name,
                 authors,
-                cover_url: item.image,
+                cover_url: item.image.clone(),
                 large_cover_url: None,
                 finished_reading_at: None,
                 started_reading_at: None,
@@ -428,20 +456,21 @@ pub async fn search_unified(
             results.push(book);
         }
     } else if let Err(e) = inv_res {
-        eprintln!("DEBUG SEARCH: {}", e);
+        eprintln!("DEBUG SEARCH: Inventaire error: {}", e);
     }
 
     // Process BNF Results
     match bnf_res {
-        Ok(bnf_results) => {
+        Ok(ref bnf_results) => {
+            println!("DEBUG SEARCH: BNF returned {} results", bnf_results.len());
             for bnf_book in bnf_results {
                 let book = book::Book {
                     id: None,
-                    title: bnf_book.title,
-                    isbn: bnf_book.isbn,
-                    publisher: bnf_book.publisher,
+                    title: bnf_book.title.clone(),
+                    isbn: bnf_book.isbn.clone(),
+                    publisher: bnf_book.publisher.clone(),
                     publication_year: bnf_book.publication_year,
-                    summary: bnf_book.description,
+                    summary: bnf_book.description.clone(),
                     dewey_decimal: None,
                     lcc: None,
                     subjects: None,
@@ -459,8 +488,8 @@ pub async fn search_unified(
                     reading_status: Some("to_read".to_string()),
                     source: Some("BNF".to_string()),
                     author: bnf_book.author.clone(),
-                    authors: bnf_book.author.map(|a| vec![a]),
-                    cover_url: bnf_book.cover_url,
+                    authors: bnf_book.author.clone().map(|a| vec![a]),
+                    cover_url: bnf_book.cover_url.clone(),
                     large_cover_url: None,
                     finished_reading_at: None,
                     started_reading_at: None,
@@ -471,10 +500,14 @@ pub async fn search_unified(
                 results.push(book);
             }
         }
-        Err(e) => eprintln!("BNF search error: {}", e),
+        Err(e) => eprintln!("DEBUG SEARCH: BNF error: {}", e),
     }
 
     // Process OpenLibrary Results
+    println!(
+        "DEBUG SEARCH: OpenLibrary returned {} results",
+        ol_res.len()
+    );
     for model in ol_res {
         // Convert Model to Book DTO and enrich
         let mut dto = book::Book::from(model.clone());
@@ -503,6 +536,8 @@ pub async fn search_unified(
         dto.source = Some("Open Library".to_string());
         results.push(dto);
     }
+
+    println!("DEBUG SEARCH: Total aggregated results: {}", results.len());
 
     // 4. Sort Results by Relevance
     // Prioritize:

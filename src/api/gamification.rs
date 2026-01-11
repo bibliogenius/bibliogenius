@@ -147,10 +147,16 @@ pub async fn get_user_status(State(db): State<DatabaseConnection>) -> impl IntoR
         .unwrap_or_default();
     println!("DEBUG GAMIFICATION: Found statuses in DB: {:?}", statuses);
 
-    // 2. Count books with reading_status = 'read' (Reader Track)
+    // 2. Count books with reading_status = 'read' or 'finished' (Reader Track)
+    // Note: Flutter app uses 'finished' for completed books
     let read_count = book::Entity::find()
         .filter(
             sea_orm::Condition::any()
+                // 'finished' variants (used by Flutter app)
+                .add(book::Column::ReadingStatus.eq("finished"))
+                .add(book::Column::ReadingStatus.eq("Finished"))
+                .add(book::Column::ReadingStatus.eq("FINISHED"))
+                // 'read' variants (legacy/alternative)
                 .add(book::Column::ReadingStatus.eq("read"))
                 .add(book::Column::ReadingStatus.eq("Read"))
                 .add(book::Column::ReadingStatus.eq("READ"))

@@ -3,7 +3,24 @@
 //! This module provides search functionality for French books via the BNF's
 //! Linked Open Data SPARQL endpoint.
 
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Simple in-memory cache with TTL for BNF queries
+/// Avoids repeated slow SPARQL queries for the same search terms
+struct CacheEntry {
+    data: Vec<BnfBook>,
+    created_at: Instant,
+}
+
+static BNF_CACHE: Lazy<Mutex<HashMap<String, CacheEntry>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+const CACHE_TTL: Duration = Duration::from_secs(3600); // 1 hour
+const MAX_CACHE_ENTRIES: usize = 100; // Limit memory usage
 
 /// A book result from BNF search
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,8 +73,24 @@ struct SparqlValue {
 /// # Returns
 /// A vector of BnfBook results
 pub async fn search_bnf(query: &str) -> Result<Vec<BnfBook>, String> {
+    let cache_key = query.to_lowercase().trim().to_string();
+
+    // Check cache first
+    {
+        let cache = BNF_CACHE.lock().unwrap();
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.created_at.elapsed() < CACHE_TTL {
+                tracing::debug!("BNF cache hit for query: {}", query);
+                return Ok(entry.data.clone());
+            }
+        }
+    }
+
+    tracing::debug!("BNF cache miss for query: {}", query);
+    println!("DEBUG BNF: Starting search for '{}'", query);
+
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(5)) // Reduced from 10s to 5s
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -189,6 +222,37 @@ LIMIT 20
         books.push(book);
     }
 
+    // Store in cache (with LRU-style eviction if full)
+    {
+        let mut cache = BNF_CACHE.lock().unwrap();
+
+        // Evict oldest entries if cache is full
+        if cache.len() >= MAX_CACHE_ENTRIES {
+            // Remove expired entries first
+            cache.retain(|_, entry| entry.created_at.elapsed() < CACHE_TTL);
+
+            // If still full, remove oldest entry
+            if cache.len() >= MAX_CACHE_ENTRIES {
+                if let Some(oldest_key) = cache
+                    .iter()
+                    .min_by_key(|(_, e)| e.created_at)
+                    .map(|(k, _)| k.clone())
+                {
+                    cache.remove(&oldest_key);
+                }
+            }
+        }
+
+        cache.insert(
+            cache_key,
+            CacheEntry {
+                data: books.clone(),
+                created_at: Instant::now(),
+            },
+        );
+    }
+
+    println!("DEBUG BNF: Search completed with {} results", books.len());
     Ok(books)
 }
 
