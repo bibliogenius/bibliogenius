@@ -680,9 +680,21 @@ pub async fn search_unified(
                 // Second fallback: fetch from edition API if still no ISBN
                 if dto.isbn.is_none() {
                     if let Some(edition_key) = json.get("edition_key").and_then(|k| k.as_str()) {
+                        println!(
+                            "DEBUG SEARCH: Trying edition fallback for key: {}",
+                            edition_key
+                        );
                         if let Some(fetched_isbn) = fetch_isbn_from_edition(edition_key).await {
+                            println!("DEBUG SEARCH: Success! Fetched ISBN: {}", fetched_isbn);
                             dto.isbn = Some(fetched_isbn);
+                        } else {
+                            println!(
+                                "DEBUG SEARCH: Edition fallback returned None for {}",
+                                edition_key
+                            );
                         }
+                    } else {
+                        println!("DEBUG SEARCH: No edition_key found for fallback");
                     }
                 }
             }
