@@ -87,8 +87,6 @@ struct OpenLibraryDoc {
     language: Option<Vec<String>>,
     edition_key: Option<Vec<String>>, // For fetching ISBN from editions
     key: String,                      // Work ID (e.g. "/works/OL12345W")
-    #[serde(flatten)]
-    extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 // Helper to check if language matches (handles 2-letter vs 3-letter codes)
