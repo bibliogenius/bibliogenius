@@ -197,22 +197,32 @@ pub async fn search_books(
                     // Extract ISBN from industryIdentifiers (prefer ISBN_13 over ISBN_10)
                     let isbn = info.industry_identifiers.as_ref().and_then(|ids| {
                         // First try to find ISBN_13
-                        let found = ids.iter()
+                        let found = ids
+                            .iter()
                             .find(|id| id.id_type == "ISBN_13")
                             .or_else(|| ids.iter().find(|id| id.id_type == "ISBN_10"))
                             .map(|id| id.identifier.replace("-", ""));
 
                         if let Some(ref isbn) = found {
-                            println!("DEBUG GOOGLE_BOOKS: Found ISBN {} for '{}'", isbn, info.title);
+                            println!(
+                                "DEBUG GOOGLE_BOOKS: Found ISBN {} for '{}'",
+                                isbn, info.title
+                            );
                         } else {
-                            println!("DEBUG GOOGLE_BOOKS: No ISBN found for '{}' (identifiers: {:?})",
-                                info.title, ids.iter().map(|i| &i.id_type).collect::<Vec<_>>());
+                            println!(
+                                "DEBUG GOOGLE_BOOKS: No ISBN found for '{}' (identifiers: {:?})",
+                                info.title,
+                                ids.iter().map(|i| &i.id_type).collect::<Vec<_>>()
+                            );
                         }
                         found
                     });
 
                     if info.industry_identifiers.is_none() {
-                        println!("DEBUG GOOGLE_BOOKS: No industryIdentifiers at all for '{}'", info.title);
+                        println!(
+                            "DEBUG GOOGLE_BOOKS: No industryIdentifiers at all for '{}'",
+                            info.title
+                        );
                     }
 
                     let source_data = serde_json::json!({

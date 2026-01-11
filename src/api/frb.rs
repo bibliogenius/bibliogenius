@@ -344,7 +344,10 @@ pub async fn get_book_by_id(id: i32) -> Result<FrbBook, String> {
 
     match crate::services::book_service::get_book(db, id).await {
         Ok(book) => {
-            println!("DEBUG FFI get_book_by_id({}): cover_url={:?}", id, book.cover_url);
+            println!(
+                "DEBUG FFI get_book_by_id({}): cover_url={:?}",
+                id, book.cover_url
+            );
             Ok(FrbBook::from(book))
         }
         Err(crate::services::book_service::ServiceError::NotFound) => {
