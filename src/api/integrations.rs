@@ -86,6 +86,7 @@ struct OpenLibraryDoc {
     cover_i: Option<i32>,
     language: Option<Vec<String>>,
     edition_key: Option<Vec<String>>, // For fetching ISBN from editions
+    key: String,                      // Work ID (e.g. "/works/OL12345W")
     #[serde(flatten)]
     extra: std::collections::HashMap<String, serde_json::Value>,
 }
@@ -164,6 +165,49 @@ async fn fetch_isbn_from_edition(edition_key: &str) -> Option<String> {
     None
 }
 
+/// Fetch ISBN from OpenLibrary Work API (get first edition)
+async fn fetch_isbn_from_work(work_key: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+        .ok()?;
+
+    // work_key is usually "/works/OLxxxW", we need to append "/editions.json"
+    let url = format!("https://openlibrary.org{}/editions.json?limit=1", work_key);
+
+    #[derive(serde::Deserialize)]
+    struct WorkEditionsResponse {
+        entries: Vec<EditionEntry>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct EditionEntry {
+        isbn_13: Option<Vec<String>>,
+        isbn_10: Option<Vec<String>>,
+    }
+
+    if let Ok(res) = client.get(&url).send().await {
+        if let Ok(data) = res.json::<WorkEditionsResponse>().await {
+            if let Some(entry) = data.entries.first() {
+                // Prefer ISBN-13
+                if let Some(isbns) = &entry.isbn_13 {
+                    if let Some(isbn) = isbns.first() {
+                        println!("DEBUG: Fetched ISBN-13 {} from work {}", isbn, work_key);
+                        return Some(isbn.clone());
+                    }
+                }
+                if let Some(isbns) = &entry.isbn_10 {
+                    if let Some(isbn) = isbns.first() {
+                        println!("DEBUG: Fetched ISBN-10 {} from work {}", isbn, work_key);
+                        return Some(isbn.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub async fn search_external(
     query: &crate::api::search::SearchQuery,
     db: &DatabaseConnection,
@@ -234,14 +278,6 @@ pub async fn search_external(
                 for doc in data.docs {
                     let isbn = doc.isbn.as_ref().and_then(|v| v.first()).cloned();
 
-                    // Debug keys if edition_key is missing
-                    if doc.edition_key.is_none() {
-                        println!(
-                            "DEBUG SEARCH: Missing edition_key. Available keys: {:?}",
-                            doc.extra.keys()
-                        );
-                    }
-
                     // Map to our Book Model (store additional data in source_data)
                     let source_data = serde_json::json!({
                         "authors": doc.author_name.clone().unwrap_or_default(),
@@ -249,7 +285,8 @@ pub async fn search_external(
                         "source": "openlibrary",
                         "languages": doc.language.clone().unwrap_or_default(),
                         "isbns": doc.isbn.clone().unwrap_or_default(),
-                        "edition_key": doc.edition_key.as_ref().and_then(|k| k.first()).cloned()
+                        "edition_key": doc.edition_key.as_ref().and_then(|k| k.first()).cloned(),
+                        "key": doc.key
                     });
 
                     let cover_url = doc
@@ -705,6 +742,22 @@ pub async fn search_unified(
                         }
                     } else {
                         println!("DEBUG SEARCH: No edition_key found for fallback");
+                    }
+                }
+
+                // Third fallback: fetch from Work API if still no ISBN
+                if dto.isbn.is_none() {
+                    if let Some(work_key) = json.get("key").and_then(|k| k.as_str()) {
+                        println!("DEBUG SEARCH: Trying work fallback for key: {}", work_key);
+                        if let Some(fetched_isbn) = fetch_isbn_from_work(work_key).await {
+                            println!(
+                                "DEBUG SEARCH: Success! Fetched ISBN from work: {}",
+                                fetched_isbn
+                            );
+                            dto.isbn = Some(fetched_isbn);
+                        } else {
+                            println!("DEBUG SEARCH: Work fallback returned None for {}", work_key);
+                        }
                     }
                 }
             }
