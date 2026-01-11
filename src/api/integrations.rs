@@ -166,14 +166,15 @@ async fn fetch_isbn_from_edition(edition_key: &str) -> Option<String> {
 }
 
 /// Fetch ISBN from OpenLibrary Work API (get first edition)
+
 async fn fetch_isbn_from_work(work_key: &str) -> Option<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(4))
         .build()
         .ok()?;
 
-    // work_key is usually "/works/OLxxxW", we need to append "/editions.json"
-    let url = format!("https://openlibrary.org{}/editions.json?limit=1", work_key);
+    // Fetch up to 5 editions to find one with an ISBN
+    let url = format!("https://openlibrary.org{}/editions.json?limit=5", work_key);
 
     #[derive(serde::Deserialize)]
     struct WorkEditionsResponse {
@@ -188,22 +189,43 @@ async fn fetch_isbn_from_work(work_key: &str) -> Option<String> {
 
     if let Ok(res) = client.get(&url).send().await {
         if let Ok(data) = res.json::<WorkEditionsResponse>().await {
-            if let Some(entry) = data.entries.first() {
+            // Iterate over entries to find the first one with an ISBN
+            for entry in data.entries {
                 // Prefer ISBN-13
                 if let Some(isbns) = &entry.isbn_13 {
                     if let Some(isbn) = isbns.first() {
-                        println!("DEBUG: Fetched ISBN-13 {} from work {}", isbn, work_key);
+                        println!(
+                            "DEBUG SEARCH: Fetched ISBN-13 {} from work {}",
+                            isbn, work_key
+                        );
                         return Some(isbn.clone());
                     }
                 }
                 if let Some(isbns) = &entry.isbn_10 {
                     if let Some(isbn) = isbns.first() {
-                        println!("DEBUG: Fetched ISBN-10 {} from work {}", isbn, work_key);
+                        println!(
+                            "DEBUG SEARCH: Fetched ISBN-10 {} from work {}",
+                            isbn, work_key
+                        );
                         return Some(isbn.clone());
                     }
                 }
             }
+            println!(
+                "DEBUG SEARCH: No ISBN found in first 5 editions for work {}",
+                work_key
+            );
+        } else {
+            println!(
+                "DEBUG SEARCH: Failed to parse editions for work {}",
+                work_key
+            );
         }
+    } else {
+        println!(
+            "DEBUG SEARCH: Failed to fetch editions for work {}",
+            work_key
+        );
     }
     None
 }
