@@ -30,31 +30,41 @@ pub fn build_router(db: DatabaseConnection) -> Router {
     Router::new().nest("/api", api_router).layer(cors)
 }
 
-/// Find an available port starting from the preferred port
-pub fn find_available_port(preferred_port: u16) -> Option<u16> {
+/// Find an available port starting from the preferred port on a specific IP
+pub fn find_available_port_on_ip(preferred_port: u16, ip: &str) -> Option<u16> {
     // Try preferred port first
-    if TcpListener::bind(("0.0.0.0", preferred_port)).is_ok() {
+    if TcpListener::bind((ip, preferred_port)).is_ok() {
         return Some(preferred_port);
     }
 
     // Scan next 100 ports
     ((preferred_port + 1)..(preferred_port + 100))
-        .find(|&port| TcpListener::bind(("0.0.0.0", port)).is_ok())
+        .find(|&port| TcpListener::bind((ip, port)).is_ok())
+}
+
+/// Find an available port starting from the preferred port (0.0.0.0)
+pub fn find_available_port(preferred_port: u16) -> Option<u16> {
+    find_available_port_on_ip(preferred_port, "0.0.0.0")
 }
 
 /// Start the HTTP server on a background task
 /// Returns the actual port used
+/// Tries 0.0.0.0 first (for P2P), then falls back to 127.0.0.1 (for local-only)
 pub async fn start_server(db: DatabaseConnection, preferred_port: u16) -> Result<u16, String> {
     // Check if already running
     if SERVER_RUNNING.load(Ordering::SeqCst) {
         return Err("HTTP server is already running".to_string());
     }
 
-    // Find available port
-    let port = find_available_port(preferred_port)
-        .ok_or_else(|| "Failed to find available port".to_string())?;
-
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // Find available port - try 0.0.0.0 first, then fallback to 127.0.0.1
+    let (port, addr) = if let Some(p) = find_available_port_on_ip(preferred_port, "0.0.0.0") {
+        (p, SocketAddr::from(([0, 0, 0, 0], p)))
+    } else if let Some(p) = find_available_port_on_ip(preferred_port, "127.0.0.1") {
+        tracing::warn!("⚠️ Falling back to 127.0.0.1 binding (P2P may not work)");
+        (p, SocketAddr::from(([127, 0, 0, 1], p)))
+    } else {
+        return Err("Failed to find available port on 0.0.0.0 or 127.0.0.1".to_string());
+    };
 
     // Build router
     let app = build_router(db);
