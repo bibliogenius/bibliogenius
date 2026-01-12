@@ -165,14 +165,38 @@ pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<InventaireMetadata,
         }
     }
 
+    // Resolve publisher from Wikidata URI to human-readable name
+    let publisher = if let Some(publisher_uri) = edition_entity
+        .claims
+        .publisher
+        .as_ref()
+        .and_then(|v| v.first().cloned())
+    {
+        // If it's a Wikidata URI (wd:Qxxx), fetch the entity to get the name
+        if publisher_uri.starts_with("wd:") {
+            if let Ok(publisher_entity) = fetch_entity(&client, &publisher_uri).await {
+                publisher_entity
+                    .labels
+                    .get("fr")
+                    .or_else(|| publisher_entity.labels.get("en"))
+                    .or_else(|| publisher_entity.labels.values().next())
+                    .cloned()
+            } else {
+                // Fallback to raw URI if fetch fails
+                Some(publisher_uri)
+            }
+        } else {
+            // Not a Wikidata URI, use as-is
+            Some(publisher_uri)
+        }
+    } else {
+        None
+    };
+
     Ok(InventaireMetadata {
         title,
         authors,
-        publisher: edition_entity
-            .claims
-            .publisher
-            .as_ref()
-            .and_then(|v| v.first().cloned()),
+        publisher,
         publication_year,
         cover_url,
         summary: get_summary(
@@ -277,6 +301,7 @@ pub struct InventaireSearchResult {
     pub image: Option<String>,
     pub authors: Option<Vec<String>>, // Added authors field
     pub isbn: Option<String>,         // ISBN from first edition
+    pub publisher: Option<String>,    // Publisher name (resolved from Wikidata URI)
 }
 
 pub async fn search_inventaire(query: &str) -> Result<Vec<InventaireSearchResult>, String> {
@@ -464,27 +489,68 @@ pub async fn enrich_search_results(
                                 .collect();
 
                             if !edition_uris.is_empty() {
-                                // Fetch edition entities to get ISBN
+                                // Fetch edition entities to get ISBN and publisher
                                 if let Ok(edition_entities) =
                                     fetch_entities_batch(&client, &edition_uris).await
                                 {
-                                    for (_, entity) in edition_entities {
+                                    let mut publisher_uri: Option<String> = None;
+
+                                    for (_, entity) in &edition_entities {
                                         // Try ISBN-13 first, then ISBN-10
-                                        if let Some(isbn) = entity
-                                            .claims
-                                            .isbn_13
-                                            .as_ref()
-                                            .and_then(|v| v.first().cloned())
-                                            .or_else(|| {
-                                                entity
-                                                    .claims
-                                                    .isbn_10
-                                                    .as_ref()
-                                                    .and_then(|v| v.first().cloned())
-                                            })
-                                        {
-                                            result.isbn = Some(isbn);
-                                            break; // Found an ISBN, stop
+                                        if result.isbn.is_none() {
+                                            if let Some(isbn) = entity
+                                                .claims
+                                                .isbn_13
+                                                .as_ref()
+                                                .and_then(|v| v.first().cloned())
+                                                .or_else(|| {
+                                                    entity
+                                                        .claims
+                                                        .isbn_10
+                                                        .as_ref()
+                                                        .and_then(|v| v.first().cloned())
+                                                })
+                                            {
+                                                result.isbn = Some(isbn);
+                                            }
+                                        }
+
+                                        // Get publisher URI
+                                        if publisher_uri.is_none() {
+                                            if let Some(pub_uri) = entity
+                                                .claims
+                                                .publisher
+                                                .as_ref()
+                                                .and_then(|v| v.first().cloned())
+                                            {
+                                                publisher_uri = Some(pub_uri);
+                                            }
+                                        }
+
+                                        // Stop if we have both
+                                        if result.isbn.is_some() && publisher_uri.is_some() {
+                                            break;
+                                        }
+                                    }
+
+                                    // Resolve publisher Wikidata URI to name
+                                    if let Some(pub_uri) = publisher_uri {
+                                        if pub_uri.starts_with("wd:") {
+                                            if let Ok(publisher_entity) =
+                                                fetch_entity(&client, &pub_uri).await
+                                            {
+                                                result.publisher = publisher_entity
+                                                    .labels
+                                                    .get("fr")
+                                                    .or_else(|| publisher_entity.labels.get("en"))
+                                                    .or_else(|| {
+                                                        publisher_entity.labels.values().next()
+                                                    })
+                                                    .cloned();
+                                            }
+                                        } else {
+                                            // Not a Wikidata URI, use as-is
+                                            result.publisher = Some(pub_uri);
                                         }
                                     }
                                 }

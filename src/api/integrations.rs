@@ -616,7 +616,7 @@ pub async fn search_unified(
                 id: None,
                 title: item.label.clone(),
                 isbn: item.isbn.clone(), // Now populated by enrichment
-                publisher: None,
+                publisher: item.publisher.clone(), // Resolved from Wikidata URI
                 publication_year: None,
                 summary: item.description.clone(),
                 dewey_decimal: None,
