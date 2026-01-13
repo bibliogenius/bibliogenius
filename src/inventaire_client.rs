@@ -486,10 +486,10 @@ pub async fn enrich_search_results(
                         if let Ok(body) = resp.text().await {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
                                 if let Some(uris) = json.get("uris").and_then(|u| u.as_array()) {
-                                    // Fetch up to 15 editions per work
+                                    // Fetch up to 40 editions per work
                                     let edition_uris: Vec<String> = uris
                                         .iter()
-                                        .take(15)
+                                        .take(40)
                                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                                         .collect();
 
@@ -580,8 +580,10 @@ pub async fn enrich_search_results(
                                                     .map(|img| {
                                                         if img.starts_with("http") {
                                                             img
-                                                        } else {
+                                                        } else if img.starts_with("/") {
                                                             format!("https://inventaire.io{}", img)
+                                                        } else {
+                                                            format!("https://inventaire.io/img/entities/{}", img)
                                                         }
                                                     });
 
@@ -591,13 +593,18 @@ pub async fn enrich_search_results(
                                                     description: result.description.clone(),
                                                     image: edition_image.or_else(|| result.image.clone()),
                                                     authors: result.authors.clone(),
-                                                    isbn,
-                                                    publisher,
+                                                    isbn: isbn.clone(),
+                                                    publisher: publisher.clone(),
                                                     language,
                                                 };
 
-                                                work_results.push(edition_result);
-                                                found_editions = true;
+                                                // Quality Filter: Only include if it has at least one of (ISBN, Cover, Publisher)
+                                                if edition_result.isbn.is_some() ||
+                                                   edition_result.image.is_some() ||
+                                                   edition_result.publisher.is_some() {
+                                                    work_results.push(edition_result);
+                                                    found_editions = true;
+                                                }
                                             }
                                         }
                                     }
@@ -608,11 +615,12 @@ pub async fn enrich_search_results(
                 }
 
                 if !found_editions {
-                    // Start Filter: Discard poor quality results (no cover AND no ISBN)
+                    // Start Filter: Discard poor quality results (no cover AND no ISBN AND no publisher)
                     let has_cover = result.image.is_some();
                     let has_isbn = result.isbn.is_some();
-                    
-                    if has_cover || has_isbn {
+                    let has_publisher = result.publisher.is_some();
+
+                    if has_cover || has_isbn || has_publisher {
                         work_results.push(result);
                     }
                     // End Filter

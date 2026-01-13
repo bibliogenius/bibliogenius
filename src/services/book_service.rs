@@ -85,15 +85,7 @@ pub async fn list_books(
     let mut book_dtos = Vec::new();
 
     for book_model in books {
-        println!(
-            "DEBUG list_books: Book {} DB cover_url={:?}",
-            book_model.id, book_model.cover_url
-        );
         let mut book_dto = Book::from(book_model.clone());
-        println!(
-            "DEBUG list_books: Book {:?} DTO cover_url={:?}",
-            book_dto.id, book_dto.cover_url
-        );
 
         // Fetch authors via relation
         if let Ok(authors) = book_model
@@ -165,16 +157,7 @@ pub async fn get_book(db: &DatabaseConnection, id: i32) -> Result<Book, ServiceE
         .await?
         .ok_or(ServiceError::NotFound)?;
 
-    println!(
-        "DEBUG get_book({}): DB model cover_url={:?}",
-        id, book_model.cover_url
-    );
-
     let mut book_dto = Book::from(book_model.clone());
-    println!(
-        "DEBUG get_book({}): After From<Model> cover_url={:?}",
-        id, book_dto.cover_url
-    );
 
     // Fetch authors
     if let Ok(authors) = book_model
@@ -248,11 +231,6 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         updated_at: Set(now.to_rfc3339()),
         ..Default::default()
     };
-
-    println!(
-        "DEBUG DB: Inserting book: Title: {:?}, ISBN: {:?}",
-        new_book.title, new_book.isbn
-    );
 
     let model = new_book.insert(db).await?;
 

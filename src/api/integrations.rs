@@ -124,8 +124,23 @@ fn lang_matches(book_lang: &str, user_lang: &str) -> bool {
     )
 }
 
-/// Fetch ISBN from OpenLibrary edition API when search results don't include one
-async fn fetch_isbn_from_edition(edition_key: &str) -> Option<String> {
+fn normalize_string(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'à' | 'â' | 'ä' => 'a',
+            'î' | 'ï' => 'i',
+            'ô' | 'ö' => 'o',
+            'û' | 'ù' | 'ü' => 'u',
+            'ç' => 'c',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Fetch ISBN and Publisher from OpenLibrary edition API when search results don't include them
+async fn fetch_edition_extras(edition_key: &str) -> Option<(String, Option<String>)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
@@ -137,27 +152,22 @@ async fn fetch_isbn_from_edition(edition_key: &str) -> Option<String> {
     struct EditionResponse {
         isbn_13: Option<Vec<String>>,
         isbn_10: Option<Vec<String>>,
+        publishers: Option<Vec<String>>,
     }
 
     if let Ok(res) = client.get(&url).send().await {
         if let Ok(edition) = res.json::<EditionResponse>().await {
+            let publisher = edition.publishers.and_then(|v| v.first().cloned());
+
             // Prefer ISBN-13 over ISBN-10
             if let Some(isbns) = edition.isbn_13 {
                 if let Some(isbn) = isbns.first() {
-                    println!(
-                        "DEBUG: Fetched ISBN-13 {} from edition {}",
-                        isbn, edition_key
-                    );
-                    return Some(isbn.clone());
+                    return Some((isbn.clone(), publisher));
                 }
             }
             if let Some(isbns) = edition.isbn_10 {
                 if let Some(isbn) = isbns.first() {
-                    println!(
-                        "DEBUG: Fetched ISBN-10 {} from edition {}",
-                        isbn, edition_key
-                    );
-                    return Some(isbn.clone());
+                    return Some((isbn.clone(), publisher));
                 }
             }
         }
@@ -165,8 +175,8 @@ async fn fetch_isbn_from_edition(edition_key: &str) -> Option<String> {
     None
 }
 
-/// Fetch ISBN from OpenLibrary Work API (get first edition)
-async fn fetch_isbn_from_work(work_key: &str) -> Option<String> {
+/// Fetch ISBN and Publisher from OpenLibrary Work API (get first edition)
+async fn fetch_work_edition_extras(work_key: &str) -> Option<(String, Option<String>)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(4))
         .build()
@@ -184,47 +194,28 @@ async fn fetch_isbn_from_work(work_key: &str) -> Option<String> {
     struct EditionEntry {
         isbn_13: Option<Vec<String>>,
         isbn_10: Option<Vec<String>>,
+        publishers: Option<Vec<String>>,
     }
 
     if let Ok(res) = client.get(&url).send().await {
         if let Ok(data) = res.json::<WorkEditionsResponse>().await {
             // Iterate over entries to find the first one with an ISBN
             for entry in data.entries {
+                let publisher = entry.publishers.and_then(|v| v.first().cloned());
+
                 // Prefer ISBN-13
                 if let Some(isbns) = &entry.isbn_13 {
                     if let Some(isbn) = isbns.first() {
-                        println!(
-                            "DEBUG SEARCH: Fetched ISBN-13 {} from work {}",
-                            isbn, work_key
-                        );
-                        return Some(isbn.clone());
+                        return Some((isbn.clone(), publisher));
                     }
                 }
                 if let Some(isbns) = &entry.isbn_10 {
                     if let Some(isbn) = isbns.first() {
-                        println!(
-                            "DEBUG SEARCH: Fetched ISBN-10 {} from work {}",
-                            isbn, work_key
-                        );
-                        return Some(isbn.clone());
+                        return Some((isbn.clone(), publisher));
                     }
                 }
             }
-            println!(
-                "DEBUG SEARCH: No ISBN found in first 5 editions for work {}",
-                work_key
-            );
-        } else {
-            println!(
-                "DEBUG SEARCH: Failed to parse editions for work {}",
-                work_key
-            );
         }
-    } else {
-        println!(
-            "DEBUG SEARCH: Failed to fetch editions for work {}",
-            work_key
-        );
     }
     None
 }
@@ -279,15 +270,23 @@ pub async fn search_external(
         }
 
         let q_str = q_parts.join("&");
-        // If using generic q, the params are already encoded and formatted
+        let limit_val = if query.autocomplete.unwrap_or(false) {
+            12 // More results for autocomplete to allow quality filtering
+        } else {
+            20
+        };
         let url = if query.q.is_some() {
-            format!("https://openlibrary.org/search.json?{}&limit=20", q_str)
+            format!(
+                "https://openlibrary.org/search.json?{}&limit={}",
+                q_str, limit_val
+            )
         } else {
             // Fallback for specific fields (legacy construction)
             let q_str_legacy = q_parts.join(" AND ");
             format!(
-                "https://openlibrary.org/search.json?q={}&limit=20",
-                urlencoding::encode(&q_str_legacy)
+                "https://openlibrary.org/search.json?q={}&limit={}",
+                urlencoding::encode(&q_str_legacy),
+                limit_val
             )
         };
 
@@ -340,15 +339,10 @@ pub async fn search_external(
                         books.push(book);
                     }
                 }
-                Err(e) => {
-                    println!("DEBUG SEARCH: Failed to parse OpenLibrary response: {}", e);
-                }
+                Err(_e) => {}
             }
         }
     }
-
-    // Note: Google Books is now searched separately via search_unified
-    // This function only returns OpenLibrary results
     books
 }
 
@@ -418,6 +412,7 @@ pub struct UnifiedSearchQuery {
     pub subject: Option<String>,
     pub lang: Option<String>, // User's preferred language (e.g., "fr", "en")
     pub source: Option<String>, // Filter to specific source: "inventaire", "bnf", "openlibrary", "google_books" or comma-separated
+    pub autocomplete: Option<bool>,
 }
 
 pub async fn search_unified(
@@ -434,16 +429,24 @@ pub async fn search_unified(
         if let Ok(Some(profile_model)) = ProfileEntity::find_by_id(1).one(&db).await {
             let modules: Vec<String> =
                 serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
-            println!("DEBUG SEARCH: Loaded modules: {:?}", modules);
             let inv = !modules.contains(&"disable_fallback:inventaire".to_string());
             let bnf = !modules.contains(&"disable_fallback:bnf".to_string());
             let ol = !modules.contains(&"disable_fallback:openlibrary".to_string());
             let gb = modules.contains(&"enable_google_books".to_string());
             (inv, bnf, ol, gb)
         } else {
-            println!("DEBUG SEARCH: Profile not found, using defaults (all enabled except Google)");
             (true, true, true, false)
         };
+
+    let is_autocomplete = params.autocomplete.unwrap_or(false);
+    let mut search_timeout = std::time::Duration::from_secs(8);
+
+    if is_autocomplete {
+        // In autocomplete mode, disable only slow sources (BNF SPARQL)
+        // Keep Inventaire enabled - it has good metadata (covers, publishers)
+        enable_bnf = false;
+        search_timeout = std::time::Duration::from_secs(4);
+    }
 
     // Apply source filter if provided (overrides profile settings)
     if let Some(ref filter) = params.source {
@@ -461,13 +464,7 @@ pub async fn search_unified(
                 || s.eq_ignore_ascii_case("google")
                 || s.eq_ignore_ascii_case("googlebooks")
         });
-        println!("DEBUG SEARCH: Source filter applied: {:?}", sources);
     }
-
-    println!(
-        "DEBUG SEARCH: Sources enabled - Inventaire: {}, BNF: {}, OpenLibrary: {}, Google Books: {}",
-        enable_inventaire, enable_bnf, enable_openlibrary, enable_google_books
-    );
 
     // 1. Build Query String for Inventaire (General Search)
     let mut inv_query_parts = Vec::new();
@@ -491,12 +488,6 @@ pub async fn search_unified(
         inv_query
     };
 
-    println!(
-        "DEBUG SEARCH: Query params - title: {:?}, author: {:?}, q: {:?}, source: {:?}",
-        params.title, params.author, params.q, params.source
-    );
-    println!("DEBUG SEARCH: Final query string: '{}'", final_inv_query);
-
     // 3. Execute Searches in Parallel (Inventaire, BNF, OpenLibrary)
     // We clone necessary data for each async task to avoid borrow checker issues with async blocks
     let inv_query_str = final_inv_query.clone();
@@ -514,6 +505,7 @@ pub async fn search_unified(
         tags: None,
         subjects: params.subject.clone(),
         sources: None,
+        autocomplete: params.autocomplete,
     };
     // Clone search_query for the tasks
     let ol_query = search_query.clone();
@@ -558,10 +550,7 @@ pub async fn search_unified(
                 .await
                 {
                     Ok(result) => result,
-                    Err(_) => {
-                        eprintln!("DEBUG SEARCH: Inventaire search timed out");
-                        Ok(Vec::new())
-                    }
+                    Err(_) => Ok(Vec::new()),
                 }
             } else {
                 Ok(Vec::new())
@@ -570,17 +559,11 @@ pub async fn search_unified(
         // Task 2: OpenLibrary (wrapped in timeout to prevent blocking)
         async move {
             if run_ol {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(8),
-                    search_external(&ol_query, &db_clone),
-                )
-                .await
+                match tokio::time::timeout(search_timeout, search_external(&ol_query, &db_clone))
+                    .await
                 {
                     Ok(result) => result,
-                    Err(_) => {
-                        eprintln!("DEBUG SEARCH: OpenLibrary search timed out");
-                        Vec::new()
-                    }
+                    Err(_) => Vec::new(),
                 }
             } else {
                 Vec::new()
@@ -597,10 +580,7 @@ pub async fn search_unified(
                 .await
                 {
                     Ok(result) => result,
-                    Err(_) => {
-                        eprintln!("DEBUG SEARCH: BNF search timed out");
-                        Ok(Vec::new())
-                    }
+                    Err(_) => Ok(Vec::new()),
                 }
             } else {
                 Ok(Vec::new())
@@ -610,16 +590,13 @@ pub async fn search_unified(
         async move {
             if run_gb {
                 match tokio::time::timeout(
-                    std::time::Duration::from_secs(8),
+                    search_timeout,
                     crate::google_books::search_books(&gb_query),
                 )
                 .await
                 {
                     Ok(result) => result,
-                    Err(_) => {
-                        eprintln!("DEBUG SEARCH: Google Books search timed out");
-                        Vec::new()
-                    }
+                    Err(_) => Vec::new(),
                 }
             } else {
                 Vec::new()
@@ -631,15 +608,7 @@ pub async fn search_unified(
 
     // Process Inventaire Results
     if let Ok(ref enriched) = inv_res {
-        println!(
-            "DEBUG SEARCH: Inventaire returned {} results",
-            enriched.len()
-        );
         for item in enriched {
-            println!(
-                "DEBUG SEARCH: Inventaire item '{}' - ISBN: {:?}",
-                item.label, item.isbn
-            );
             let authors = item.authors.clone();
             let author_name = authors.as_ref().map(|a| a.join(", "));
 
@@ -679,19 +648,13 @@ pub async fn search_unified(
             };
             results.push(book);
         }
-    } else if let Err(e) = inv_res {
-        eprintln!("DEBUG SEARCH: Inventaire error: {}", e);
+    } else if let Err(_e) = inv_res {
     }
 
     // Process BNF Results
     match bnf_res {
         Ok(ref bnf_results) => {
-            println!("DEBUG SEARCH: BNF returned {} results", bnf_results.len());
             for bnf_book in bnf_results {
-                println!(
-                    "DEBUG SEARCH: BNF item '{}' - ISBN: {:?}",
-                    bnf_book.title, bnf_book.isbn
-                );
                 let book = book::Book {
                     id: None,
                     title: bnf_book.title.clone(),
@@ -729,21 +692,12 @@ pub async fn search_unified(
                 results.push(book);
             }
         }
-        Err(e) => eprintln!("DEBUG SEARCH: BNF error: {}", e),
+        Err(_e) => (),
     }
 
     // Process OpenLibrary Results - PARALLELIZED
-    println!(
-        "DEBUG SEARCH: OpenLibrary returned {} results",
-        ol_res.len()
-    );
-
     let ol_processed_results: Vec<book::Book> = stream::iter(ol_res)
         .map(|model| async move {
-            println!(
-                "DEBUG SEARCH: OpenLibrary item '{}' - ISBN: {:?}",
-                model.title, model.isbn
-            );
             // Convert Model to Book DTO and enrich
             let mut dto = book::Book::from(model.clone());
 
@@ -773,12 +727,30 @@ pub async fn search_unified(
                             dto.language = Some(first_lang.to_string());
                         }
                     }
+                    // Extract publisher if missing
+                    if dto.publisher.is_none() {
+                        if let Some(publisher) = json.get("publisher").and_then(|p| p.as_array()) {
+                            let pub_str = publisher
+                                .iter()
+                                .map(|v| v.as_str().unwrap_or("").to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            if !pub_str.is_empty() {
+                                dto.publisher = Some(pub_str);
+                            }
+                        } else if let Some(publisher) =
+                            json.get("publisher").and_then(|p| p.as_str())
+                        {
+                            if !publisher.is_empty() {
+                                dto.publisher = Some(publisher.to_string());
+                            }
+                        }
+                    }
                     // Fallback: extract ISBN from source_data if model.isbn was None
                     if dto.isbn.is_none() {
                         if let Some(isbns) = json.get("isbns").and_then(|i| i.as_array()) {
                             if let Some(first_isbn) = isbns.first().and_then(|v| v.as_str()) {
                                 dto.isbn = Some(first_isbn.to_string());
-                                println!("DEBUG SEARCH: Fallback ISBN extracted: {}", first_isbn);
                             }
                         }
                     }
@@ -789,41 +761,35 @@ pub async fn search_unified(
                         .map(|s| s == "openlibrary")
                         .unwrap_or(true); // Default to true if source not specified (legacy)
 
-                    // Second fallback: fetch from edition API if still no ISBN
-                    if is_openlibrary && dto.isbn.is_none() {
+                    // Fallback: fetch from edition API if still no ISBN OR no publisher
+                    if is_openlibrary && (dto.isbn.is_none() || dto.publisher.is_none()) {
                         if let Some(edition_key) = json.get("edition_key").and_then(|k| k.as_str())
                         {
-                            println!(
-                                "DEBUG SEARCH: Trying edition fallback for key: {}",
-                                edition_key
-                            );
-                            if let Some(fetched_isbn) = fetch_isbn_from_edition(edition_key).await {
-                                println!("DEBUG SEARCH: Success! Fetched ISBN: {}", fetched_isbn);
-                                dto.isbn = Some(fetched_isbn);
-                            } else {
-                                println!(
-                                    "DEBUG SEARCH: Edition fallback returned None for {}",
-                                    edition_key
-                                );
+                            if let Some((fetched_isbn, fetched_pub)) =
+                                fetch_edition_extras(edition_key).await
+                            {
+                                if dto.isbn.is_none() {
+                                    dto.isbn = Some(fetched_isbn);
+                                }
+                                if dto.publisher.is_none() && fetched_pub.is_some() {
+                                    dto.publisher = fetched_pub;
+                                }
                             }
                         }
                     }
 
-                    // Third fallback: fetch from Work API if still no ISBN
-                    if is_openlibrary && dto.isbn.is_none() {
+                    // Extra Fallback: fetch from Work API if still no ISBN OR no publisher
+                    if is_openlibrary && (dto.isbn.is_none() || dto.publisher.is_none()) {
                         if let Some(work_key) = json.get("key").and_then(|k| k.as_str()) {
-                            println!("DEBUG SEARCH: Trying work fallback for key: {}", work_key);
-                            if let Some(fetched_isbn) = fetch_isbn_from_work(work_key).await {
-                                println!(
-                                    "DEBUG SEARCH: Success! Fetched ISBN from work: {}",
-                                    fetched_isbn
-                                );
-                                dto.isbn = Some(fetched_isbn);
-                            } else {
-                                println!(
-                                    "DEBUG SEARCH: Work fallback returned None for {}",
-                                    work_key
-                                );
+                            if let Some((fetched_isbn, fetched_pub)) =
+                                fetch_work_edition_extras(work_key).await
+                            {
+                                if dto.isbn.is_none() {
+                                    dto.isbn = Some(fetched_isbn);
+                                }
+                                if dto.publisher.is_none() && fetched_pub.is_some() {
+                                    dto.publisher = fetched_pub;
+                                }
                             }
                         }
                     }
@@ -853,15 +819,7 @@ pub async fn search_unified(
     results.extend(ol_processed_results);
 
     // Process Google Books Results
-    println!(
-        "DEBUG SEARCH: Google Books returned {} results",
-        gb_res.len()
-    );
     for model in gb_res {
-        println!(
-            "DEBUG SEARCH: Google Books item '{}' - ISBN: {:?}",
-            model.title, model.isbn
-        );
         // Convert Model to Book DTO
         let mut dto = book::Book::from(model.clone());
 
@@ -889,71 +847,35 @@ pub async fn search_unified(
         results.push(dto);
     }
 
-    println!(
-        "DEBUG SEARCH: Total aggregated results before filtering: {}",
-        results.len()
-    );
+    // Global Quality Filter: discard results that are too sparse
+    // (Missing ISBN AND missing Cover)
+    // We keep results if they have EITHER an ISBN OR a Cover.
+    // Publisher is used for prioritization but is not a hard requirement for existence.
+    results.retain(|book| {
+        let has_isbn = book.isbn.as_ref().map_or(false, |s| !s.trim().is_empty());
+        let has_cover = book
+            .cover_url
+            .as_ref()
+            .map_or(false, |s| !s.trim().is_empty());
+        let has_publisher = book
+            .publisher
+            .as_ref()
+            .map_or(false, |s| !s.trim().is_empty());
+
+        // Keep the result if it has at least one significant piece of metadata
+        has_isbn || has_cover || has_publisher
+    });
 
     let query_author = params.author.as_deref().unwrap_or("").to_lowercase();
     let query_title = params.title.as_deref().unwrap_or("").to_lowercase();
     let query_q = params.q.as_deref().unwrap_or("").to_lowercase();
     let user_lang = params.lang.as_deref().unwrap_or("").to_lowercase();
 
-    // 4. Filter by language if specified
-    // Only keep results that match the user's language preference
-    // Results without language info are kept (we can't determine their language)
-    if !user_lang.is_empty() {
-        results.retain(|book| {
-            let mut has_lang_info = false;
-
-            // Check the language field first
-            if let Some(ref lang) = book.language {
-                has_lang_info = true;
-                let book_lang = lang.to_lowercase();
-                if lang_matches(&book_lang, &user_lang) {
-                    return true;
-                }
-            }
-
-            // Fallback: check source_data for languages array
-            if let Some(ref source_data_str) = book.source_data {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str) {
-                    if let Some(languages) = json.get("languages").and_then(|l| l.as_array()) {
-                        if !languages.is_empty() {
-                            has_lang_info = true;
-                            for lang_val in languages {
-                                if let Some(lang_str) = lang_val.as_str() {
-                                    if lang_matches(lang_str, &user_lang) {
-                                        return true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // Also check singular "language" in source_data (common in Google Books/others)
-                    if let Some(lang) = json.get("language").and_then(|l| l.as_str()) {
-                        has_lang_info = true;
-                        if lang_matches(lang, &user_lang) {
-                            return true;
-                        }
-                    }
-                }
-            }
-
-            // If we found language info but it didn't match -> Filter out
-            if has_lang_info {
-                return false;
-            }
-
-            // No language info - keep the result (can't determine language)
-            true
-        });
-        println!(
-            "DEBUG SEARCH: Results after language filter '{}': {}",
-            user_lang,
-            results.len()
-        );
-    }
+    // 4. Language handling: ORDER by preferred language instead of filtering
+    // This keeps all results but puts matching languages first
+    // The ordering is handled by calculate_relevance() which gives +100 points
+    // for language matches and -100 penalty for mismatches.
+    // No filtering here - all results are kept for maximum coverage.
 
     // 5. Sort Results by Relevance
     // Prioritize:
@@ -963,8 +885,20 @@ pub async fn search_unified(
     results.sort_by(|a, b| {
         let score_a = calculate_relevance(a, &query_author, &query_title, &query_q, &user_lang);
         let score_b = calculate_relevance(b, &query_author, &query_title, &query_q, &user_lang);
-        score_b.cmp(&score_a) // Descending score
+
+        // Descending Match: highest scores first
+        score_b.cmp(&score_a)
     });
+
+    for book in &results {
+        let score = calculate_relevance(book, &query_author, &query_title, &query_q, &user_lang);
+        tracing::debug!(
+            "Final Result: {} ({}): Score {}",
+            book.title,
+            book.publisher.as_deref().unwrap_or("N/A"),
+            score
+        );
+    }
 
     (StatusCode::OK, Json(results)).into_response()
 }
@@ -978,24 +912,39 @@ fn calculate_relevance(
 ) -> i32 {
     let mut score = 0;
 
-    let title = book.title.to_lowercase();
-    let author = book.author.as_deref().unwrap_or("").to_lowercase();
+    let title = normalize_string(&book.title);
+    let author = normalize_string(book.author.as_deref().unwrap_or(""));
+    let q_author = normalize_string(q_author);
+    let q_title = normalize_string(q_title);
+    let q_any = normalize_string(q_any);
 
     // Language Match - highest priority for user experience
     if !user_lang.is_empty() {
+        // 1. Check direct language field
+        if let Some(ref lang) = book.language {
+            if lang_matches(lang, user_lang) {
+                score += 100; // Even stronger boost for direct language match
+            } else {
+                score -= 100; // PENALTY for explicit mismatch
+            }
+        }
+
+        // 2. Check source_data for languages
         if let Some(source_data_str) = &book.source_data {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str) {
                 if let Some(languages) = json.get("languages").and_then(|l| l.as_array()) {
+                    let mut found_match = false;
                     for lang in languages {
                         if let Some(lang_str) = lang.as_str() {
-                            // Check for match (e.g., "fre" matches "fr", "fra", "french")
-                            if lang_str.to_lowercase().starts_with(user_lang)
-                                || user_lang.starts_with(&lang_str.to_lowercase())
-                            {
-                                score += 40; // Strong language preference boost
+                            if lang_matches(lang_str, user_lang) {
+                                score += 60;
+                                found_match = true;
                                 break;
                             }
                         }
+                    }
+                    if !found_match && !languages.is_empty() {
+                        score -= 50; // Mismatch penalty in source data
                     }
                 }
             }
@@ -1015,7 +964,7 @@ fn calculate_relevance(
     if !q_author.is_empty() {
         if author == q_author {
             score += 100;
-        } else if author.contains(q_author) {
+        } else if author.contains(&q_author) {
             score += 50;
         }
     }
@@ -1024,19 +973,41 @@ fn calculate_relevance(
     if !q_title.is_empty() {
         if title == q_title {
             score += 80;
-        } else if title.contains(q_title) {
+        } else if title.contains(&q_title) {
             score += 40;
         }
     }
 
     // General Query Match
     if !q_any.is_empty() {
-        if author.contains(q_any) {
+        if author.contains(&q_any) {
             score += 30;
         }
-        if title.contains(q_any) {
+        if title.contains(&q_any) {
             score += 30;
         }
+    }
+
+    // Check metadata completeness
+    let has_publisher = book
+        .publisher
+        .as_ref()
+        .map(|p| !p.trim().is_empty())
+        .unwrap_or(false);
+    let has_cover = book
+        .cover_url
+        .as_ref()
+        .map(|c| !c.trim().is_empty())
+        .unwrap_or(false);
+
+    // Strong bonus for having BOTH cover AND publisher (complete metadata)
+    if has_cover && has_publisher {
+        score += 50; // Significant boost for complete results
+    }
+
+    // Boost for any publisher present
+    if has_publisher {
+        score += 15;
     }
 
     // Boost for common publishers (e.g. Livre de Poche, Pocket, etc.)
@@ -1054,15 +1025,23 @@ fn calculate_relevance(
         ];
         for common in common_publishers {
             if publisher.to_lowercase().contains(&common.to_lowercase()) {
-                score += 15; // Significant boost for common editions
+                score += 30; // Stronger boost for common editions
                 break;
             }
+        }
+
+        // Penalty for "Independently Published" or "CreateSpace"
+        let publisher_lower = publisher.to_lowercase();
+        if publisher_lower.contains("independently published")
+            || publisher_lower.contains("createspace")
+        {
+            score -= 100; // Heavy penalty for self-published/low-quality metadata editions
         }
     }
 
     // Boost items with covers
-    if book.cover_url.is_some() {
-        score += 5;
+    if has_cover {
+        score += 25; // Higher boost for visual results
     }
 
     // Boost items with summaries

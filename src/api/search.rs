@@ -19,6 +19,7 @@ pub struct SearchQuery {
     pub q: Option<String>,
     pub subjects: Option<String>, // Plural to match existing usage or "subject" singular? OL uses subject. Book model uses subjects. Let's use "subject" for query param for consistency with others.
     pub sources: Option<String>,  // "local,peers,public"
+    pub autocomplete: Option<bool>,
 }
 
 #[derive(Serialize)]

@@ -170,9 +170,14 @@ pub async fn search_books(
     }
 
     let q_str = q_parts.join("+"); // Google Books uses + or space
+    let max_results = if query.autocomplete.unwrap_or(false) {
+        10 // More results for autocomplete to allow quality filtering
+    } else {
+        15
+    };
     let url = format!(
-        "https://www.googleapis.com/books/v1/volumes?q={}&maxResults=10",
-        q_str
+        "https://www.googleapis.com/books/v1/volumes?q={}&maxResults={}",
+        q_str, max_results
     );
 
     let client = reqwest::Client::builder()
@@ -204,18 +209,6 @@ pub async fn search_books(
                             .or_else(|| ids.iter().find(|id| id.id_type == "ISBN_10"))
                             .map(|id| id.identifier.replace("-", ""));
 
-                        if let Some(ref isbn) = found {
-                            println!(
-                                "DEBUG GOOGLE_BOOKS: Found ISBN {} for '{}'",
-                                isbn, info.title
-                            );
-                        } else {
-                            println!(
-                                "DEBUG GOOGLE_BOOKS: No ISBN found for '{}' (identifiers: {:?})",
-                                info.title,
-                                ids.iter().map(|i| &i.id_type).collect::<Vec<_>>()
-                            );
-                        }
                         found
                     });
 
