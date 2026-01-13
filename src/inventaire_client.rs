@@ -729,6 +729,7 @@ mod search_tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore] // Flaky in CI due to external network request
     async fn test_search_inventaire() {
         let query = "Harry Potter";
         let result = search_inventaire(query).await;
