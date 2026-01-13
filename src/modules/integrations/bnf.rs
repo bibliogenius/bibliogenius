@@ -142,7 +142,7 @@ WHERE {{
         ?work dcterms:description ?description .
     }}
 }}
-LIMIT 20
+LIMIT 30
 "#,
         search = query.replace('"', r#"\""#)
     );

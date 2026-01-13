@@ -19,6 +19,7 @@ struct GoogleVolumeInfo {
     #[serde(rename = "publishedDate")]
     published_date: Option<String>,
     description: Option<String>,
+    language: Option<String>,
     #[serde(rename = "imageLinks")]
     image_links: Option<GoogleImageLinks>,
     #[serde(rename = "industryIdentifiers")]
@@ -228,6 +229,7 @@ pub async fn search_books(
                     let source_data = serde_json::json!({
                        "source": "google_books",
                        "authors": info.authors.clone().unwrap_or_default(),
+                       "language": info.language.clone(),
                     });
 
                     let book = crate::models::book::Model {
