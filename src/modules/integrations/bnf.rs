@@ -89,7 +89,7 @@ pub async fn search_bnf(query: &str) -> Result<Vec<BnfBook>, String> {
     println!("DEBUG BNF: Starting search for '{}'", query);
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5)) // Reduced from 10s to 5s
+        .timeout(std::time::Duration::from_secs(30)) // Increased to 30s to avoid CI timeouts
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -382,6 +382,9 @@ mod tests {
     #[tokio::test]
     async fn test_search_bnf() {
         let results = search_bnf("Victor Hugo").await;
-        assert!(results.is_ok());
+        if let Err(e) = &results {
+            println!("BNF Search failed: {}", e);
+        }
+        assert!(results.is_ok(), "BNF search failed: {:?}", results.err());
     }
 }
