@@ -559,12 +559,9 @@ pub async fn search_unified(
         // Task 2: OpenLibrary (wrapped in timeout to prevent blocking)
         async move {
             if run_ol {
-                match tokio::time::timeout(search_timeout, search_external(&ol_query, &db_clone))
+                tokio::time::timeout(search_timeout, search_external(&ol_query, &db_clone))
                     .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Vec::new(),
-                }
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             }
@@ -589,15 +586,9 @@ pub async fn search_unified(
         // Task 4: Google Books (wrapped in timeout)
         async move {
             if run_gb {
-                match tokio::time::timeout(
-                    search_timeout,
-                    crate::google_books::search_books(&gb_query),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Vec::new(),
-                }
+                tokio::time::timeout(search_timeout, crate::google_books::search_books(&gb_query))
+                    .await
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             }
@@ -852,15 +843,15 @@ pub async fn search_unified(
     // We keep results if they have EITHER an ISBN OR a Cover.
     // Publisher is used for prioritization but is not a hard requirement for existence.
     results.retain(|book| {
-        let has_isbn = book.isbn.as_ref().map_or(false, |s| !s.trim().is_empty());
+        let has_isbn = book.isbn.as_ref().is_some_and(|s| !s.trim().is_empty());
         let has_cover = book
             .cover_url
             .as_ref()
-            .map_or(false, |s| !s.trim().is_empty());
+            .is_some_and(|s| !s.trim().is_empty());
         let has_publisher = book
             .publisher
             .as_ref()
-            .map_or(false, |s| !s.trim().is_empty());
+            .is_some_and(|s| !s.trim().is_empty());
 
         // Keep the result if it has at least one significant piece of metadata
         has_isbn || has_cover || has_publisher
