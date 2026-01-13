@@ -58,6 +58,8 @@ pub struct Claims {
     pub isbn_13: Option<Vec<String>>,
     #[serde(rename = "wdt:P957")] // ISBN-10
     pub isbn_10: Option<Vec<String>>,
+    #[serde(rename = "wdt:P407")] // Language of work (Wikidata URI like "wd:Q150" for French)
+    pub language: Option<Vec<String>>,
 }
 
 const USER_AGENT: &str = "BiblioGenius/1.0 (federico@bibliogenius.org)";
@@ -302,6 +304,7 @@ pub struct InventaireSearchResult {
     pub authors: Option<Vec<String>>, // Added authors field
     pub isbn: Option<String>,         // ISBN from first edition
     pub publisher: Option<String>,    // Publisher name (resolved from Wikidata URI)
+    pub language: Option<String>,     // Language code (e.g., "fr", "en")
 }
 
 pub async fn search_inventaire(query: &str) -> Result<Vec<InventaireSearchResult>, String> {
@@ -462,18 +465,18 @@ pub async fn enrich_search_results(
         enriched_results.push(result);
     }
 
-    // 6. Fetch editions to get ISBNs for each work
+    // 6. Fetch editions for each work and create separate results per edition
     // Use reverse-claims to find editions that have this work as parent
-    for result in &mut enriched_results {
-        if result.isbn.is_some() {
-            continue; // Already has ISBN
-        }
+    let mut final_results: Vec<InventaireSearchResult> = Vec::new();
 
+    for result in enriched_results {
         // Fetch editions for this work using reverse-claims API
         let editions_url = format!(
             "https://inventaire.io/api/entities?action=reverse-claims&property=wdt:P629&value={}",
             urlencoding::encode(&result.uri)
         );
+
+        let mut found_editions = false;
 
         if let Ok(resp) = client.get(&editions_url).send().await {
             if resp.status().is_success() {
@@ -481,77 +484,119 @@ pub async fn enrich_search_results(
                     // Response is { "uris": ["inv:xxx", "inv:yyy"] }
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
                         if let Some(uris) = json.get("uris").and_then(|u| u.as_array()) {
-                            // Take first few edition URIs to fetch
+                            // Fetch up to 15 editions per work
                             let edition_uris: Vec<String> = uris
                                 .iter()
-                                .take(3) // Limit to first 3 editions
+                                .take(15)
                                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                                 .collect();
 
                             if !edition_uris.is_empty() {
-                                // Fetch edition entities to get ISBN and publisher
+                                // Fetch edition entities
                                 if let Ok(edition_entities) =
                                     fetch_entities_batch(&client, &edition_uris).await
                                 {
-                                    let mut publisher_uri: Option<String> = None;
-
-                                    for (_, entity) in &edition_entities {
-                                        // Try ISBN-13 first, then ISBN-10
-                                        if result.isbn.is_none() {
-                                            if let Some(isbn) = entity
-                                                .claims
-                                                .isbn_13
-                                                .as_ref()
-                                                .and_then(|v| v.first().cloned())
-                                                .or_else(|| {
-                                                    entity
-                                                        .claims
-                                                        .isbn_10
-                                                        .as_ref()
-                                                        .and_then(|v| v.first().cloned())
-                                                })
-                                            {
-                                                result.isbn = Some(isbn);
-                                            }
-                                        }
-
-                                        // Get publisher URI
-                                        if publisher_uri.is_none() {
-                                            if let Some(pub_uri) = entity
-                                                .claims
+                                    // Collect all publisher URIs to batch fetch
+                                    let publisher_uris: Vec<String> = edition_entities
+                                        .values()
+                                        .filter_map(|e| {
+                                            e.claims
                                                 .publisher
                                                 .as_ref()
                                                 .and_then(|v| v.first().cloned())
-                                            {
-                                                publisher_uri = Some(pub_uri);
-                                            }
-                                        }
+                                        })
+                                        .filter(|uri| uri.starts_with("wd:"))
+                                        .collect();
 
-                                        // Stop if we have both
-                                        if result.isbn.is_some() && publisher_uri.is_some() {
-                                            break;
-                                        }
-                                    }
+                                    // Batch fetch publishers
+                                    let publishers_map = if !publisher_uris.is_empty() {
+                                        fetch_entities_batch(&client, &publisher_uris)
+                                            .await
+                                            .unwrap_or_default()
+                                    } else {
+                                        HashMap::new()
+                                    };
 
-                                    // Resolve publisher Wikidata URI to name
-                                    if let Some(pub_uri) = publisher_uri {
-                                        if pub_uri.starts_with("wd:") {
-                                            if let Ok(publisher_entity) =
-                                                fetch_entity(&client, &pub_uri).await
-                                            {
-                                                result.publisher = publisher_entity
-                                                    .labels
-                                                    .get("fr")
-                                                    .or_else(|| publisher_entity.labels.get("en"))
-                                                    .or_else(|| {
-                                                        publisher_entity.labels.values().next()
+                                    // Create one result per edition
+                                    for (edition_uri, entity) in &edition_entities {
+                                        // Get ISBN (prefer ISBN-13)
+                                        let isbn = entity
+                                            .claims
+                                            .isbn_13
+                                            .as_ref()
+                                            .and_then(|v| v.first().cloned())
+                                            .or_else(|| {
+                                                entity
+                                                    .claims
+                                                    .isbn_10
+                                                    .as_ref()
+                                                    .and_then(|v| v.first().cloned())
+                                            });
+
+                                        // Get publisher name
+                                        let publisher = entity
+                                            .claims
+                                            .publisher
+                                            .as_ref()
+                                            .and_then(|v| v.first())
+                                            .and_then(|pub_uri| {
+                                                if pub_uri.starts_with("wd:") {
+                                                    publishers_map.get(pub_uri).and_then(|pe| {
+                                                        pe.labels
+                                                            .get("fr")
+                                                            .or_else(|| pe.labels.get("en"))
+                                                            .or_else(|| pe.labels.values().next())
+                                                            .cloned()
                                                     })
-                                                    .cloned();
-                                            }
-                                        } else {
-                                            // Not a Wikidata URI, use as-is
-                                            result.publisher = Some(pub_uri);
-                                        }
+                                                } else {
+                                                    Some(pub_uri.clone())
+                                                }
+                                            });
+
+                                        // Get language
+                                        let language = entity
+                                            .claims
+                                            .language
+                                            .as_ref()
+                                            .and_then(|v| v.first())
+                                            .map(|uri| wikidata_language_to_code(uri));
+
+                                        // Get edition title (might differ from work title)
+                                        let edition_title = entity
+                                            .labels
+                                            .get("fr")
+                                            .or_else(|| entity.labels.get("en"))
+                                            .or_else(|| entity.labels.values().next())
+                                            .cloned();
+
+                                        // Get edition cover image
+                                        let edition_image = entity
+                                            .claims
+                                            .image
+                                            .as_ref()
+                                            .and_then(|v| v.first().cloned())
+                                            .map(|img| {
+                                                if img.starts_with("http") {
+                                                    img
+                                                } else {
+                                                    format!("https://inventaire.io{}", img)
+                                                }
+                                            });
+
+                                        // Create edition result
+                                        let edition_result = InventaireSearchResult {
+                                            uri: edition_uri.clone(),
+                                            label: edition_title.unwrap_or_else(|| result.label.clone()),
+                                            description: result.description.clone(),
+                                            image: edition_image.or_else(|| result.image.clone()),
+                                            authors: result.authors.clone(),
+                                            isbn,
+                                            publisher,
+                                            language,
+                                        };
+
+                                        final_results.push(edition_result);
+                                        found_editions = true;
                                     }
                                 }
                             }
@@ -560,9 +605,57 @@ pub async fn enrich_search_results(
                 }
             }
         }
+
+        // If no editions found, keep the original work result
+        if !found_editions {
+            final_results.push(result);
+        }
     }
 
-    Ok(enriched_results)
+    Ok(final_results)
+}
+
+/// Convert Wikidata language URI to ISO 639-1 language code
+fn wikidata_language_to_code(uri: &str) -> String {
+    // Common Wikidata language QIDs
+    match uri {
+        "wd:Q150" => "fr".to_string(),   // French
+        "wd:Q1860" => "en".to_string(),  // English
+        "wd:Q1321" => "es".to_string(),  // Spanish
+        "wd:Q188" => "de".to_string(),   // German
+        "wd:Q652" => "it".to_string(),   // Italian
+        "wd:Q5146" => "pt".to_string(),  // Portuguese
+        "wd:Q7411" => "nl".to_string(),  // Dutch
+        "wd:Q7737" => "ru".to_string(),  // Russian
+        "wd:Q5287" => "ja".to_string(),  // Japanese
+        "wd:Q7850" => "zh".to_string(),  // Chinese
+        "wd:Q9288" => "he".to_string(),  // Hebrew
+        "wd:Q9299" => "sr".to_string(),  // Serbian
+        "wd:Q9072" => "eu".to_string(),  // Basque
+        "wd:Q7026" => "ca".to_string(),  // Catalan
+        "wd:Q9027" => "sv".to_string(),  // Swedish
+        "wd:Q9035" => "da".to_string(),  // Danish
+        "wd:Q9043" => "no".to_string(),  // Norwegian
+        "wd:Q9056" => "cs".to_string(),  // Czech
+        "wd:Q9067" => "hu".to_string(),  // Hungarian
+        "wd:Q9058" => "pl".to_string(),  // Polish
+        "wd:Q9083" => "el".to_string(),  // Greek
+        "wd:Q9168" => "fa".to_string(),  // Persian
+        "wd:Q9217" => "ko".to_string(),  // Korean
+        "wd:Q256" => "tr".to_string(),   // Turkish
+        "wd:Q8798" => "uk".to_string(),  // Ukrainian
+        "wd:Q9078" => "bg".to_string(),  // Bulgarian
+        "wd:Q13955" => "ar".to_string(), // Arabic
+        "wd:Q9240" => "id".to_string(),  // Indonesian
+        "wd:Q9252" => "vi".to_string(),  // Vietnamese
+        "wd:Q9176" => "th".to_string(),  // Thai
+        "wd:Q1571" => "la".to_string(),  // Latin
+        "wd:Q35497" => "grc".to_string(), // Ancient Greek
+        _ => {
+            // If not in our map, extract the Q number as fallback
+            uri.trim_start_matches("wd:").to_string()
+        }
+    }
 }
 
 pub async fn fetch_entities_batch(

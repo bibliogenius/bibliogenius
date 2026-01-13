@@ -235,16 +235,13 @@ pub async fn search_external(
     use crate::models::installation_profile::Entity as ProfileEntity;
     use sea_orm::EntityTrait;
 
-    let (enable_openlibrary, enable_google) =
+    let enable_openlibrary =
         if let Ok(Some(profile_model)) = ProfileEntity::find_by_id(1).one(db).await {
             let modules: Vec<String> =
                 serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
-            (
-                !modules.contains(&"disable_fallback:openlibrary".to_string()),
-                modules.contains(&"enable_google_books".to_string()),
-            )
+            !modules.contains(&"disable_fallback:openlibrary".to_string())
         } else {
-            (true, false)
+            true
         };
 
     let mut books = Vec::new();
@@ -347,11 +344,8 @@ pub async fn search_external(
         }
     }
 
-    if enable_google {
-        let gb_results = crate::google_books::search_books(query).await;
-        books.extend(gb_results);
-    }
-
+    // Note: Google Books is now searched separately via search_unified
+    // This function only returns OpenLibrary results
     books
 }
 
@@ -420,7 +414,7 @@ pub struct UnifiedSearchQuery {
     pub publisher: Option<String>,
     pub subject: Option<String>,
     pub lang: Option<String>, // User's preferred language (e.g., "fr", "en")
-    pub source: Option<String>, // Filter to specific source: "inventaire", "bnf", "openlibrary", or comma-separated
+    pub source: Option<String>, // Filter to specific source: "inventaire", "bnf", "openlibrary", "google_books" or comma-separated
 }
 
 pub async fn search_unified(
@@ -433,7 +427,7 @@ pub async fn search_unified(
     use sea_orm::EntityTrait;
 
     // Load profile config to check enabled providers
-    let (mut enable_inventaire, mut enable_bnf, mut enable_openlibrary) =
+    let (mut enable_inventaire, mut enable_bnf, mut enable_openlibrary, mut enable_google_books) =
         if let Ok(Some(profile_model)) = ProfileEntity::find_by_id(1).one(&db).await {
             let modules: Vec<String> =
                 serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
@@ -441,10 +435,11 @@ pub async fn search_unified(
             let inv = !modules.contains(&"disable_fallback:inventaire".to_string());
             let bnf = !modules.contains(&"disable_fallback:bnf".to_string());
             let ol = !modules.contains(&"disable_fallback:openlibrary".to_string());
-            (inv, bnf, ol)
+            let gb = modules.contains(&"enable_google_books".to_string());
+            (inv, bnf, ol, gb)
         } else {
-            println!("DEBUG SEARCH: Profile not found, using defaults (all enabled)");
-            (true, true, true)
+            println!("DEBUG SEARCH: Profile not found, using defaults (all enabled except Google)");
+            (true, true, true, false)
         };
 
     // Apply source filter if provided (overrides profile settings)
@@ -458,12 +453,17 @@ pub async fn search_unified(
         enable_openlibrary = sources.iter().any(|s| {
             s.eq_ignore_ascii_case("openlibrary") || s.eq_ignore_ascii_case("open library")
         });
+        enable_google_books = sources.iter().any(|s| {
+            s.eq_ignore_ascii_case("google_books")
+                || s.eq_ignore_ascii_case("google")
+                || s.eq_ignore_ascii_case("googlebooks")
+        });
         println!("DEBUG SEARCH: Source filter applied: {:?}", sources);
     }
 
     println!(
-        "DEBUG SEARCH: Sources enabled - Inventaire: {}, BNF: {}, OpenLibrary: {}",
-        enable_inventaire, enable_bnf, enable_openlibrary
+        "DEBUG SEARCH: Sources enabled - Inventaire: {}, BNF: {}, OpenLibrary: {}, Google Books: {}",
+        enable_inventaire, enable_bnf, enable_openlibrary, enable_google_books
     );
 
     // 1. Build Query String for Inventaire (General Search)
@@ -512,8 +512,9 @@ pub async fn search_unified(
         subjects: params.subject.clone(),
         sources: None,
     };
-    // Clone search_query for the task
+    // Clone search_query for the tasks
     let ol_query = search_query.clone();
+    let gb_query = search_query.clone();
 
     // Determine if we should run OL search
     let run_ol = enable_openlibrary
@@ -523,9 +524,17 @@ pub async fn search_unified(
             || ol_query.publisher.is_some()
             || ol_query.subjects.is_some());
 
+    // Determine if we should run Google Books search
+    let run_gb = enable_google_books
+        && (gb_query.q.is_some()
+            || gb_query.title.is_some()
+            || gb_query.author.is_some()
+            || gb_query.publisher.is_some()
+            || gb_query.subjects.is_some());
+
     // Execute ALL sources in parallel with individual error isolation
     // This ensures one slow/failing source doesn't block or crash others
-    let (inv_res, ol_res, bnf_res) = tokio::join!(
+    let (inv_res, ol_res, bnf_res, gb_res) = tokio::join!(
         // Task 1: Inventaire (wrapped in timeout to prevent blocking)
         async move {
             if enable_inventaire && !inv_query_str.trim().is_empty() {
@@ -593,6 +602,25 @@ pub async fn search_unified(
             } else {
                 Ok(Vec::new())
             }
+        },
+        // Task 4: Google Books (wrapped in timeout)
+        async move {
+            if run_gb {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    crate::google_books::search_books(&gb_query),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        eprintln!("DEBUG SEARCH: Google Books search timed out");
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            }
         }
     );
 
@@ -644,7 +672,7 @@ pub async fn search_unified(
                 user_rating: None,
                 owned: Some(true),
                 price: None,
-                language: None, // Inventaire doesn't provide language info
+                language: item.language.clone(), // Language from Wikidata
             };
             results.push(book);
         }
@@ -808,6 +836,43 @@ pub async fn search_unified(
         if dto.source.is_none() {
             dto.source = Some("Open Library".to_string());
         }
+        results.push(dto);
+    }
+
+    // Process Google Books Results
+    println!(
+        "DEBUG SEARCH: Google Books returned {} results",
+        gb_res.len()
+    );
+    for model in gb_res {
+        println!(
+            "DEBUG SEARCH: Google Books item '{}' - ISBN: {:?}",
+            model.title, model.isbn
+        );
+        // Convert Model to Book DTO
+        let mut dto = book::Book::from(model.clone());
+
+        // Extract author, cover, and language from source_data
+        if let Some(source_data_str) = &model.source_data {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str) {
+                // Extract author
+                if let Some(authors) = json.get("authors").and_then(|a| a.as_array()) {
+                    let author_str = authors
+                        .iter()
+                        .map(|v| v.as_str().unwrap_or("").to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if !author_str.is_empty() {
+                        dto.author = Some(author_str);
+                    }
+                }
+                // Extract language
+                if let Some(lang) = json.get("language").and_then(|l| l.as_str()) {
+                    dto.language = Some(lang.to_string());
+                }
+            }
+        }
+        dto.source = Some("Google Books".to_string());
         results.push(dto);
     }
 
