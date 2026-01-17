@@ -35,6 +35,15 @@ pub struct InventaireEntity {
     #[serde(default)]
     pub descriptions: HashMap<String, String>,
     pub uri: String, // Was _uri, but API returns "uri"
+    /// Image object returned directly on entity (not in claims)
+    /// Format: { "url": "/img/entities/HASH" }
+    #[serde(default)]
+    pub image: Option<InventaireImage>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct InventaireImage {
+    pub url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,15 +95,11 @@ pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<InventaireMetadata,
     let publication_year = edition_entity
         .claims
         .publication_date
+        .as_ref()
         .and_then(|v| v.first().cloned())
         .map(|d| d.chars().take(4).collect());
 
-    let cover_url = edition_entity
-        .claims
-        .image
-        .as_ref()
-        .and_then(|v| v.first().cloned()) // "hash"
-        .map(|hash| format!("https://inventaire.io/img/entities/{}", hash));
+    let cover_url = get_entity_image_url(&edition_entity);
 
     // 2. Get Work URI to find Author
     let work_uri = edition_entity
@@ -139,12 +144,7 @@ pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<InventaireMetadata,
                             .map(|d| d.chars().take(4).collect());
 
                         // Extract Image
-                        let image_url = author_entity
-                            .claims
-                            .image
-                            .as_ref()
-                            .and_then(|v| v.first().cloned())
-                            .map(|hash| format!("https://inventaire.io/img/entities/{}", hash));
+                        let image_url = get_entity_image_url(&author_entity);
 
                         // Extract Bio (Description)
                         let bio = author_entity
@@ -572,20 +572,7 @@ pub async fn enrich_search_results(
                                                     .cloned();
 
                                                 // Get edition cover image
-                                                let edition_image = entity
-                                                    .claims
-                                                    .image
-                                                    .as_ref()
-                                                    .and_then(|v| v.first().cloned())
-                                                    .map(|img| {
-                                                        if img.starts_with("http") {
-                                                            img
-                                                        } else if img.starts_with("/") {
-                                                            format!("https://inventaire.io{}", img)
-                                                        } else {
-                                                            format!("https://inventaire.io/img/entities/{}", img)
-                                                        }
-                                                    });
+                                                let edition_image = get_entity_image_url(entity);
 
                                                 let edition_result = InventaireSearchResult {
                                                     uri: edition_uri.clone(),
@@ -679,6 +666,38 @@ fn wikidata_language_to_code(uri: &str) -> String {
             uri.trim_start_matches("wd:").to_string()
         }
     }
+}
+
+/// Extract image URL from an Inventaire entity.
+/// Priority: entity.image.url (always present when image exists) > claims.invp:P2/wdt:P18
+fn get_entity_image_url(entity: &InventaireEntity) -> Option<String> {
+    // First try the image object on the entity (most reliable)
+    if let Some(img) = &entity.image {
+        let url = &img.url;
+        if url.starts_with("http") {
+            return Some(url.clone());
+        } else if url.starts_with("/") {
+            return Some(format!("https://inventaire.io{}", url));
+        } else {
+            return Some(format!("https://inventaire.io/img/entities/{}", url));
+        }
+    }
+
+    // Fallback to claims (for older API responses or edge cases)
+    entity
+        .claims
+        .image
+        .as_ref()
+        .and_then(|v| v.first().cloned())
+        .map(|hash| {
+            if hash.starts_with("http") {
+                hash
+            } else if hash.starts_with("/") {
+                format!("https://inventaire.io{}", hash)
+            } else {
+                format!("https://inventaire.io/img/entities/{}", hash)
+            }
+        })
 }
 
 pub async fn fetch_entities_batch(

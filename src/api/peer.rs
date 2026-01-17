@@ -96,16 +96,16 @@ pub async fn connect(
     let (latitude, longitude, remote_name) = match client.get(&config_url).send().await {
         Ok(res) => {
             if res.status().is_success() {
-                if let Ok(config) = res.json::<crate::api::setup::ConfigResponse>().await {
+                match res.json::<crate::api::setup::ConfigResponse>().await { Ok(config) => {
                     let (lat, long) = if config.share_location {
                         (config.latitude, config.longitude)
                     } else {
                         (None, None)
                     };
                     (lat, long, Some(config.library_name))
-                } else {
+                } _ => {
                     (None, None, None)
-                }
+                }}
             } else {
                 (None, None, None)
             }
@@ -692,7 +692,7 @@ pub async fn sync_peer(
                     books: Vec<crate::models::Book>,
                 }
 
-                if let Ok(data) = response.json::<BooksResponse>().await {
+                match response.json::<BooksResponse>().await { Ok(data) => {
                     // 3. Clear old cache for this peer
                     let _ = peer_book::Entity::delete_many()
                         .filter(peer_book::Column::PeerId.eq(peer.id))
@@ -722,13 +722,13 @@ pub async fn sync_peer(
                         Json(json!({ "message": "Sync successful", "count": count })),
                     )
                         .into_response()
-                } else {
+                } _ => {
                     (
                         StatusCode::BAD_GATEWAY,
                         Json(json!({ "error": "Invalid response format" })),
                     )
                         .into_response()
-                }
+                }}
             } else {
                 (
                     StatusCode::BAD_GATEWAY,
@@ -865,7 +865,7 @@ pub async fn sync_peer_by_url(
                     books: Vec<crate::models::Book>,
                 }
 
-                if let Ok(data) = response.json::<BooksResponse>().await {
+                match response.json::<BooksResponse>().await { Ok(data) => {
                     // 3. Clear old cache for this peer
                     let _ = peer_book::Entity::delete_many()
                         .filter(peer_book::Column::PeerId.eq(peer.id))
@@ -895,13 +895,13 @@ pub async fn sync_peer_by_url(
                         Json(json!({ "message": "Sync successful", "count": count, "peer_id": peer.id })),
                     )
                         .into_response()
-                } else {
+                } _ => {
                     (
                         StatusCode::BAD_GATEWAY,
                         Json(json!({ "error": "Invalid response format" })),
                     )
                         .into_response()
-                }
+                }}
             } else {
                 (
                     StatusCode::BAD_GATEWAY,
@@ -948,7 +948,7 @@ pub async fn broadcast_search(
                 .await
             {
                 Ok(res) => {
-                    if let Ok(mut books) = res.json::<Vec<crate::models::Book>>().await {
+                    match res.json::<Vec<crate::models::Book>>().await { Ok(mut books) => {
                         // Tag source and embed peer_id for request
                         for b in &mut books {
                             b.source = Some(format!("Peer: {}", peer.name));
@@ -956,9 +956,9 @@ pub async fn broadcast_search(
                             b.source_data = Some(json!({ "peer_id": peer.id }).to_string());
                         }
                         books
-                    } else {
+                    } _ => {
                         vec![]
-                    }
+                    }}
                 }
                 Err(_) => vec![],
             }
@@ -1975,16 +1975,16 @@ pub async fn update_outgoing_status(
                         .one(&db)
                         .await
                     {
-                        if let Err(e) = copy::Entity::delete_by_id(borrowed_copy.id).exec(&db).await
-                        {
+                        match copy::Entity::delete_by_id(borrowed_copy.id).exec(&db).await
+                        { Err(e) => {
                             tracing::warn!("⚠️ Failed to delete borrowed copy: {}", e);
-                        } else {
+                        } _ => {
                             tracing::info!(
                                 "✅ Deleted borrowed copy {} for book {}",
                                 borrowed_copy.id,
                                 book.id
                             );
-                        }
+                        }}
                     }
 
                     // 3. Check if book should be deleted
@@ -2004,11 +2004,11 @@ pub async fn update_outgoing_status(
                             book.id,
                             book_isbn
                         );
-                        if let Err(e) = book::Entity::delete_by_id(book.id).exec(&db).await {
+                        match book::Entity::delete_by_id(book.id).exec(&db).await { Err(e) => {
                             tracing::warn!("⚠️ Failed to delete book: {}", e);
-                        } else {
+                        } _ => {
                             tracing::info!("✅ Deleted book {} after loan return", book.id);
-                        }
+                        }}
                     }
                 }
             }

@@ -134,7 +134,8 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
 
     // Set the DATABASE_URL environment variable so that other components (like MCP config)
     // can access the correct database path being used by the FFI instance.
-    std::env::set_var("DATABASE_URL", &db_url);
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("DATABASE_URL", &db_url) };
     tracing::info!("FFI: Set DATABASE_URL env var to: {}", db_url);
 
     match crate::db::init_db(&db_url).await {

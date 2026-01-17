@@ -229,13 +229,13 @@ pub async fn search_external(
     use sea_orm::EntityTrait;
 
     let enable_openlibrary =
-        if let Ok(Some(profile_model)) = ProfileEntity::find_by_id(1).one(db).await {
+        match ProfileEntity::find_by_id(1).one(db).await { Ok(Some(profile_model)) => {
             let modules: Vec<String> =
                 serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
             !modules.contains(&"disable_fallback:openlibrary".to_string())
-        } else {
+        } _ => {
             true
-        };
+        }};
 
     let mut books = Vec::new();
 
@@ -426,7 +426,7 @@ pub async fn search_unified(
 
     // Load profile config to check enabled providers
     let (mut enable_inventaire, mut enable_bnf, mut enable_openlibrary, mut enable_google_books) =
-        if let Ok(Some(profile_model)) = ProfileEntity::find_by_id(1).one(&db).await {
+        match ProfileEntity::find_by_id(1).one(&db).await { Ok(Some(profile_model)) => {
             let modules: Vec<String> =
                 serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
             let inv = !modules.contains(&"disable_fallback:inventaire".to_string());
@@ -434,9 +434,9 @@ pub async fn search_unified(
             let ol = !modules.contains(&"disable_fallback:openlibrary".to_string());
             let gb = modules.contains(&"enable_google_books".to_string());
             (inv, bnf, ol, gb)
-        } else {
+        } _ => {
             (true, true, true, false)
-        };
+        }};
 
     let is_autocomplete = params.autocomplete.unwrap_or(false);
     let mut search_timeout = std::time::Duration::from_secs(8);

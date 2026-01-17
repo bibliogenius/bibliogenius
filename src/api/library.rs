@@ -12,15 +12,14 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> Result<Json<Val
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let enabled_modules = if let Ok(Some(profile)) =
-        crate::models::installation_profile::Entity::find_by_id(1)
+    let enabled_modules = match crate::models::installation_profile::Entity::find_by_id(1)
             .one(&db)
             .await
-    {
+    { Ok(Some(profile)) => {
         serde_json::from_str::<Vec<String>>(&profile.enabled_modules).unwrap_or_default()
-    } else {
+    } _ => {
         vec![]
-    };
+    }};
 
     match config {
         Some(cfg) => {

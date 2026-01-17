@@ -214,7 +214,7 @@ pub async fn setup(
         updated_at: Set(now.to_rfc3339()),
     };
 
-    if let Err(e) = library::Entity::insert(new_library)
+    match library::Entity::insert(new_library)
         .on_conflict(
             sea_orm::sea_query::OnConflict::column(library::Column::Id)
                 .update_columns([
@@ -226,11 +226,11 @@ pub async fn setup(
         )
         .exec(&db)
         .await
-    {
+    { Err(e) => {
         tracing::error!("Failed to create default library: {}", e);
-    } else {
+    } _ => {
         tracing::info!("Default library created/updated successfully");
-    }
+    }}
 
     (
         StatusCode::OK,

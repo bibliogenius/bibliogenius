@@ -86,7 +86,8 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(pos) = args.iter().position(|arg| arg == "--profile") {
         if let Some(val) = args.get(pos + 1) {
-            std::env::set_var("PROFILE", val);
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("PROFILE", val) };
         }
     }
 
@@ -100,11 +101,11 @@ async fn main() {
     // Check for seed flag
     if std::env::var("SEED_DEMO").is_ok() {
         tracing::info!("Seeding demo data...");
-        if let Err(e) = seed::seed_demo_data(&db).await {
+        match seed::seed_demo_data(&db).await { Err(e) => {
             tracing::error!("Failed to seed data: {}", e);
-        } else {
+        } _ => {
             tracing::info!("Demo data seeded successfully.");
-        }
+        }}
     }
 
     // [MCP] Start MCP Server if --mcp flag is present
