@@ -1,5 +1,5 @@
 use crate::genie::service::GenieService;
-use axum::{response::IntoResponse, Json};
+use axum::{Json, response::IntoResponse};
 use serde::Deserialize;
 
 #[derive(Deserialize)]

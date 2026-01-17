@@ -101,11 +101,14 @@ async fn main() {
     // Check for seed flag
     if std::env::var("SEED_DEMO").is_ok() {
         tracing::info!("Seeding demo data...");
-        match seed::seed_demo_data(&db).await { Err(e) => {
-            tracing::error!("Failed to seed data: {}", e);
-        } _ => {
-            tracing::info!("Demo data seeded successfully.");
-        }}
+        match seed::seed_demo_data(&db).await {
+            Err(e) => {
+                tracing::error!("Failed to seed data: {}", e);
+            }
+            _ => {
+                tracing::info!("Demo data seeded successfully.");
+            }
+        }
     }
 
     // [MCP] Start MCP Server if --mcp flag is present

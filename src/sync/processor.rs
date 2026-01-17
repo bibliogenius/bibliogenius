@@ -7,13 +7,16 @@ pub async fn run_processor(db: DatabaseConnection) {
     tracing::info!("🔄 Operation Processor started");
 
     loop {
-        match process_next_batch(&db).await { Err(e) => {
-            tracing::error!("❌ Error processing operations: {}", e);
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        } _ => {
-            // If no operations were found, verify inside process_next_batch if we should sleep
-            // For simplicity here, we assume process_next_batch handles the sleep if empty
-        }}
+        match process_next_batch(&db).await {
+            Err(e) => {
+                tracing::error!("❌ Error processing operations: {}", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            _ => {
+                // If no operations were found, verify inside process_next_batch if we should sleep
+                // For simplicity here, we assume process_next_batch handles the sleep if empty
+            }
+        }
     }
 }
 

@@ -32,8 +32,8 @@ pub mod user;
 pub mod mcp;
 
 use axum::{
-    routing::{get, post, put},
     Router,
+    routing::{get, post, put},
 };
 use sea_orm::DatabaseConnection;
 

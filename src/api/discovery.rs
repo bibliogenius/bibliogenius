@@ -2,7 +2,7 @@
 //!
 //! Provides REST endpoints for local network discovery via mDNS.
 
-use axum::{http::StatusCode, response::IntoResponse, Json};
+use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Deserialize;
 use serde_json::json;
 

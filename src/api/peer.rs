@@ -96,16 +96,17 @@ pub async fn connect(
     let (latitude, longitude, remote_name) = match client.get(&config_url).send().await {
         Ok(res) => {
             if res.status().is_success() {
-                match res.json::<crate::api::setup::ConfigResponse>().await { Ok(config) => {
-                    let (lat, long) = if config.share_location {
-                        (config.latitude, config.longitude)
-                    } else {
-                        (None, None)
-                    };
-                    (lat, long, Some(config.library_name))
-                } _ => {
-                    (None, None, None)
-                }}
+                match res.json::<crate::api::setup::ConfigResponse>().await {
+                    Ok(config) => {
+                        let (lat, long) = if config.share_location {
+                            (config.latitude, config.longitude)
+                        } else {
+                            (None, None)
+                        };
+                        (lat, long, Some(config.library_name))
+                    }
+                    _ => (None, None, None),
+                }
             } else {
                 (None, None, None)
             }
@@ -347,14 +348,14 @@ pub async fn update_peer_status(
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "Peer not found" })),
             )
-                .into_response()
+                .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": format!("Database error: {}", e) })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -434,14 +435,14 @@ pub async fn update_peer_url(
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "Peer not found" })),
             )
-                .into_response()
+                .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": format!("Database error: {}", e) })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -639,7 +640,7 @@ pub async fn proxy_search(
                     StatusCode::BAD_GATEWAY,
                     Json(json!({ "error": "Failed to contact peer" })),
                 )
-                    .into_response()
+                    .into_response();
             }
         }
     }
@@ -665,7 +666,7 @@ pub async fn sync_peer(
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "Peer not found" })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -692,43 +693,44 @@ pub async fn sync_peer(
                     books: Vec<crate::models::Book>,
                 }
 
-                match response.json::<BooksResponse>().await { Ok(data) => {
-                    // 3. Clear old cache for this peer
-                    let _ = peer_book::Entity::delete_many()
-                        .filter(peer_book::Column::PeerId.eq(peer.id))
-                        .exec(&db)
-                        .await;
+                match response.json::<BooksResponse>().await {
+                    Ok(data) => {
+                        // 3. Clear old cache for this peer
+                        let _ = peer_book::Entity::delete_many()
+                            .filter(peer_book::Column::PeerId.eq(peer.id))
+                            .exec(&db)
+                            .await;
 
-                    let count = data.books.len();
+                        let count = data.books.len();
 
-                    // 4. Insert new cache
-                    for book in data.books {
-                        let cache = peer_book::ActiveModel {
-                            peer_id: Set(peer.id),
-                            remote_book_id: Set(book.id.unwrap_or(0)),
-                            title: Set(book.title),
-                            isbn: Set(book.isbn),
-                            author: Set(book.author),
-                            cover_url: Set(book.cover_url),
-                            summary: Set(book.summary),
-                            synced_at: Set(chrono::Utc::now().to_rfc3339()),
-                            ..Default::default()
-                        };
-                        let _ = peer_book::Entity::insert(cache).exec(&db).await;
+                        // 4. Insert new cache
+                        for book in data.books {
+                            let cache = peer_book::ActiveModel {
+                                peer_id: Set(peer.id),
+                                remote_book_id: Set(book.id.unwrap_or(0)),
+                                title: Set(book.title),
+                                isbn: Set(book.isbn),
+                                author: Set(book.author),
+                                cover_url: Set(book.cover_url),
+                                summary: Set(book.summary),
+                                synced_at: Set(chrono::Utc::now().to_rfc3339()),
+                                ..Default::default()
+                            };
+                            let _ = peer_book::Entity::insert(cache).exec(&db).await;
+                        }
+
+                        (
+                            StatusCode::OK,
+                            Json(json!({ "message": "Sync successful", "count": count })),
+                        )
+                            .into_response()
                     }
-
-                    (
-                        StatusCode::OK,
-                        Json(json!({ "message": "Sync successful", "count": count })),
-                    )
-                        .into_response()
-                } _ => {
-                    (
+                    _ => (
                         StatusCode::BAD_GATEWAY,
                         Json(json!({ "error": "Invalid response format" })),
                     )
-                        .into_response()
-                }}
+                        .into_response(),
+                }
             } else {
                 (
                     StatusCode::BAD_GATEWAY,
@@ -760,7 +762,7 @@ pub async fn sync_peer_by_url(
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "Missing 'url' field" })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -836,7 +838,7 @@ pub async fn sync_peer_by_url(
                             json!({ "error": format!("Peer not found with URL: {}", docker_url) }),
                         ),
                     )
-                        .into_response()
+                        .into_response();
                 }
             }
         }
@@ -865,43 +867,44 @@ pub async fn sync_peer_by_url(
                     books: Vec<crate::models::Book>,
                 }
 
-                match response.json::<BooksResponse>().await { Ok(data) => {
-                    // 3. Clear old cache for this peer
-                    let _ = peer_book::Entity::delete_many()
-                        .filter(peer_book::Column::PeerId.eq(peer.id))
-                        .exec(&db)
-                        .await;
+                match response.json::<BooksResponse>().await {
+                    Ok(data) => {
+                        // 3. Clear old cache for this peer
+                        let _ = peer_book::Entity::delete_many()
+                            .filter(peer_book::Column::PeerId.eq(peer.id))
+                            .exec(&db)
+                            .await;
 
-                    let count = data.books.len();
+                        let count = data.books.len();
 
-                    // 4. Insert new cache
-                    for book in data.books {
-                        let cache = peer_book::ActiveModel {
-                            peer_id: Set(peer.id),
-                            remote_book_id: Set(book.id.unwrap_or(0)),
-                            title: Set(book.title),
-                            isbn: Set(book.isbn),
-                            author: Set(book.author),
-                            cover_url: Set(book.cover_url),
-                            summary: Set(book.summary),
-                            synced_at: Set(chrono::Utc::now().to_rfc3339()),
-                            ..Default::default()
-                        };
-                        let _ = peer_book::Entity::insert(cache).exec(&db).await;
-                    }
+                        // 4. Insert new cache
+                        for book in data.books {
+                            let cache = peer_book::ActiveModel {
+                                peer_id: Set(peer.id),
+                                remote_book_id: Set(book.id.unwrap_or(0)),
+                                title: Set(book.title),
+                                isbn: Set(book.isbn),
+                                author: Set(book.author),
+                                cover_url: Set(book.cover_url),
+                                summary: Set(book.summary),
+                                synced_at: Set(chrono::Utc::now().to_rfc3339()),
+                                ..Default::default()
+                            };
+                            let _ = peer_book::Entity::insert(cache).exec(&db).await;
+                        }
 
-                    (
+                        (
                         StatusCode::OK,
                         Json(json!({ "message": "Sync successful", "count": count, "peer_id": peer.id })),
                     )
                         .into_response()
-                } _ => {
-                    (
+                    }
+                    _ => (
                         StatusCode::BAD_GATEWAY,
                         Json(json!({ "error": "Invalid response format" })),
                     )
-                        .into_response()
-                }}
+                        .into_response(),
+                }
             } else {
                 (
                     StatusCode::BAD_GATEWAY,
@@ -948,17 +951,20 @@ pub async fn broadcast_search(
                 .await
             {
                 Ok(res) => {
-                    match res.json::<Vec<crate::models::Book>>().await { Ok(mut books) => {
-                        // Tag source and embed peer_id for request
-                        for b in &mut books {
-                            b.source = Some(format!("Peer: {}", peer.name));
-                            // Hack: Embed peer_id in source_data so frontend can use it
-                            b.source_data = Some(json!({ "peer_id": peer.id }).to_string());
+                    match res.json::<Vec<crate::models::Book>>().await {
+                        Ok(mut books) => {
+                            // Tag source and embed peer_id for request
+                            for b in &mut books {
+                                b.source = Some(format!("Peer: {}", peer.name));
+                                // Hack: Embed peer_id in source_data so frontend can use it
+                                b.source_data = Some(json!({ "peer_id": peer.id }).to_string());
+                            }
+                            books
                         }
-                        books
-                    } _ => {
-                        vec![]
-                    }}
+                        _ => {
+                            vec![]
+                        }
+                    }
                 }
                 Err(_) => vec![],
             }
@@ -988,7 +994,7 @@ pub async fn request_book(
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "Peer not found" })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1111,7 +1117,7 @@ pub async fn request_book_by_url(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "DB Error" })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1157,7 +1163,7 @@ pub async fn request_book_by_url(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "Library config not found" })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1250,7 +1256,7 @@ pub async fn receive_request(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({ "error": format!("Failed to create peer: {}", e) })),
                     )
-                        .into_response()
+                        .into_response();
                 }
             }
         }
@@ -1259,7 +1265,7 @@ pub async fn receive_request(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "DB Error" })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1340,7 +1346,7 @@ pub async fn update_request_status(
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "Request not found" })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1357,7 +1363,7 @@ pub async fn update_request_status(
                     StatusCode::BAD_REQUEST,
                     Json(json!({ "error": "Peer not found" })),
                 )
-                    .into_response()
+                    .into_response();
             }
         };
 
@@ -1469,7 +1475,7 @@ pub async fn update_request_status(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(json!({ "error": format!("Failed to create contact: {}", e) })),
                         )
-                            .into_response()
+                            .into_response();
                     }
                 }
             }
@@ -1478,7 +1484,7 @@ pub async fn update_request_status(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": "DB Error finding contact" })),
                 )
-                    .into_response()
+                    .into_response();
             }
         };
 
@@ -1577,14 +1583,14 @@ pub async fn update_request_status(
                     StatusCode::NOT_FOUND,
                     Json(json!({ "error": "Peer not found" })),
                 )
-                    .into_response()
+                    .into_response();
             }
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": e.to_string() })),
                 )
-                    .into_response()
+                    .into_response();
             }
         };
 
@@ -1726,7 +1732,7 @@ pub async fn list_peer_books_by_url(
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "Missing 'url' field" })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1745,7 +1751,7 @@ pub async fn list_peer_books_by_url(
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": format!("Peer not found with URL: {}", docker_url) })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1975,16 +1981,18 @@ pub async fn update_outgoing_status(
                         .one(&db)
                         .await
                     {
-                        match copy::Entity::delete_by_id(borrowed_copy.id).exec(&db).await
-                        { Err(e) => {
-                            tracing::warn!("⚠️ Failed to delete borrowed copy: {}", e);
-                        } _ => {
-                            tracing::info!(
-                                "✅ Deleted borrowed copy {} for book {}",
-                                borrowed_copy.id,
-                                book.id
-                            );
-                        }}
+                        match copy::Entity::delete_by_id(borrowed_copy.id).exec(&db).await {
+                            Err(e) => {
+                                tracing::warn!("⚠️ Failed to delete borrowed copy: {}", e);
+                            }
+                            _ => {
+                                tracing::info!(
+                                    "✅ Deleted borrowed copy {} for book {}",
+                                    borrowed_copy.id,
+                                    book.id
+                                );
+                            }
+                        }
                     }
 
                     // 3. Check if book should be deleted
@@ -2004,11 +2012,14 @@ pub async fn update_outgoing_status(
                             book.id,
                             book_isbn
                         );
-                        match book::Entity::delete_by_id(book.id).exec(&db).await { Err(e) => {
-                            tracing::warn!("⚠️ Failed to delete book: {}", e);
-                        } _ => {
-                            tracing::info!("✅ Deleted book {} after loan return", book.id);
-                        }}
+                        match book::Entity::delete_by_id(book.id).exec(&db).await {
+                            Err(e) => {
+                                tracing::warn!("⚠️ Failed to delete book: {}", e);
+                            }
+                            _ => {
+                                tracing::info!("✅ Deleted book {} after loan return", book.id);
+                            }
+                        }
                     }
                 }
             }
@@ -2132,7 +2143,7 @@ pub async fn receive_loan_request(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({ "error": format!("Failed to create peer: {}", e) })),
                     )
-                        .into_response()
+                        .into_response();
                 }
             }
         }
@@ -2141,7 +2152,7 @@ pub async fn receive_loan_request(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": format!("Database error: {}", e) })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -2218,7 +2229,7 @@ pub async fn create_outgoing_request(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({ "error": format!("Failed to create peer: {}", e) })),
                     )
-                        .into_response()
+                        .into_response();
                 }
             }
         }
@@ -2227,7 +2238,7 @@ pub async fn create_outgoing_request(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": format!("Database error: {}", e) })),
             )
-                .into_response()
+                .into_response();
         }
     };
 

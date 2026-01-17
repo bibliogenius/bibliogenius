@@ -10,8 +10,8 @@ use sea_orm::{
 };
 use std::collections::HashMap;
 
-use crate::models::book::{ActiveModel as BookActiveModel, Entity as BookEntity};
 use crate::models::Book;
+use crate::models::book::{ActiveModel as BookActiveModel, Entity as BookEntity};
 
 /// Filter parameters for listing books
 #[derive(Debug, Default, Clone)]

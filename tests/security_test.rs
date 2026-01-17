@@ -1,7 +1,7 @@
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode},
-    Router,
 };
 use rust_lib_app::api;
 use rust_lib_app::auth::{create_jwt, decode_jwt, hash_password, verify_password};

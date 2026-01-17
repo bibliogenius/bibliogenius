@@ -1,9 +1,9 @@
 use crate::models::tag::{self, Entity as Tag};
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use sea_orm::*;
 use serde::Deserialize;

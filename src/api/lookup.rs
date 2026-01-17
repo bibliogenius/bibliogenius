@@ -1,8 +1,8 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use sea_orm::DatabaseConnection;
 
@@ -21,18 +21,19 @@ pub async fn lookup_book(
 
     // Load profile config to check enabled providers
     let (enable_openlibrary, enable_google, enable_inventaire, enable_bnf) =
-        match ProfileEntity::find_by_id(1).one(&db).await { Ok(Some(profile_model)) => {
-            let modules: Vec<String> =
-                serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
-            (
-                !modules.contains(&"disable_fallback:openlibrary".to_string()),
-                modules.contains(&"enable_google_books".to_string()),
-                !modules.contains(&"disable_fallback:inventaire".to_string()),
-                !modules.contains(&"disable_fallback:bnf".to_string()),
-            )
-        } _ => {
-            (true, false, true, true)
-        }};
+        match ProfileEntity::find_by_id(1).one(&db).await {
+            Ok(Some(profile_model)) => {
+                let modules: Vec<String> =
+                    serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
+                (
+                    !modules.contains(&"disable_fallback:openlibrary".to_string()),
+                    modules.contains(&"enable_google_books".to_string()),
+                    !modules.contains(&"disable_fallback:inventaire".to_string()),
+                    !modules.contains(&"disable_fallback:bnf".to_string()),
+                )
+            }
+            _ => (true, false, true, true),
+        };
 
     // Pre-check: For French ISBNs, prioritize BNF (more reliable for French books)
     let clean_isbn = isbn.replace('-', "");

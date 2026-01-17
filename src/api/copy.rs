@@ -1,9 +1,9 @@
 use crate::models::copy::{self as copy_model, Entity as Copy};
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
@@ -176,14 +176,14 @@ pub async fn update_copy(
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": "Copy not found"})),
             )
-                .into_response()
+                .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": format!("Database error: {}", e)})),
             )
-                .into_response()
+                .into_response();
         }
     };
 

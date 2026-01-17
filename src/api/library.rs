@@ -1,9 +1,9 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{Json, extract::State, http::StatusCode};
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::models::library_config::{ActiveModel, Entity as LibraryConfigEntity};
 use crate::models::LibraryConfig;
+use crate::models::library_config::{ActiveModel, Entity as LibraryConfigEntity};
 
 pub async fn get_config(State(db): State<DatabaseConnection>) -> Result<Json<Value>, StatusCode> {
     // Get the first (and only) library config
@@ -13,13 +13,16 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> Result<Json<Val
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let enabled_modules = match crate::models::installation_profile::Entity::find_by_id(1)
-            .one(&db)
-            .await
-    { Ok(Some(profile)) => {
-        serde_json::from_str::<Vec<String>>(&profile.enabled_modules).unwrap_or_default()
-    } _ => {
-        vec![]
-    }};
+        .one(&db)
+        .await
+    {
+        Ok(Some(profile)) => {
+            serde_json::from_str::<Vec<String>>(&profile.enabled_modules).unwrap_or_default()
+        }
+        _ => {
+            vec![]
+        }
+    };
 
     match config {
         Some(cfg) => {

@@ -11,4 +11,4 @@ pub mod sale_service; // Service de vente pour profil Libraire
 
 // Re-export for convenience
 pub use book_service::*;
-pub use mdns::{get_local_peers, init_mdns, is_mdns_active, stop_mdns, DiscoveredPeer};
+pub use mdns::{DiscoveredPeer, get_local_peers, init_mdns, is_mdns_active, stop_mdns};

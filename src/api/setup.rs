@@ -1,5 +1,5 @@
 use crate::models::{installation_profile, library_config};
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -226,11 +226,14 @@ pub async fn setup(
         )
         .exec(&db)
         .await
-    { Err(e) => {
-        tracing::error!("Failed to create default library: {}", e);
-    } _ => {
-        tracing::info!("Default library created/updated successfully");
-    }}
+    {
+        Err(e) => {
+            tracing::error!("Failed to create default library: {}", e);
+        }
+        _ => {
+            tracing::info!("Default library created/updated successfully");
+        }
+    }
 
     (
         StatusCode::OK,
@@ -268,7 +271,7 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "Config not found"})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -279,7 +282,7 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "Profile not found"})),
             )
-                .into_response()
+                .into_response();
         }
     };
 

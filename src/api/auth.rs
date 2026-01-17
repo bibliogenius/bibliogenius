@@ -1,6 +1,6 @@
 use crate::auth::{create_jwt, hash_password, verify_password};
 use crate::models::user;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use sea_orm::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -84,7 +84,7 @@ pub async fn login_mfa(
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "Invalid credentials" })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -267,7 +267,7 @@ pub async fn get_me(
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "User not found"})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -292,7 +292,7 @@ pub async fn get_me(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": e.to_string()})),
             )
-                .into_response()
+                .into_response();
         }
     };
 

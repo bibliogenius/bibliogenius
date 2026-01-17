@@ -1,8 +1,8 @@
 use axum::{
+    Json,
     extract::{Multipart, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use sea_orm::DatabaseConnection;
 use serde_json::json;
@@ -21,7 +21,7 @@ pub async fn scan_image(
                         StatusCode::BAD_REQUEST,
                         Json(json!({ "error": e.to_string() })),
                     )
-                        .into_response()
+                        .into_response();
                 }
             };
 
@@ -48,7 +48,7 @@ pub async fn scan_image(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({ "error": e })),
                     )
-                        .into_response()
+                        .into_response();
                 }
             }
         }
