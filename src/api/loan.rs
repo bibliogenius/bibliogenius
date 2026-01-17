@@ -213,84 +213,79 @@ pub async fn return_loan(
         .one(&db)
         .await
         .unwrap_or(None)
+        && contact.r#type == "Library"
     {
-        if contact.r#type == "Library" {
-            tracing::info!(
-                "🔄 Return loan associated with Peer Contact: {}",
-                contact.name
-            );
+        tracing::info!(
+            "🔄 Return loan associated with Peer Contact: {}",
+            contact.name
+        );
 
-            // Find Peer by name
-            if let Some(peer) = peer::Entity::find()
-                .filter(peer::Column::Name.eq(&contact.name))
+        // Find Peer by name
+        if let Some(peer) = peer::Entity::find()
+            .filter(peer::Column::Name.eq(&contact.name))
+            .one(&db)
+            .await
+            .unwrap_or(None)
+        {
+            // Find associated book to get ISBN
+            if let Some(book) = book::Entity::find_by_id(copy.book_id)
                 .one(&db)
                 .await
                 .unwrap_or(None)
+                && let Some(isbn) = &book.isbn
             {
-                // Find associated book to get ISBN
-                if let Some(book) = book::Entity::find_by_id(copy.book_id)
+                // Find the latest 'accepted' request for this book from this peer
+                if let Some(request) = p2p_request::Entity::find()
+                    .filter(p2p_request::Column::BookIsbn.eq(isbn))
+                    .filter(p2p_request::Column::FromPeerId.eq(peer.id))
+                    .filter(p2p_request::Column::Status.eq("accepted"))
+                    .order_by_desc(p2p_request::Column::CreatedAt)
                     .one(&db)
                     .await
                     .unwrap_or(None)
                 {
-                    if let Some(isbn) = &book.isbn {
-                        // Find the latest 'accepted' request for this book from this peer
-                        if let Some(request) = p2p_request::Entity::find()
-                            .filter(p2p_request::Column::BookIsbn.eq(isbn))
-                            .filter(p2p_request::Column::FromPeerId.eq(peer.id))
-                            .filter(p2p_request::Column::Status.eq("accepted"))
-                            .order_by_desc(p2p_request::Column::CreatedAt)
-                            .one(&db)
+                    tracing::info!("found p2p request to return: {}", request.id);
+
+                    // Update local request status
+                    let mut req_active: p2p_request::ActiveModel = request.clone().into();
+                    req_active.status = Set("returned".to_owned());
+                    req_active.updated_at = Set(now.clone());
+                    let _ = req_active.update(&db).await;
+
+                    // Notify Peer
+                    // We spin off a task or do it here? better await since we want to know if it fails?
+                    // Actually, fire and forget regarding the user response, but log it.
+                    let peer_url = peer.url.clone();
+                    let req_id = request.id.clone();
+
+                    tokio::spawn(async move {
+                        let client = reqwest::Client::new();
+                        let url = format!("{}/api/peers/requests/status/{}", peer_url, req_id);
+                        tracing::info!("📡 Notifying peer of return: POST {}", url);
+
+                        match client
+                            .put(&url)
+                            .json(&serde_json::json!({
+                                "status": "returned"
+                            }))
+                            .send()
                             .await
-                            .unwrap_or(None)
                         {
-                            tracing::info!("found p2p request to return: {}", request.id);
-
-                            // Update local request status
-                            let mut req_active: p2p_request::ActiveModel = request.clone().into();
-                            req_active.status = Set("returned".to_owned());
-                            req_active.updated_at = Set(now.clone());
-                            let _ = req_active.update(&db).await;
-
-                            // Notify Peer
-                            // We spin off a task or do it here? better await since we want to know if it fails?
-                            // Actually, fire and forget regarding the user response, but log it.
-                            let peer_url = peer.url.clone();
-                            let req_id = request.id.clone();
-
-                            tokio::spawn(async move {
-                                let client = reqwest::Client::new();
-                                let url =
-                                    format!("{}/api/peers/requests/status/{}", peer_url, req_id);
-                                tracing::info!("📡 Notifying peer of return: POST {}", url);
-
-                                match client
-                                    .put(&url)
-                                    .json(&serde_json::json!({
-                                        "status": "returned"
-                                    }))
-                                    .send()
-                                    .await
-                                {
-                                    Ok(res) => {
-                                        if res.status().is_success() {
-                                            tracing::info!(
-                                                "✅ Peer notified of return successfully"
-                                            );
-                                        } else {
-                                            tracing::error!(
-                                                "⚠️ Peer notification failed: status {}",
-                                                res.status()
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("❌ Failed to notify peer: {}", e);
-                                    }
+                            Ok(res) => {
+                                if res.status().is_success() {
+                                    tracing::info!("✅ Peer notified of return successfully");
+                                } else {
+                                    tracing::error!(
+                                        "⚠️ Peer notification failed: status {}",
+                                        res.status()
+                                    );
                                 }
-                            });
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ Failed to notify peer: {}", e);
+                            }
                         }
-                    }
+                    });
                 }
             }
         }

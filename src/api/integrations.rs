@@ -155,21 +155,21 @@ async fn fetch_edition_extras(edition_key: &str) -> Option<(String, Option<Strin
         publishers: Option<Vec<String>>,
     }
 
-    if let Ok(res) = client.get(&url).send().await {
-        if let Ok(edition) = res.json::<EditionResponse>().await {
-            let publisher = edition.publishers.and_then(|v| v.first().cloned());
+    if let Ok(res) = client.get(&url).send().await
+        && let Ok(edition) = res.json::<EditionResponse>().await
+    {
+        let publisher = edition.publishers.and_then(|v| v.first().cloned());
 
-            // Prefer ISBN-13 over ISBN-10
-            if let Some(isbns) = edition.isbn_13
-                && let Some(isbn) = isbns.first()
-            {
-                return Some((isbn.clone(), publisher));
-            }
-            if let Some(isbns) = edition.isbn_10
-                && let Some(isbn) = isbns.first()
-            {
-                return Some((isbn.clone(), publisher));
-            }
+        // Prefer ISBN-13 over ISBN-10
+        if let Some(isbns) = edition.isbn_13
+            && let Some(isbn) = isbns.first()
+        {
+            return Some((isbn.clone(), publisher));
+        }
+        if let Some(isbns) = edition.isbn_10
+            && let Some(isbn) = isbns.first()
+        {
+            return Some((isbn.clone(), publisher));
         }
     }
     None
@@ -197,23 +197,23 @@ async fn fetch_work_edition_extras(work_key: &str) -> Option<(String, Option<Str
         publishers: Option<Vec<String>>,
     }
 
-    if let Ok(res) = client.get(&url).send().await {
-        if let Ok(data) = res.json::<WorkEditionsResponse>().await {
-            // Iterate over entries to find the first one with an ISBN
-            for entry in data.entries {
-                let publisher = entry.publishers.and_then(|v| v.first().cloned());
+    if let Ok(res) = client.get(&url).send().await
+        && let Ok(data) = res.json::<WorkEditionsResponse>().await
+    {
+        // Iterate over entries to find the first one with an ISBN
+        for entry in data.entries {
+            let publisher = entry.publishers.and_then(|v| v.first().cloned());
 
-                // Prefer ISBN-13
-                if let Some(isbns) = &entry.isbn_13
-                    && let Some(isbn) = isbns.first()
-                {
-                    return Some((isbn.clone(), publisher));
-                }
-                if let Some(isbns) = &entry.isbn_10
-                    && let Some(isbn) = isbns.first()
-                {
-                    return Some((isbn.clone(), publisher));
-                }
+            // Prefer ISBN-13
+            if let Some(isbns) = &entry.isbn_13
+                && let Some(isbn) = isbns.first()
+            {
+                return Some((isbn.clone(), publisher));
+            }
+            if let Some(isbns) = &entry.isbn_10
+                && let Some(isbn) = isbns.first()
+            {
+                return Some((isbn.clone(), publisher));
             }
         }
     }
@@ -698,107 +698,101 @@ pub async fn search_unified(
 
             // Extract author, cover, and language from source_data
 
-            if let Some(source_data_str) = &model.source_data {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str) {
-                    if let Some(authors) = json.get("authors").and_then(|a| a.as_array()) {
-                        let author_str = authors
+            if let Some(source_data_str) = &model.source_data
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str)
+            {
+                if let Some(authors) = json.get("authors").and_then(|a| a.as_array()) {
+                    let author_str = authors
+                        .iter()
+                        .map(|v| v.as_str().unwrap_or("").to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if !author_str.is_empty() {
+                        dto.author = Some(author_str);
+                    }
+                }
+                if let Some(cover_id) = json.get("cover_id").and_then(|v| v.as_i64()) {
+                    dto.cover_url = Some(format!(
+                        "https://covers.openlibrary.org/b/id/{}-L.jpg",
+                        cover_id
+                    ));
+                }
+                // Extract first language
+                if let Some(languages) = json.get("languages").and_then(|l| l.as_array())
+                    && let Some(first_lang) = languages.first().and_then(|v| v.as_str())
+                {
+                    dto.language = Some(first_lang.to_string());
+                }
+                // Extract publisher if missing
+                if dto.publisher.is_none() {
+                    if let Some(publisher) = json.get("publisher").and_then(|p| p.as_array()) {
+                        let pub_str = publisher
                             .iter()
                             .map(|v| v.as_str().unwrap_or("").to_string())
                             .collect::<Vec<_>>()
                             .join(", ");
-                        if !author_str.is_empty() {
-                            dto.author = Some(author_str);
+                        if !pub_str.is_empty() {
+                            dto.publisher = Some(pub_str);
                         }
+                    } else if let Some(publisher) = json.get("publisher").and_then(|p| p.as_str())
+                        && !publisher.is_empty()
+                    {
+                        dto.publisher = Some(publisher.to_string());
                     }
-                    if let Some(cover_id) = json.get("cover_id").and_then(|v| v.as_i64()) {
-                        dto.cover_url = Some(format!(
-                            "https://covers.openlibrary.org/b/id/{}-L.jpg",
-                            cover_id
-                        ));
-                    }
-                    // Extract first language
-                    if let Some(languages) = json.get("languages").and_then(|l| l.as_array()) {
-                        if let Some(first_lang) = languages.first().and_then(|v| v.as_str()) {
-                            dto.language = Some(first_lang.to_string());
-                        }
-                    }
-                    // Extract publisher if missing
-                    if dto.publisher.is_none() {
-                        if let Some(publisher) = json.get("publisher").and_then(|p| p.as_array()) {
-                            let pub_str = publisher
-                                .iter()
-                                .map(|v| v.as_str().unwrap_or("").to_string())
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            if !pub_str.is_empty() {
-                                dto.publisher = Some(pub_str);
-                            }
-                        } else if let Some(publisher) =
-                            json.get("publisher").and_then(|p| p.as_str())
-                            && !publisher.is_empty()
-                        {
-                            dto.publisher = Some(publisher.to_string());
-                        }
-                    }
-                    // Fallback: extract ISBN from source_data if model.isbn was None
+                }
+                // Fallback: extract ISBN from source_data if model.isbn was None
+                if dto.isbn.is_none()
+                    && let Some(isbns) = json.get("isbns").and_then(|i| i.as_array())
+                    && let Some(first_isbn) = isbns.first().and_then(|v| v.as_str())
+                {
+                    dto.isbn = Some(first_isbn.to_string());
+                }
+
+                let is_openlibrary = json
+                    .get("source")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s == "openlibrary")
+                    .unwrap_or(true); // Default to true if source not specified (legacy)
+
+                // Fallback: fetch from edition API if still no ISBN OR no publisher
+                if is_openlibrary
+                    && (dto.isbn.is_none() || dto.publisher.is_none())
+                    && let Some(edition_key) = json.get("edition_key").and_then(|k| k.as_str())
+                    && let Some((fetched_isbn, fetched_pub)) =
+                        fetch_edition_extras(edition_key).await
+                {
                     if dto.isbn.is_none() {
-                        if let Some(isbns) = json.get("isbns").and_then(|i| i.as_array())
-                            && let Some(first_isbn) = isbns.first().and_then(|v| v.as_str())
-                        {
-                            dto.isbn = Some(first_isbn.to_string());
-                        }
+                        dto.isbn = Some(fetched_isbn);
                     }
-
-                    let is_openlibrary = json
-                        .get("source")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s == "openlibrary")
-                        .unwrap_or(true); // Default to true if source not specified (legacy)
-
-                    // Fallback: fetch from edition API if still no ISBN OR no publisher
-                    if is_openlibrary
-                        && (dto.isbn.is_none() || dto.publisher.is_none())
-                        && let Some(edition_key) = json.get("edition_key").and_then(|k| k.as_str())
-                    {
-                        if let Some((fetched_isbn, fetched_pub)) =
-                            fetch_edition_extras(edition_key).await
-                        {
-                            if dto.isbn.is_none() {
-                                dto.isbn = Some(fetched_isbn);
-                            }
-                            if dto.publisher.is_none() && fetched_pub.is_some() {
-                                dto.publisher = fetched_pub;
-                            }
-                        }
+                    if dto.publisher.is_none() && fetched_pub.is_some() {
+                        dto.publisher = fetched_pub;
                     }
+                }
 
-                    // Extra Fallback: fetch from Work API if still no ISBN OR no publisher
-                    if is_openlibrary
-                        && (dto.isbn.is_none() || dto.publisher.is_none())
-                        && let Some(work_key) = json.get("key").and_then(|k| k.as_str())
-                    {
-                        if let Some((fetched_isbn, fetched_pub)) =
-                            fetch_work_edition_extras(work_key).await
-                        {
-                            if dto.isbn.is_none() {
-                                dto.isbn = Some(fetched_isbn);
-                            }
-                            if dto.publisher.is_none() && fetched_pub.is_some() {
-                                dto.publisher = fetched_pub;
-                            }
-                        }
+                // Extra Fallback: fetch from Work API if still no ISBN OR no publisher
+                if is_openlibrary
+                    && (dto.isbn.is_none() || dto.publisher.is_none())
+                    && let Some(work_key) = json.get("key").and_then(|k| k.as_str())
+                    && let Some((fetched_isbn, fetched_pub)) =
+                        fetch_work_edition_extras(work_key).await
+                {
+                    if dto.isbn.is_none() {
+                        dto.isbn = Some(fetched_isbn);
                     }
+                    if dto.publisher.is_none() && fetched_pub.is_some() {
+                        dto.publisher = fetched_pub;
+                    }
+                }
 
-                    // Set source based on the actual data
-                    if let Some(source_str) = json.get("source").and_then(|s| s.as_str()) {
-                        if source_str == "google_books" {
-                            dto.source = Some("Google Books".to_string());
-                        } else {
-                            dto.source = Some("Open Library".to_string());
-                        }
+                // Set source based on the actual data
+                if let Some(source_str) = json.get("source").and_then(|s| s.as_str()) {
+                    if source_str == "google_books" {
+                        dto.source = Some("Google Books".to_string());
                     } else {
                         dto.source = Some("Open Library".to_string());
                     }
+                } else {
+                    dto.source = Some("Open Library".to_string());
                 }
             }
             // dto.source is now set inside the block above based on data
@@ -819,23 +813,23 @@ pub async fn search_unified(
         let mut dto = book::Book::from(model.clone());
 
         // Extract author, cover, and language from source_data
-        if let Some(source_data_str) = &model.source_data {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str) {
-                // Extract author
-                if let Some(authors) = json.get("authors").and_then(|a| a.as_array()) {
-                    let author_str = authors
-                        .iter()
-                        .map(|v| v.as_str().unwrap_or("").to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    if !author_str.is_empty() {
-                        dto.author = Some(author_str);
-                    }
+        if let Some(source_data_str) = &model.source_data
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str)
+        {
+            // Extract author
+            if let Some(authors) = json.get("authors").and_then(|a| a.as_array()) {
+                let author_str = authors
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !author_str.is_empty() {
+                    dto.author = Some(author_str);
                 }
-                // Extract language
-                if let Some(lang) = json.get("language").and_then(|l| l.as_str()) {
-                    dto.language = Some(lang.to_string());
-                }
+            }
+            // Extract language
+            if let Some(lang) = json.get("language").and_then(|l| l.as_str()) {
+                dto.language = Some(lang.to_string());
             }
         }
         dto.source = Some("Google Books".to_string());
@@ -925,34 +919,32 @@ fn calculate_relevance(
         }
 
         // 2. Check source_data for languages
-        if let Some(source_data_str) = &book.source_data {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str) {
-                if let Some(languages) = json.get("languages").and_then(|l| l.as_array()) {
-                    let mut found_match = false;
-                    for lang in languages {
-                        if let Some(lang_str) = lang.as_str() {
-                            if lang_matches(lang_str, user_lang) {
-                                score += 60;
-                                found_match = true;
-                                break;
-                            }
-                        }
-                    }
-                    if !found_match && !languages.is_empty() {
-                        score -= 50; // Mismatch penalty in source data
-                    }
+        if let Some(source_data_str) = &book.source_data
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str)
+            && let Some(languages) = json.get("languages").and_then(|l| l.as_array())
+        {
+            let mut found_match = false;
+            for lang in languages {
+                if let Some(lang_str) = lang.as_str()
+                    && lang_matches(lang_str, user_lang)
+                {
+                    score += 60;
+                    found_match = true;
+                    break;
                 }
+            }
+            if !found_match && !languages.is_empty() {
+                score -= 50; // Mismatch penalty in source data
             }
         }
     }
 
     // Source boost for French users: Prioritize BNF (national library) for French content
-    if user_lang == "fr" || user_lang == "fra" || user_lang == "fre" {
-        if let Some(source) = &book.source {
-            if source == "BNF" {
-                score += 50; // National library bonus for French users
-            }
-        }
+    if (user_lang == "fr" || user_lang == "fra" || user_lang == "fre")
+        && let Some(source) = &book.source
+        && source == "BNF"
+    {
+        score += 50; // National library bonus for French users
     }
 
     // Author Match

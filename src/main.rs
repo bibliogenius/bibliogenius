@@ -84,11 +84,11 @@ async fn main() {
 
     // Check for --profile CLI argument
     let args: Vec<String> = std::env::args().collect();
-    if let Some(pos) = args.iter().position(|arg| arg == "--profile") {
-        if let Some(val) = args.get(pos + 1) {
-            // TODO: Audit that the environment access only happens in single-threaded code.
-            unsafe { std::env::set_var("PROFILE", val) };
-        }
+    if let Some(pos) = args.iter().position(|arg| arg == "--profile")
+        && let Some(val) = args.get(pos + 1)
+    {
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("PROFILE", val) };
     }
 
     let config = config::Config::from_env();

@@ -423,12 +423,12 @@ pub async fn get_all_tags() -> Result<Vec<FrbTag>, String> {
 
     let mut tag_counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     for book in books {
-        if let Some(subjects_json) = book.subjects {
-            if let Ok(subjects) = serde_json::from_str::<Vec<String>>(&subjects_json) {
-                for subject in subjects {
-                    if !subject.trim().is_empty() {
-                        *tag_counts.entry(subject.trim().to_string()).or_insert(0) += 1;
-                    }
+        if let Some(subjects_json) = book.subjects
+            && let Ok(subjects) = serde_json::from_str::<Vec<String>>(&subjects_json)
+        {
+            for subject in subjects {
+                if !subject.trim().is_empty() {
+                    *tag_counts.entry(subject.trim().to_string()).or_insert(0) += 1;
                 }
             }
         }

@@ -76,13 +76,12 @@ pub async fn search_bnf(query: &str) -> Result<Vec<BnfBook>, String> {
     let cache_key = query.to_lowercase().trim().to_string();
 
     // Check cache first (use try_lock to avoid blocking/panics)
-    if let Ok(cache) = BNF_CACHE.try_lock() {
-        if let Some(entry) = cache.get(&cache_key)
-            && entry.created_at.elapsed() < CACHE_TTL
-        {
-            tracing::debug!("BNF cache hit for query: {}", query);
-            return Ok(entry.data.clone());
-        }
+    if let Ok(cache) = BNF_CACHE.try_lock()
+        && let Some(entry) = cache.get(&cache_key)
+        && entry.created_at.elapsed() < CACHE_TTL
+    {
+        tracing::debug!("BNF cache hit for query: {}", query);
+        return Ok(entry.data.clone());
     }
 
     tracing::debug!("BNF cache miss for query: {}", query);
@@ -230,14 +229,13 @@ LIMIT 30
             cache.retain(|_, entry| entry.created_at.elapsed() < CACHE_TTL);
 
             // If still full, remove oldest entry
-            if cache.len() >= MAX_CACHE_ENTRIES {
-                if let Some(oldest_key) = cache
+            if cache.len() >= MAX_CACHE_ENTRIES
+                && let Some(oldest_key) = cache
                     .iter()
                     .min_by_key(|(_, e)| e.created_at)
                     .map(|(k, _)| k.clone())
-                {
-                    cache.remove(&oldest_key);
-                }
+            {
+                cache.remove(&oldest_key);
             }
         }
 

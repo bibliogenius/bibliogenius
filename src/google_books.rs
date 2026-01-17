@@ -185,74 +185,70 @@ pub async fn search_books(
 
     let mut books = Vec::new();
 
-    if let Ok(resp) = client.get(&url).send().await {
-        if let Ok(parsed) = resp.json::<GoogleBooksResponse>().await {
-            if let Some(items) = parsed.items {
-                for item in items {
-                    let info = item.volume_info;
+    if let Ok(resp) = client.get(&url).send().await
+        && let Ok(parsed) = resp.json::<GoogleBooksResponse>().await
+        && let Some(items) = parsed.items
+    {
+        for item in items {
+            let info = item.volume_info;
 
-                    // Convert to Book Model
-                    let cover_url = info
-                        .image_links
-                        .as_ref()
-                        .and_then(|l| l.thumbnail.clone())
-                        .map(|url| url.replace("http://", "https://"));
+            // Convert to Book Model
+            let cover_url = info
+                .image_links
+                .as_ref()
+                .and_then(|l| l.thumbnail.clone())
+                .map(|url| url.replace("http://", "https://"));
 
-                    // Extract ISBN from industryIdentifiers (prefer ISBN_13 over ISBN_10)
-                    let isbn = info.industry_identifiers.as_ref().and_then(|ids| {
-                        // First try to find ISBN_13
-                        let found = ids
-                            .iter()
-                            .find(|id| id.id_type == "ISBN_13")
-                            .or_else(|| ids.iter().find(|id| id.id_type == "ISBN_10"))
-                            .map(|id| id.identifier.replace("-", ""));
+            // Extract ISBN from industryIdentifiers (prefer ISBN_13 over ISBN_10)
+            let isbn = info.industry_identifiers.as_ref().and_then(|ids| {
+                // First try to find ISBN_13
+                ids.iter()
+                    .find(|id| id.id_type == "ISBN_13")
+                    .or_else(|| ids.iter().find(|id| id.id_type == "ISBN_10"))
+                    .map(|id| id.identifier.replace("-", ""))
+            });
 
-                        found
-                    });
-
-                    if info.industry_identifiers.is_none() {
-                        println!(
-                            "DEBUG GOOGLE_BOOKS: No industryIdentifiers at all for '{}'",
-                            info.title
-                        );
-                    }
-
-                    let source_data = serde_json::json!({
-                       "source": "google_books",
-                       "authors": info.authors.clone().unwrap_or_default(),
-                       "language": info.language.clone(),
-                    });
-
-                    let book = crate::models::book::Model {
-                        id: 0,
-                        title: info.title,
-                        isbn,
-                        publisher: info.publisher,
-                        publication_year: info
-                            .published_date
-                            .and_then(|d| d.chars().take(4).collect::<String>().parse().ok()),
-                        summary: info.description,
-                        dewey_decimal: None,
-                        lcc: None,
-                        subjects: None,
-                        marc_record: None,
-                        cataloguing_notes: None,
-                        source_data: Some(source_data.to_string()),
-                        shelf_position: None,
-                        cover_url,
-                        reading_status: "to_read".to_string(),
-                        finished_reading_at: None,
-                        started_reading_at: None,
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                        updated_at: chrono::Utc::now().to_rfc3339(),
-                        user_rating: None,
-                        owned: true,
-                        price: None,
-                        digital_formats: None,
-                    };
-                    books.push(book);
-                }
+            if info.industry_identifiers.is_none() {
+                println!(
+                    "DEBUG GOOGLE_BOOKS: No industryIdentifiers at all for '{}'",
+                    info.title
+                );
             }
+
+            let source_data = serde_json::json!({
+               "source": "google_books",
+               "authors": info.authors.clone().unwrap_or_default(),
+               "language": info.language.clone(),
+            });
+
+            let book = crate::models::book::Model {
+                id: 0,
+                title: info.title,
+                isbn,
+                publisher: info.publisher,
+                publication_year: info
+                    .published_date
+                    .and_then(|d| d.chars().take(4).collect::<String>().parse().ok()),
+                summary: info.description,
+                dewey_decimal: None,
+                lcc: None,
+                subjects: None,
+                marc_record: None,
+                cataloguing_notes: None,
+                source_data: Some(source_data.to_string()),
+                shelf_position: None,
+                cover_url,
+                reading_status: "to_read".to_string(),
+                finished_reading_at: None,
+                started_reading_at: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+                user_rating: None,
+                owned: true,
+                price: None,
+                digital_formats: None,
+            };
+            books.push(book);
         }
     }
 

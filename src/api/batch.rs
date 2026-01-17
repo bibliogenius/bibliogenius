@@ -105,11 +105,11 @@ pub async fn find_duplicates(State(db): State<DatabaseConnection>) -> impl IntoR
 
     for model in books {
         let isbn_clone = model.isbn.clone(); // Clone first
-        if let Some(isbn) = isbn_clone {
-            if !isbn.is_empty() {
-                let book_dto: book::Book = model.into(); // Now we can move model
-                isbn_map.entry(isbn).or_default().push(book_dto);
-            }
+        if let Some(isbn) = isbn_clone
+            && !isbn.is_empty()
+        {
+            let book_dto: book::Book = model.into(); // Now we can move model
+            isbn_map.entry(isbn).or_default().push(book_dto);
         }
     }
 

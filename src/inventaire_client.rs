@@ -477,11 +477,12 @@ pub async fn enrich_search_results(
                 let mut work_results = Vec::new(); // Results for this specific work item
                 let mut found_editions = false;
 
-                if let Ok(resp) = client.get(&editions_url).send().await {
-                    if resp.status().is_success() {
-                        if let Ok(body) = resp.text().await {
-                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                                if let Some(uris) = json.get("uris").and_then(|u| u.as_array()) {
+                if let Ok(resp) = client.get(&editions_url).send().await
+                    && resp.status().is_success()
+                    && let Ok(body) = resp.text().await
+                    && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+                    && let Some(uris) = json.get("uris").and_then(|u| u.as_array())
+                {
                                     // Fetch up to 40 editions per work
                                     let edition_uris: Vec<String> = uris
                                         .iter()
@@ -591,10 +592,6 @@ pub async fn enrich_search_results(
                                             }
                                         }
                                     }
-                                }
-                            }
-                        }
-                    }
                 }
 
                 if !found_editions {

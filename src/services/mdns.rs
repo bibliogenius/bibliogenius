@@ -273,12 +273,11 @@ pub fn is_mdns_active() -> bool {
 
 /// Stop the global mDNS service
 pub fn stop_mdns() {
-    if let Some(global) = MDNS_SERVICE.get() {
-        if let Ok(mut lock) = global.write() {
-            if let Some(service) = lock.take() {
-                service.stop();
-            }
-        }
+    if let Some(global) = MDNS_SERVICE.get()
+        && let Ok(mut lock) = global.write()
+        && let Some(service) = lock.take()
+    {
+        service.stop();
     }
 }
 

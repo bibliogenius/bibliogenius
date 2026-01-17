@@ -88,28 +88,28 @@ pub async fn login_mfa(
         }
     };
 
-    if verify_password(&payload.password, &user.password_hash).unwrap_or(false) {
-        if let Some(secret_str) = user.totp_secret {
-            // Secret stored as encoded string (likely base32 if we use get_secret_base32)
-            // But we store it as String. Let's assume we store the Base32 string.
-            // Setup saves `secret` which is `totp.get_secret_base32()`.
-            // So here we need to use Secret::Encoded.
-            let secret = Secret::Encoded(secret_str);
-            let totp = TOTP::new(
-                Algorithm::SHA1,
-                6,
-                1,
-                30,
-                secret.to_bytes().unwrap(),
-                Some(payload.username.clone()),
-                "BiblioGenius".to_string(),
-            )
-            .unwrap();
+    if verify_password(&payload.password, &user.password_hash).unwrap_or(false)
+        && let Some(secret_str) = user.totp_secret
+    {
+        // Secret stored as encoded string (likely base32 if we use get_secret_base32)
+        // But we store it as String. Let's assume we store the Base32 string.
+        // Setup saves `secret` which is `totp.get_secret_base32()`.
+        // So here we need to use Secret::Encoded.
+        let secret = Secret::Encoded(secret_str);
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret.to_bytes().unwrap(),
+            Some(payload.username.clone()),
+            "BiblioGenius".to_string(),
+        )
+        .unwrap();
 
-            if totp.check_current(&payload.code).unwrap_or(false) {
-                let token = create_jwt(&user.username, &user.role).unwrap();
-                return (StatusCode::OK, Json(json!({ "token": token }))).into_response();
-            }
+        if totp.check_current(&payload.code).unwrap_or(false) {
+            let token = create_jwt(&user.username, &user.role).unwrap();
+            return (StatusCode::OK, Json(json!({ "token": token }))).into_response();
         }
     }
 

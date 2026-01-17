@@ -92,26 +92,25 @@ pub async fn list_books(
             .find_related(crate::models::author::Entity)
             .all(db)
             .await
+            && !authors.is_empty()
         {
-            if !authors.is_empty() {
-                book_dto.author = Some(
-                    authors
-                        .into_iter()
-                        .map(|a| a.name)
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                );
-            }
+            book_dto.author = Some(
+                authors
+                    .into_iter()
+                    .map(|a| a.name)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
         }
 
         // Derive cover URLs from ISBN only if no cover is stored
-        if book_dto.cover_url.is_none() {
-            if let Some(isbn) = &book_dto.isbn {
-                book_dto.cover_url = Some(format!(
-                    "https://covers.openlibrary.org/b/isbn/{}-M.jpg",
-                    isbn
-                ));
-            }
+        if book_dto.cover_url.is_none()
+            && let Some(isbn) = &book_dto.isbn
+        {
+            book_dto.cover_url = Some(format!(
+                "https://covers.openlibrary.org/b/isbn/{}-M.jpg",
+                isbn
+            ));
         }
 
         // In-memory status filter (safety net)
@@ -164,34 +163,33 @@ pub async fn get_book(db: &DatabaseConnection, id: i32) -> Result<Book, ServiceE
         .find_related(crate::models::author::Entity)
         .all(db)
         .await
+        && !authors.is_empty()
     {
-        if !authors.is_empty() {
-            book_dto.author = Some(
-                authors
-                    .into_iter()
-                    .map(|a| a.name)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            );
-        }
+        book_dto.author = Some(
+            authors
+                .into_iter()
+                .map(|a| a.name)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
     }
 
     // Derive cover URLs only if no cover is stored
-    if book_dto.cover_url.is_none() {
-        if let Some(isbn) = &book_dto.isbn {
-            book_dto.cover_url = Some(format!(
-                "https://covers.openlibrary.org/b/isbn/{}-M.jpg",
-                isbn
-            ));
-        }
+    if book_dto.cover_url.is_none()
+        && let Some(isbn) = &book_dto.isbn
+    {
+        book_dto.cover_url = Some(format!(
+            "https://covers.openlibrary.org/b/isbn/{}-M.jpg",
+            isbn
+        ));
     }
-    if book_dto.large_cover_url.is_none() {
-        if let Some(isbn) = &book_dto.isbn {
-            book_dto.large_cover_url = Some(format!(
-                "https://covers.openlibrary.org/b/isbn/{}-L.jpg",
-                isbn
-            ));
-        }
+    if book_dto.large_cover_url.is_none()
+        && let Some(isbn) = &book_dto.isbn
+    {
+        book_dto.large_cover_url = Some(format!(
+            "https://covers.openlibrary.org/b/isbn/{}-L.jpg",
+            isbn
+        ));
     }
 
     Ok(book_dto)
@@ -334,12 +332,12 @@ pub async fn list_tags(db: &DatabaseConnection) -> Result<Vec<TagDto>, ServiceEr
     let mut tag_counts: HashMap<String, usize> = HashMap::new();
 
     for book in books {
-        if let Some(subjects_json) = book.subjects {
-            if let Ok(subjects) = serde_json::from_str::<Vec<String>>(&subjects_json) {
-                for subject in subjects {
-                    if !subject.trim().is_empty() {
-                        *tag_counts.entry(subject.trim().to_string()).or_insert(0) += 1;
-                    }
+        if let Some(subjects_json) = book.subjects
+            && let Ok(subjects) = serde_json::from_str::<Vec<String>>(&subjects_json)
+        {
+            for subject in subjects {
+                if !subject.trim().is_empty() {
+                    *tag_counts.entry(subject.trim().to_string()).or_insert(0) += 1;
                 }
             }
         }

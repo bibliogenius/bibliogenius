@@ -535,12 +535,12 @@ pub async fn list_tags(
     let mut tag_counts: HashMap<String, usize> = HashMap::new();
 
     for book in books {
-        if let Some(subjects_json) = book.subjects {
-            if let Ok(subjects) = serde_json::from_str::<Vec<String>>(&subjects_json) {
-                for subject in subjects {
-                    if !subject.trim().is_empty() {
-                        *tag_counts.entry(subject.trim().to_string()).or_insert(0) += 1;
-                    }
+        if let Some(subjects_json) = book.subjects
+            && let Ok(subjects) = serde_json::from_str::<Vec<String>>(&subjects_json)
+        {
+            for subject in subjects {
+                if !subject.trim().is_empty() {
+                    *tag_counts.entry(subject.trim().to_string()).or_insert(0) += 1;
                 }
             }
         }
@@ -583,12 +583,11 @@ pub async fn get_book(
                 .find_related(crate::models::author::Entity)
                 .all(&db)
                 .await
+                && !authors.is_empty()
             {
-                if !authors.is_empty() {
-                    let author_names: Vec<String> = authors.into_iter().map(|a| a.name).collect();
-                    book_dto.author = Some(author_names.join(", ")); // Backward compat
-                    book_dto.authors = Some(author_names); // New array field
-                }
+                let author_names: Vec<String> = authors.into_iter().map(|a| a.name).collect();
+                book_dto.author = Some(author_names.join(", ")); // Backward compat
+                book_dto.authors = Some(author_names); // New array field
             }
 
             // Derive cover_url
