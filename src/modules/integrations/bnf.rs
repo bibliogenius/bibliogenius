@@ -77,11 +77,11 @@ pub async fn search_bnf(query: &str) -> Result<Vec<BnfBook>, String> {
 
     // Check cache first (use try_lock to avoid blocking/panics)
     if let Ok(cache) = BNF_CACHE.try_lock() {
-        if let Some(entry) = cache.get(&cache_key) {
-            if entry.created_at.elapsed() < CACHE_TTL {
-                tracing::debug!("BNF cache hit for query: {}", query);
-                return Ok(entry.data.clone());
-            }
+        if let Some(entry) = cache.get(&cache_key)
+            && entry.created_at.elapsed() < CACHE_TTL
+        {
+            tracing::debug!("BNF cache hit for query: {}", query);
+            return Ok(entry.data.clone());
         }
     }
 

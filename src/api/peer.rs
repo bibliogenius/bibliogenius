@@ -38,12 +38,10 @@ fn validate_url(url_str: &str) -> Result<String, String> {
         }
 
         // Check if it's an IP address
-        if let Ok(ip) = host_str.parse::<IpAddr>() {
-            if ip.is_loopback() {
-                return Err("Loopback addresses blocked".to_string());
-            }
-            // Note: Link-local addresses (169.254.x.x, fe80::/10) are ALLOWED
-            // for local network P2P communication between devices on same network
+        if let Ok(ip) = host_str.parse::<IpAddr>()
+            && ip.is_loopback()
+        {
+            return Err("Loopback addresses blocked".to_string());
         }
     }
 

@@ -63,46 +63,46 @@ pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
     let body = resp.text().await.map_err(|e| e.to_string())?;
     let parsed: GoogleBooksResponse = serde_json::from_str(&body).map_err(|e| e.to_string())?;
 
-    if let Some(items) = parsed.items {
-        if let Some(first_item) = items.first() {
-            let info = &first_item.volume_info;
+    if let Some(items) = parsed.items
+        && let Some(first_item) = items.first()
+    {
+        let info = &first_item.volume_info;
 
-            let authors = info
-                .authors
-                .as_ref()
-                .map(|list| {
-                    list.iter()
-                        .filter(|name| {
-                            let n = name.trim();
-                            !n.eq_ignore_ascii_case("unknown author")
-                                && !n.eq_ignore_ascii_case("unknown")
-                        })
-                        .map(|name| AuthorMetadata {
-                            name: name.clone(),
-                            birth_year: None,
-                            death_year: None,
-                            image_url: None,
-                            bio: None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+        let authors = info
+            .authors
+            .as_ref()
+            .map(|list| {
+                list.iter()
+                    .filter(|name| {
+                        let n = name.trim();
+                        !n.eq_ignore_ascii_case("unknown author")
+                            && !n.eq_ignore_ascii_case("unknown")
+                    })
+                    .map(|name| AuthorMetadata {
+                        name: name.clone(),
+                        birth_year: None,
+                        death_year: None,
+                        image_url: None,
+                        bio: None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
-            let cover_url = info
-                .image_links
-                .as_ref()
-                .and_then(|l| l.thumbnail.clone())
-                .map(|url| url.replace("http://", "https://"));
+        let cover_url = info
+            .image_links
+            .as_ref()
+            .and_then(|l| l.thumbnail.clone())
+            .map(|url| url.replace("http://", "https://"));
 
-            return Ok(BookMetadata {
-                title: info.title.clone(),
-                authors,
-                publisher: info.publisher.clone(),
-                publication_year: info.published_date.clone(),
-                cover_url,
-                summary: info.description.clone(),
-            });
-        }
+        return Ok(BookMetadata {
+            title: info.title.clone(),
+            authors,
+            publisher: info.publisher.clone(),
+            publication_year: info.published_date.clone(),
+            cover_url,
+            summary: info.description.clone(),
+        });
     }
 
     Err("Book not found in Google Books".to_string())
@@ -128,16 +128,14 @@ pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
     let body = resp.text().await.ok()?;
     let parsed: GoogleBooksResponse = serde_json::from_str(&body).ok()?;
 
-    if let Some(items) = parsed.items {
-        if let Some(first_item) = items.first() {
-            if let Some(links) = &first_item.volume_info.image_links {
-                if let Some(thumb) = &links.thumbnail {
-                    // Google Books returns http links often, upgrade to https
-                    let secure_url = thumb.replace("http://", "https://");
-                    return Some(secure_url);
-                }
-            }
-        }
+    if let Some(items) = parsed.items
+        && let Some(first_item) = items.first()
+        && let Some(links) = &first_item.volume_info.image_links
+        && let Some(thumb) = &links.thumbnail
+    {
+        // Google Books returns http links often, upgrade to https
+        let secure_url = thumb.replace("http://", "https://");
+        return Some(secure_url);
     }
 
     None

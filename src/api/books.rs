@@ -54,33 +54,33 @@ pub async fn list_books(
 
     let mut query = BookEntity::find();
 
-    if let Some(status) = &filter.status {
-        if !status.is_empty() {
-            query = query.filter(crate::models::book::Column::ReadingStatus.eq(status));
-        }
+    if let Some(status) = &filter.status
+        && !status.is_empty()
+    {
+        query = query.filter(crate::models::book::Column::ReadingStatus.eq(status));
     }
 
-    if let Some(title) = &filter.title {
-        if !title.is_empty() {
-            query = query.filter(crate::models::book::Column::Title.contains(title));
-        }
+    if let Some(title) = &filter.title
+        && !title.is_empty()
+    {
+        query = query.filter(crate::models::book::Column::Title.contains(title));
     }
 
     // Tag filter (searching in JSON subjects array via simple text match for compatibility)
-    if let Some(tag_query) = &filter.tag {
-        if !tag_query.is_empty() {
-            query = query.filter(crate::models::book::Column::Subjects.contains(tag_query));
-        }
+    if let Some(tag_query) = &filter.tag
+        && !tag_query.is_empty()
+    {
+        query = query.filter(crate::models::book::Column::Subjects.contains(tag_query));
     }
 
-    if let Some(q) = &filter.q {
-        if !q.is_empty() {
-            let cond = Condition::any()
-                .add(crate::models::book::Column::Title.contains(q))
-                .add(crate::models::book::Column::Isbn.contains(q))
-                .add(crate::models::book::Column::Subjects.contains(q));
-            query = query.filter(cond);
-        }
+    if let Some(q) = &filter.q
+        && !q.is_empty()
+    {
+        let cond = Condition::any()
+            .add(crate::models::book::Column::Title.contains(q))
+            .add(crate::models::book::Column::Isbn.contains(q))
+            .add(crate::models::book::Column::Subjects.contains(q));
+        query = query.filter(cond);
     }
 
     // ... (existing code, ensure imports are correct or just use crate::models::book::Column etc)
@@ -137,12 +137,11 @@ pub async fn list_books(
             .find_related(crate::models::author::Entity)
             .all(&db)
             .await
+            && !authors.is_empty()
         {
-            if !authors.is_empty() {
-                let author_names: Vec<String> = authors.into_iter().map(|a| a.name).collect();
-                book_dto.author = Some(author_names.join(", ")); // Backward compat
-                book_dto.authors = Some(author_names); // New array field
-            }
+            let author_names: Vec<String> = authors.into_iter().map(|a| a.name).collect();
+            book_dto.author = Some(author_names.join(", ")); // Backward compat
+            book_dto.authors = Some(author_names); // New array field
         }
 
         // Derive cover_url
@@ -166,20 +165,19 @@ pub async fn list_books(
     // The user must accept this limitation for now or we implement complex DB sort later.
     // However, if NO LIMIT is provided (Local Library), we can still do in-memory sort to support 'author_asc'.
 
-    if filter.limit.is_none() {
-        if let Some(sort_order) = &filter.sort {
-            if sort_order == "author_asc" {
-                book_dtos.sort_by(|a, b| {
-                    let author_a = a.author.as_deref().unwrap_or("").to_lowercase();
-                    let author_b = b.author.as_deref().unwrap_or("").to_lowercase();
-                    if author_a == author_b {
-                        a.title.to_lowercase().cmp(&b.title.to_lowercase())
-                    } else {
-                        author_a.cmp(&author_b)
-                    }
-                });
+    if filter.limit.is_none()
+        && let Some(sort_order) = &filter.sort
+        && sort_order == "author_asc"
+    {
+        book_dtos.sort_by(|a, b| {
+            let author_a = a.author.as_deref().unwrap_or("").to_lowercase();
+            let author_b = b.author.as_deref().unwrap_or("").to_lowercase();
+            if author_a == author_b {
+                a.title.to_lowercase().cmp(&b.title.to_lowercase())
+            } else {
+                author_a.cmp(&author_b)
             }
-        }
+        });
     }
 
     Ok(Json(json!({

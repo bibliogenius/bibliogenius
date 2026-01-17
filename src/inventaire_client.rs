@@ -176,20 +176,16 @@ pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<InventaireMetadata,
         .and_then(|v| v.first().cloned())
     {
         // If it's a Wikidata URI (wd:Qxxx), fetch the entity to get the name
-        if publisher_uri.starts_with("wd:") {
-            if let Ok(publisher_entity) = fetch_entity(&client, &publisher_uri).await {
-                publisher_entity
-                    .labels
-                    .get("fr")
-                    .or_else(|| publisher_entity.labels.get("en"))
-                    .or_else(|| publisher_entity.labels.values().next())
-                    .cloned()
-            } else {
-                // Fallback to raw URI if fetch fails
-                Some(publisher_uri)
-            }
+        if publisher_uri.starts_with("wd:")
+            && let Ok(publisher_entity) = fetch_entity(&client, &publisher_uri).await
+        {
+            publisher_entity
+                .labels
+                .get("fr")
+                .or_else(|| publisher_entity.labels.get("en"))
+                .or_else(|| publisher_entity.labels.values().next())
+                .cloned()
         } else {
-            // Not a Wikidata URI, use as-is
             Some(publisher_uri)
         }
     } else {
@@ -443,24 +439,24 @@ pub async fn enrich_search_results(
     let mut enriched_results = Vec::new();
 
     for mut result in results {
-        if let Some(work_entity) = works_map.get(&result.uri) {
-            if let Some(uris) = &work_entity.claims.authors {
-                let mut names = Vec::new();
-                for uri in uris {
-                    if let Some(author_entity) = authors_map.get(uri) {
-                        let name = author_entity
-                            .labels
-                            .get("fr")
-                            .or_else(|| author_entity.labels.get("en"))
-                            .or_else(|| author_entity.labels.values().next())
-                            .cloned()
-                            .unwrap_or_else(|| "Unknown".to_string());
-                        names.push(name);
-                    }
+        if let Some(work_entity) = works_map.get(&result.uri)
+            && let Some(uris) = &work_entity.claims.authors
+        {
+            let mut names = Vec::new();
+            for uri in uris {
+                if let Some(author_entity) = authors_map.get(uri) {
+                    let name = author_entity
+                        .labels
+                        .get("fr")
+                        .or_else(|| author_entity.labels.get("en"))
+                        .or_else(|| author_entity.labels.values().next())
+                        .cloned()
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    names.push(name);
                 }
-                if !names.is_empty() {
-                    result.authors = Some(names);
-                }
+            }
+            if !names.is_empty() {
+                result.authors = Some(names);
             }
         }
         enriched_results.push(result);

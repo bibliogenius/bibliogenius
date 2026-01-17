@@ -47,16 +47,16 @@ impl GenieService {
         // German: suchen, suche, finden, finde, zeigen, zeige
         let search_pattern = Regex::new(r"(?i)^(search|find|lookup|show|get|chercher|cherche|trouver|trouve|rechercher|recherche|voir|buscar|busca|encontrar|encuentra|ver|mira|suchen|suche|finden|finde|zeigen|zeige)\s+(for\s+|pour\s+|para\s+|nach\s+)?(.+)$").unwrap();
 
-        if let Some(caps) = add_pattern.captures(&text_lower) {
-            if let Some(query) = caps.get(3) {
-                return UserIntent::AddBook(query.as_str().trim().to_string());
-            }
+        if let Some(caps) = add_pattern.captures(&text_lower)
+            && let Some(query) = caps.get(3)
+        {
+            return UserIntent::AddBook(query.as_str().trim().to_string());
         }
 
-        if let Some(caps) = search_pattern.captures(&text_lower) {
-            if let Some(query) = caps.get(3) {
-                return UserIntent::SearchBook(query.as_str().trim().to_string());
-            }
+        if let Some(caps) = search_pattern.captures(&text_lower)
+            && let Some(query) = caps.get(3)
+        {
+            return UserIntent::SearchBook(query.as_str().trim().to_string());
         }
 
         // Fallback: Fuzzy Logic (Simulated)

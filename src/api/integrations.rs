@@ -160,15 +160,15 @@ async fn fetch_edition_extras(edition_key: &str) -> Option<(String, Option<Strin
             let publisher = edition.publishers.and_then(|v| v.first().cloned());
 
             // Prefer ISBN-13 over ISBN-10
-            if let Some(isbns) = edition.isbn_13 {
-                if let Some(isbn) = isbns.first() {
-                    return Some((isbn.clone(), publisher));
-                }
+            if let Some(isbns) = edition.isbn_13
+                && let Some(isbn) = isbns.first()
+            {
+                return Some((isbn.clone(), publisher));
             }
-            if let Some(isbns) = edition.isbn_10 {
-                if let Some(isbn) = isbns.first() {
-                    return Some((isbn.clone(), publisher));
-                }
+            if let Some(isbns) = edition.isbn_10
+                && let Some(isbn) = isbns.first()
+            {
+                return Some((isbn.clone(), publisher));
             }
         }
     }
@@ -204,15 +204,15 @@ async fn fetch_work_edition_extras(work_key: &str) -> Option<(String, Option<Str
                 let publisher = entry.publishers.and_then(|v| v.first().cloned());
 
                 // Prefer ISBN-13
-                if let Some(isbns) = &entry.isbn_13 {
-                    if let Some(isbn) = isbns.first() {
-                        return Some((isbn.clone(), publisher));
-                    }
+                if let Some(isbns) = &entry.isbn_13
+                    && let Some(isbn) = isbns.first()
+                {
+                    return Some((isbn.clone(), publisher));
                 }
-                if let Some(isbns) = &entry.isbn_10 {
-                    if let Some(isbn) = isbns.first() {
-                        return Some((isbn.clone(), publisher));
-                    }
+                if let Some(isbns) = &entry.isbn_10
+                    && let Some(isbn) = isbns.first()
+                {
+                    return Some((isbn.clone(), publisher));
                 }
             }
         }
@@ -735,18 +735,17 @@ pub async fn search_unified(
                             }
                         } else if let Some(publisher) =
                             json.get("publisher").and_then(|p| p.as_str())
+                            && !publisher.is_empty()
                         {
-                            if !publisher.is_empty() {
-                                dto.publisher = Some(publisher.to_string());
-                            }
+                            dto.publisher = Some(publisher.to_string());
                         }
                     }
                     // Fallback: extract ISBN from source_data if model.isbn was None
                     if dto.isbn.is_none() {
-                        if let Some(isbns) = json.get("isbns").and_then(|i| i.as_array()) {
-                            if let Some(first_isbn) = isbns.first().and_then(|v| v.as_str()) {
-                                dto.isbn = Some(first_isbn.to_string());
-                            }
+                        if let Some(isbns) = json.get("isbns").and_then(|i| i.as_array())
+                            && let Some(first_isbn) = isbns.first().and_then(|v| v.as_str())
+                        {
+                            dto.isbn = Some(first_isbn.to_string());
                         }
                     }
 
@@ -757,34 +756,35 @@ pub async fn search_unified(
                         .unwrap_or(true); // Default to true if source not specified (legacy)
 
                     // Fallback: fetch from edition API if still no ISBN OR no publisher
-                    if is_openlibrary && (dto.isbn.is_none() || dto.publisher.is_none()) {
-                        if let Some(edition_key) = json.get("edition_key").and_then(|k| k.as_str())
+                    if is_openlibrary
+                        && (dto.isbn.is_none() || dto.publisher.is_none())
+                        && let Some(edition_key) = json.get("edition_key").and_then(|k| k.as_str())
+                    {
+                        if let Some((fetched_isbn, fetched_pub)) =
+                            fetch_edition_extras(edition_key).await
                         {
-                            if let Some((fetched_isbn, fetched_pub)) =
-                                fetch_edition_extras(edition_key).await
-                            {
-                                if dto.isbn.is_none() {
-                                    dto.isbn = Some(fetched_isbn);
-                                }
-                                if dto.publisher.is_none() && fetched_pub.is_some() {
-                                    dto.publisher = fetched_pub;
-                                }
+                            if dto.isbn.is_none() {
+                                dto.isbn = Some(fetched_isbn);
+                            }
+                            if dto.publisher.is_none() && fetched_pub.is_some() {
+                                dto.publisher = fetched_pub;
                             }
                         }
                     }
 
                     // Extra Fallback: fetch from Work API if still no ISBN OR no publisher
-                    if is_openlibrary && (dto.isbn.is_none() || dto.publisher.is_none()) {
-                        if let Some(work_key) = json.get("key").and_then(|k| k.as_str()) {
-                            if let Some((fetched_isbn, fetched_pub)) =
-                                fetch_work_edition_extras(work_key).await
-                            {
-                                if dto.isbn.is_none() {
-                                    dto.isbn = Some(fetched_isbn);
-                                }
-                                if dto.publisher.is_none() && fetched_pub.is_some() {
-                                    dto.publisher = fetched_pub;
-                                }
+                    if is_openlibrary
+                        && (dto.isbn.is_none() || dto.publisher.is_none())
+                        && let Some(work_key) = json.get("key").and_then(|k| k.as_str())
+                    {
+                        if let Some((fetched_isbn, fetched_pub)) =
+                            fetch_work_edition_extras(work_key).await
+                        {
+                            if dto.isbn.is_none() {
+                                dto.isbn = Some(fetched_isbn);
+                            }
+                            if dto.publisher.is_none() && fetched_pub.is_some() {
+                                dto.publisher = fetched_pub;
                             }
                         }
                     }

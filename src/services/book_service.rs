@@ -57,22 +57,22 @@ pub async fn list_books(
     let mut query = BookEntity::find();
 
     // Apply DB-level filters
-    if let Some(status) = &filter.status {
-        if !status.is_empty() {
-            query = query.filter(crate::models::book::Column::ReadingStatus.eq(status));
-        }
+    if let Some(status) = &filter.status
+        && !status.is_empty()
+    {
+        query = query.filter(crate::models::book::Column::ReadingStatus.eq(status));
     }
 
-    if let Some(title) = &filter.title {
-        if !title.is_empty() {
-            query = query.filter(crate::models::book::Column::Title.contains(title));
-        }
+    if let Some(title) = &filter.title
+        && !title.is_empty()
+    {
+        query = query.filter(crate::models::book::Column::Title.contains(title));
     }
 
-    if let Some(tag) = &filter.tag {
-        if !tag.is_empty() {
-            query = query.filter(crate::models::book::Column::Subjects.contains(tag));
-        }
+    if let Some(tag) = &filter.tag
+        && !tag.is_empty()
+    {
+        query = query.filter(crate::models::book::Column::Subjects.contains(tag));
     }
 
     let books = query
@@ -115,31 +115,31 @@ pub async fn list_books(
         }
 
         // In-memory status filter (safety net)
-        if let Some(status_filter) = &filter.status {
-            if !status_filter.is_empty() {
-                if let Some(book_status) = &book_dto.reading_status {
-                    if book_status != status_filter {
-                        continue;
-                    }
-                } else {
+        if let Some(status_filter) = &filter.status
+            && !status_filter.is_empty()
+        {
+            if let Some(book_status) = &book_dto.reading_status {
+                if book_status != status_filter {
                     continue;
                 }
+            } else {
+                continue;
             }
         }
 
         // In-memory author filter
-        if let Some(author_query) = &filter.author {
-            if !author_query.is_empty() {
-                if let Some(authors) = &book_dto.author {
-                    if !authors
-                        .to_lowercase()
-                        .contains(&author_query.to_lowercase())
-                    {
-                        continue;
-                    }
-                } else {
+        if let Some(author_query) = &filter.author
+            && !author_query.is_empty()
+        {
+            if let Some(authors) = &book_dto.author {
+                if !authors
+                    .to_lowercase()
+                    .contains(&author_query.to_lowercase())
+                {
                     continue;
                 }
+            } else {
+                continue;
             }
         }
 
