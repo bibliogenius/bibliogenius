@@ -43,7 +43,8 @@ pub struct InventaireEntity {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct InventaireImage {
-    pub url: String,
+    /// URL may be absent if the image object is empty `{}`
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -665,8 +666,10 @@ fn wikidata_language_to_code(uri: &str) -> String {
 /// Priority: entity.image.url (always present when image exists) > claims.invp:P2/wdt:P18
 fn get_entity_image_url(entity: &InventaireEntity) -> Option<String> {
     // First try the image object on the entity (most reliable)
-    if let Some(img) = &entity.image {
-        let url = &img.url;
+    // Note: image can be an empty object `{}` with url: None
+    if let Some(img) = &entity.image
+        && let Some(url) = &img.url
+    {
         if url.starts_with("http") {
             return Some(url.clone());
         } else if url.starts_with("/") {
@@ -756,6 +759,56 @@ mod search_tests {
             }
             Err(e) => {
                 // It's possible the API fails in CI/offline, but for manual verification it should pass.
+                panic!("Search failed: {}", e);
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore] // Flaky in CI due to external network request
+    async fn test_search_with_enrichment() {
+        let query = "Martin Eden";
+        let search_result = search_inventaire(query).await;
+
+        match search_result {
+            Ok(results) => {
+                println!("Search returned {} results", results.len());
+                assert!(!results.is_empty());
+
+                // Now enrich the results
+                match enrich_search_results(results).await {
+                    Ok(enriched) => {
+                        println!("Enrichment returned {} results", enriched.len());
+                        assert!(!enriched.is_empty(), "Enrichment should return at least one result");
+
+                        // Check that at least some results have ISBNs
+                        let with_isbn = enriched.iter().filter(|r| r.isbn.is_some()).count();
+                        println!("Results with ISBN: {}", with_isbn);
+
+                        // Check that at least some results have authors
+                        let with_authors = enriched.iter().filter(|r| r.authors.is_some()).count();
+                        println!("Results with authors: {}", with_authors);
+
+                        // Print first few results for debugging
+                        for (i, result) in enriched.iter().take(5).enumerate() {
+                            println!(
+                                "Result {}: {} | ISBN: {:?} | Authors: {:?} | Publisher: {:?}",
+                                i + 1,
+                                result.label,
+                                result.isbn,
+                                result.authors,
+                                result.publisher
+                            );
+                        }
+
+                        assert!(with_isbn > 0, "At least one result should have an ISBN");
+                    }
+                    Err(e) => {
+                        panic!("Enrichment failed: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
                 panic!("Search failed: {}", e);
             }
         }
