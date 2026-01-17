@@ -32,6 +32,7 @@ I need to design a documentation system for BiblioGenius, an open-source library
 - Recommended documentation standards/conventions for contributors
 
 Please provide a detailed implementation plan with specific tooling recommendations.
+These documentations would be ideally accessibles by agents so they can have more context before coding
 
 ---
 
@@ -85,3 +86,40 @@ I need to create a step-by-step onboarding tutorial for developers who want to c
 - Suggested format (markdown docs, interactive guide, video scripts?)
 
 Please design this tutorial with progressive complexity, allowing contributors to start with simple tasks before tackling cross-stack features.
+
+This tutorial would be ideally accessible by agents so they can have more context before coding
+
+---
+
+## Prompt 3: Notes & Highlights Feature with Module System
+
+**Role**: Senior Flutter & Systems Architect specializing in Rust/Flutter integration.
+
+**Context**: BiblioGenius is a personal library management app (Flutter + Rust backend). We are introducing a "Notes & Highlights" feature for books.
+
+**Core Requirements:**
+
+1. **Modular Architecture**
+   - The "Notes" feature must be implemented as a distinct **Module** that can be enabled or disabled in the app settings.
+   - This modularity should follow or establish a pattern for future optional features.
+
+2. **Safety & Data Protection (Critical)**
+   - **Disabling Logic**: Users *can* disable the module, but this action is destructive (hides/removes notes).
+   - **Explicit Warning**: The disable flow MUST trigger a strict confirmation dialog: *"Disabling this module will delete all your notes. Are you sure?"*
+   - **Mandatory Export Prompt**: Before the final deletion confirmation, the user MUST be informed that they can export their notes. The flow should offer an "Export Notes" button alongside the "Delete & Disable" button.
+
+3. **Data Specifications**
+   - **Entity**: Create a `Note` entity linked to a `Book`.
+   - **Fields**: Text content, page number/location, creation date, and metadata to support future Kindle imports (e.g., `original_source`, `highlight_timestamp`, `location_range`).
+   - **Storage**: Persisted via Rust backend (SeaORM/SQLite).
+
+4. **Integration**
+   - **UI**: Seamlessly integrate into `BookDetailsScreen` when enabled.
+   - **Kindle Strategy**: Outline a plan for a parser (e.g., `My Clippings.txt`) to run locally.
+
+**Deliverables Needed:**
+
+- **Data Model Schema**: Rust structs and database migration plan.
+- **Module Logic**: State management design for enabling/disabling modules.
+- **Safety Flow Design**: UX description or pseudo-code for the Disable -> Export-Warning -> Confirm -> Delete flow.
+- **Implementation Plan**: Step-by-step guide to build this feature.
