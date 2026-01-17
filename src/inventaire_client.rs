@@ -779,7 +779,10 @@ mod search_tests {
                 match enrich_search_results(results).await {
                     Ok(enriched) => {
                         println!("Enrichment returned {} results", enriched.len());
-                        assert!(!enriched.is_empty(), "Enrichment should return at least one result");
+                        assert!(
+                            !enriched.is_empty(),
+                            "Enrichment should return at least one result"
+                        );
 
                         // Check that at least some results have ISBNs
                         let with_isbn = enriched.iter().filter(|r| r.isbn.is_some()).count();
