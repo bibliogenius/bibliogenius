@@ -1,8 +1,8 @@
 use axum::{
+    Json,
     extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use sea_orm::DatabaseConnection;
 use serde::Deserialize;
@@ -228,14 +228,14 @@ pub async fn search_external(
     use crate::models::installation_profile::Entity as ProfileEntity;
     use sea_orm::EntityTrait;
 
-    let enable_openlibrary =
-        match ProfileEntity::find_by_id(1).one(db).await { Ok(Some(profile_model)) => {
+    let enable_openlibrary = match ProfileEntity::find_by_id(1).one(db).await {
+        Ok(Some(profile_model)) => {
             let modules: Vec<String> =
                 serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
             !modules.contains(&"disable_fallback:openlibrary".to_string())
-        } _ => {
-            true
-        }};
+        }
+        _ => true,
+    };
 
     let mut books = Vec::new();
 
@@ -335,6 +335,7 @@ pub async fn search_external(
                             user_rating: None,
                             owned: true, // External search results are assumed owned
                             price: None, // No price from external search
+                            digital_formats: None,
                         };
                         books.push(book);
                     }
@@ -426,17 +427,18 @@ pub async fn search_unified(
 
     // Load profile config to check enabled providers
     let (mut enable_inventaire, mut enable_bnf, mut enable_openlibrary, mut enable_google_books) =
-        match ProfileEntity::find_by_id(1).one(&db).await { Ok(Some(profile_model)) => {
-            let modules: Vec<String> =
-                serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
-            let inv = !modules.contains(&"disable_fallback:inventaire".to_string());
-            let bnf = !modules.contains(&"disable_fallback:bnf".to_string());
-            let ol = !modules.contains(&"disable_fallback:openlibrary".to_string());
-            let gb = modules.contains(&"enable_google_books".to_string());
-            (inv, bnf, ol, gb)
-        } _ => {
-            (true, true, true, false)
-        }};
+        match ProfileEntity::find_by_id(1).one(&db).await {
+            Ok(Some(profile_model)) => {
+                let modules: Vec<String> =
+                    serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
+                let inv = !modules.contains(&"disable_fallback:inventaire".to_string());
+                let bnf = !modules.contains(&"disable_fallback:bnf".to_string());
+                let ol = !modules.contains(&"disable_fallback:openlibrary".to_string());
+                let gb = modules.contains(&"enable_google_books".to_string());
+                (inv, bnf, ol, gb)
+            }
+            _ => (true, true, true, false),
+        };
 
     let is_autocomplete = params.autocomplete.unwrap_or(false);
     let mut search_timeout = std::time::Duration::from_secs(8);
@@ -636,6 +638,7 @@ pub async fn search_unified(
                 owned: Some(true),
                 price: None,
                 language: item.language.clone(), // Language from Wikidata
+                digital_formats: None,
             };
             results.push(book);
         }
@@ -679,6 +682,7 @@ pub async fn search_unified(
                     owned: Some(true),
                     price: None,
                     language: Some("fr".to_string()), // BNF is French National Library
+                    digital_formats: None,
                 };
                 results.push(book);
             }

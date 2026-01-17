@@ -44,6 +44,7 @@ pub struct Model {
     /// Price of the book (EUR). Used by bookseller profile.
     /// If set, this is the default price for all copies of this book.
     pub price: Option<f64>,
+    pub digital_formats: Option<String>, // JSON array
 }
 
 // ... (Relation enum and Related impls omit for brevity) ...
@@ -119,6 +120,8 @@ pub struct Book {
     pub price: Option<f64>, // Price in EUR (for bookseller profile)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>, // Language code (e.g., "fr", "en", "fre", "eng")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digital_formats: Option<Vec<String>>, // ["ebook", "audiobook"]
 }
 
 impl From<Model> for Book {
@@ -139,6 +142,10 @@ impl From<Model> for Book {
                         .map(|s| s.to_string())
                 })
         });
+
+        let digital_formats: Option<Vec<String>> = model
+            .digital_formats
+            .map(|s| serde_json::from_str(&s).unwrap_or_default());
 
         Self {
             id: Some(model.id),
@@ -166,6 +173,7 @@ impl From<Model> for Book {
             owned: Some(model.owned),
             price: model.price,
             language,
+            digital_formats,
         }
     }
 }
@@ -197,6 +205,10 @@ impl From<Book> for ActiveModel {
             user_rating: book.user_rating.map_or(NotSet, |r| Set(Some(r))),
             owned: book.owned.map_or(NotSet, Set),
             price: book.price.map_or(NotSet, |p| Set(Some(p))),
+            digital_formats: book
+                .digital_formats
+                .map(|s| serde_json::to_string(&s).unwrap_or_default())
+                .map_or(NotSet, |s| Set(Some(s))),
         }
     }
 }

@@ -250,6 +250,7 @@ pub async fn search_books(
                         user_rating: None,
                         owned: true,
                         price: None,
+                        digital_formats: None,
                     };
                     books.push(book);
                 }

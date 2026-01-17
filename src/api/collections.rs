@@ -124,6 +124,7 @@ pub struct CollectionBookDto {
     pub cover_url: Option<String>,
     pub added_at: String,
     pub is_owned: bool, // Derived from comparing with owned books
+    pub digital_formats: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -253,6 +254,9 @@ pub async fn get_collection_books(
                         cover_url: b.cover_url,
                         added_at: cb.added_at,
                         is_owned: b.owned,
+                        digital_formats: b
+                            .digital_formats
+                            .and_then(|s| serde_json::from_str(&s).ok()),
                     });
                 }
             }

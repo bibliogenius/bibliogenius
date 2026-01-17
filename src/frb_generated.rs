@@ -1242,6 +1242,7 @@ impl SseDecode for crate::api::frb::FrbBook {
         let mut var_startedReadingAt = <Option<String>>::sse_decode(deserializer);
         let mut var_owned = <bool>::sse_decode(deserializer);
         let mut var_price = <Option<f64>>::sse_decode(deserializer);
+        let mut var_digitalFormats = <Option<Vec<String>>>::sse_decode(deserializer);
         return crate::api::frb::FrbBook {
             id: var_id,
             title: var_title,
@@ -1262,6 +1263,7 @@ impl SseDecode for crate::api::frb::FrbBook {
             started_reading_at: var_startedReadingAt,
             owned: var_owned,
             price: var_price,
+            digital_formats: var_digitalFormats,
         };
     }
 }
@@ -1519,6 +1521,17 @@ impl SseDecode for Option<i32> {
     }
 }
 
+impl SseDecode for Option<Vec<String>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<Vec<String>>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for u16 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1620,6 +1633,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbBook {
             self.started_reading_at.into_into_dart().into_dart(),
             self.owned.into_into_dart().into_dart(),
             self.price.into_into_dart().into_dart(),
+            self.digital_formats.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1775,6 +1789,7 @@ impl SseEncode for crate::api::frb::FrbBook {
         <Option<String>>::sse_encode(self.started_reading_at, serializer);
         <bool>::sse_encode(self.owned, serializer);
         <Option<f64>>::sse_encode(self.price, serializer);
+        <Option<Vec<String>>>::sse_encode(self.digital_formats, serializer);
     }
 }
 
@@ -1960,6 +1975,16 @@ impl SseEncode for Option<i32> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <i32>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<Vec<String>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <Vec<String>>::sse_encode(value, serializer);
         }
     }
 }

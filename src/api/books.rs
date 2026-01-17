@@ -5,10 +5,10 @@ use axum::{
     response::IntoResponse,
 };
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::models::book::{ActiveModel, Entity as BookEntity};
 use crate::models::Book;
+use crate::models::book::{ActiveModel, Entity as BookEntity};
 
 #[derive(serde::Deserialize, Default)]
 pub struct BookFilter {
@@ -232,6 +232,9 @@ pub async fn create_book(
         finished_reading_at: Set(book.finished_reading_at.flatten()),
         owned: Set(owned),
         price: Set(book.price),
+        digital_formats: Set(book
+            .digital_formats
+            .map(|s| serde_json::to_string(&s).unwrap_or_else(|_| "[]".to_string()))),
         created_at: Set(now.to_rfc3339()),
         updated_at: Set(now.to_rfc3339()),
         ..Default::default()
@@ -394,14 +397,14 @@ pub async fn update_book(
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "Book not found"})),
             )
-                .into_response()
+                .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": e.to_string()})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -447,6 +450,12 @@ pub async fn update_book(
     }
 
     book.price = Set(book_data.price);
+
+    // Handle digital_formats update
+    if let Some(formats) = book_data.digital_formats {
+        let formats_json = serde_json::to_string(&formats).unwrap_or_else(|_| "[]".to_string());
+        book.digital_formats = Set(Some(formats_json));
+    }
 
     book.updated_at = Set(now.to_rfc3339());
 
@@ -645,7 +654,7 @@ pub async fn reorder_books(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": e.to_string()})),
             )
-                .into_response()
+                .into_response();
         }
     };
 

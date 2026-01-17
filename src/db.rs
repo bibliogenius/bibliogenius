@@ -801,6 +801,14 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 028: Add digital_formats to books
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE books ADD COLUMN digital_formats TEXT".to_owned(),
+        ))
+        .await;
+
     // Migration 028: Add price to copies
     let _ = db
         .execute(Statement::from_string(

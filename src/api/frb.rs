@@ -87,6 +87,7 @@ pub struct FrbBook {
     pub started_reading_at: Option<String>,
     pub owned: bool,        // Added for copy management
     pub price: Option<f64>, // Added for bookseller profile
+    pub digital_formats: Option<Vec<String>>,
 }
 
 /// Convert domain Book to FFI-safe FrbBook
@@ -114,6 +115,7 @@ impl From<crate::models::Book> for FrbBook {
             started_reading_at: book.started_reading_at.flatten(),
             owned: book.owned.unwrap_or(true), // Default to owned if None (legacy/missing)
             price: book.price,
+            digital_formats: book.digital_formats,
         }
     }
 }
@@ -295,6 +297,7 @@ impl From<FrbBook> for crate::models::Book {
             owned: Some(frb_book.owned),
             price: frb_book.price, // Price now exposed in FFI layer
             language: None,
+            digital_formats: frb_book.digital_formats,
         }
     }
 }
@@ -919,7 +922,10 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                     tracing::info!("🚀 FFI Server task starting on port {}", server_port);
                     match axum::serve(listener, app).await {
                         Ok(()) => {
-                            tracing::warn!("⚠️ FFI Server task exited normally on port {} (this is unexpected)", server_port);
+                            tracing::warn!(
+                                "⚠️ FFI Server task exited normally on port {} (this is unexpected)",
+                                server_port
+                            );
                         }
                         Err(e) => {
                             tracing::error!("❌ FFI Server Error on port {}: {}", server_port, e);
