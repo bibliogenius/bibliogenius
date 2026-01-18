@@ -259,6 +259,12 @@ fn generate_bnf_cover_url(bnf_uri: &str) -> Option<String> {
     // URI format: http://data.bnf.fr/ark:/12148/cb123456789
     if let Some(ark_start) = bnf_uri.find("ark:/") {
         let ark = &bnf_uri[ark_start..];
+        // Only generate thumbnail URLs for digitized documents (bpt6k, btv1b)
+        // Notice ARKs (cb...) don't have thumbnails on Gallica - they cause connection errors
+        let ark_id = ark.trim_start_matches("ark:/12148/");
+        if !ark_id.starts_with("bpt6k") && !ark_id.starts_with("btv1b") {
+            return None;
+        }
         // Try Gallica thumbnail service
         return Some(format!(
             "https://gallica.bnf.fr/{}/thumbnail",
