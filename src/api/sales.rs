@@ -4,6 +4,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use chrono::Local;
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -15,8 +16,10 @@ use crate::services::sale_service::{self, SaleFilter};
 pub struct CreateSaleRequest {
     pub copy_id: i32,
     pub contact_id: Option<i32>,
-    pub library_id: i32,
-    pub sale_date: String,
+    /// Default to 1 if not provided (single library mode for FFI)
+    pub library_id: Option<i32>,
+    /// Default to current datetime if not provided
+    pub sale_date: Option<String>,
     pub sale_price: f64,
     pub notes: Option<String>,
 }
@@ -43,12 +46,15 @@ pub async fn create_sale(
     State(db): State<DatabaseConnection>,
     Json(payload): Json<CreateSaleRequest>,
 ) -> impl IntoResponse {
+    // Default sale_date to now if not provided
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
     let dto = crate::models::sale::SaleDto {
         id: None,
         copy_id: payload.copy_id,
         contact_id: payload.contact_id,
-        library_id: payload.library_id,
-        sale_date: payload.sale_date,
+        library_id: payload.library_id.unwrap_or(1),
+        sale_date: payload.sale_date.unwrap_or(now),
         sale_price: payload.sale_price,
         status: None,
         notes: payload.notes,
