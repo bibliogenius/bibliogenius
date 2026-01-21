@@ -122,6 +122,8 @@ pub struct CollectionBookDto {
     pub title: String,
     pub author: Option<String>,
     pub cover_url: Option<String>,
+    pub publisher: Option<String>,
+    pub publication_year: Option<i32>,
     pub added_at: String,
     pub is_owned: bool, // Derived from comparing with owned books
     pub digital_formats: Option<Vec<String>>,
@@ -252,6 +254,8 @@ pub async fn get_collection_books(
                         // TODO: Join with authors table to get actual author name
                         author: None,
                         cover_url: b.cover_url,
+                        publisher: b.publisher,
+                        publication_year: b.publication_year,
                         added_at: cb.added_at,
                         is_owned: b.owned,
                         digital_formats: b

@@ -320,9 +320,9 @@ pub async fn reset_app(
     _claims: crate::auth::Claims,
 ) -> impl IntoResponse {
     use crate::models::{
-        author, book, book_authors, book_tags, contact, copy, installation_profile, library,
-        library_config, loan, operation_log, p2p_outgoing_request, p2p_request, peer, peer_book,
-        tag, user,
+        author, book, book_authors, book_tags, collection, collection_book, contact, copy,
+        installation_profile, library, library_config, loan, operation_log, p2p_outgoing_request,
+        p2p_request, peer, peer_book, tag, user,
     };
 
     // Helper macro to delete all from a table
@@ -342,6 +342,8 @@ pub async fn reset_app(
     // Delete in order of dependencies (child tables first)
     delete_all!(loan);
     delete_all!(copy);
+    delete_all!(collection_book);
+    delete_all!(collection);
     delete_all!(book_authors);
     delete_all!(book_tags);
     delete_all!(book);
