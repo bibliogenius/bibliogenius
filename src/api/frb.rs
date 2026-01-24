@@ -317,6 +317,7 @@ pub async fn create_book(book: FrbBook) -> Result<FrbBook, String> {
 
     match crate::services::book_service::create_book(db, book_dto).await {
         Ok(created_book) => Ok(FrbBook::from(created_book)),
+        Err(crate::services::book_service::ServiceError::InvalidInput(msg)) => Err(msg),
         Err(e) => Err(format!("{:?}", e)),
     }
 }
@@ -368,6 +369,7 @@ pub async fn update_book(id: i32, book: FrbBook) -> Result<FrbBook, String> {
 
     match crate::services::book_service::update_book(db, id, book_dto).await {
         Ok(updated_book) => Ok(FrbBook::from(updated_book)),
+        Err(crate::services::book_service::ServiceError::InvalidInput(msg)) => Err(msg),
         Err(e) => Err(format!("{:?}", e)),
     }
 }

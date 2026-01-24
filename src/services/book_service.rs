@@ -34,6 +34,7 @@ pub struct TagDto {
 pub enum ServiceError {
     Database(String),
     NotFound,
+    InvalidInput(String),
 }
 
 impl From<sea_orm::DbErr> for ServiceError {
@@ -199,6 +200,12 @@ pub async fn get_book(db: &DatabaseConnection, id: i32) -> Result<Book, ServiceE
 pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, ServiceError> {
     let now = chrono::Utc::now();
 
+    let reading_status = book
+        .reading_status
+        .clone()
+        .unwrap_or_else(|| "to_read".to_string());
+    validate_reading_status(&reading_status)?;
+
     let subjects_json = book
         .subjects
         .as_ref()
@@ -217,10 +224,7 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         cataloguing_notes: Set(book.cataloguing_notes.clone()),
         source_data: Set(book.source_data.clone()),
         cover_url: Set(book.cover_url.clone()),
-        reading_status: Set(book
-            .reading_status
-            .clone()
-            .unwrap_or_else(|| "to_read".to_string())),
+        reading_status: Set(reading_status),
         started_reading_at: Set(book.started_reading_at.clone().flatten()),
         finished_reading_at: Set(book.finished_reading_at.clone().flatten()),
         owned: Set(book.owned.unwrap_or(true)),
@@ -273,6 +277,17 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
     Ok(Book::from(model))
 }
 
+/// Validates that the reading status is one of the allowed values
+fn validate_reading_status(status: &str) -> Result<(), ServiceError> {
+    match status {
+        "to_read" | "reading" | "read" | "wanting" | "abandoned" => Ok(()),
+        _ => Err(ServiceError::InvalidInput(format!(
+            "Invalid reading status: '{}'",
+            status
+        ))),
+    }
+}
+
 /// Update an existing book
 pub async fn update_book(
     db: &DatabaseConnection,
@@ -294,6 +309,7 @@ pub async fn update_book(
     book.publisher = Set(book_data.publisher);
     book.publication_year = Set(book_data.publication_year);
     if let Some(status) = book_data.reading_status {
+        validate_reading_status(&status)?;
         book.reading_status = Set(status);
     }
     if let Some(finished_at) = book_data.finished_reading_at {
