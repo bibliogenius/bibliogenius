@@ -261,9 +261,15 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         let is_individual_profile =
             profile.profile_type == "individual" || profile.profile_type == "kid";
         if is_individual_profile && model.owned {
+            // Dynamically get the library_id
+            let library = crate::models::library::Entity::find()
+                .one(db)
+                .await?
+                .ok_or(ServiceError::NotFound)?; // Return NotFound if no library exists
+
             let copy = crate::models::copy::ActiveModel {
                 book_id: Set(model.id),
-                library_id: Set(1),
+                library_id: Set(library.id), // Use the dynamically fetched library ID
                 status: Set("available".to_string()),
                 is_temporary: Set(false),
                 created_at: Set(now.to_rfc3339()),
