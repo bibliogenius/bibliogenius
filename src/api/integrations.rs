@@ -837,9 +837,9 @@ pub async fn search_unified(
     }
 
     // Global Quality Filter: discard results that are too sparse
-    // (Missing ISBN AND missing Cover)
-    // We keep results if they have EITHER an ISBN OR a Cover.
-    // Publisher is used for prioritization but is not a hard requirement for existence.
+    // Keep results if they have at least one significant piece of metadata.
+    // BNF (French National Library) is an authoritative source - keep its results
+    // even without cover/ISBN since it has high-quality curated metadata.
     results.retain(|book| {
         let has_isbn = book.isbn.as_ref().is_some_and(|s| !s.trim().is_empty());
         let has_cover = book
@@ -851,8 +851,16 @@ pub async fn search_unified(
             .as_ref()
             .is_some_and(|s| !s.trim().is_empty());
 
+        // BNF is authoritative French National Library - keep ALL its results
+        // BNF has high-quality curated metadata (title is always present and accurate)
+        let is_bnf = book
+            .source
+            .as_ref()
+            .is_some_and(|s| s.eq_ignore_ascii_case("BNF"));
+
         // Keep the result if it has at least one significant piece of metadata
-        has_isbn || has_cover || has_publisher
+        // OR if it's from BNF (authoritative French national library source)
+        has_isbn || has_cover || has_publisher || is_bnf
     });
 
     let query_author = params.author.as_deref().unwrap_or("").to_lowercase();
