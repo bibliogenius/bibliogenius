@@ -162,6 +162,7 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         // Copies
         .route("/copies", get(copy::list_copies))
         .route("/copies", post(copy::create_copy))
+        .route("/copies/borrowed", get(copy::get_borrowed_copies))
         .route("/books/:id/copies", get(copy::get_book_copies))
         .route("/copies/:id", axum::routing::delete(copy::delete_copy))
         .route("/copies/:id", axum::routing::put(copy::update_copy))

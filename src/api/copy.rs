@@ -134,6 +134,47 @@ pub async fn get_book_copies(
     }
 }
 
+/// Get borrowed copies (is_temporary=true) with book details
+pub async fn get_borrowed_copies(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    use crate::models::book::Entity as Book;
+
+    match Copy::find()
+        .filter(copy_model::Column::IsTemporary.eq(true))
+        .find_also_related(Book)
+        .all(&db)
+        .await
+    {
+        Ok(copies_with_books) => {
+            let borrowed: Vec<serde_json::Value> = copies_with_books
+                .into_iter()
+                .map(|(copy, book)| {
+                    serde_json::json!({
+                        "id": copy.id,
+                        "book_id": copy.book_id,
+                        "title": book.as_ref().map(|b| b.title.clone()).unwrap_or_default(),
+                        "cover": book.as_ref().and_then(|b| b.cover_url.clone()),
+                        "status": copy.status,
+                        "notes": copy.notes,
+                        "acquisition_date": copy.acquisition_date,
+                        "from_contact": copy.notes.clone() // Notes contains "Borrowed from: Name (ID: x)"
+                    })
+                })
+                .collect();
+
+            Json(serde_json::json!({
+                "loans": borrowed,
+                "total": borrowed.len()
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Database error: {}", e)})),
+        )
+            .into_response(),
+    }
+}
+
 // Delete a copy
 pub async fn delete_copy(
     State(db): State<DatabaseConnection>,
