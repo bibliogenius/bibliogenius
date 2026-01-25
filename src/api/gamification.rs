@@ -1,4 +1,5 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use chrono::Utc;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
 };
@@ -40,7 +41,8 @@ pub struct StreakInfo {
 pub struct GamificationConfigDto {
     pub achievements_style: String,
     pub reading_goal_yearly: i32,
-    pub reading_goal_progress: i32,
+    pub reading_goal_progress: i32, // Books read THIS YEAR (based on finished_reading_at)
+    pub total_books_read: i32,      // Total books with reading_status='read' (all time)
 }
 
 #[derive(Serialize)]
@@ -135,9 +137,17 @@ pub async fn get_user_status(State(db): State<DatabaseConnection>) -> impl IntoR
     // 1. Count books (Collector Track)
     let books_count = book::Entity::find().count(&db).await.unwrap_or(0) as i64;
 
-    // 2. Count books with reading_status = 'read' (Reader Track)
+    // 2. Count books with reading_status = 'read' (Reader Track - all time)
     let read_count = book::Entity::find()
         .filter(book::Column::ReadingStatus.eq("read"))
+        .count(&db)
+        .await
+        .unwrap_or(0) as i64;
+
+    // 3. Count books finished THIS YEAR (for yearly reading goal)
+    let current_year = Utc::now().format("%Y").to_string();
+    let yearly_read_count = book::Entity::find()
+        .filter(book::Column::FinishedReadingAt.like(format!("{}%", current_year)))
         .count(&db)
         .await
         .unwrap_or(0) as i64;
@@ -200,12 +210,14 @@ pub async fn get_user_status(State(db): State<DatabaseConnection>) -> impl IntoR
         .map(|c| GamificationConfigDto {
             achievements_style: c.achievements_style,
             reading_goal_yearly: c.reading_goal_yearly,
-            reading_goal_progress: read_count as i32,
+            reading_goal_progress: yearly_read_count as i32, // Books finished THIS YEAR
+            total_books_read: read_count as i32,             // All-time read count
         })
         .unwrap_or(GamificationConfigDto {
             achievements_style: "minimal".to_string(),
             reading_goal_yearly: 12,
-            reading_goal_progress: read_count as i32,
+            reading_goal_progress: yearly_read_count as i32,
+            total_books_read: read_count as i32,
         });
 
     // Legacy level calculation (for backward compatibility with Flutter)
