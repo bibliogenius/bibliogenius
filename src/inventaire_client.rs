@@ -169,15 +169,15 @@ pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<InventaireMetadata,
         }
     }
 
-    // Resolve publisher from Wikidata URI to human-readable name
+    // Resolve publisher from URI to human-readable name
     let publisher = if let Some(publisher_uri) = edition_entity
         .claims
         .publisher
         .as_ref()
         .and_then(|v| v.first().cloned())
     {
-        // If it's a Wikidata URI (wd:Qxxx), fetch the entity to get the name
-        if publisher_uri.starts_with("wd:")
+        // If it's a Wikidata or Inventaire URI, fetch the entity to get the name
+        if (publisher_uri.starts_with("wd:") || publisher_uri.starts_with("inv"))
             && let Ok(publisher_entity) = fetch_entity(&client, &publisher_uri).await
         {
             publisher_entity
@@ -496,7 +496,7 @@ pub async fn enrich_search_results(
                                         if let Ok(edition_entities) =
                                             fetch_entities_batch(&client, &edition_uris).await
                                         {
-                                            // Collect all publisher URIs to batch fetch
+                                            // Collect all publisher URIs to batch fetch (both Wikidata and Inventaire)
                                             let publisher_uris: Vec<String> = edition_entities
                                                 .values()
                                                 .filter_map(|e| {
@@ -505,7 +505,7 @@ pub async fn enrich_search_results(
                                                         .as_ref()
                                                         .and_then(|v| v.first().cloned())
                                                 })
-                                                .filter(|uri| uri.starts_with("wd:"))
+                                                .filter(|uri| uri.starts_with("wd:") || uri.starts_with("inv"))
                                                 .collect();
 
                                             // Batch fetch publishers
@@ -533,14 +533,14 @@ pub async fn enrich_search_results(
                                                             .and_then(|v| v.first().cloned())
                                                     });
 
-                                                // Get publisher name
+                                                // Get publisher name (resolve both Wikidata and Inventaire URIs)
                                                 let publisher = entity
                                                     .claims
                                                     .publisher
                                                     .as_ref()
                                                     .and_then(|v| v.first())
                                                     .and_then(|pub_uri| {
-                                                        if pub_uri.starts_with("wd:") {
+                                                        if pub_uri.starts_with("wd:") || pub_uri.starts_with("inv") {
                                                             publishers_map.get(pub_uri).and_then(|pe| {
                                                                 pe.labels
                                                                     .get("fr")
