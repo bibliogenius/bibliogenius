@@ -259,6 +259,9 @@ pub struct ConfigResponse {
     pub longitude: Option<f64>,
     pub share_location: bool,
     pub show_borrowed_books: bool,
+    /// Whether this library allows others to cache its catalog for offline viewing
+    #[serde(default)]
+    pub allow_library_caching: bool,
 }
 
 pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoResponse {
@@ -289,6 +292,9 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
     let enabled_modules: Vec<String> =
         serde_json::from_str(&profile.enabled_modules).unwrap_or_default();
 
+    // Check if library owner allows caching (opt-in, default false for privacy)
+    let allow_library_caching = enabled_modules.contains(&"allow_library_caching".to_string());
+
     (
         StatusCode::OK,
         Json(ConfigResponse {
@@ -310,6 +316,7 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
             },
             share_location: config.share_location.unwrap_or(false),
             show_borrowed_books: config.show_borrowed_books.unwrap_or(false),
+            allow_library_caching,
         }),
     )
         .into_response()

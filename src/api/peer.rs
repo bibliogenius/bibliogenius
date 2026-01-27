@@ -121,6 +121,7 @@ pub async fn connect(
 
     // Translate localhost URLs to Docker service names for inter-container communication
     let docker_url = translate_url_for_docker(&payload.url);
+    let peer_url_for_sync = docker_url.clone(); // Clone before moving into ActiveModel
 
     let peer = peer::ActiveModel {
         name: Set(name),
@@ -136,17 +137,127 @@ pub async fn connect(
     };
 
     match peer::Entity::insert(peer).exec(&db).await {
-        Ok(res) => (
-            StatusCode::CREATED,
-            Json(json!({ "id": res.last_insert_id })),
-        )
-            .into_response(),
+        Ok(res) => {
+            let peer_id = res.last_insert_id;
+
+            // Trigger background sync of peer catalog
+            let db_clone = db.clone();
+            tokio::spawn(async move {
+                tracing::info!("🔄 Background sync triggered for new peer {}", peer_id);
+                if let Err(e) = sync_peer_internal(&db_clone, peer_id, &peer_url_for_sync).await {
+                    tracing::warn!("⚠️ Background sync failed for peer {}: {}", peer_id, e);
+                }
+            });
+
+            (
+                StatusCode::CREATED,
+                Json(json!({ "id": peer_id })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
     }
+}
+
+/// Internal sync function for background sync after connect
+async fn sync_peer_internal(
+    db: &DatabaseConnection,
+    peer_id: i32,
+    peer_url: &str,
+) -> Result<usize, String> {
+    use crate::models::peer_book;
+
+    // Validate URL
+    validate_url(peer_url).map_err(|e| format!("Invalid peer URL: {}", e))?;
+
+    let client = get_safe_client();
+
+    // First, check if peer allows library caching (privacy consent)
+    let config_url = format!("{}/api/config", peer_url);
+    let allows_caching = match client.get(&config_url).send().await {
+        Ok(res) if res.status().is_success() => {
+            match res.json::<crate::api::setup::ConfigResponse>().await {
+                Ok(config) => config.allow_library_caching,
+                Err(_) => false, // Can't parse config, assume no caching allowed
+            }
+        }
+        _ => false, // Can't reach config, assume no caching allowed
+    };
+
+    if !allows_caching {
+        tracing::info!("⚠️ Peer {} does not allow library caching, skipping sync", peer_url);
+        // Still update last_seen to track connectivity
+        if let Ok(Some(peer)) = crate::models::peer::Entity::find_by_id(peer_id).one(db).await {
+            let mut active_peer: peer::ActiveModel = peer.into();
+            active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
+            active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
+            let _ = active_peer.update(db).await;
+        }
+        return Ok(0); // Return 0 books cached
+    }
+
+    // Fetch remote books
+    let url = format!("{}/api/books", peer_url);
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to contact peer: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err("Peer returned error".to_string());
+    }
+
+    // Parse response
+    #[derive(Deserialize)]
+    struct BooksResponse {
+        books: Vec<crate::models::Book>,
+    }
+
+    let data: BooksResponse = response
+        .json()
+        .await
+        .map_err(|_| "Invalid response format".to_string())?;
+
+    // Clear old cache
+    let _ = peer_book::Entity::delete_many()
+        .filter(peer_book::Column::PeerId.eq(peer_id))
+        .exec(db)
+        .await;
+
+    let count = data.books.len();
+
+    // Insert new cache
+    for book in data.books {
+        let cache = peer_book::ActiveModel {
+            peer_id: Set(peer_id),
+            remote_book_id: Set(book.id.unwrap_or(0)),
+            title: Set(book.title),
+            isbn: Set(book.isbn),
+            author: Set(book.author),
+            cover_url: Set(book.cover_url),
+            summary: Set(book.summary),
+            synced_at: Set(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+        let _ = peer_book::Entity::insert(cache).exec(db).await;
+    }
+
+    // Update peer's last_seen
+    if let Ok(Some(peer)) = crate::models::peer::Entity::find_by_id(peer_id).one(db).await {
+        let mut active_peer: peer::ActiveModel = peer.into();
+        active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
+        active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        let _ = active_peer.update(db).await;
+    }
+
+    tracing::info!("✅ Background sync completed: {} books cached for peer {}", count, peer_id);
+    Ok(count)
 }
 
 #[derive(Deserialize)]
@@ -841,7 +952,7 @@ pub async fn sync_peer_by_url(
         }
     };
 
-    // 2. Fetch remote books
+    // 2. Validate URL
     if let Err(e) = validate_url(&peer.url) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -851,6 +962,40 @@ pub async fn sync_peer_by_url(
     }
 
     let client = get_safe_client();
+
+    // 3. Check if peer allows library caching (privacy consent)
+    let config_url = format!("{}/api/config", peer.url);
+    let allows_caching = match client.get(&config_url).send().await {
+        Ok(res) if res.status().is_success() => {
+            match res.json::<crate::api::setup::ConfigResponse>().await {
+                Ok(config) => config.allow_library_caching,
+                Err(_) => false,
+            }
+        }
+        _ => false,
+    };
+
+    if !allows_caching {
+        // Peer doesn't allow caching - update last_seen but don't cache books
+        let peer_id = peer.id;
+        let mut active_peer: peer::ActiveModel = peer.into();
+        active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
+        active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        let _ = active_peer.update(&db).await;
+
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "message": "Peer does not allow library caching",
+                "count": 0,
+                "peer_id": peer_id,
+                "caching_allowed": false
+            })),
+        )
+            .into_response();
+    }
+
+    // 4. Fetch remote books
     let url = format!("{}/api/books", peer.url);
 
     let res = client.get(&url).send().await;
@@ -890,9 +1035,16 @@ pub async fn sync_peer_by_url(
                             let _ = peer_book::Entity::insert(cache).exec(&db).await;
                         }
 
+                        // Update peer's last_seen after successful sync
+                        let peer_id = peer.id; // Save before moving
+                        let mut active_peer: peer::ActiveModel = peer.into();
+                        active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
+                        active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
+                        let _ = active_peer.update(&db).await;
+
                         (
                         StatusCode::OK,
-                        Json(json!({ "message": "Sync successful", "count": count, "peer_id": peer.id })),
+                        Json(json!({ "message": "Sync successful", "count": count, "peer_id": peer_id })),
                     )
                         .into_response()
                     }
@@ -1760,6 +1912,122 @@ pub async fn list_peer_books_by_url(
         .unwrap_or(vec![]);
 
     (StatusCode::OK, Json(books)).into_response()
+}
+
+/// Get cached peer books with staleness metadata (no network call to peer)
+/// Returns books from local cache along with last_synced timestamp for UI staleness indicator
+pub async fn get_cached_books_by_url(
+    State(db): State<DatabaseConnection>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use crate::models::peer_book;
+
+    // Extract URL from payload
+    let peer_url = match payload.get("url").and_then(|v| v.as_str()) {
+        Some(url) => url,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Missing 'url' field" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Translate localhost URL to Docker service name if needed
+    let docker_url = translate_url_for_docker(peer_url);
+
+    // Find peer by URL
+    let peer = match peer::Entity::find()
+        .filter(peer::Column::Url.eq(&docker_url))
+        .one(&db)
+        .await
+    {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            // Peer not found - return empty result with null metadata
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "books": [],
+                    "peer_name": null,
+                    "peer_id": null,
+                    "last_synced": null,
+                    "last_seen": null,
+                    "cached": true
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Database error: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    // Get cached books for this peer
+    let books = peer_book::Entity::find()
+        .filter(peer_book::Column::PeerId.eq(peer.id))
+        .all(&db)
+        .await
+        .unwrap_or(vec![]);
+
+    // Get latest synced_at from cached books (all books have same sync time)
+    let last_synced = books.first().map(|b| b.synced_at.clone());
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "books": books,
+            "peer_name": peer.name,
+            "peer_id": peer.id,
+            "last_synced": last_synced,
+            "last_seen": peer.last_seen,
+            "cached": true
+        })),
+    )
+        .into_response()
+}
+
+/// Cleanup peer_books entries older than 30 days (TTL for privacy)
+/// Call this on app startup to auto-purge stale caches
+pub async fn cleanup_stale_peer_books(
+    State(db): State<DatabaseConnection>,
+) -> impl IntoResponse {
+    use crate::models::peer_book;
+    use sea_orm::QueryFilter;
+
+    // Calculate cutoff date (30 days ago)
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    let cutoff_str = cutoff.to_rfc3339();
+
+    // Delete entries where synced_at < cutoff
+    let result = peer_book::Entity::delete_many()
+        .filter(peer_book::Column::SyncedAt.lt(&cutoff_str))
+        .exec(&db)
+        .await;
+
+    match result {
+        Ok(res) => {
+            let deleted = res.rows_affected;
+            if deleted > 0 {
+                tracing::info!("🧹 TTL cleanup: deleted {} stale peer_books entries (older than 30 days)", deleted);
+            }
+            (
+                StatusCode::OK,
+                Json(json!({ "deleted": deleted, "cutoff": cutoff_str })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Cleanup failed: {}", e) })),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn delete_request(
