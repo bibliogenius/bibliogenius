@@ -49,7 +49,10 @@ pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
         isbn
     );
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     let resp = client
         .get(&url)
         .send()
