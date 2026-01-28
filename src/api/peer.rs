@@ -149,11 +149,7 @@ pub async fn connect(
                 }
             });
 
-            (
-                StatusCode::CREATED,
-                Json(json!({ "id": peer_id })),
-            )
-                .into_response()
+            (StatusCode::CREATED, Json(json!({ "id": peer_id }))).into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -189,9 +185,15 @@ async fn sync_peer_internal(
     };
 
     if !allows_caching {
-        tracing::info!("⚠️ Peer {} does not allow library caching, skipping sync", peer_url);
+        tracing::info!(
+            "⚠️ Peer {} does not allow library caching, skipping sync",
+            peer_url
+        );
         // Still update last_seen to track connectivity
-        if let Ok(Some(peer)) = crate::models::peer::Entity::find_by_id(peer_id).one(db).await {
+        if let Ok(Some(peer)) = crate::models::peer::Entity::find_by_id(peer_id)
+            .one(db)
+            .await
+        {
             let mut active_peer: peer::ActiveModel = peer.into();
             active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
             active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
@@ -249,14 +251,21 @@ async fn sync_peer_internal(
     }
 
     // Update peer's last_seen
-    if let Ok(Some(peer)) = crate::models::peer::Entity::find_by_id(peer_id).one(db).await {
+    if let Ok(Some(peer)) = crate::models::peer::Entity::find_by_id(peer_id)
+        .one(db)
+        .await
+    {
         let mut active_peer: peer::ActiveModel = peer.into();
         active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
         active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
         let _ = active_peer.update(db).await;
     }
 
-    tracing::info!("✅ Background sync completed: {} books cached for peer {}", count, peer_id);
+    tracing::info!(
+        "✅ Background sync completed: {} books cached for peer {}",
+        count,
+        peer_id
+    );
     Ok(count)
 }
 
@@ -1994,9 +2003,7 @@ pub async fn get_cached_books_by_url(
 
 /// Cleanup peer_books entries older than 30 days (TTL for privacy)
 /// Call this on app startup to auto-purge stale caches
-pub async fn cleanup_stale_peer_books(
-    State(db): State<DatabaseConnection>,
-) -> impl IntoResponse {
+pub async fn cleanup_stale_peer_books(State(db): State<DatabaseConnection>) -> impl IntoResponse {
     use crate::models::peer_book;
     use sea_orm::QueryFilter;
 
@@ -2014,7 +2021,10 @@ pub async fn cleanup_stale_peer_books(
         Ok(res) => {
             let deleted = res.rows_affected;
             if deleted > 0 {
-                tracing::info!("🧹 TTL cleanup: deleted {} stale peer_books entries (older than 30 days)", deleted);
+                tracing::info!(
+                    "🧹 TTL cleanup: deleted {} stale peer_books entries (older than 30 days)",
+                    deleted
+                );
             }
             (
                 StatusCode::OK,

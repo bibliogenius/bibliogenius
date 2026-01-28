@@ -116,8 +116,14 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/peers/sync_by_url", post(peer::sync_peer_by_url)) // Sync by URL (solves Hub ID mismatch)
         .route("/peers/:id/books", get(peer::list_peer_books))
         .route("/peers/books_by_url", post(peer::list_peer_books_by_url)) // Get books by URL
-        .route("/peers/cached_books_by_url", post(peer::get_cached_books_by_url)) // Get cached books with metadata
-        .route("/peers/cleanup_stale_cache", post(peer::cleanup_stale_peer_books)) // TTL cleanup for privacy
+        .route(
+            "/peers/cached_books_by_url",
+            post(peer::get_cached_books_by_url),
+        ) // Get cached books with metadata
+        .route(
+            "/peers/cleanup_stale_cache",
+            post(peer::cleanup_stale_peer_books),
+        ) // TTL cleanup for privacy
         .route("/peers/search", post(peer::search_local))
         .route("/peers/proxy_search", post(peer::proxy_search))
         .route("/peers/request_by_url", post(peer::request_book_by_url)) // Send request by URL
