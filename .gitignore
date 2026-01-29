@@ -27,4 +27,5 @@
 *.swp
 
 # Other
-
+backend.log
+server.log
