@@ -722,10 +722,10 @@ pub async fn search_unified(
         Ok(ref bnf_sru_results) => {
             for bnf_book in bnf_sru_results {
                 // Skip if already have this ISBN from another source
-                if let Some(ref isbn) = bnf_book.isbn {
-                    if results.iter().any(|b| b.isbn.as_ref() == Some(isbn)) {
-                        continue;
-                    }
+                if let Some(ref isbn) = bnf_book.isbn
+                    && results.iter().any(|b| b.isbn.as_ref() == Some(isbn))
+                {
+                    continue;
                 }
                 let book = book::Book {
                     id: None,

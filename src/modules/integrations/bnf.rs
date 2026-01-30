@@ -482,10 +482,11 @@ pub async fn lookup_bnf_sru(isbn: &str) -> Result<Option<BnfBook>, String> {
                 let text = e.unescape().unwrap_or_default().to_string();
 
                 // Control fields (003 = ARK URL)
-                if in_controlfield && controlfield_tag == "003" {
-                    if let Some(ark_start) = text.find("ark:/12148/") {
-                        ark_id = Some(text[ark_start..].to_string());
-                    }
+                if in_controlfield
+                    && controlfield_tag == "003"
+                    && let Some(ark_start) = text.find("ark:/12148/")
+                {
+                    ark_id = Some(text[ark_start..].to_string());
                 }
 
                 // Data fields
@@ -549,12 +550,11 @@ pub async fn lookup_bnf_sru(isbn: &str) -> Result<Option<BnfBook>, String> {
     }
 
     // Build cover URL from ARK ID (not always available)
-    let cover_url = ark_id.as_ref().and_then(|ark| {
-        // BNF cover service - may not work for all books
-        Some(format!(
+    let cover_url = ark_id.as_ref().map(|ark| {
+        format!(
             "https://catalogue.bnf.fr/couverture?&appName=NE&idArk={}&couession=1",
             ark.trim_start_matches("ark:/12148/")
-        ))
+        )
     });
 
     let book = BnfBook {
@@ -600,16 +600,16 @@ pub async fn search_bnf_sru(
     // Build SRU query for cache key
     let mut query_parts = Vec::new();
 
-    if let Some(t) = title {
-        if !t.trim().is_empty() {
-            query_parts.push(format!("bib.title adj \"{}\"", t.replace('"', " ")));
-        }
+    if let Some(t) = title
+        && !t.trim().is_empty()
+    {
+        query_parts.push(format!("bib.title adj \"{}\"", t.replace('"', " ")));
     }
 
-    if let Some(a) = author {
-        if !a.trim().is_empty() {
-            query_parts.push(format!("bib.author adj \"{}\"", a.replace('"', " ")));
-        }
+    if let Some(a) = author
+        && !a.trim().is_empty()
+    {
+        query_parts.push(format!("bib.author adj \"{}\"", a.replace('"', " ")));
     }
 
     // If no specific fields, use general query
@@ -712,10 +712,11 @@ pub async fn search_bnf_sru(
             Ok(Event::Text(e)) => {
                 let text = e.unescape().unwrap_or_default().to_string();
 
-                if in_controlfield && controlfield_tag == "003" {
-                    if let Some(ark_start) = text.find("ark:/12148/") {
-                        current_book.ark_id = Some(text[ark_start..].to_string());
-                    }
+                if in_controlfield
+                    && controlfield_tag == "003"
+                    && let Some(ark_start) = text.find("ark:/12148/")
+                {
+                    current_book.ark_id = Some(text[ark_start..].to_string());
                 }
 
                 if in_subfield {
@@ -753,10 +754,10 @@ pub async fn search_bnf_sru(
                     in_record = false;
                     // Build and save book if it has a title
                     let book = std::mem::take(&mut current_book);
-                    if !book.title.is_empty() {
-                        if let Some(b) = book.build() {
-                            books.push(b);
-                        }
+                    if !book.title.is_empty()
+                        && let Some(b) = book.build()
+                    {
+                        books.push(b);
                     }
                 } else if name.ends_with("datafield") {
                     in_datafield = false;
