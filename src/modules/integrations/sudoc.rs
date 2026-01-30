@@ -1,8 +1,24 @@
+use once_cell::sync::Lazy;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Cache entry for SUDOC queries
+struct CacheEntry {
+    data: SudocBook,
+    created_at: Instant,
+}
+
+static SUDOC_CACHE: Lazy<Mutex<HashMap<String, CacheEntry>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+const CACHE_TTL: Duration = Duration::from_secs(3600); // 1 hour
+const MAX_CACHE_ENTRIES: usize = 100;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SudocBook {
     pub title: String,
     pub author: Option<String>,
@@ -15,12 +31,25 @@ pub struct SudocBook {
 }
 
 pub async fn fetch_by_isbn(isbn: &str) -> Result<SudocBook, String> {
+    let clean_isbn = isbn.replace('-', "");
+
+    // Check cache first
+    if let Ok(cache) = SUDOC_CACHE.try_lock()
+        && let Some(entry) = cache.get(&clean_isbn)
+        && entry.created_at.elapsed() < CACHE_TTL
+    {
+        return Ok(entry.data.clone());
+    }
+
     // 1. Get PPN from ISBN
     // URL: https://www.sudoc.fr/services/isbn2ppn/{isbn}
     // Response is JSON: {"sudoc":{"query":{"isbn":"..."},"result":[{"ppn":"..."}]}}
 
-    let client = reqwest::Client::new();
-    let ppn_url = format!("https://www.sudoc.fr/services/isbn2ppn/{}", isbn);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let ppn_url = format!("https://www.sudoc.fr/services/isbn2ppn/{}", clean_isbn);
 
     let ppn_res = client
         .get(&ppn_url)
@@ -36,11 +65,17 @@ pub async fn fetch_by_isbn(isbn: &str) -> Result<SudocBook, String> {
     let ppn_json: serde_json::Value = ppn_res.json().await.map_err(|e| e.to_string())?;
     tracing::debug!("SUDOC JSON: {:?}", ppn_json);
 
-    // Extract PPN (take the first one if multiple)
-    let ppn = ppn_json["sudoc"]["query"]["result"][0]["ppn"]
-        .as_str()
-        .ok_or("No PPN found for this ISBN")?
-        .to_string();
+    // Extract PPN - handle both single result (object) and multiple results (array)
+    let result = &ppn_json["sudoc"]["query"]["result"];
+    let ppn = if result.is_array() {
+        // Multiple results: take the first one
+        result[0]["ppn"].as_str()
+    } else {
+        // Single result: direct object
+        result["ppn"].as_str()
+    }
+    .ok_or("No PPN found for this ISBN")?
+    .to_string();
 
     // 2. Fetch XML Record
     // URL: https://www.sudoc.fr/{ppn}.xml
@@ -53,7 +88,23 @@ pub async fn fetch_by_isbn(isbn: &str) -> Result<SudocBook, String> {
     let xml_content = xml_res.text().await.map_err(|e| e.to_string())?;
 
     // 3. Parse XML
-    parse_sudoc_xml(&xml_content, &ppn)
+    let book = parse_sudoc_xml(&xml_content, &ppn)?;
+
+    // Store in cache
+    if let Ok(mut cache) = SUDOC_CACHE.try_lock() {
+        if cache.len() >= MAX_CACHE_ENTRIES {
+            cache.retain(|_, entry| entry.created_at.elapsed() < CACHE_TTL);
+        }
+        cache.insert(
+            clean_isbn.clone(),
+            CacheEntry {
+                data: book.clone(),
+                created_at: Instant::now(),
+            },
+        );
+    }
+
+    Ok(book)
 }
 
 fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {

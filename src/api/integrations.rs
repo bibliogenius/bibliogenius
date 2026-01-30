@@ -490,10 +490,13 @@ pub async fn search_unified(
         inv_query
     };
 
-    // 3. Execute Searches in Parallel (Inventaire, BNF, OpenLibrary)
+    // 3. Execute Searches in Parallel (Inventaire, BNF, OpenLibrary, BNF SRU)
     // We clone necessary data for each async task to avoid borrow checker issues with async blocks
     let inv_query_str = final_inv_query.clone();
     let bnf_query_str = final_inv_query.clone();
+    let bnf_sru_query_str = final_inv_query.clone();
+    let bnf_sru_title = params.title.clone();
+    let bnf_sru_author = params.author.clone();
     let db_clone = db.clone();
 
     // Construct SearchQuery for search_external
@@ -531,7 +534,7 @@ pub async fn search_unified(
 
     // Execute ALL sources in parallel with individual error isolation
     // This ensures one slow/failing source doesn't block or crash others
-    let (inv_res, ol_res, bnf_res, gb_res) = tokio::join!(
+    let (inv_res, ol_res, bnf_res, bnf_sru_res, gb_res) = tokio::join!(
         // Task 1: Inventaire (wrapped in timeout to prevent blocking)
         async move {
             if enable_inventaire && !inv_query_str.trim().is_empty() {
@@ -585,7 +588,31 @@ pub async fn search_unified(
                 Ok(Vec::new())
             }
         },
-        // Task 4: Google Books (wrapped in timeout)
+        // Task 4: BNF SRU (catalogue.bnf.fr - better coverage for recent French books)
+        async move {
+            if enable_bnf
+                && (!bnf_sru_query_str.trim().is_empty()
+                    || bnf_sru_title.is_some()
+                    || bnf_sru_author.is_some())
+            {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    crate::modules::integrations::bnf::search_bnf_sru(
+                        &bnf_sru_query_str,
+                        bnf_sru_title.as_deref(),
+                        bnf_sru_author.as_deref(),
+                    ),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Ok(Vec::new()),
+                }
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        // Task 5: Google Books (wrapped in timeout)
         async move {
             if run_gb {
                 tokio::time::timeout(search_timeout, crate::google_books::search_books(&gb_query))
@@ -682,6 +709,57 @@ pub async fn search_unified(
                     owned: Some(true),
                     price: None,
                     language: Some("fr".to_string()), // BNF is French National Library
+                    digital_formats: None,
+                };
+                results.push(book);
+            }
+        }
+        Err(_e) => (),
+    }
+
+    // Process BNF SRU Results (catalogue.bnf.fr)
+    match bnf_sru_res {
+        Ok(ref bnf_sru_results) => {
+            for bnf_book in bnf_sru_results {
+                // Skip if already have this ISBN from another source
+                if let Some(ref isbn) = bnf_book.isbn {
+                    if results.iter().any(|b| b.isbn.as_ref() == Some(isbn)) {
+                        continue;
+                    }
+                }
+                let book = book::Book {
+                    id: None,
+                    title: bnf_book.title.clone(),
+                    isbn: bnf_book.isbn.clone(),
+                    publisher: bnf_book.publisher.clone(),
+                    publication_year: bnf_book.publication_year,
+                    summary: bnf_book.description.clone(),
+                    dewey_decimal: None,
+                    lcc: None,
+                    subjects: None,
+                    marc_record: None,
+                    cataloguing_notes: None,
+                    source_data: Some(
+                        serde_json::json!({
+                            "source": "bnf-sru",
+                            "bnf_uri": bnf_book.bnf_uri,
+                            "languages": ["fr"]
+                        })
+                        .to_string(),
+                    ),
+                    shelf_position: None,
+                    reading_status: Some("to_read".to_string()),
+                    source: Some("BNF".to_string()),
+                    author: bnf_book.author.clone(),
+                    authors: bnf_book.author.clone().map(|a| vec![a]),
+                    cover_url: bnf_book.cover_url.clone(),
+                    large_cover_url: None,
+                    finished_reading_at: None,
+                    started_reading_at: None,
+                    user_rating: None,
+                    owned: Some(true),
+                    price: None,
+                    language: Some("fr".to_string()),
                     digital_formats: None,
                 };
                 results.push(book);
@@ -896,6 +974,21 @@ pub async fn search_unified(
             score
         );
     }
+
+    // Filter out self-publishing platforms (low-quality results)
+    let results: Vec<_> = results
+        .into_iter()
+        .filter(|book| {
+            if let Some(ref publisher) = book.publisher {
+                let pub_lower = publisher.to_lowercase();
+                !pub_lower.contains("createspace")
+                    && !pub_lower.contains("independently published")
+                    && !pub_lower.contains("independent publishing platform")
+            } else {
+                true // Keep books without publisher info
+            }
+        })
+        .collect();
 
     (StatusCode::OK, Json(results)).into_response()
 }

@@ -76,6 +76,93 @@ pub async fn lookup_book(
                 tracing::warn!("BNF lookup failed for {}: {}", isbn, e);
             }
         }
+
+        // Try SUDOC as fallback for French ISBNs (better coverage than BNF SPARQL)
+        tracing::debug!("Trying SUDOC for French ISBN {}", isbn);
+        match crate::modules::integrations::sudoc::fetch_by_isbn(&clean_isbn).await {
+            Ok(sudoc_book) => {
+                tracing::info!("SUDOC found book for ISBN {}: {}", isbn, sudoc_book.title);
+                let authors = sudoc_book
+                    .author
+                    .map(|name| {
+                        vec![crate::inventaire_client::AuthorMetadata {
+                            name,
+                            birth_year: None,
+                            death_year: None,
+                            image_url: None,
+                            bio: None,
+                        }]
+                    })
+                    .unwrap_or_default();
+
+                // Try to get cover from other sources
+                let mut cover_url = None;
+                if enable_openlibrary {
+                    cover_url = crate::openlibrary::fetch_cover_url(&isbn).await;
+                }
+                if cover_url.is_none() && enable_google {
+                    cover_url = crate::google_books::fetch_cover_url(&isbn).await;
+                }
+
+                let metadata = crate::openlibrary::BookMetadata {
+                    title: sudoc_book.title,
+                    authors,
+                    publisher: sudoc_book.publisher,
+                    publication_year: sudoc_book.publication_year.map(|y| y.to_string()),
+                    cover_url,
+                    summary: None,
+                };
+                return (StatusCode::OK, Json(metadata)).into_response();
+            }
+            Err(e) => {
+                tracing::debug!("SUDOC lookup failed for {}: {}", isbn, e);
+            }
+        }
+
+        // Try BNF SRU (catalogue.bnf.fr) - better coverage than SPARQL for recent books
+        tracing::debug!("Trying BNF SRU for French ISBN {}", isbn);
+        match crate::modules::integrations::bnf::lookup_bnf_sru(&clean_isbn).await {
+            Ok(Some(bnf_book)) => {
+                tracing::info!("BNF SRU found book for ISBN {}: {}", isbn, bnf_book.title);
+                let authors = bnf_book
+                    .author
+                    .map(|name| {
+                        vec![crate::inventaire_client::AuthorMetadata {
+                            name,
+                            birth_year: None,
+                            death_year: None,
+                            image_url: None,
+                            bio: None,
+                        }]
+                    })
+                    .unwrap_or_default();
+
+                // Try to get cover from other sources if BNF cover fails
+                let mut cover_url = bnf_book.cover_url;
+                if cover_url.is_none() && enable_openlibrary {
+                    cover_url = crate::openlibrary::fetch_cover_url(&isbn).await;
+                }
+                if cover_url.is_none() && enable_google {
+                    cover_url = crate::google_books::fetch_cover_url(&isbn).await;
+                }
+
+                let metadata = crate::openlibrary::BookMetadata {
+                    title: bnf_book.title,
+                    authors,
+                    publisher: bnf_book.publisher,
+                    publication_year: bnf_book.publication_year.map(|y| y.to_string()),
+                    cover_url,
+                    summary: bnf_book.description,
+                };
+                return (StatusCode::OK, Json(metadata)).into_response();
+            }
+            Ok(None) => {
+                tracing::debug!("BNF SRU returned no result for ISBN {}", isbn);
+            }
+            Err(e) => {
+                tracing::debug!("BNF SRU lookup failed for {}: {}", isbn, e);
+            }
+        }
     }
 
     // 1. Try Inventaire

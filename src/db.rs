@@ -890,5 +890,13 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     ))
     .await?;
 
+    // Migration 032: Convert 'owned' reading_status to empty string (harmonization)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "UPDATE books SET reading_status = '' WHERE reading_status = 'owned'".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
