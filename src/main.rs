@@ -2,7 +2,6 @@ use axum::Router;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use rust_lib_app::{api, config, db, seed};
@@ -147,7 +146,6 @@ async fn main() {
     let app = Router::new()
         .merge(SwaggerUi::new("/api/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .nest("/api", api_router)
-        .nest_service("/", ServeDir::new("static"))
         // CORS
         .layer(
             CorsLayer::new()
