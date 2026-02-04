@@ -95,7 +95,7 @@
 
         <div class="card">
             <h2>🌍 Discovery Map</h2>
-            <p style="color: var(--text-light); margin-bottom: 1rem;">Find libraries and bookstores near you.</p>
+            <p style="color: var(--text-light); margin-bottom: 1rem;">Find BiblioGenius peers near you.</p>
 
             <div id="map" style="height: 400px; width: 100%; border-radius: 12px; margin-bottom: 1rem;"></div>
 
@@ -105,18 +105,6 @@
                     <span
                         style="display: inline-block; width: 12px; height: 12px; background: #10b981; border-radius: 50%;"></span>
                     Peers
-                </label>
-                <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
-                    <input type="checkbox" id="layerLibraries" checked onchange="updateMapLayers()">
-                    <span
-                        style="display: inline-block; width: 12px; height: 12px; background: #3b82f6; border-radius: 50%;"></span>
-                    Public Libraries
-                </label>
-                <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
-                    <input type="checkbox" id="layerBookstores" onchange="updateMapLayers()">
-                    <span
-                        style="display: inline-block; width: 12px; height: 12px; background: #f59e0b; border-radius: 50%;"></span>
-                    Bookstores
                 </label>
             </div>
         </div>
@@ -149,8 +137,6 @@
         let map;
         let layers = {
             peers: L.layerGroup(),
-            libraries: L.layerGroup(),
-            bookstores: L.layerGroup(),
             me: L.layerGroup()
         };
         let myLocation = null;
@@ -208,8 +194,6 @@
 
             // 4. Load Layers
             await loadPeers();
-            await loadLibraries();
-            // Bookstores loaded on demand
         }
 
         async function loadPeers() {
@@ -250,66 +234,11 @@
             }
         }
 
-        async function loadLibraries() {
-            try {
-                const [lat, lon] = myLocation;
-                const res = await fetch(`/api/integrations/osm/libraries?lat=${lat}&lon=${lon}&radius=5000`);
-                const nodes = await res.json();
-
-                layers.libraries.clearLayers();
-                nodes.forEach(node => {
-                    const name = node.tags && node.tags.name ? node.tags.name : "Public Library";
-                    const marker = L.marker([node.lat, node.lon], {
-                        icon: createIcon('#3b82f6') // Blue
-                    }).bindPopup(`<b>${name}</b><br>Public Library`);
-                    layers.libraries.addLayer(marker);
-                });
-                layers.libraries.addTo(map);
-            } catch (e) {
-                console.error("Failed to load libraries", e);
-            }
-        }
-
-        async function loadBookstores() {
-            try {
-                const [lat, lon] = myLocation;
-                const res = await fetch(`/api/integrations/osm/bookstores?lat=${lat}&lon=${lon}&radius=5000`);
-                const nodes = await res.json();
-
-                layers.bookstores.clearLayers();
-                nodes.forEach(node => {
-                    const name = node.tags && node.tags.name ? node.tags.name : "Bookstore";
-                    const marker = L.marker([node.lat, node.lon], {
-                        icon: createIcon('#f59e0b') // Orange
-                    }).bindPopup(`<b>${name}</b><br>Bookstore`);
-                    layers.bookstores.addLayer(marker);
-                });
-                layers.bookstores.addTo(map);
-            } catch (e) {
-                console.error("Failed to load bookstores", e);
-            }
-        }
-
         function updateMapLayers() {
             if (document.getElementById('layerPeers').checked) {
                 map.addLayer(layers.peers);
             } else {
                 map.removeLayer(layers.peers);
-            }
-
-            if (document.getElementById('layerLibraries').checked) {
-                map.addLayer(layers.libraries);
-            } else {
-                map.removeLayer(layers.libraries);
-            }
-
-            if (document.getElementById('layerBookstores').checked) {
-                if (layers.bookstores.getLayers().length === 0) {
-                    loadBookstores();
-                }
-                map.addLayer(layers.bookstores);
-            } else {
-                map.removeLayer(layers.bookstores);
             }
         }
 

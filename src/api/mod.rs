@@ -12,7 +12,6 @@ pub mod discovery;
 pub mod export;
 pub mod frb; // FFI API for flutter_rust_bridge
 pub mod gamification;
-pub mod genie;
 pub mod health;
 pub mod hub;
 pub mod integrations;
@@ -61,7 +60,6 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route("/books/search", get(search::search_books))
         .route("/books/tags", get(books::list_tags))
         .route("/chat", post(chat::chat_handler))
-        .route("/genie/chat", post(genie::chat))
         .route("/books", post(books::create_book))
         .route(
             "/books/:id",
@@ -205,14 +203,6 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         .route(
             "/integrations/sudoc/search",
             get(integrations::search_sudoc),
-        )
-        .route(
-            "/integrations/osm/libraries",
-            get(integrations::search_osm_libraries),
-        )
-        .route(
-            "/integrations/osm/bookstores",
-            get(integrations::search_osm_bookstores),
         )
         .route(
             "/integrations/openlibrary/search",

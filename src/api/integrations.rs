@@ -35,41 +35,6 @@ pub async fn search_sudoc(
     }
 }
 
-#[derive(Deserialize)]
-pub struct OsmSearchQuery {
-    lat: f64,
-    lon: f64,
-    radius: Option<u32>,
-}
-
-pub async fn search_osm_libraries(Query(params): Query<OsmSearchQuery>) -> impl IntoResponse {
-    let radius = params.radius.unwrap_or(5000); // Default 5km
-    match crate::modules::integrations::osm::find_nearby_libraries(params.lat, params.lon, radius)
-        .await
-    {
-        Ok(nodes) => (StatusCode::OK, Json(nodes)).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-pub async fn search_osm_bookstores(Query(params): Query<OsmSearchQuery>) -> impl IntoResponse {
-    let radius = params.radius.unwrap_or(5000); // Default 5km
-    match crate::modules::integrations::osm::find_nearby_bookstores(params.lat, params.lon, radius)
-        .await
-    {
-        Ok(nodes) => (StatusCode::OK, Json(nodes)).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
 // --- Federated Search Helpers ---
 
 #[derive(Deserialize, Debug)]
