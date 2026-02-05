@@ -1130,11 +1130,8 @@ pub async fn mcp_config() -> impl IntoResponse {
         #[cfg(target_os = "macos")]
         {
             if let Ok(home) = std::env::var("HOME") {
-                // macOS: Application Support/BiblioGenius or Documents (Flutter uses getApplicationDocumentsDirectory)
-                // Flutter on macOS sandboxed app uses: ~/Library/Containers/com.example.bibliogeniusApp/Data/Documents/
-                // Flutter on macOS debug uses: ~/Library/Application Support/bibliogenius.db
-                // For compatibility, try Documents first (where Flutter puts it)
-                format!("sqlite://{}/Documents/bibliogenius.db?mode=rwc", home)
+                // macOS: Flutter uses getApplicationSupportDirectory() → ~/Library/Application Support/
+                format!("sqlite://{}/Library/Application Support/com.bibliogenius.app/bibliogenius.db?mode=rwc", home)
             } else {
                 "sqlite:///path/to/bibliogenius.db?mode=rwc".to_string()
             }
