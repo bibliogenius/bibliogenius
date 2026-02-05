@@ -7,6 +7,7 @@ use rust_lib_app::api;
 use rust_lib_app::auth;
 use rust_lib_app::db;
 use rust_lib_app::infrastructure::AppState;
+use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
 use tower::util::ServiceExt; // for `oneshot`
 
 // Helper to create a test app state
@@ -15,6 +16,35 @@ async fn setup_test_state() -> AppState {
         .await
         .expect("Failed to init DB");
     AppState::new(db)
+}
+
+// Helper to create a test admin user
+async fn create_test_admin(db: &DatabaseConnection) -> i32 {
+    let now = chrono::Utc::now().to_rfc3339();
+    let admin = rust_lib_app::models::user::ActiveModel {
+        username: Set("test_admin".to_string()),
+        password_hash: Set("hash".to_string()),
+        role: Set("admin".to_string()),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    let res = admin.insert(db).await.expect("Failed to create admin");
+    res.id
+}
+
+// Helper to create a test library
+async fn create_test_library(db: &DatabaseConnection, owner_id: i32) -> i32 {
+    let now = chrono::Utc::now().to_rfc3339();
+    let library = rust_lib_app::models::library::ActiveModel {
+        name: Set("Test Library".to_string()),
+        owner_id: Set(owner_id),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    let res = library.insert(db).await.expect("Failed to create library");
+    res.id
 }
 
 // Helper to create a valid auth token
@@ -346,4 +376,314 @@ async fn test_author_crud_via_repository() {
 
     let response = delete_app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_copy_crud_via_repository() {
+    let state = setup_test_state().await;
+    let token = get_test_token();
+
+    // Create admin and library first (required for foreign key)
+    let admin_id = create_test_admin(state.db()).await;
+    let library_id = create_test_library(state.db(), admin_id).await;
+
+    // First create a book (required for copy)
+    let create_book_app = Router::new()
+        .route("/books", axum::routing::post(api::books::create_book))
+        .with_state(state.clone());
+
+    let book_payload = serde_json::json!({
+        "title": "Test Book for Copy",
+        "isbn": "9781234567891"
+    });
+
+    let req = Request::builder()
+        .uri("/books")
+        .method("POST")
+        .header(header::AUTHORIZATION, format!("Bearer {}", token))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&book_payload).unwrap()))
+        .unwrap();
+
+    let response = create_book_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let book_id = json["book"]["id"].as_i64().unwrap() as i32;
+
+    // Create a copy
+    let create_copy_app = Router::new()
+        .route("/copies", axum::routing::post(api::copy::create_copy))
+        .with_state(state.clone());
+
+    let copy_payload = serde_json::json!({
+        "book_id": book_id,
+        "library_id": library_id,
+        "status": "available",
+        "is_temporary": false,
+        "notes": "Test copy"
+    });
+
+    let req = Request::builder()
+        .uri("/copies")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&copy_payload).unwrap()))
+        .unwrap();
+
+    let response = create_copy_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let copy_id = json["copy"]["id"].as_i64().unwrap();
+    assert_eq!(json["copy"]["status"], "available");
+    assert_eq!(json["copy"]["notes"], "Test copy");
+
+    // Get single copy
+    let get_copy_app = Router::new()
+        .route("/copies/:id", axum::routing::get(api::copy::get_copy))
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri(format!("/copies/{}", copy_id))
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = get_copy_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // List copies
+    let list_copies_app = Router::new()
+        .route("/copies", axum::routing::get(api::copy::list_copies))
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri("/copies")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = list_copies_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["total"].as_i64().unwrap() >= 1);
+
+    // Get book copies
+    let get_book_copies_app = Router::new()
+        .route(
+            "/books/:id/copies",
+            axum::routing::get(api::copy::get_book_copies),
+        )
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri(format!("/books/{}/copies", book_id))
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = get_book_copies_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // Should have exactly 1 copy for this book (or at least 1)
+    assert!(json["total"].as_i64().unwrap() >= 1);
+
+    // Update copy
+    let update_copy_app = Router::new()
+        .route("/copies/:id", axum::routing::put(api::copy::update_copy))
+        .with_state(state.clone());
+
+    let update_payload = serde_json::json!({
+        "status": "borrowed",
+        "notes": "Updated notes"
+    });
+
+    let req = Request::builder()
+        .uri(format!("/copies/{}", copy_id))
+        .method("PUT")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&update_payload).unwrap()))
+        .unwrap();
+
+    let response = update_copy_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["copy"]["status"], "borrowed");
+    assert_eq!(json["copy"]["notes"], "Updated notes");
+
+    // Delete copy
+    let delete_copy_app = Router::new()
+        .route("/copies/:id", axum::routing::delete(api::copy::delete_copy))
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri(format!("/copies/{}", copy_id))
+        .method("DELETE")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = delete_copy_app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Verify idempotent delete
+    let req = Request::builder()
+        .uri(format!("/copies/{}", copy_id))
+        .method("DELETE")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = delete_copy_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_get_copy_not_found() {
+    let state = setup_test_state().await;
+
+    let app = Router::new()
+        .route("/copies/:id", axum::routing::get(api::copy::get_copy))
+        .with_state(state);
+
+    let req = Request::builder()
+        .uri("/copies/99999")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_update_copy_not_found() {
+    let state = setup_test_state().await;
+
+    let app = Router::new()
+        .route("/copies/:id", axum::routing::put(api::copy::update_copy))
+        .with_state(state);
+
+    let payload = serde_json::json!({
+        "status": "borrowed"
+    });
+
+    let req = Request::builder()
+        .uri("/copies/99999")
+        .method("PUT")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_borrowed_copies_via_repository() {
+    let state = setup_test_state().await;
+    let token = get_test_token();
+
+    // Create admin and library first
+    let admin_id = create_test_admin(state.db()).await;
+    let library_id = create_test_library(state.db(), admin_id).await;
+
+    // Create a book
+    let create_book_app = Router::new()
+        .route("/books", axum::routing::post(api::books::create_book))
+        .with_state(state.clone());
+
+    let book_payload = serde_json::json!({
+        "title": "Borrowed Book Test",
+        "isbn": "9781234567892"
+    });
+
+    let req = Request::builder()
+        .uri("/books")
+        .method("POST")
+        .header(header::AUTHORIZATION, format!("Bearer {}", token))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&book_payload).unwrap()))
+        .unwrap();
+
+    let response = create_book_app.oneshot(req).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let book_id = json["book"]["id"].as_i64().unwrap() as i32;
+
+    // Create a borrowed copy (is_temporary=true)
+    let create_copy_app = Router::new()
+        .route("/copies", axum::routing::post(api::copy::create_copy))
+        .with_state(state.clone());
+
+    let copy_payload = serde_json::json!({
+        "book_id": book_id,
+        "library_id": library_id,
+        "status": "borrowed",
+        "is_temporary": true,
+        "notes": "Borrowed from: Test User"
+    });
+
+    let req = Request::builder()
+        .uri("/copies")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&copy_payload).unwrap()))
+        .unwrap();
+
+    let response = create_copy_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Get borrowed copies
+    let borrowed_app = Router::new()
+        .route(
+            "/copies/borrowed",
+            axum::routing::get(api::copy::get_borrowed_copies),
+        )
+        .with_state(state);
+
+    let req = Request::builder()
+        .uri("/copies/borrowed")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = borrowed_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Should return "loans" key for Flutter compatibility
+    assert!(json["loans"].is_array());
+    assert!(json["total"].as_i64().unwrap() >= 1);
+
+    // Verify loan structure
+    let loans = json["loans"].as_array().unwrap();
+    let loan = loans.iter().find(|l| l["title"] == "Borrowed Book Test");
+    assert!(loan.is_some());
+    let loan = loan.unwrap();
+    assert_eq!(loan["notes"], "Borrowed from: Test User");
+    assert_eq!(loan["from_contact"], "Borrowed from: Test User");
 }

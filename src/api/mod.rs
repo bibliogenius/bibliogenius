@@ -179,13 +179,16 @@ fn build_routes() -> Router<AppState> {
         .route("/books/batch/sort", post(batch::batch_sort))
         .route("/books/duplicates", get(batch::find_duplicates))
         // Copies
-        // Copies
         .route("/copies", get(copy::list_copies))
         .route("/copies", post(copy::create_copy))
         .route("/copies/borrowed", get(copy::get_borrowed_copies))
         .route("/books/:id/copies", get(copy::get_book_copies))
-        .route("/copies/:id", axum::routing::delete(copy::delete_copy))
-        .route("/copies/:id", axum::routing::put(copy::update_copy))
+        .route(
+            "/copies/:id",
+            get(copy::get_copy)
+                .put(copy::update_copy)
+                .delete(copy::delete_copy),
+        )
         // Contacts
         .route(
             "/contacts",
