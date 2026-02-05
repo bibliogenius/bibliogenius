@@ -687,3 +687,266 @@ async fn test_borrowed_copies_via_repository() {
     assert_eq!(loan["notes"], "Borrowed from: Test User");
     assert_eq!(loan["from_contact"], "Borrowed from: Test User");
 }
+
+#[tokio::test]
+async fn test_collection_crud_via_repository() {
+    let state = setup_test_state().await;
+
+    // Create a collection
+    let create_app = Router::new()
+        .route(
+            "/collections",
+            axum::routing::post(api::collections::create_collection),
+        )
+        .with_state(state.clone());
+
+    let payload = serde_json::json!({
+        "name": "Test Collection",
+        "description": "A test collection"
+    });
+
+    let req = Request::builder()
+        .uri("/collections")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+
+    let response = create_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let collection_id = json["id"].as_str().unwrap().to_string();
+    assert_eq!(json["name"], "Test Collection");
+    assert_eq!(json["total_books"], 0);
+
+    // Get collection
+    let get_app = Router::new()
+        .route(
+            "/collections/:id",
+            axum::routing::get(api::collections::get_collection),
+        )
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri(format!("/collections/{}", collection_id))
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = get_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // List collections
+    let list_app = Router::new()
+        .route(
+            "/collections",
+            axum::routing::get(api::collections::list_collections),
+        )
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri("/collections")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = list_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json.as_array().unwrap().len() >= 1);
+
+    // Delete collection
+    let delete_app = Router::new()
+        .route(
+            "/collections/:id",
+            axum::routing::delete(api::collections::delete_collection),
+        )
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri(format!("/collections/{}", collection_id))
+        .method("DELETE")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = delete_app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    // Verify idempotent delete
+    let req = Request::builder()
+        .uri(format!("/collections/{}", collection_id))
+        .method("DELETE")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = delete_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_collection_book_operations() {
+    let state = setup_test_state().await;
+    let token = get_test_token();
+
+    // Create a collection
+    let create_collection_app = Router::new()
+        .route(
+            "/collections",
+            axum::routing::post(api::collections::create_collection),
+        )
+        .with_state(state.clone());
+
+    let payload = serde_json::json!({
+        "name": "Book Operations Collection"
+    });
+
+    let req = Request::builder()
+        .uri("/collections")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+
+    let response = create_collection_app.oneshot(req).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let collection_id = json["id"].as_str().unwrap().to_string();
+
+    // Create a book
+    let create_book_app = Router::new()
+        .route("/books", axum::routing::post(api::books::create_book))
+        .with_state(state.clone());
+
+    let book_payload = serde_json::json!({
+        "title": "Collection Test Book",
+        "isbn": "9781234567893"
+    });
+
+    let req = Request::builder()
+        .uri("/books")
+        .method("POST")
+        .header(header::AUTHORIZATION, format!("Bearer {}", token))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&book_payload).unwrap()))
+        .unwrap();
+
+    let response = create_book_app.oneshot(req).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let book_id = json["book"]["id"].as_i64().unwrap() as i32;
+
+    // Add book to collection
+    let add_book_app = Router::new()
+        .route(
+            "/collections/:collection_id/books/:book_id",
+            axum::routing::post(api::collections::add_book_to_collection),
+        )
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri(format!("/collections/{}/books/{}", collection_id, book_id))
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = add_book_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Get collection books
+    let get_books_app = Router::new()
+        .route(
+            "/collections/:id/books",
+            axum::routing::get(api::collections::get_collection_books),
+        )
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri(format!("/collections/{}/books", collection_id))
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = get_books_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json.as_array().unwrap().len(), 1);
+    assert_eq!(json[0]["title"], "Collection Test Book");
+
+    // Get book's collections
+    let get_book_collections_app = Router::new()
+        .route(
+            "/books/:id/collections",
+            axum::routing::get(api::collections::get_book_collections),
+        )
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri(format!("/books/{}/collections", book_id))
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = get_book_collections_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json.as_array().unwrap().len(), 1);
+    assert_eq!(json[0]["name"], "Book Operations Collection");
+
+    // Remove book from collection
+    let remove_book_app = Router::new()
+        .route(
+            "/collections/:collection_id/books/:book_id",
+            axum::routing::delete(api::collections::remove_book_from_collection),
+        )
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri(format!("/collections/{}/books/{}", collection_id, book_id))
+        .method("DELETE")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = remove_book_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_get_collection_not_found() {
+    let state = setup_test_state().await;
+
+    let app = Router::new()
+        .route(
+            "/collections/:id",
+            axum::routing::get(api::collections::get_collection),
+        )
+        .with_state(state);
+
+    let req = Request::builder()
+        .uri("/collections/non-existent-uuid")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
