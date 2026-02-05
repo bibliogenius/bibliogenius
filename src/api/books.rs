@@ -40,11 +40,9 @@ pub struct BookFilter {
     )
 )]
 pub async fn list_books(
-    State(db): State<DatabaseConnection>,
+    State(state): State<crate::infrastructure::AppState>,
     axum::extract::Query(filter): axum::extract::Query<BookFilter>,
 ) -> Result<Json<Value>, StatusCode> {
-    use sea_orm::{ColumnTrait, Condition, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder};
-
     tracing::info!(
         "List books request - Filters: status={:?}, title={:?}, tag={:?}",
         filter.status,
@@ -52,119 +50,34 @@ pub async fn list_books(
         filter.tag
     );
 
-    let mut query = BookEntity::find();
-
-    if let Some(status) = &filter.status
-        && !status.is_empty()
-    {
-        query = query.filter(crate::models::book::Column::ReadingStatus.eq(status));
-    }
-
-    if let Some(title) = &filter.title
-        && !title.is_empty()
-    {
-        query = query.filter(crate::models::book::Column::Title.contains(title));
-    }
-
-    // Tag filter (searching in JSON subjects array via simple text match for compatibility)
-    if let Some(tag_query) = &filter.tag
-        && !tag_query.is_empty()
-    {
-        query = query.filter(crate::models::book::Column::Subjects.contains(tag_query));
-    }
-
-    if let Some(q) = &filter.q
-        && !q.is_empty()
-    {
-        let cond = Condition::any()
-            .add(crate::models::book::Column::Title.contains(q))
-            .add(crate::models::book::Column::Isbn.contains(q))
-            .add(crate::models::book::Column::Subjects.contains(q));
-        query = query.filter(cond);
-    }
-
-    // ... (existing code, ensure imports are correct or just use crate::models::book::Column etc)
-
-    // --- SORTING (Database Level) ---
-    match filter.sort.as_deref() {
-        Some("title_asc") => {
-            query = query.order_by_asc(crate::models::book::Column::Title);
-        }
-        Some("title_desc") => {
-            query = query.order_by_desc(crate::models::book::Column::Title);
-        }
-        Some("recent") => {
-            query = query.order_by_desc(crate::models::book::Column::CreatedAt);
-        }
-        // "author_asc" is hard to do at DB level without joins.
-        // For now, if author sorting is requested with pagination,
-        // we might NOT sort by author correctly across pages (it will sort by ID/Shelf then paginate).
-        // Improvements: Implement join-based sort or complex query.
-        _ => {
-            query = query.order_by_asc(crate::models::book::Column::ShelfPosition);
-        }
-    }
-
-    // --- PAGINATION & FETCHING ---
-    let (books, total_count) = if let Some(limit) = filter.limit {
-        let page = filter.page.unwrap_or(0);
-        let paginator = query.paginate(&db, limit);
-        let total = paginator.num_items().await.unwrap_or(0);
-        let items = paginator.fetch_page(page).await.unwrap_or(vec![]);
-        (items, total)
-    } else {
-        let items = query
-            .all(&db)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let total = items.len() as u64;
-        (items, total)
+    // Convert API filter to domain filter
+    let domain_filter = crate::domain::BookFilter {
+        status: filter.status.clone(),
+        title: filter.title.clone(),
+        author: filter.author.clone(),
+        tag: filter.tag.clone(),
+        query: filter.q.clone(),
+        sort: filter.sort.clone(),
+        page: filter.page,
+        limit: filter.limit,
     };
 
+    // Fetch via repository
+    let result = state.book_repo.find_all(domain_filter).await.map_err(|e| {
+        tracing::error!("Failed to fetch books: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
     tracing::info!(
-        "DB query returned {} books (Total: {})",
-        books.len(),
-        total_count
+        "Repository returned {} books (Total: {})",
+        result.books.len(),
+        result.total
     );
 
-    let mut book_dtos = Vec::new();
+    let mut book_dtos = result.books;
 
-    for book_model in books {
-        let mut book_dto = Book::from(book_model.clone());
-
-        // Fetch authors
-        if let Ok(authors) = book_model
-            .find_related(crate::models::author::Entity)
-            .all(&db)
-            .await
-            && !authors.is_empty()
-        {
-            let author_names: Vec<String> = authors.into_iter().map(|a| a.name).collect();
-            book_dto.author = Some(author_names.join(", ")); // Backward compat
-            book_dto.authors = Some(author_names); // New array field
-        }
-
-        // Derive cover_url
-        if let Some(isbn) = &book_dto.isbn {
-            book_dto.cover_url = Some(format!(
-                "https://covers.openlibrary.org/b/isbn/{}-M.jpg",
-                isbn
-            ));
-        }
-
-        // Note: We skip the "DEFENSIVE" in-memory filtering here for performance.
-        // We rely on DB filters. If DB filters are correct, we don't need double-check.
-        // Also, pagination makes in-memory filtering impossible (as we only have a slice).
-
-        book_dtos.push(book_dto);
-    }
-
-    // Apply in-memory sorting ONLY if we fetched everything (no limit) OR if it's a sort we couldn't do in DB?
-    // Actually, if we paginate, we CANNOT sort in memory.
-    // So for "author_asc", if paginated, it will just be "unsorted" (or shelf/ID sorted).
-    // The user must accept this limitation for now or we implement complex DB sort later.
-    // However, if NO LIMIT is provided (Local Library), we can still do in-memory sort to support 'author_asc'.
-
+    // Apply in-memory author sorting only if no pagination (full dataset)
+    // Author sorting at DB level requires complex joins not yet implemented
     if filter.limit.is_none()
         && let Some(sort_order) = &filter.sort
         && sort_order == "author_asc"
@@ -182,7 +95,7 @@ pub async fn list_books(
 
     Ok(Json(json!({
         "books": book_dtos,
-        "total": total_count
+        "total": result.total
     })))
 }
 

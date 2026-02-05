@@ -6,7 +6,7 @@ use sea_orm::{
     PaginatorTrait, QueryFilter, QueryOrder, Set,
 };
 
-use crate::domain::{BookFilter, BookRepository, DomainError};
+use crate::domain::{BookFilter, BookRepository, DomainError, PaginatedBooks};
 use crate::models::Book;
 use crate::models::book::{ActiveModel, Column, Entity as BookEntity};
 
@@ -23,7 +23,7 @@ impl SeaOrmBookRepository {
 
 #[async_trait]
 impl BookRepository for SeaOrmBookRepository {
-    async fn find_all(&self, filter: BookFilter) -> Result<Vec<Book>, DomainError> {
+    async fn find_all(&self, filter: BookFilter) -> Result<PaginatedBooks, DomainError> {
         let mut query = BookEntity::find();
 
         // Apply filters
@@ -63,12 +63,17 @@ impl BookRepository for SeaOrmBookRepository {
             _ => query = query.order_by_asc(Column::ShelfPosition),
         }
 
-        // Fetch with optional pagination
-        let books = if let Some(limit) = filter.limit {
+        // Fetch with pagination and total count
+        let (books, total) = if let Some(limit) = filter.limit {
             let page = filter.page.unwrap_or(0);
-            query.paginate(&self.db, limit).fetch_page(page).await?
+            let paginator = query.paginate(&self.db, limit);
+            let total = paginator.num_items().await.unwrap_or(0);
+            let items = paginator.fetch_page(page).await?;
+            (items, total)
         } else {
-            query.all(&self.db).await?
+            let items = query.all(&self.db).await?;
+            let total = items.len() as u64;
+            (items, total)
         };
 
         // Convert to DTOs and fetch related authors
@@ -99,7 +104,10 @@ impl BookRepository for SeaOrmBookRepository {
             book_dtos.push(book_dto);
         }
 
-        Ok(book_dtos)
+        Ok(PaginatedBooks {
+            books: book_dtos,
+            total,
+        })
     }
 
     async fn find_by_id(&self, id: i32) -> Result<Option<Book>, DomainError> {

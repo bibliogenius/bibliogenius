@@ -203,3 +203,68 @@ async fn test_update_book_success() {
     assert_eq!(json["book"]["title"], "Updated Title");
     assert_eq!(json["book"]["reading_status"], "reading");
 }
+
+#[tokio::test]
+async fn test_list_books_with_pagination() {
+    let state = setup_test_state().await;
+    let token = get_test_token();
+
+    // Create 3 books
+    let create_app = Router::new()
+        .route("/books", axum::routing::post(api::books::create_book))
+        .with_state(state.clone());
+
+    for i in 1..=3 {
+        let payload = serde_json::json!({
+            "title": format!("Book {}", i),
+            "isbn": format!("978000000000{}", i)
+        });
+        let req = Request::builder()
+            .uri("/books")
+            .method("POST")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+        let response = create_app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    // Test list without pagination
+    let list_app = Router::new()
+        .route("/books", axum::routing::get(api::books::list_books))
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri("/books")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = list_app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["total"], 3);
+    assert_eq!(json["books"].as_array().unwrap().len(), 3);
+
+    // Test list with pagination (limit=2, page=0)
+    let req = Request::builder()
+        .uri("/books?limit=2&page=0")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = list_app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["total"], 3); // Total is still 3
+    assert_eq!(json["books"].as_array().unwrap().len(), 2); // But only 2 returned
+}

@@ -21,11 +21,18 @@ pub struct BookFilter {
     pub limit: Option<u64>,
 }
 
+/// Paginated result with total count
+#[derive(Debug)]
+pub struct PaginatedBooks {
+    pub books: Vec<Book>,
+    pub total: u64,
+}
+
 /// Repository trait for Book entity
 #[async_trait]
 pub trait BookRepository: Send + Sync {
-    /// Find all books matching the filter criteria
-    async fn find_all(&self, filter: BookFilter) -> Result<Vec<Book>, DomainError>;
+    /// Find all books matching the filter criteria with pagination support
+    async fn find_all(&self, filter: BookFilter) -> Result<PaginatedBooks, DomainError>;
 
     /// Find a single book by ID
     async fn find_by_id(&self, id: i32) -> Result<Option<Book>, DomainError>;
