@@ -305,6 +305,7 @@ name = "bibliogenius"
 version = "0.6.5-alpha.16"
 dependencies = [
  "argon2",
+ "async-trait",
  "axum",
  "chrono",
  "csv",

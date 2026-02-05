@@ -8,7 +8,7 @@ use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use serde_json::{Value, json};
 
 use crate::models::Book;
-use crate::models::book::{ActiveModel, Entity as BookEntity};
+use crate::models::book::Entity as BookEntity;
 
 #[derive(serde::Deserialize, Default)]
 pub struct BookFilter {
@@ -195,136 +195,100 @@ pub async fn list_books(
     )
 )]
 pub async fn create_book(
-    State(db): State<DatabaseConnection>,
+    State(state): State<crate::infrastructure::AppState>,
     _claims: crate::auth::Claims,
     Json(book): Json<Book>,
 ) -> impl IntoResponse {
+    let db = state.db();
     let now = chrono::Utc::now();
 
-    let subjects_json = book
-        .subjects
-        .as_ref()
-        .map(|s| serde_json::to_string(s).unwrap_or_else(|_| "[]".to_string()));
-
-    // Determine owned status: false for 'wanting', true otherwise
-    let reading_status = book
-        .reading_status
-        .clone()
-        .unwrap_or_else(|| "to_read".to_string());
-    let owned = book.owned.unwrap_or_else(|| reading_status != "wanting");
-
-    let new_book = ActiveModel {
-        title: Set(book.title.clone()),
-        isbn: Set(book.isbn),
-        summary: Set(book.summary),
-        publisher: Set(book.publisher),
-        publication_year: Set(book.publication_year),
-        dewey_decimal: Set(book.dewey_decimal),
-        lcc: Set(book.lcc),
-        subjects: Set(subjects_json),
-        marc_record: Set(book.marc_record),
-        cataloguing_notes: Set(book.cataloguing_notes),
-        source_data: Set(book.source_data),
-        reading_status: Set(reading_status),
-        started_reading_at: Set(book.started_reading_at.flatten()),
-        finished_reading_at: Set(book.finished_reading_at.flatten()),
-        owned: Set(owned),
-        price: Set(book.price),
-        digital_formats: Set(book
-            .digital_formats
-            .map(|s| serde_json::to_string(&s).unwrap_or_else(|_| "[]".to_string()))),
-        created_at: Set(now.to_rfc3339()),
-        updated_at: Set(now.to_rfc3339()),
-        ..Default::default()
+    // Extract author info before moving book to repository
+    let author_names: Vec<String> = if let Some(ref authors) = book.authors {
+        authors.clone()
+    } else if let Some(ref author) = book.author {
+        author
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        Vec::new()
     };
 
-    match new_book.insert(&db).await {
-        Ok(model) => {
-            // Handle authors - support both single author and authors array
-            // Preference: use authors array if provided, fall back to single author
-            let author_names: Vec<String> = if let Some(ref authors) = book.authors {
-                authors.clone()
-            } else if let Some(ref author) = book.author {
-                // Split comma-separated for backward compat
-                author
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            } else {
-                Vec::new()
-            };
+    // Create book via repository
+    match state.book_repo.create(book).await {
+        Ok(created_book) => {
+            let book_id = created_book.id.expect("Created book must have ID");
+            let owned = created_book.owned.unwrap_or(true);
 
+            // Handle authors - find or create, then link to book
             if !author_names.is_empty() {
                 use crate::models::author::{ActiveModel as AuthorActive, Entity as AuthorEntity};
                 use crate::models::book_authors::ActiveModel as BookAuthorActive;
                 use sea_orm::{ColumnTrait, QueryFilter};
 
                 for author_name in author_names {
-                    // Find or create author
                     let author = match AuthorEntity::find()
                         .filter(crate::models::author::Column::Name.eq(&author_name))
-                        .one(&db)
+                        .one(db)
                         .await
                     {
                         Ok(Some(existing)) => existing,
                         _ => {
-                            // Create new author
                             let new_author = AuthorActive {
                                 name: Set(author_name),
                                 created_at: Set(now.to_rfc3339()),
                                 updated_at: Set(now.to_rfc3339()),
                                 ..Default::default()
                             };
-                            match new_author.insert(&db).await {
+                            match new_author.insert(db).await {
                                 Ok(created) => created,
                                 Err(e) => {
                                     tracing::warn!("Failed to create author: {}", e);
-                                    continue; // Skip this author but continue with others
+                                    continue;
                                 }
                             }
                         }
                     };
 
-                    // Create book-author relation
                     let book_author = BookAuthorActive {
-                        book_id: Set(model.id),
+                        book_id: Set(book_id),
                         author_id: Set(author.id),
                         ..Default::default()
                     };
-                    let _ = book_author.insert(&db).await;
+                    let _ = book_author.insert(db).await;
                 }
             }
 
-            // Log operation
+            // Log sync operation
             let _ = crate::sync::log_operation(
-                &db,
+                db,
                 "book",
-                model.id,
+                book_id,
                 "INSERT",
-                Some(serde_json::to_value(&model).unwrap()),
+                Some(serde_json::to_value(&created_book).unwrap_or_default()),
             )
             .await;
 
             // Create default copy only if owned
-            if model.owned {
+            if owned {
                 let copy = crate::models::copy::ActiveModel {
-                    book_id: Set(model.id),
-                    library_id: Set(1), // Default library ID
+                    book_id: Set(book_id),
+                    library_id: Set(1),
                     status: Set("available".to_string()),
                     is_temporary: Set(false),
                     created_at: Set(now.to_rfc3339()),
                     updated_at: Set(now.to_rfc3339()),
                     ..Default::default()
                 };
-                let _ = copy.insert(&db).await;
+                let _ = copy.insert(db).await;
             }
 
             (
                 StatusCode::CREATED,
                 Json(json!({
                     "message": "Book created successfully",
-                    "book": Book::from(model)
+                    "book": created_book
                 })),
             )
                 .into_response()
@@ -349,12 +313,15 @@ pub async fn create_book(
     )
 )]
 pub async fn delete_book(
-    State(db): State<DatabaseConnection>,
+    State(state): State<crate::infrastructure::AppState>,
     _claims: crate::auth::Claims,
     axum::extract::Path(id): axum::extract::Path<i32>,
 ) -> impl IntoResponse {
-    match BookEntity::delete_by_id(id).exec(&db).await {
-        Ok(_) => (
+    use crate::domain::DomainError;
+
+    // Idempotent DELETE: return 200 OK even if book doesn't exist
+    match state.book_repo.delete(id).await {
+        Ok(()) | Err(DomainError::NotFound) => (
             StatusCode::OK,
             Json(json!({"message": "Book deleted successfully"})),
         )
@@ -380,15 +347,18 @@ pub async fn delete_book(
     )
 )]
 pub async fn update_book(
-    State(db): State<DatabaseConnection>,
+    State(state): State<crate::infrastructure::AppState>,
     _claims: crate::auth::Claims,
     axum::extract::Path(id): axum::extract::Path<i32>,
     Json(book_data): Json<Book>,
 ) -> impl IntoResponse {
+    use crate::domain::DomainError;
+
+    let db = state.db();
     let now = chrono::Utc::now();
 
-    // Find the book first
-    let book = match BookEntity::find_by_id(id).one(&db).await {
+    // Get current book to track owned status change
+    let current_book = match state.book_repo.find_by_id(id).await {
         Ok(Some(b)) => b,
         Ok(None) => {
             return (
@@ -406,59 +376,14 @@ pub async fn update_book(
         }
     };
 
-    let mut book: ActiveModel = book.into();
-
-    println!("Updating book {} with data: {:?}", id, book_data);
-
-    // Ensure title is updated if provided, or fallback to existing?
-    // Frontend is now sending title, so we can set it.
-    book.title = Set(book_data.title);
-    book.isbn = Set(book_data.isbn);
-    book.summary = Set(book_data.summary);
-    book.publisher = Set(book_data.publisher);
-    book.publication_year = Set(book_data.publication_year);
-    if let Some(status) = book_data.reading_status {
-        book.reading_status = Set(status);
-    }
-    if let Some(finished_at) = book_data.finished_reading_at {
-        book.finished_reading_at = Set(finished_at);
-    }
-    if let Some(started_at) = book_data.started_reading_at {
-        book.started_reading_at = Set(started_at);
-    }
-
-    // Handle attributes/tags update
-    if let Some(subjects) = book_data.subjects {
-        let subjects_json = serde_json::to_string(&subjects).unwrap_or_else(|_| "[]".to_string());
-        book.subjects = Set(Some(subjects_json));
-    }
-
-    // Handle user_rating update
-    book.user_rating = Set(book_data.user_rating);
-
-    // Handle owned field - track if we need to create/delete copies
-    let old_owned = match &book.owned {
-        sea_orm::ActiveValue::Unchanged(v) => *v,
-        sea_orm::ActiveValue::Set(v) => *v,
-        _ => true,
-    };
+    let old_owned = current_book.owned.unwrap_or(true);
     let new_owned = book_data.owned.unwrap_or(old_owned);
-    if new_owned != old_owned {
-        book.owned = Set(new_owned);
-    }
 
-    book.price = Set(book_data.price);
+    tracing::debug!("Updating book {} with data: {:?}", id, book_data);
 
-    // Handle digital_formats update
-    if let Some(formats) = book_data.digital_formats {
-        let formats_json = serde_json::to_string(&formats).unwrap_or_else(|_| "[]".to_string());
-        book.digital_formats = Set(Some(formats_json));
-    }
-
-    book.updated_at = Set(now.to_rfc3339());
-
-    match book.update(&db).await {
-        Ok(model) => {
+    // Update book via repository
+    match state.book_repo.update(id, book_data).await {
+        Ok(updated_book) => {
             // Handle owned change: create or delete copies
             if new_owned != old_owned {
                 use crate::models::copy::{self as copy_model, Entity as CopyEntity};
@@ -468,7 +393,7 @@ pub async fn update_book(
                     // owned: false -> true: create a copy if none exists
                     let existing = CopyEntity::find()
                         .filter(copy_model::Column::BookId.eq(id))
-                        .one(&db)
+                        .one(db)
                         .await;
                     if matches!(existing, Ok(None)) {
                         let copy = copy_model::ActiveModel {
@@ -480,13 +405,13 @@ pub async fn update_book(
                             updated_at: Set(now.to_rfc3339()),
                             ..Default::default()
                         };
-                        let _ = copy.insert(&db).await;
+                        let _ = copy.insert(db).await;
                     }
                 } else {
                     // owned: true -> false: delete all copies for this book
                     let _ = CopyEntity::delete_many()
                         .filter(copy_model::Column::BookId.eq(id))
-                        .exec(&db)
+                        .exec(db)
                         .await;
                 }
             }
@@ -495,11 +420,16 @@ pub async fn update_book(
                 StatusCode::OK,
                 Json(json!({
                     "message": "Book updated successfully",
-                    "book": Book::from(model)
+                    "book": updated_book
                 })),
             )
                 .into_response()
         }
+        Err(DomainError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Book not found"})),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -569,40 +499,18 @@ pub async fn list_tags(
     )
 )]
 pub async fn get_book(
-    State(db): State<DatabaseConnection>,
+    State(state): State<crate::infrastructure::AppState>,
     axum::extract::Path(id): axum::extract::Path<i32>,
 ) -> impl IntoResponse {
-    use sea_orm::{EntityTrait, ModelTrait};
-
-    match BookEntity::find_by_id(id).one(&db).await {
-        Ok(Some(book_model)) => {
-            let mut book_dto = Book::from(book_model.clone());
-
-            // Fetch authors
-            if let Ok(authors) = book_model
-                .find_related(crate::models::author::Entity)
-                .all(&db)
-                .await
-                && !authors.is_empty()
-            {
-                let author_names: Vec<String> = authors.into_iter().map(|a| a.name).collect();
-                book_dto.author = Some(author_names.join(", ")); // Backward compat
-                book_dto.authors = Some(author_names); // New array field
-            }
-
-            // Derive cover_url
+    match state.book_repo.find_by_id(id).await {
+        Ok(Some(mut book_dto)) => {
+            // Add large cover URL if we have ISBN
             if let Some(isbn) = &book_dto.isbn {
-                book_dto.cover_url = Some(format!(
-                    "https://covers.openlibrary.org/b/isbn/{}-M.jpg",
-                    isbn
-                ));
-                // Add large cover URL
                 book_dto.large_cover_url = Some(format!(
                     "https://covers.openlibrary.org/b/isbn/{}-L.jpg",
                     isbn
                 ));
             }
-
             (StatusCode::OK, Json(book_dto)).into_response()
         }
         Ok(None) => (

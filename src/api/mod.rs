@@ -36,7 +36,21 @@ use axum::{
 };
 use sea_orm::DatabaseConnection;
 
+use crate::infrastructure::AppState;
+
+/// Create API router with a pre-built AppState (returns Router with state applied)
+pub fn api_router_with_state(state: AppState) -> Router {
+    build_routes().with_state(state)
+}
+
+/// Create API router from DatabaseConnection (convenience wrapper)
 pub fn api_router(db: DatabaseConnection) -> Router {
+    let state = AppState::new(db);
+    api_router_with_state(state)
+}
+
+/// Build the route definitions (internal)
+fn build_routes() -> Router<AppState> {
     Router::new()
         // Admin
         .route("/admin/shutdown", post(admin::shutdown))
@@ -218,5 +232,4 @@ pub fn api_router(db: DatabaseConnection) -> Router {
         // Export/Import
         .route("/export", get(export::export_data))
         .route("/import", post(export::import_data))
-        .with_state(db)
 }

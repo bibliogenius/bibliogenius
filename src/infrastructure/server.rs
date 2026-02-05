@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::api;
+use crate::infrastructure::AppState;
 
 // Global flag to track if server is running
 static SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -19,7 +20,8 @@ pub fn is_server_running() -> bool {
 
 /// Build the API router with database connection
 pub fn build_router(db: DatabaseConnection) -> Router {
-    let api_router = api::api_router(db);
+    let state = AppState::new(db);
+    let api_router = api::api_router_with_state(state.clone());
 
     // CORS configuration
     let cors = CorsLayer::new()
