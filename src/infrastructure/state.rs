@@ -3,8 +3,8 @@
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 
-use crate::domain::BookRepository;
-use crate::infrastructure::SeaOrmBookRepository;
+use crate::domain::{AuthorRepository, BookRepository};
+use crate::infrastructure::{SeaOrmAuthorRepository, SeaOrmBookRepository};
 
 /// Application state shared across all handlers
 #[derive(Clone)]
@@ -13,14 +13,21 @@ pub struct AppState {
     db: DatabaseConnection,
     /// Book repository
     pub book_repo: Arc<dyn BookRepository>,
+    /// Author repository
+    pub author_repo: Arc<dyn AuthorRepository>,
 }
 
 impl AppState {
     /// Create a new AppState with all repositories initialized
     pub fn new(db: DatabaseConnection) -> Self {
         let book_repo = Arc::new(SeaOrmBookRepository::new(db.clone()));
+        let author_repo = Arc::new(SeaOrmAuthorRepository::new(db.clone()));
 
-        Self { db, book_repo }
+        Self {
+            db,
+            book_repo,
+            author_repo,
+        }
     }
 
     /// Get the database connection (for backward compatibility during migration)

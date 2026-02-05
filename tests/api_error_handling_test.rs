@@ -268,3 +268,82 @@ async fn test_list_books_with_pagination() {
     assert_eq!(json["total"], 3); // Total is still 3
     assert_eq!(json["books"].as_array().unwrap().len(), 2); // But only 2 returned
 }
+
+#[tokio::test]
+async fn test_author_crud_via_repository() {
+    let state = setup_test_state().await;
+
+    // Create author
+    let create_app = Router::new()
+        .route("/authors", axum::routing::post(api::author::create_author))
+        .with_state(state.clone());
+
+    let payload = serde_json::json!({ "name": "Test Author" });
+    let req = Request::builder()
+        .uri("/authors")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+
+    let response = create_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let author_id = json["id"].as_i64().unwrap();
+    assert_eq!(json["name"], "Test Author");
+
+    // Get author
+    let get_app = Router::new()
+        .route("/authors/:id", axum::routing::get(api::author::get_author))
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri(format!("/authors/{}", author_id))
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = get_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // List authors
+    let list_app = Router::new()
+        .route("/authors", axum::routing::get(api::author::list_authors))
+        .with_state(state.clone());
+
+    let req = Request::builder()
+        .uri("/authors")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = list_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json.as_array().unwrap().len() >= 1);
+
+    // Delete author
+    let delete_app = Router::new()
+        .route(
+            "/authors/:id",
+            axum::routing::delete(api::author::delete_author),
+        )
+        .with_state(state);
+
+    let req = Request::builder()
+        .uri(format!("/authors/{}", author_id))
+        .method("DELETE")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = delete_app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
