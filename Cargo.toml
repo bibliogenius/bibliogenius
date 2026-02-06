@@ -2,6 +2,7 @@
 name = "bibliogenius"
 version = "0.6.5-alpha.16"
 edition = "2024"
+license = "MIT"
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(frb_expand)'] }

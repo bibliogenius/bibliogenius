@@ -42,7 +42,7 @@ echo "🚀 Starting BiblioGenius on port $PORT..."
 # Set environment variables
 export PORT="$PORT"
 if [ -n "$DATABASE" ]; then
-    export DATABASE_PATH="$DATABASE"
+    export DATABASE_URL="sqlite://$DATABASE?mode=rwc"
     echo "📚 Using database: $DATABASE"
 fi
 

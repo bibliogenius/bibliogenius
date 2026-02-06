@@ -74,7 +74,6 @@ The backend is designed as a modular library:
 ## 🔗 Related Repositories
 
 - [**bibliogenius-app**](https://github.com/bibliogenius/bibliogenius-app): The frontend Flutter application.
-- [**bibliogenius-docker**](https://github.com/bibliogenius/bibliogenius-docker): Docker Compose environment.
 
 ## 📄 License
 

@@ -1,0 +1,60 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# Checks crates against the RustSec advisory database (replaces cargo-audit)
+version = 2
+ignore = [
+    # sqlx 0.7.4 binary protocol overflow — not exploitable on SQLite.
+    # Fix requires sqlx >= 0.8.1 which needs sea-orm 1.x upgrade.
+    "RUSTSEC-2024-0363",
+    # rustls-pemfile 1.0.4 unmaintained — transitive dep from reqwest 0.11 / sqlx 0.7.
+    # Will be resolved when upgrading to reqwest 0.12+ / sqlx 0.8+.
+    "RUSTSEC-2025-0134",
+    # derivative unmaintained — transitive dep from sea-query 0.30 (sea-orm 0.12).
+    "RUSTSEC-2024-0388",
+    # paste unmaintained — transitive dep from sqlx-core 0.7 (sea-orm 0.12).
+    "RUSTSEC-2024-0436",
+    # proc-macro-error unmaintained — transitive dep from sea-orm 0.12 / utoipa 4.2.
+    "RUSTSEC-2024-0370",
+    # NOTE: All above will be resolved by upgrading sea-orm to 1.x.
+]
+
+[licenses]
+# This project is MIT-licensed — only allow compatible licenses
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "BSL-1.0",
+    "MPL-2.0",
+]
+
+[[licenses.clarify]]
+crate = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# flutter_rust_bridge transitive dep — has MIT license but missing Cargo.toml field
+[[licenses.clarify]]
+crate = "allo-isolate"
+expression = "MIT"
+license-files = [{ path = "LICENSE", hash = 0xf4b3a26a }]
+
+[bans]
+# Detect duplicate crate versions
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# Only allow crates from crates.io
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
