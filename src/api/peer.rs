@@ -275,86 +275,78 @@ pub struct IncomingConnectionRequest {
     url: String,
 }
 
-/// Receive an incoming connection request from a remote peer
-/// This forwards the request to the local Hub to create an 'incoming' peer record
+/// Receive an incoming connection request from a remote peer.
+/// Tries to forward to the local Hub first; falls back to local storage
+/// if the Hub is unreachable or rejects the request (P2P/FFI mode).
 pub async fn receive_connection_request(
     State(db): State<DatabaseConnection>,
     Json(payload): Json<IncomingConnectionRequest>,
 ) -> impl IntoResponse {
-    // Forward to local Hub
+    // Try forwarding to local Hub
     let hub_url = std::env::var("HUB_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
     let endpoint = format!("{}/api/peers/receive_connection", hub_url);
 
     let client = get_safe_client();
-    match client
+    let hub_result = client
         .post(&endpoint)
         .json(&serde_json::json!({
             "name": payload.name,
             "url": payload.url,
         }))
         .send()
-        .await
-    {
-        Ok(res) => {
-            if res.status().is_success() {
-                (
-                    StatusCode::OK,
-                    Json(json!({ "message": "Connection request received and forwarded to Hub" })),
-                )
-                    .into_response()
-            } else {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "Hub rejected the request" })),
-                )
-                    .into_response()
-            }
-        }
-        Err(_) => {
-            // Fallback: Handle locally if Hub is unreachable (P2P mode)
-            // Check if peer exists locally
-            let existing = peer::Entity::find()
-                .filter(peer::Column::Url.eq(&payload.url))
-                .one(&db)
-                .await;
+        .await;
 
-            match existing {
-                Ok(Some(_)) => (
+    // If Hub handled it successfully, we're done
+    if let Ok(ref res) = hub_result
+        && res.status().is_success()
+    {
+        return (
+            StatusCode::OK,
+            Json(json!({ "message": "Connection request received and forwarded to Hub" })),
+        )
+            .into_response();
+    }
+
+    // Hub unreachable or rejected — handle locally (P2P/FFI mode)
+    let existing = peer::Entity::find()
+        .filter(peer::Column::Url.eq(&payload.url))
+        .one(&db)
+        .await;
+
+    match existing {
+        Ok(Some(_)) => (
+            StatusCode::OK,
+            Json(json!({ "message": "Peer already exists locally" })),
+        )
+            .into_response(),
+        Ok(None) => {
+            let new_peer = peer::ActiveModel {
+                name: Set(payload.name),
+                url: Set(payload.url),
+                auto_approve: Set(false),
+                created_at: Set(Utc::now().to_rfc3339()),
+                updated_at: Set(Utc::now().to_rfc3339()),
+                ..Default::default()
+            };
+
+            match new_peer.insert(&db).await {
+                Ok(_) => (
                     StatusCode::OK,
-                    Json(json!({ "message": "Peer already exists locally" })),
+                    Json(json!({ "message": "Connection request saved locally" })),
                 )
                     .into_response(),
-                Ok(None) => {
-                    // Create new peer (pending approval conceptually, strict P2P)
-                    let new_peer = peer::ActiveModel {
-                        name: Set(payload.name),
-                        url: Set(payload.url),
-                        auto_approve: Set(false),
-                        created_at: Set(Utc::now().to_rfc3339()),
-                        updated_at: Set(Utc::now().to_rfc3339()),
-                        ..Default::default()
-                    };
-
-                    match new_peer.insert(&db).await {
-                        Ok(_) => (
-                            StatusCode::OK,
-                            Json(json!({ "message": "Connection request saved locally" })),
-                        )
-                            .into_response(),
-                        Err(e) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({ "error": format!("Failed to save peer locally: {}", e) })),
-                        )
-                            .into_response(),
-                    }
-                }
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": format!("Database error: {}", e) })),
+                    Json(json!({ "error": format!("Failed to save peer locally: {}", e) })),
                 )
                     .into_response(),
             }
         }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Database error: {}", e) })),
+        )
+            .into_response(),
     }
 }
 

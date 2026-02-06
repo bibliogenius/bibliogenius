@@ -59,12 +59,21 @@ pub async fn lookup_book(
                     })
                     .unwrap_or_default();
 
+                // Enrich with cover from other sources if BNF has none
+                let mut cover_url = bnf_book.cover_url;
+                if cover_url.is_none() && enable_openlibrary {
+                    cover_url = crate::openlibrary::fetch_cover_url(&isbn).await;
+                }
+                if cover_url.is_none() && enable_google {
+                    cover_url = crate::google_books::fetch_cover_url(&isbn).await;
+                }
+
                 let metadata = crate::openlibrary::BookMetadata {
                     title: bnf_book.title,
                     authors,
                     publisher: bnf_book.publisher,
                     publication_year: bnf_book.publication_year.map(|y| y.to_string()),
-                    cover_url: bnf_book.cover_url,
+                    cover_url,
                     summary: bnf_book.description,
                 };
                 return (StatusCode::OK, Json(metadata)).into_response();
@@ -240,12 +249,21 @@ pub async fn lookup_book(
                     })
                     .unwrap_or_default();
 
+                // Enrich with cover from other sources if BNF has none
+                let mut cover_url = bnf_book.cover_url;
+                if cover_url.is_none() && enable_openlibrary {
+                    cover_url = crate::openlibrary::fetch_cover_url(&isbn).await;
+                }
+                if cover_url.is_none() && enable_google {
+                    cover_url = crate::google_books::fetch_cover_url(&isbn).await;
+                }
+
                 let metadata = crate::openlibrary::BookMetadata {
                     title: bnf_book.title,
                     authors,
                     publisher: bnf_book.publisher,
                     publication_year: bnf_book.publication_year.map(|y| y.to_string()),
-                    cover_url: bnf_book.cover_url,
+                    cover_url,
                     summary: bnf_book.description,
                 };
                 return (StatusCode::OK, Json(metadata)).into_response();
