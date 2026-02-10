@@ -371,6 +371,8 @@ pub struct LeaderboardResponse {
     pub reader: Vec<LeaderboardEntry>,
     pub lender: Vec<LeaderboardEntry>,
     pub cataloguer: Vec<LeaderboardEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refreshed: Option<String>,
 }
 
 /// GET /api/gamification/leaderboard
@@ -464,6 +466,13 @@ pub async fn get_leaderboard(State(db): State<DatabaseConnection>) -> impl IntoR
         .await
         .unwrap_or_default();
 
+    // Freshness = oldest synced_at among peers (stalest peer = overall freshness)
+    let last_refreshed: Option<String> = peer_stats
+        .iter()
+        .map(|s| s.synced_at.as_str())
+        .min()
+        .map(|s| s.to_string());
+
     for stat in peer_stats {
         collector_entries.push(LeaderboardEntry {
             library_name: stat.library_name.clone(),
@@ -513,6 +522,7 @@ pub async fn get_leaderboard(State(db): State<DatabaseConnection>) -> impl IntoR
             reader: reader_entries,
             lender: lender_entries,
             cataloguer: cataloguer_entries,
+            last_refreshed,
         }),
     )
         .into_response()

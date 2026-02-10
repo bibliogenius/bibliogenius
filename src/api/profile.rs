@@ -7,22 +7,26 @@ use crate::models::installation_profile::{ActiveModel, Entity as InstallationPro
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateProfileRequest {
-    pub profile_type: String,
+    #[serde(default)]
+    pub profile_type: Option<String>,
     #[serde(default)]
     pub avatar_config: Option<serde_json::Value>,
     #[serde(default)]
     pub fallback_preferences: Option<std::collections::HashMap<String, bool>>,
+    #[serde(default)]
+    pub enabled_modules: Option<Vec<String>>,
 }
 
 pub async fn update_profile(
     State(db): State<DatabaseConnection>,
     Json(req): Json<UpdateProfileRequest>,
 ) -> impl IntoResponse {
-    // Validate profile type
-    if req.profile_type != "individual"
-        && req.profile_type != "professional"
-        && req.profile_type != "librarian"
-        && req.profile_type != "kid"
+    // Validate profile type if provided
+    if let Some(ref profile_type) = req.profile_type
+        && profile_type != "individual"
+        && profile_type != "professional"
+        && profile_type != "librarian"
+        && profile_type != "kid"
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -39,7 +43,10 @@ pub async fn update_profile(
 
     if let Some(existing_profile) = profile {
         let mut active: ActiveModel = existing_profile.clone().into();
-        active.profile_type = Set(req.profile_type.clone());
+
+        if let Some(ref profile_type) = req.profile_type {
+            active.profile_type = Set(profile_type.clone());
+        }
 
         if let Some(avatar_config) = req.avatar_config {
             active.avatar_config = Set(Some(
@@ -47,10 +54,19 @@ pub async fn update_profile(
             ));
         }
 
-        // Handle fallback preferences
+        // Handle direct enabled_modules update
+        if let Some(ref modules) = req.enabled_modules {
+            active.enabled_modules = Set(serde_json::to_string(modules).unwrap_or_default());
+        }
+
+        // Handle fallback preferences (toggle-based module flags)
         if let Some(prefs) = req.fallback_preferences {
-            let mut modules: Vec<String> =
-                serde_json::from_str(&existing_profile.enabled_modules).unwrap_or_default();
+            let mut modules: Vec<String> = if req.enabled_modules.is_some() {
+                // If enabled_modules was also set, use that as the base
+                req.enabled_modules.clone().unwrap_or_default()
+            } else {
+                serde_json::from_str(&existing_profile.enabled_modules).unwrap_or_default()
+            };
 
             for (provider, enabled) in prefs {
                 if provider == "google_books" {
@@ -89,16 +105,15 @@ pub async fn update_profile(
         }
 
         // Also update library config defaults based on profile type
-        // If switching to individual -> show_borrowed_books = true
-        // If switching to professional -> show_borrowed_books = false
-        // We need to access library_config model here.
         use crate::models::library_config::{
             ActiveModel as ConfigActiveModel, Entity as ConfigEntity,
         };
 
-        if let Ok(Some(config)) = ConfigEntity::find_by_id(1).one(&db).await {
+        if let Some(ref profile_type) = req.profile_type
+            && let Ok(Some(config)) = ConfigEntity::find_by_id(1).one(&db).await
+        {
             let mut active_config: ConfigActiveModel = config.into();
-            active_config.show_borrowed_books = Set(Some(req.profile_type == "individual"));
+            active_config.show_borrowed_books = Set(Some(profile_type == "individual"));
             let _ = active_config.update(&db).await;
         }
 
