@@ -3,7 +3,8 @@ use chrono::Utc;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::models::{
     book, gamification_achievements, gamification_config, gamification_streaks, loan,
@@ -254,4 +255,265 @@ pub async fn get_user_status(State(db): State<DatabaseConnection>) -> impl IntoR
     };
 
     (StatusCode::OK, Json(status)).into_response()
+}
+
+// --- Network Gamification (Leaderboard) ---
+
+#[derive(Serialize, Deserialize)]
+pub struct PublicTrackStats {
+    pub level: i32,
+    pub current: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PublicGamificationStats {
+    pub library_name: String,
+    pub collector: PublicTrackStats,
+    pub reader: PublicTrackStats,
+    pub lender: PublicTrackStats,
+    pub cataloguer: PublicTrackStats,
+}
+
+/// GET /api/gamification/public-stats
+/// Returns public gamification stats if the user opted-in to sharing.
+pub async fn get_public_stats(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    use crate::models::{installation_profile, library_config};
+
+    // Check if network_gamification + share_gamification_stats are enabled
+    let profile = match installation_profile::Entity::find_by_id(1).one(&db).await {
+        Ok(Some(p)) => p,
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "Module not available"})),
+            )
+                .into_response();
+        }
+    };
+
+    let enabled_modules: Vec<String> =
+        serde_json::from_str(&profile.enabled_modules).unwrap_or_default();
+
+    if !enabled_modules.contains(&"network_gamification".to_string())
+        || !enabled_modules.contains(&"share_gamification_stats".to_string())
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Gamification stats sharing is disabled"})),
+        )
+            .into_response();
+    }
+
+    // Get library name
+    let library_name = match library_config::Entity::find_by_id(1).one(&db).await {
+        Ok(Some(c)) => c.name,
+        _ => "Unknown".to_string(),
+    };
+
+    // Compute stats (same logic as get_user_status)
+    let books_count = book::Entity::find().count(&db).await.unwrap_or(0) as i64;
+    let read_count = book::Entity::find()
+        .filter(book::Column::ReadingStatus.eq("read"))
+        .count(&db)
+        .await
+        .unwrap_or(0) as i64;
+    let loans_count = loan::Entity::find().count(&db).await.unwrap_or(0) as i64;
+    let organized_count = book::Entity::find()
+        .filter(book::Column::ShelfPosition.gt(0))
+        .count(&db)
+        .await
+        .unwrap_or(0) as i64;
+
+    let collector = calculate_track_progress(books_count, &COLLECTOR_THRESHOLDS, COLLECTOR_STEP);
+    let reader = calculate_track_progress(read_count, &READER_THRESHOLDS, READER_STEP);
+    let lender = calculate_track_progress(loans_count, &LENDER_THRESHOLDS, LENDER_STEP);
+    let cataloguer =
+        calculate_track_progress(organized_count, &CATALOGUER_THRESHOLDS, CATALOGUER_STEP);
+
+    (
+        StatusCode::OK,
+        Json(PublicGamificationStats {
+            library_name,
+            collector: PublicTrackStats {
+                level: collector.level,
+                current: collector.current,
+            },
+            reader: PublicTrackStats {
+                level: reader.level,
+                current: reader.current,
+            },
+            lender: PublicTrackStats {
+                level: lender.level,
+                current: lender.current,
+            },
+            cataloguer: PublicTrackStats {
+                level: cataloguer.level,
+                current: cataloguer.current,
+            },
+        }),
+    )
+        .into_response()
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LeaderboardEntry {
+    pub library_name: String,
+    pub level: i32,
+    pub current: i64,
+    pub is_self: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<i32>,
+}
+
+#[derive(Serialize)]
+pub struct LeaderboardResponse {
+    pub collector: Vec<LeaderboardEntry>,
+    pub reader: Vec<LeaderboardEntry>,
+    pub lender: Vec<LeaderboardEntry>,
+    pub cataloguer: Vec<LeaderboardEntry>,
+}
+
+/// GET /api/gamification/leaderboard
+/// Returns leaderboard combining local stats + peer stats, sorted by level then current.
+pub async fn get_leaderboard(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    use crate::models::{installation_profile, library_config, peer_gamification_stats};
+
+    // Check if network_gamification is enabled
+    let profile = match installation_profile::Entity::find_by_id(1).one(&db).await {
+        Ok(Some(p)) => p,
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "Module not available"})),
+            )
+                .into_response();
+        }
+    };
+
+    let enabled_modules: Vec<String> =
+        serde_json::from_str(&profile.enabled_modules).unwrap_or_default();
+
+    if !enabled_modules.contains(&"network_gamification".to_string()) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Network gamification is disabled"})),
+        )
+            .into_response();
+    }
+
+    // Get local library name
+    let library_name = match library_config::Entity::find_by_id(1).one(&db).await {
+        Ok(Some(c)) => c.name,
+        _ => "My Library".to_string(),
+    };
+
+    // Compute local stats
+    let books_count = book::Entity::find().count(&db).await.unwrap_or(0) as i64;
+    let read_count = book::Entity::find()
+        .filter(book::Column::ReadingStatus.eq("read"))
+        .count(&db)
+        .await
+        .unwrap_or(0) as i64;
+    let loans_count = loan::Entity::find().count(&db).await.unwrap_or(0) as i64;
+    let organized_count = book::Entity::find()
+        .filter(book::Column::ShelfPosition.gt(0))
+        .count(&db)
+        .await
+        .unwrap_or(0) as i64;
+
+    let local_collector =
+        calculate_track_progress(books_count, &COLLECTOR_THRESHOLDS, COLLECTOR_STEP);
+    let local_reader = calculate_track_progress(read_count, &READER_THRESHOLDS, READER_STEP);
+    let local_lender = calculate_track_progress(loans_count, &LENDER_THRESHOLDS, LENDER_STEP);
+    let local_cataloguer =
+        calculate_track_progress(organized_count, &CATALOGUER_THRESHOLDS, CATALOGUER_STEP);
+
+    // Build leaderboard entries starting with local user
+    let mut collector_entries = vec![LeaderboardEntry {
+        library_name: library_name.clone(),
+        level: local_collector.level,
+        current: local_collector.current,
+        is_self: true,
+        peer_id: None,
+    }];
+    let mut reader_entries = vec![LeaderboardEntry {
+        library_name: library_name.clone(),
+        level: local_reader.level,
+        current: local_reader.current,
+        is_self: true,
+        peer_id: None,
+    }];
+    let mut lender_entries = vec![LeaderboardEntry {
+        library_name: library_name.clone(),
+        level: local_lender.level,
+        current: local_lender.current,
+        is_self: true,
+        peer_id: None,
+    }];
+    let mut cataloguer_entries = vec![LeaderboardEntry {
+        library_name: library_name.clone(),
+        level: local_cataloguer.level,
+        current: local_cataloguer.current,
+        is_self: true,
+        peer_id: None,
+    }];
+
+    // Get peer stats
+    let peer_stats = peer_gamification_stats::Entity::find()
+        .all(&db)
+        .await
+        .unwrap_or_default();
+
+    for stat in peer_stats {
+        collector_entries.push(LeaderboardEntry {
+            library_name: stat.library_name.clone(),
+            level: stat.collector_level,
+            current: stat.collector_current as i64,
+            is_self: false,
+            peer_id: Some(stat.peer_id),
+        });
+        reader_entries.push(LeaderboardEntry {
+            library_name: stat.library_name.clone(),
+            level: stat.reader_level,
+            current: stat.reader_current as i64,
+            is_self: false,
+            peer_id: Some(stat.peer_id),
+        });
+        lender_entries.push(LeaderboardEntry {
+            library_name: stat.library_name.clone(),
+            level: stat.lender_level,
+            current: stat.lender_current as i64,
+            is_self: false,
+            peer_id: Some(stat.peer_id),
+        });
+        cataloguer_entries.push(LeaderboardEntry {
+            library_name: stat.library_name.clone(),
+            level: stat.cataloguer_level,
+            current: stat.cataloguer_current as i64,
+            is_self: false,
+            peer_id: Some(stat.peer_id),
+        });
+    }
+
+    // Sort: by level desc, then current desc
+    let sort_fn = |a: &LeaderboardEntry, b: &LeaderboardEntry| match b.level.cmp(&a.level) {
+        std::cmp::Ordering::Equal => b.current.cmp(&a.current),
+        ord => ord,
+    };
+
+    collector_entries.sort_by(sort_fn);
+    reader_entries.sort_by(sort_fn);
+    lender_entries.sort_by(sort_fn);
+    cataloguer_entries.sort_by(sort_fn);
+
+    (
+        StatusCode::OK,
+        Json(LeaderboardResponse {
+            collector: collector_entries,
+            reader: reader_entries,
+            lender: lender_entries,
+            cataloguer: cataloguer_entries,
+        }),
+    )
+        .into_response()
 }

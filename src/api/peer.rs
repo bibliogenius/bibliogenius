@@ -1,5 +1,5 @@
 #![allow(clippy::needless_update)] // SeaORM ActiveModels require ..Default::default()
-use crate::models::{operation_log, peer};
+use crate::models::{operation_log, peer, peer_gamification_stats};
 use axum::{
     extract::{Json, Path, State},
     http::StatusCode,
@@ -216,23 +216,29 @@ async fn sync_peer_internal(
 
     let client = get_safe_client();
 
-    // First, check if peer allows library caching (privacy consent)
+    // First, check peer's config for privacy consent flags
     let config_url = format!("{}/api/config", peer_url);
-    let allows_caching = match client.get(&config_url).send().await {
+    let peer_config = match client.get(&config_url).send().await {
         Ok(res) if res.status().is_success() => {
-            match res.json::<crate::api::setup::ConfigResponse>().await {
-                Ok(config) => config.allow_library_caching,
-                Err(_) => false, // Can't parse config, assume no caching allowed
-            }
+            res.json::<crate::api::setup::ConfigResponse>().await.ok()
         }
-        _ => false, // Can't reach config, assume no caching allowed
+        _ => None,
     };
+
+    let allows_caching = peer_config
+        .as_ref()
+        .is_some_and(|c| c.allow_library_caching);
+    let shares_gamification = peer_config
+        .as_ref()
+        .is_some_and(|c| c.share_gamification_stats);
 
     if !allows_caching {
         tracing::info!(
-            "⚠️ Peer {} does not allow library caching, skipping sync",
+            "Peer {} does not allow library caching, skipping book sync",
             peer_url
         );
+        // Still sync gamification stats if available
+        sync_peer_gamification_stats(db, peer_id, peer_url, &client, shares_gamification).await;
         // Still update last_seen to track connectivity
         if let Ok(Some(peer)) = crate::models::peer::Entity::find_by_id(peer_id)
             .one(db)
@@ -294,6 +300,9 @@ async fn sync_peer_internal(
         let _ = peer_book::Entity::insert(cache).exec(db).await;
     }
 
+    // Sync gamification stats if both sides have the module enabled
+    sync_peer_gamification_stats(db, peer_id, peer_url, &client, shares_gamification).await;
+
     // Update peer's last_seen
     if let Ok(Some(peer)) = crate::models::peer::Entity::find_by_id(peer_id)
         .one(db)
@@ -311,6 +320,90 @@ async fn sync_peer_internal(
         peer_id
     );
     Ok(count)
+}
+
+/// Sync gamification stats from a peer (if both sides opted-in)
+async fn sync_peer_gamification_stats(
+    db: &DatabaseConnection,
+    peer_id: i32,
+    peer_url: &str,
+    client: &reqwest::Client,
+    peer_shares_stats: bool,
+) {
+    use crate::models::installation_profile;
+
+    // Check if network_gamification is enabled locally
+    let local_enabled = match installation_profile::Entity::find_by_id(1).one(db).await {
+        Ok(Some(p)) => {
+            let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
+            modules.contains(&"network_gamification".to_string())
+        }
+        _ => false,
+    };
+
+    if !local_enabled {
+        return;
+    }
+
+    // If peer doesn't share stats, clean up any cached stats
+    if !peer_shares_stats {
+        let _ = peer_gamification_stats::Entity::delete_many()
+            .filter(peer_gamification_stats::Column::PeerId.eq(peer_id))
+            .exec(db)
+            .await;
+        return;
+    }
+
+    // Fetch peer's public gamification stats
+    let stats_url = format!("{}/api/gamification/public-stats", peer_url);
+    let stats = match client.get(&stats_url).send().await {
+        Ok(res) if res.status().is_success() => {
+            match res
+                .json::<crate::api::gamification::PublicGamificationStats>()
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Failed to parse gamification stats from peer: {}", e);
+                    return;
+                }
+            }
+        }
+        _ => {
+            tracing::warn!("Failed to fetch gamification stats from peer {}", peer_url);
+            return;
+        }
+    };
+
+    // Upsert: delete old + insert new (same pattern as peer_books)
+    let _ = peer_gamification_stats::Entity::delete_many()
+        .filter(peer_gamification_stats::Column::PeerId.eq(peer_id))
+        .exec(db)
+        .await;
+
+    let entry = peer_gamification_stats::ActiveModel {
+        peer_id: Set(peer_id),
+        library_name: Set(stats.library_name),
+        collector_level: Set(stats.collector.level),
+        collector_current: Set(stats.collector.current as i32),
+        reader_level: Set(stats.reader.level),
+        reader_current: Set(stats.reader.current as i32),
+        lender_level: Set(stats.lender.level),
+        lender_current: Set(stats.lender.current as i32),
+        cataloguer_level: Set(stats.cataloguer.level),
+        cataloguer_current: Set(stats.cataloguer.current as i32),
+        synced_at: Set(chrono::Utc::now().to_rfc3339()),
+        ..Default::default()
+    };
+
+    if let Err(e) = peer_gamification_stats::Entity::insert(entry)
+        .exec(db)
+        .await
+    {
+        tracing::warn!("Failed to save peer gamification stats: {}", e);
+    } else {
+        tracing::info!("Gamification stats synced for peer {}", peer_id);
+    }
 }
 
 #[derive(Deserialize)]
@@ -2101,33 +2194,39 @@ pub async fn cleanup_stale_peer_books(State(db): State<DatabaseConnection>) -> i
     let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
     let cutoff_str = cutoff.to_rfc3339();
 
-    // Delete entries where synced_at < cutoff
-    let result = peer_book::Entity::delete_many()
+    // Delete stale peer_books entries
+    let books_deleted = peer_book::Entity::delete_many()
         .filter(peer_book::Column::SyncedAt.lt(&cutoff_str))
         .exec(&db)
-        .await;
+        .await
+        .map(|r| r.rows_affected)
+        .unwrap_or(0);
 
-    match result {
-        Ok(res) => {
-            let deleted = res.rows_affected;
-            if deleted > 0 {
-                tracing::info!(
-                    "🧹 TTL cleanup: deleted {} stale peer_books entries (older than 30 days)",
-                    deleted
-                );
-            }
-            (
-                StatusCode::OK,
-                Json(json!({ "deleted": deleted, "cutoff": cutoff_str })),
-            )
-                .into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("Cleanup failed: {}", e) })),
-        )
-            .into_response(),
+    // Also clean up stale peer_gamification_stats
+    let stats_deleted = peer_gamification_stats::Entity::delete_many()
+        .filter(peer_gamification_stats::Column::SyncedAt.lt(&cutoff_str))
+        .exec(&db)
+        .await
+        .map(|r| r.rows_affected)
+        .unwrap_or(0);
+
+    if books_deleted > 0 || stats_deleted > 0 {
+        tracing::info!(
+            "TTL cleanup: deleted {} stale peer_books + {} stale peer_gamification_stats (older than 30 days)",
+            books_deleted,
+            stats_deleted
+        );
     }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "deleted": books_deleted,
+            "stats_deleted": stats_deleted,
+            "cutoff": cutoff_str
+        })),
+    )
+        .into_response()
 }
 
 pub async fn delete_request(

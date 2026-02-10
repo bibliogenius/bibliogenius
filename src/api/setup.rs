@@ -262,6 +262,9 @@ pub struct ConfigResponse {
     /// Whether this library allows others to cache its catalog for offline viewing
     #[serde(default)]
     pub allow_library_caching: bool,
+    /// Whether this library shares gamification stats with peers
+    #[serde(default)]
+    pub share_gamification_stats: bool,
 }
 
 pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoResponse {
@@ -294,6 +297,8 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
 
     // Check if library owner allows caching (opt-in, default false for privacy)
     let allow_library_caching = enabled_modules.contains(&"allow_library_caching".to_string());
+    let share_gamification_stats =
+        enabled_modules.contains(&"share_gamification_stats".to_string());
 
     (
         StatusCode::OK,
@@ -317,6 +322,7 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
             share_location: config.share_location.unwrap_or(false),
             show_borrowed_books: config.show_borrowed_books.unwrap_or(false),
             allow_library_caching,
+            share_gamification_stats,
         }),
     )
         .into_response()
@@ -329,7 +335,7 @@ pub async fn reset_app(
     use crate::models::{
         author, book, book_authors, book_tags, collection, collection_book, contact, copy,
         installation_profile, library, library_config, loan, operation_log, p2p_outgoing_request,
-        p2p_request, peer, peer_book, tag, user,
+        p2p_request, peer, peer_book, peer_gamification_stats, tag, user,
     };
 
     // Helper macro to delete all from a table
@@ -360,6 +366,7 @@ pub async fn reset_app(
     delete_all!(p2p_outgoing_request);
     delete_all!(p2p_request);
     delete_all!(peer_book);
+    delete_all!(peer_gamification_stats);
     delete_all!(peer);
     delete_all!(contact);
 

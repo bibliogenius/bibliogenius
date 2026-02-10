@@ -908,5 +908,28 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 034: Create peer_gamification_stats table for network leaderboard
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE TABLE IF NOT EXISTS peer_gamification_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                peer_id INTEGER NOT NULL,
+                library_name TEXT NOT NULL,
+                collector_level INTEGER NOT NULL DEFAULT 0,
+                collector_current INTEGER NOT NULL DEFAULT 0,
+                reader_level INTEGER NOT NULL DEFAULT 0,
+                reader_current INTEGER NOT NULL DEFAULT 0,
+                lender_level INTEGER NOT NULL DEFAULT 0,
+                lender_current INTEGER NOT NULL DEFAULT 0,
+                cataloguer_level INTEGER NOT NULL DEFAULT 0,
+                cataloguer_current INTEGER NOT NULL DEFAULT 0,
+                synced_at TEXT NOT NULL,
+                FOREIGN KEY (peer_id) REFERENCES peers(id) ON DELETE CASCADE
+            )"
+            .to_owned(),
+        ))
+        .await;
+
     Ok(())
 }

@@ -236,6 +236,14 @@ fn build_routes() -> Router<AppState> {
         .route("/integrations/mcp-config", get(integrations::mcp_config))
         // Gamification
         .route("/user/status", get(gamification::get_user_status))
+        .route(
+            "/gamification/public-stats",
+            get(gamification::get_public_stats),
+        )
+        .route(
+            "/gamification/leaderboard",
+            get(gamification::get_leaderboard),
+        )
         // Export/Import
         .route("/export", get(export::export_data))
         .route("/import", post(export::import_data))
