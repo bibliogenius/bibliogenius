@@ -898,5 +898,15 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 033: Add connection_status to peers (decoupled from auto_approve)
+    // Default 'accepted' so existing peers remain connected
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peers ADD COLUMN connection_status TEXT NOT NULL DEFAULT 'accepted'"
+                .to_owned(),
+        ))
+        .await;
+
     Ok(())
 }

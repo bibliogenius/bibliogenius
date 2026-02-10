@@ -121,6 +121,10 @@ fn build_routes() -> Router<AppState> {
         .route("/peers/:id/status", put(peer::update_peer_status)) // Accept/reject peer
         .route("/peers/:id/url", put(peer::update_peer_url)) // Update peer URL (mDNS IP changes)
         .route("/peers/connect", post(peer::connect))
+        .route(
+            "/peers/auto_approve_all",
+            post(peer::auto_approve_all_peers),
+        )
         .route("/peers/incoming", post(peer::receive_connection_request)) // Receive incoming connection
         .route("/peers/push", post(peer::push_operations))
         .route("/peers/pull", get(peer::pull_operations))

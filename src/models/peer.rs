@@ -16,6 +16,9 @@ pub struct Model {
     pub longitude: Option<f64>,
     #[sea_orm(default_value = "false")]
     pub auto_approve: bool,
+    /// Connection status: "pending" or "accepted"
+    #[sea_orm(default_value = "accepted")]
+    pub connection_status: String,
     pub last_seen: Option<String>,
     pub created_at: String,
     pub updated_at: String,

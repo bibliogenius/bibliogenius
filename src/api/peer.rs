@@ -71,6 +71,50 @@ fn translate_url_for_docker(url: &str) -> String {
     }
 }
 
+/// Check if the `connection_validation` module is enabled in installation profile
+async fn is_connection_validation_enabled(db: &DatabaseConnection) -> bool {
+    use crate::models::installation_profile;
+
+    if let Ok(Some(profile)) = installation_profile::Entity::find().one(db).await {
+        return profile.enabled_modules.contains("connection_validation");
+    }
+    false
+}
+
+/// Check if a specific peer is approved for access.
+/// Returns true if connection_validation is disabled OR if the peer has connection_status == "accepted".
+async fn is_peer_approved(db: &DatabaseConnection, peer: &peer::Model) -> bool {
+    if !is_connection_validation_enabled(db).await {
+        return true;
+    }
+    peer.connection_status == "accepted"
+}
+
+/// Bulk-approve all pending peers (called when connection_validation is toggled OFF)
+pub async fn auto_approve_all_peers(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    let peers = peer::Entity::find()
+        .filter(peer::Column::ConnectionStatus.eq("pending"))
+        .all(&db)
+        .await
+        .unwrap_or_default();
+
+    let count = peers.len();
+    for p in peers {
+        let mut active: peer::ActiveModel = p.into();
+        active.connection_status = Set("accepted".to_string());
+        active.auto_approve = Set(true);
+        active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        let _ = active.update(&db).await;
+    }
+
+    tracing::info!("✅ Auto-approved {} pending peers", count);
+    (
+        StatusCode::OK,
+        Json(json!({ "message": format!("Approved {} peers", count), "count": count })),
+    )
+        .into_response()
+}
+
 #[derive(Deserialize)]
 pub struct ConnectRequest {
     name: String,
@@ -320,10 +364,18 @@ pub async fn receive_connection_request(
         )
             .into_response(),
         Ok(None) => {
+            // Check if connection_validation module is enabled
+            let connection_status = if is_connection_validation_enabled(&db).await {
+                "pending"
+            } else {
+                "accepted"
+            };
+
             let new_peer = peer::ActiveModel {
                 name: Set(payload.name),
                 url: Set(payload.url),
-                auto_approve: Set(false),
+                auto_approve: Set(connection_status == "accepted"),
+                connection_status: Set(connection_status.to_string()),
                 created_at: Set(Utc::now().to_rfc3339()),
                 updated_at: Set(Utc::now().to_rfc3339()),
                 ..Default::default()
@@ -332,7 +384,7 @@ pub async fn receive_connection_request(
             match new_peer.insert(&db).await {
                 Ok(_) => (
                     StatusCode::OK,
-                    Json(json!({ "message": "Connection request saved locally" })),
+                    Json(json!({ "message": "Connection request saved locally", "connection_status": connection_status })),
                 )
                     .into_response(),
                 Err(e) => (
@@ -410,10 +462,14 @@ pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoRespon
     let peers = peer::Entity::find().all(&db).await.unwrap_or(vec![]);
 
     // Convert to JSON with computed status field
-    // V1 Simplification: All peers are considered "connected" (no pending workflow)
     let peers_with_status: Vec<serde_json::Value> = peers
         .into_iter()
         .map(|p| {
+            let status = if p.connection_status == "pending" {
+                "pending"
+            } else {
+                "connected"
+            };
             json!({
                 "id": p.id,
                 "name": p.name,
@@ -422,9 +478,10 @@ pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoRespon
                 "latitude": p.latitude,
                 "longitude": p.longitude,
                 "auto_approve": p.auto_approve,
-                "status": "connected",
+                "connection_status": p.connection_status,
+                "status": status,
                 "last_seen": p.last_seen,
-               "created_at": p.created_at,
+                "created_at": p.created_at,
                 "updated_at": p.updated_at,
             })
         })
@@ -493,11 +550,14 @@ pub async fn update_peer_status(
         }
     }
 
-    // Update auto_approve for accept/active
+    // Update auto_approve and connection_status for accept/active
     let auto_approve = payload.status == "active" || payload.status == "accepted";
 
     let mut active_model: peer::ActiveModel = peer.into();
     active_model.auto_approve = Set(auto_approve);
+    if auto_approve {
+        active_model.connection_status = Set("accepted".to_string());
+    }
     active_model.updated_at = Set(chrono::Utc::now().to_rfc3339());
 
     match active_model.update(&db).await {
@@ -780,6 +840,15 @@ pub async fn sync_peer(
         }
     };
 
+    // Check if peer is approved
+    if !is_peer_approved(&db, &peer).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "Peer connection pending approval" })),
+        )
+            .into_response();
+    }
+
     // 2. Fetch remote books
     if let Err(e) = validate_url(&peer.url) {
         return (
@@ -953,7 +1022,16 @@ pub async fn sync_peer_by_url(
         }
     };
 
-    // 2. Validate URL
+    // 2. Check if peer is approved
+    if !is_peer_approved(&db, &peer).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "Peer connection pending approval" })),
+        )
+            .into_response();
+    }
+
+    // 3. Validate URL
     if let Err(e) = validate_url(&peer.url) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -964,7 +1042,7 @@ pub async fn sync_peer_by_url(
 
     let client = get_safe_client();
 
-    // 3. Check if peer allows library caching (privacy consent)
+    // 4. Check if peer allows library caching (privacy consent)
     let config_url = format!("{}/api/config", peer.url);
     let allows_caching = match client.get(&config_url).send().await {
         Ok(res) if res.status().is_success() => {
@@ -1858,6 +1936,17 @@ pub async fn list_peer_books(
 ) -> impl IntoResponse {
     use crate::models::peer_book;
 
+    // Check if peer is approved
+    if let Ok(Some(peer)) = peer::Entity::find_by_id(peer_id).one(&db).await
+        && !is_peer_approved(&db, &peer).await
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "Peer connection pending approval" })),
+        )
+            .into_response();
+    }
+
     let books = peer_book::Entity::find()
         .filter(peer_book::Column::PeerId.eq(peer_id))
         .all(&db)
@@ -1904,6 +1993,15 @@ pub async fn list_peer_books_by_url(
                 .into_response();
         }
     };
+
+    // Check if peer is approved
+    if !is_peer_approved(&db, &peer).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "Peer connection pending approval" })),
+        )
+            .into_response();
+    }
 
     // Get books for this peer
     let books = peer_book::Entity::find()
@@ -2394,11 +2492,17 @@ pub async fn receive_loan_request(
                 let _ = peer::Entity::delete_by_id(conflict.id).exec(&db).await;
             }
 
+            let conn_status = if is_connection_validation_enabled(&db).await {
+                "pending"
+            } else {
+                "accepted"
+            };
             let new_peer = peer::ActiveModel {
                 name: Set(payload.from_name),
                 url: Set(payload.from_url),
                 library_uuid: Set(payload.library_uuid),
-                auto_approve: Set(false),
+                auto_approve: Set(conn_status == "accepted"),
+                connection_status: Set(conn_status.to_string()),
                 created_at: Set(Utc::now().to_rfc3339()),
                 updated_at: Set(Utc::now().to_rfc3339()),
                 ..Default::default()
