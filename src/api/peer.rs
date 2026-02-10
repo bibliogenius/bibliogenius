@@ -942,7 +942,7 @@ pub async fn sync_peer(
             .into_response();
     }
 
-    // 2. Fetch remote books
+    // 2. Validate URL and fetch remote books
     if let Err(e) = validate_url(&peer.url) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -952,6 +952,19 @@ pub async fn sync_peer(
     }
 
     let client = get_safe_client();
+
+    // Check peer config for gamification sharing
+    let config_url = format!("{}/api/config", peer.url);
+    let peer_config = match client.get(&config_url).send().await {
+        Ok(res) if res.status().is_success() => {
+            res.json::<crate::api::setup::ConfigResponse>().await.ok()
+        }
+        _ => None,
+    };
+    let shares_gamification = peer_config
+        .as_ref()
+        .is_some_and(|c| c.share_gamification_stats);
+
     let url = format!("{}/api/books", peer.url);
 
     let res = client.get(&url).send().await;
@@ -990,6 +1003,16 @@ pub async fn sync_peer(
                             };
                             let _ = peer_book::Entity::insert(cache).exec(&db).await;
                         }
+
+                        // Sync gamification stats
+                        sync_peer_gamification_stats(
+                            &db,
+                            peer.id,
+                            &peer.url,
+                            &client,
+                            shares_gamification,
+                        )
+                        .await;
 
                         (
                             StatusCode::OK,
@@ -1135,20 +1158,26 @@ pub async fn sync_peer_by_url(
 
     let client = get_safe_client();
 
-    // 4. Check if peer allows library caching (privacy consent)
+    // 4. Check peer's config for privacy consent flags
     let config_url = format!("{}/api/config", peer.url);
-    let allows_caching = match client.get(&config_url).send().await {
+    let peer_config = match client.get(&config_url).send().await {
         Ok(res) if res.status().is_success() => {
-            match res.json::<crate::api::setup::ConfigResponse>().await {
-                Ok(config) => config.allow_library_caching,
-                Err(_) => false,
-            }
+            res.json::<crate::api::setup::ConfigResponse>().await.ok()
         }
-        _ => false,
+        _ => None,
     };
 
+    let allows_caching = peer_config
+        .as_ref()
+        .is_some_and(|c| c.allow_library_caching);
+    let shares_gamification = peer_config
+        .as_ref()
+        .is_some_and(|c| c.share_gamification_stats);
+
     if !allows_caching {
-        // Peer doesn't allow caching - update last_seen but don't cache books
+        // Peer doesn't allow caching - still sync gamification stats
+        sync_peer_gamification_stats(&db, peer.id, &peer.url, &client, shares_gamification).await;
+
         let peer_id = peer.id;
         let mut active_peer: peer::ActiveModel = peer.into();
         active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
@@ -1206,6 +1235,16 @@ pub async fn sync_peer_by_url(
                             };
                             let _ = peer_book::Entity::insert(cache).exec(&db).await;
                         }
+
+                        // Sync gamification stats
+                        sync_peer_gamification_stats(
+                            &db,
+                            peer.id,
+                            &peer.url,
+                            &client,
+                            shares_gamification,
+                        )
+                        .await;
 
                         // Update peer's last_seen after successful sync
                         let peer_id = peer.id; // Save before moving
