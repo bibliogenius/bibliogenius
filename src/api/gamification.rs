@@ -375,6 +375,63 @@ pub struct LeaderboardResponse {
     pub last_refreshed: Option<String>,
 }
 
+/// POST /api/gamification/refresh-leaderboard
+/// Syncs gamification stats from all connected peers, then returns the leaderboard.
+pub async fn refresh_leaderboard(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    use crate::models::{installation_profile, peer};
+
+    // Check if network_gamification is enabled
+    let profile = match installation_profile::Entity::find_by_id(1).one(&db).await {
+        Ok(Some(p)) => p,
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "Module not available"})),
+            )
+                .into_response();
+        }
+    };
+
+    let enabled_modules: Vec<String> =
+        serde_json::from_str(&profile.enabled_modules).unwrap_or_default();
+
+    if !enabled_modules.contains(&"network_gamification".to_string()) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Network gamification is disabled"})),
+        )
+            .into_response();
+    }
+
+    // Fetch all connected peers and sync their gamification stats
+    let peers = peer::Entity::find()
+        .filter(peer::Column::ConnectionStatus.eq("accepted"))
+        .all(&db)
+        .await
+        .unwrap_or_default();
+
+    let client = crate::api::peer::get_safe_client();
+
+    for p in &peers {
+        // Fetch each peer's config to check if they share stats
+        let config_url = format!("{}/api/config", p.url);
+        let shares = match client.get(&config_url).send().await {
+            Ok(res) if res.status().is_success() => {
+                match res.json::<crate::api::setup::ConfigResponse>().await {
+                    Ok(c) => c.share_gamification_stats,
+                    Err(_) => false,
+                }
+            }
+            _ => false,
+        };
+
+        crate::api::peer::sync_peer_gamification_stats(&db, p.id, &p.url, &client, shares).await;
+    }
+
+    // Now return the leaderboard (delegate to get_leaderboard logic)
+    get_leaderboard(State(db)).await.into_response()
+}
+
 /// GET /api/gamification/leaderboard
 /// Returns leaderboard combining local stats + peer stats, sorted by level then current.
 pub async fn get_leaderboard(State(db): State<DatabaseConnection>) -> impl IntoResponse {

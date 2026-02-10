@@ -244,6 +244,10 @@ fn build_routes() -> Router<AppState> {
             "/gamification/leaderboard",
             get(gamification::get_leaderboard),
         )
+        .route(
+            "/gamification/refresh-leaderboard",
+            post(gamification::refresh_leaderboard),
+        )
         // Export/Import
         .route("/export", get(export::export_data))
         .route("/import", post(export::import_data))

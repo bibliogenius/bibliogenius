@@ -49,7 +49,7 @@ fn validate_url(url_str: &str) -> Result<String, String> {
 }
 
 /// Create a safe HTTP client with restricted redirects and timeouts
-fn get_safe_client() -> reqwest::Client {
+pub(crate) fn get_safe_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none()) // Disable redirects to prevent bypass
@@ -323,7 +323,7 @@ async fn sync_peer_internal(
 }
 
 /// Sync gamification stats from a peer (if both sides opted-in)
-async fn sync_peer_gamification_stats(
+pub(crate) async fn sync_peer_gamification_stats(
     db: &DatabaseConnection,
     peer_id: i32,
     peer_url: &str,
