@@ -413,19 +413,30 @@ pub async fn refresh_leaderboard(State(db): State<DatabaseConnection>) -> impl I
     let client = crate::api::peer::get_safe_client();
 
     for p in &peers {
-        // Fetch each peer's config to check if they share stats
+        // Fetch each peer's config to check if they share stats.
+        // If the peer is unreachable, skip sync entirely to preserve cached data.
         let config_url = format!("{}/api/config", p.url);
-        let shares = match client.get(&config_url).send().await {
+        match client.get(&config_url).send().await {
             Ok(res) if res.status().is_success() => {
-                match res.json::<crate::api::setup::ConfigResponse>().await {
+                let shares = match res.json::<crate::api::setup::ConfigResponse>().await {
                     Ok(c) => c.share_gamification_stats,
-                    Err(_) => false,
-                }
+                    Err(_) => {
+                        // Parse error — skip, preserve cached data
+                        continue;
+                    }
+                };
+                crate::api::peer::sync_peer_gamification_stats(&db, p.id, &p.url, &client, shares)
+                    .await;
             }
-            _ => false,
-        };
-
-        crate::api::peer::sync_peer_gamification_stats(&db, p.id, &p.url, &client, shares).await;
+            _ => {
+                // Peer unreachable — skip, preserve cached data
+                tracing::debug!(
+                    "Peer {} unreachable during leaderboard refresh, keeping cached stats",
+                    p.url
+                );
+                continue;
+            }
+        }
     }
 
     // Now return the leaderboard (delegate to get_leaderboard logic)
