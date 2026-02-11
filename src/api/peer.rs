@@ -228,9 +228,22 @@ async fn sync_peer_internal(
     let allows_caching = peer_config
         .as_ref()
         .is_some_and(|c| c.allow_library_caching);
-    let shares_gamification = peer_config
-        .as_ref()
-        .is_some_and(|c| c.share_gamification_stats);
+    let shares_gamification = peer_config.as_ref().map(|c| c.share_gamification_stats);
+
+    // Extract updated name from peer config (if changed)
+    let updated_name = if let Some(config) = &peer_config {
+        if let Ok(Some(p)) = peer::Entity::find_by_id(peer_id).one(db).await {
+            if p.name != config.library_name {
+                Some(config.library_name.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     if !allows_caching {
         tracing::info!(
@@ -239,12 +252,16 @@ async fn sync_peer_internal(
         );
         // Still sync gamification stats if available
         sync_peer_gamification_stats(db, peer_id, peer_url, &client, shares_gamification).await;
-        // Still update last_seen to track connectivity
+        // Still update last_seen (and name if changed)
         if let Ok(Some(peer)) = crate::models::peer::Entity::find_by_id(peer_id)
             .one(db)
             .await
         {
             let mut active_peer: peer::ActiveModel = peer.into();
+            if let Some(ref new_name) = updated_name {
+                active_peer.name = Set(new_name.clone());
+                tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
+            }
             active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
             active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
             let _ = active_peer.update(db).await;
@@ -303,12 +320,16 @@ async fn sync_peer_internal(
     // Sync gamification stats if both sides have the module enabled
     sync_peer_gamification_stats(db, peer_id, peer_url, &client, shares_gamification).await;
 
-    // Update peer's last_seen
+    // Update peer's last_seen (and name if changed)
     if let Ok(Some(peer)) = crate::models::peer::Entity::find_by_id(peer_id)
         .one(db)
         .await
     {
         let mut active_peer: peer::ActiveModel = peer.into();
+        if let Some(ref new_name) = updated_name {
+            active_peer.name = Set(new_name.clone());
+            tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
+        }
         active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
         active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
         let _ = active_peer.update(db).await;
@@ -322,13 +343,17 @@ async fn sync_peer_internal(
     Ok(count)
 }
 
-/// Sync gamification stats from a peer (if both sides opted-in)
+/// Sync gamification stats from a peer.
+/// `peer_shares_stats`:
+///   - `Some(true)`:  peer confirmed it shares → fetch fresh stats
+///   - `Some(false)`: peer confirmed it does NOT share → delete cached stats
+///   - `None`:        peer was unreachable (config unknown) → preserve cache, skip sync
 pub(crate) async fn sync_peer_gamification_stats(
     db: &DatabaseConnection,
     peer_id: i32,
     peer_url: &str,
     client: &reqwest::Client,
-    peer_shares_stats: bool,
+    peer_shares_stats: Option<bool>,
 ) {
     use crate::models::installation_profile;
 
@@ -345,13 +370,24 @@ pub(crate) async fn sync_peer_gamification_stats(
         return;
     }
 
-    // If peer doesn't share stats, clean up any cached stats
-    if !peer_shares_stats {
-        let _ = peer_gamification_stats::Entity::delete_many()
-            .filter(peer_gamification_stats::Column::PeerId.eq(peer_id))
-            .exec(db)
-            .await;
-        return;
+    match peer_shares_stats {
+        None => {
+            // Peer unreachable — preserve cached data
+            tracing::debug!(
+                "Peer {} config unknown, preserving cached gamification stats",
+                peer_url
+            );
+            return;
+        }
+        Some(false) => {
+            // Peer explicitly does NOT share stats — clean up cache
+            let _ = peer_gamification_stats::Entity::delete_many()
+                .filter(peer_gamification_stats::Column::PeerId.eq(peer_id))
+                .exec(db)
+                .await;
+            return;
+        }
+        Some(true) => {} // Peer shares — continue to fetch
     }
 
     // Fetch peer's public gamification stats
@@ -961,9 +997,7 @@ pub async fn sync_peer(
         }
         _ => None,
     };
-    let shares_gamification = peer_config
-        .as_ref()
-        .is_some_and(|c| c.share_gamification_stats);
+    let shares_gamification = peer_config.as_ref().map(|c| c.share_gamification_stats);
 
     let url = format!("{}/api/books", peer.url);
 
@@ -1170,9 +1204,13 @@ pub async fn sync_peer_by_url(
     let allows_caching = peer_config
         .as_ref()
         .is_some_and(|c| c.allow_library_caching);
-    let shares_gamification = peer_config
+    let shares_gamification = peer_config.as_ref().map(|c| c.share_gamification_stats);
+
+    // Extract updated name from peer config (if changed)
+    let updated_name = peer_config
         .as_ref()
-        .is_some_and(|c| c.share_gamification_stats);
+        .filter(|c| c.library_name != peer.name)
+        .map(|c| c.library_name.clone());
 
     if !allows_caching {
         // Peer doesn't allow caching - still sync gamification stats
@@ -1180,6 +1218,10 @@ pub async fn sync_peer_by_url(
 
         let peer_id = peer.id;
         let mut active_peer: peer::ActiveModel = peer.into();
+        if let Some(ref new_name) = updated_name {
+            active_peer.name = Set(new_name.clone());
+            tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
+        }
         active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
         active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
         let _ = active_peer.update(&db).await;
@@ -1246,9 +1288,13 @@ pub async fn sync_peer_by_url(
                         )
                         .await;
 
-                        // Update peer's last_seen after successful sync
+                        // Update peer's last_seen (and name if changed) after successful sync
                         let peer_id = peer.id; // Save before moving
                         let mut active_peer: peer::ActiveModel = peer.into();
+                        if let Some(ref new_name) = updated_name {
+                            active_peer.name = Set(new_name.clone());
+                            tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
+                        }
                         active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
                         active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
                         let _ = active_peer.update(&db).await;

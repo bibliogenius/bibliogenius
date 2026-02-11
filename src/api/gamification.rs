@@ -158,7 +158,7 @@ pub async fn get_user_status(State(db): State<DatabaseConnection>) -> impl IntoR
 
     // 4. Count books with custom shelf order (Cataloguer Track)
     let organized_count = book::Entity::find()
-        .filter(book::Column::ShelfPosition.gt(0))
+        .filter(book::Column::ShelfPosition.is_not_null())
         .count(&db)
         .await
         .unwrap_or(0) as i64;
@@ -319,7 +319,7 @@ pub async fn get_public_stats(State(db): State<DatabaseConnection>) -> impl Into
         .unwrap_or(0) as i64;
     let loans_count = loan::Entity::find().count(&db).await.unwrap_or(0) as i64;
     let organized_count = book::Entity::find()
-        .filter(book::Column::ShelfPosition.gt(0))
+        .filter(book::Column::ShelfPosition.is_not_null())
         .count(&db)
         .await
         .unwrap_or(0) as i64;
@@ -403,7 +403,11 @@ pub async fn refresh_leaderboard(State(db): State<DatabaseConnection>) -> impl I
             .into_response();
     }
 
-    // Fetch all connected peers and sync their gamification stats
+    // Fetch all connected peers and sync their gamification stats.
+    // Only contact a peer if its cached stats are older than CACHE_TTL;
+    // otherwise the cache is authoritative (avoids data loss on network hiccups).
+    const CACHE_TTL_SECS: i64 = 5 * 60; // 5 minutes
+
     let peers = peer::Entity::find()
         .filter(peer::Column::ConnectionStatus.eq("accepted"))
         .all(&db)
@@ -411,10 +415,31 @@ pub async fn refresh_leaderboard(State(db): State<DatabaseConnection>) -> impl I
         .unwrap_or_default();
 
     let client = crate::api::peer::get_safe_client();
+    let now = chrono::Utc::now();
 
     for p in &peers {
-        // Fetch each peer's config to check if they share stats.
-        // If the peer is unreachable, skip sync entirely to preserve cached data.
+        // Check if we have fresh cached stats for this peer
+        let cached = crate::models::peer_gamification_stats::Entity::find()
+            .filter(crate::models::peer_gamification_stats::Column::PeerId.eq(p.id))
+            .one(&db)
+            .await
+            .unwrap_or(None);
+
+        if let Some(ref stats) = cached
+            && let Ok(synced) = chrono::DateTime::parse_from_rfc3339(&stats.synced_at)
+        {
+            let age = now.signed_duration_since(synced);
+            if age.num_seconds() < CACHE_TTL_SECS {
+                tracing::debug!(
+                    "Peer {} cache is fresh ({}s old), skipping sync",
+                    p.url,
+                    age.num_seconds()
+                );
+                continue;
+            }
+        }
+
+        // Cache is stale or absent — try to reach the peer
         let config_url = format!("{}/api/config", p.url);
         match client.get(&config_url).send().await {
             Ok(res) if res.status().is_success() => {
@@ -425,8 +450,14 @@ pub async fn refresh_leaderboard(State(db): State<DatabaseConnection>) -> impl I
                         continue;
                     }
                 };
-                crate::api::peer::sync_peer_gamification_stats(&db, p.id, &p.url, &client, shares)
-                    .await;
+                crate::api::peer::sync_peer_gamification_stats(
+                    &db,
+                    p.id,
+                    &p.url,
+                    &client,
+                    Some(shares),
+                )
+                .await;
             }
             _ => {
                 // Peer unreachable — skip, preserve cached data
@@ -486,7 +517,7 @@ pub async fn get_leaderboard(State(db): State<DatabaseConnection>) -> impl IntoR
         .unwrap_or(0) as i64;
     let loans_count = loan::Entity::find().count(&db).await.unwrap_or(0) as i64;
     let organized_count = book::Entity::find()
-        .filter(book::Column::ShelfPosition.gt(0))
+        .filter(book::Column::ShelfPosition.is_not_null())
         .count(&db)
         .await
         .unwrap_or(0) as i64;
