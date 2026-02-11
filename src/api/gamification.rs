@@ -1,13 +1,15 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use chrono::Utc;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::models::{
-    book, gamification_achievements, gamification_config, gamification_streaks, loan,
+    book, book_tags, contact, gamification_achievements, gamification_config, gamification_streaks,
+    loan,
 };
 
 // Track thresholds configuration
@@ -131,6 +133,21 @@ fn calculate_track_progress(
     }
 }
 
+/// Count distinct books assigned to at least one shelf (tag).
+async fn count_catalogued_books(db: &DatabaseConnection) -> i64 {
+    book_tags::Entity::find()
+        .select_only()
+        .column_as(
+            sea_orm::sea_query::Expr::cust("COUNT(DISTINCT book_id)"),
+            "count",
+        )
+        .into_tuple::<i64>()
+        .one(db)
+        .await
+        .unwrap_or(None)
+        .unwrap_or(0)
+}
+
 pub async fn get_user_status(State(db): State<DatabaseConnection>) -> impl IntoResponse {
     // For V3 single-user mode, use user_id = 1
     let user_id = 1;
@@ -156,12 +173,8 @@ pub async fn get_user_status(State(db): State<DatabaseConnection>) -> impl IntoR
     // 3. Count loans (Lender Track)
     let loans_count = loan::Entity::find().count(&db).await.unwrap_or(0) as i64;
 
-    // 4. Count books with custom shelf order (Cataloguer Track)
-    let organized_count = book::Entity::find()
-        .filter(book::Column::ShelfPosition.is_not_null())
-        .count(&db)
-        .await
-        .unwrap_or(0) as i64;
+    // 4. Count books assigned to at least one shelf/tag (Cataloguer Track)
+    let organized_count = count_catalogued_books(&db).await;
 
     // Calculate track progress
     let collector_progress =
@@ -318,11 +331,7 @@ pub async fn get_public_stats(State(db): State<DatabaseConnection>) -> impl Into
         .await
         .unwrap_or(0) as i64;
     let loans_count = loan::Entity::find().count(&db).await.unwrap_or(0) as i64;
-    let organized_count = book::Entity::find()
-        .filter(book::Column::ShelfPosition.is_not_null())
-        .count(&db)
-        .await
-        .unwrap_or(0) as i64;
+    let organized_count = count_catalogued_books(&db).await;
 
     let collector = calculate_track_progress(books_count, &COLLECTOR_THRESHOLDS, COLLECTOR_STEP);
     let reader = calculate_track_progress(read_count, &READER_THRESHOLDS, READER_STEP);
@@ -404,10 +413,7 @@ pub async fn refresh_leaderboard(State(db): State<DatabaseConnection>) -> impl I
     }
 
     // Fetch all connected peers and sync their gamification stats.
-    // Only contact a peer if its cached stats are older than CACHE_TTL;
-    // otherwise the cache is authoritative (avoids data loss on network hiccups).
-    const CACHE_TTL_SECS: i64 = 5 * 60; // 5 minutes
-
+    // If a peer is unreachable, preserve its cached data.
     let peers = peer::Entity::find()
         .filter(peer::Column::ConnectionStatus.eq("accepted"))
         .all(&db)
@@ -415,47 +421,49 @@ pub async fn refresh_leaderboard(State(db): State<DatabaseConnection>) -> impl I
         .unwrap_or_default();
 
     let client = crate::api::peer::get_safe_client();
-    let now = chrono::Utc::now();
 
     for p in &peers {
-        // Check if we have fresh cached stats for this peer
-        let cached = crate::models::peer_gamification_stats::Entity::find()
-            .filter(crate::models::peer_gamification_stats::Column::PeerId.eq(p.id))
-            .one(&db)
-            .await
-            .unwrap_or(None);
-
-        if let Some(ref stats) = cached
-            && let Ok(synced) = chrono::DateTime::parse_from_rfc3339(&stats.synced_at)
-        {
-            let age = now.signed_duration_since(synced);
-            if age.num_seconds() < CACHE_TTL_SECS {
-                tracing::debug!(
-                    "Peer {} cache is fresh ({}s old), skipping sync",
-                    p.url,
-                    age.num_seconds()
-                );
-                continue;
-            }
-        }
-
-        // Cache is stale or absent — try to reach the peer
         let config_url = format!("{}/api/config", p.url);
         match client.get(&config_url).send().await {
             Ok(res) if res.status().is_success() => {
-                let shares = match res.json::<crate::api::setup::ConfigResponse>().await {
-                    Ok(c) => c.share_gamification_stats,
+                let config = match res.json::<crate::api::setup::ConfigResponse>().await {
+                    Ok(c) => c,
                     Err(_) => {
                         // Parse error — skip, preserve cached data
                         continue;
                     }
                 };
+
+                // Update peer name and corresponding contact if it changed
+                if config.library_name != p.name
+                    && let Ok(Some(peer_model)) = peer::Entity::find_by_id(p.id).one(&db).await
+                {
+                    let old_name = peer_model.name.clone();
+                    let mut active: peer::ActiveModel = peer_model.into();
+                    active.name = Set(config.library_name.clone());
+                    active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+                    let _ = active.update(&db).await;
+
+                    // Also update the linked contact (matched by old name + type "Library")
+                    if let Ok(Some(contact_model)) = contact::Entity::find()
+                        .filter(contact::Column::Name.eq(&old_name))
+                        .filter(contact::Column::Type.eq("Library"))
+                        .one(&db)
+                        .await
+                    {
+                        let mut contact_active: contact::ActiveModel = contact_model.into();
+                        contact_active.name = Set(config.library_name.clone());
+                        contact_active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+                        let _ = contact_active.update(&db).await;
+                    }
+                }
+
                 crate::api::peer::sync_peer_gamification_stats(
                     &db,
                     p.id,
                     &p.url,
                     &client,
-                    Some(shares),
+                    Some(config.share_gamification_stats),
                 )
                 .await;
             }
@@ -516,11 +524,7 @@ pub async fn get_leaderboard(State(db): State<DatabaseConnection>) -> impl IntoR
         .await
         .unwrap_or(0) as i64;
     let loans_count = loan::Entity::find().count(&db).await.unwrap_or(0) as i64;
-    let organized_count = book::Entity::find()
-        .filter(book::Column::ShelfPosition.is_not_null())
-        .count(&db)
-        .await
-        .unwrap_or(0) as i64;
+    let organized_count = count_catalogued_books(&db).await;
 
     let local_collector =
         calculate_track_progress(books_count, &COLLECTOR_THRESHOLDS, COLLECTOR_STEP);

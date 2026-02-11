@@ -17,6 +17,12 @@ pub struct ContactDto {
     pub email: Option<String>,
     pub phone: Option<String>,
     pub address: Option<String>,
+    pub street_address: Option<String>,
+    pub postal_code: Option<String>,
+    pub city: Option<String>,
+    pub country: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
     pub notes: Option<String>,
     pub user_id: Option<i32>,
     pub library_owner_id: Option<i32>,
@@ -33,6 +39,12 @@ impl From<contact_model::Model> for ContactDto {
             email: model.email,
             phone: model.phone,
             address: model.address,
+            street_address: model.street_address,
+            postal_code: model.postal_code,
+            city: model.city,
+            country: model.country,
+            latitude: model.latitude,
+            longitude: model.longitude,
             notes: model.notes,
             user_id: model.user_id,
             library_owner_id: Some(model.library_owner_id),
@@ -118,6 +130,12 @@ pub async fn create_contact(
         email: Set(contact_dto.email),
         phone: Set(contact_dto.phone),
         address: Set(contact_dto.address),
+        street_address: Set(contact_dto.street_address),
+        postal_code: Set(contact_dto.postal_code),
+        city: Set(contact_dto.city),
+        country: Set(contact_dto.country),
+        latitude: Set(contact_dto.latitude),
+        longitude: Set(contact_dto.longitude),
         notes: Set(contact_dto.notes),
         user_id: Set(contact_dto.user_id),
         library_owner_id: Set(contact_dto.library_owner_id.unwrap_or(1)),
@@ -165,6 +183,12 @@ pub async fn update_contact(
         active_model.email = Set(contact_dto.email);
         active_model.phone = Set(contact_dto.phone);
         active_model.address = Set(contact_dto.address);
+        active_model.street_address = Set(contact_dto.street_address);
+        active_model.postal_code = Set(contact_dto.postal_code);
+        active_model.city = Set(contact_dto.city);
+        active_model.country = Set(contact_dto.country);
+        active_model.latitude = Set(contact_dto.latitude);
+        active_model.longitude = Set(contact_dto.longitude);
         active_model.notes = Set(contact_dto.notes);
         active_model.user_id = Set(contact_dto.user_id);
         if let Some(lid) = contact_dto.library_owner_id {

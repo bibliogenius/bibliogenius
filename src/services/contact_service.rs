@@ -107,6 +107,17 @@ pub async fn create_contact(
 ) -> Result<ContactDto, ServiceError> {
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Validate user_id FK: set to None if user doesn't exist
+    let user_id = if let Some(uid) = dto.user_id {
+        use crate::models::user;
+        match user::Entity::find_by_id(uid).one(db).await {
+            Ok(Some(_)) => Some(uid),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     let new_contact = contact_model::ActiveModel {
         r#type: Set(dto.contact_type),
         name: Set(dto.name),
@@ -121,7 +132,7 @@ pub async fn create_contact(
         latitude: Set(dto.latitude),
         longitude: Set(dto.longitude),
         notes: Set(dto.notes),
-        user_id: Set(dto.user_id),
+        user_id: Set(user_id),
         library_owner_id: Set(dto.library_owner_id.unwrap_or(1)),
         is_active: Set(dto.is_active),
         created_at: Set(now.clone()),
