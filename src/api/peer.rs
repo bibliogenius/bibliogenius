@@ -13,7 +13,6 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::net::IpAddr;
 use tracing::{error, info};
 use url::Url;
 
@@ -23,7 +22,7 @@ use url::Url;
 /// - Link-Local (169.254.0.0/16, fe80::/10)
 /// - AWS Metadata Service (169.254.169.254)
 /// - "localhost" hostname
-fn validate_url(url_str: &str) -> Result<String, String> {
+pub fn validate_url(url_str: &str) -> Result<String, String> {
     let url = Url::parse(url_str).map_err(|_| "Invalid URL format".to_string())?;
 
     // 1. Check Scheme
@@ -32,17 +31,17 @@ fn validate_url(url_str: &str) -> Result<String, String> {
     }
 
     // 2. Check Host
-    if let Some(host_str) = url.host_str() {
-        if host_str == "localhost" {
+    match url.host() {
+        Some(url::Host::Domain("localhost")) => {
             return Err("Localhost access is blocked".to_string());
         }
-
-        // Check if it's an IP address
-        if let Ok(ip) = host_str.parse::<IpAddr>()
-            && ip.is_loopback()
-        {
+        Some(url::Host::Ipv4(ip)) if ip.is_loopback() => {
             return Err("Loopback addresses blocked".to_string());
         }
+        Some(url::Host::Ipv6(ip)) if ip.is_loopback() => {
+            return Err("Loopback addresses blocked".to_string());
+        }
+        _ => {}
     }
 
     Ok(url.to_string())

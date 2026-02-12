@@ -198,19 +198,19 @@ struct OpenLibrarySearchDoc {
     cover_i: Option<i64>,
 }
 
-/// Fetch cover URL from OpenLibrary's Cover API (most reliable endpoint)
-/// This is separate from their ISBN/Books APIs and works very consistently
-/// Returns None if the cover doesn't exist (404 response)
+/// Fetch cover URL from OpenLibrary's Cover API (most reliable endpoint).
+/// Uses `?default=false` so OpenLibrary returns 404 for missing covers
+/// instead of redirecting to a 1x1 transparent placeholder.
 pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
     let cover_url = format!("https://covers.openlibrary.org/b/isbn/{}-L.jpg", isbn);
+    let check_url = format!("{}?default=false", &cover_url);
 
-    // Check if cover exists using HEAD request (lightweight)
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
         .ok()?;
 
-    match client.head(&cover_url).send().await {
+    match client.head(&check_url).send().await {
         Ok(resp) if resp.status().is_success() => Some(cover_url),
         _ => None,
     }

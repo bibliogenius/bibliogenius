@@ -93,14 +93,6 @@ impl BookRepository for SeaOrmBookRepository {
                 book_dto.authors = Some(author_names);
             }
 
-            // Derive cover_url from ISBN
-            if let Some(isbn) = &book_dto.isbn {
-                book_dto.cover_url = Some(format!(
-                    "https://covers.openlibrary.org/b/isbn/{}-M.jpg",
-                    isbn
-                ));
-            }
-
             book_dtos.push(book_dto);
         }
 
@@ -127,13 +119,6 @@ impl BookRepository for SeaOrmBookRepository {
                     let author_names: Vec<String> = authors.into_iter().map(|a| a.name).collect();
                     book_dto.author = Some(author_names.join(", "));
                     book_dto.authors = Some(author_names);
-                }
-
-                if let Some(isbn) = &book_dto.isbn {
-                    book_dto.cover_url = Some(format!(
-                        "https://covers.openlibrary.org/b/isbn/{}-M.jpg",
-                        isbn
-                    ));
                 }
 
                 Ok(Some(book_dto))
@@ -241,6 +226,39 @@ impl BookRepository for SeaOrmBookRepository {
         if result.rows_affected == 0 {
             return Err(DomainError::NotFound);
         }
+
+        Ok(())
+    }
+
+    async fn find_missing_covers(&self) -> Result<Vec<(i32, String)>, DomainError> {
+        let models = BookEntity::find()
+            .filter(Column::CoverUrl.is_null())
+            .filter(Column::Isbn.is_not_null())
+            .all(&self.db)
+            .await?;
+
+        Ok(models
+            .into_iter()
+            .filter_map(|m| {
+                let isbn = m.isbn.as_deref().unwrap_or("").trim().to_string();
+                if isbn.is_empty() {
+                    None
+                } else {
+                    Some((m.id, isbn))
+                }
+            })
+            .collect())
+    }
+
+    async fn update_cover_url(&self, id: i32, cover_url: &str) -> Result<(), DomainError> {
+        BookEntity::update_many()
+            .col_expr(
+                Column::CoverUrl,
+                sea_orm::sea_query::Expr::value(cover_url.to_string()),
+            )
+            .filter(Column::Id.eq(id))
+            .exec(&self.db)
+            .await?;
 
         Ok(())
     }

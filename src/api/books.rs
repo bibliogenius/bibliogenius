@@ -416,16 +416,7 @@ pub async fn get_book(
     axum::extract::Path(id): axum::extract::Path<i32>,
 ) -> impl IntoResponse {
     match state.book_repo.find_by_id(id).await {
-        Ok(Some(mut book_dto)) => {
-            // Add large cover URL if we have ISBN
-            if let Some(isbn) = &book_dto.isbn {
-                book_dto.large_cover_url = Some(format!(
-                    "https://covers.openlibrary.org/b/isbn/{}-L.jpg",
-                    isbn
-                ));
-            }
-            (StatusCode::OK, Json(book_dto)).into_response()
-        }
+        Ok(Some(book_dto)) => (StatusCode::OK, Json(book_dto)).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "Book not found"})),

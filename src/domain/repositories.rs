@@ -139,6 +139,13 @@ pub trait BookRepository: Send + Sync {
 
     /// Delete a book by ID
     async fn delete(&self, id: i32) -> Result<(), DomainError>;
+
+    /// Find books that have an ISBN but no persisted cover URL.
+    /// Returns (book_id, isbn) pairs.
+    async fn find_missing_covers(&self) -> Result<Vec<(i32, String)>, DomainError>;
+
+    /// Update only the cover_url field for a single book (lightweight, no full reload).
+    async fn update_cover_url(&self, id: i32, cover_url: &str) -> Result<(), DomainError>;
 }
 
 /// Collection data for API responses

@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1481970102;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -548058683;
 
 // Section: executor
 
@@ -409,6 +409,41 @@ fn wire__crate__api__frb__delete_tag_impl(
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let output_ok = crate::api::frb::delete_tag(api_id).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__enrich_missing_covers_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "enrich_missing_covers",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::enrich_missing_covers().await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -905,6 +940,44 @@ fn wire__crate__api__frb__is_mdns_available_impl(
         },
     )
 }
+fn wire__crate__api__frb__lookup_book_metadata_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "lookup_book_metadata",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_isbn = <String>::sse_decode(&mut deserializer);
+            let api_lang = <Option<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::frb::lookup_book_metadata(api_isbn, api_lang).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__frb__reorder_books_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1004,6 +1077,165 @@ fn wire__crate__api__frb__return_loan_impl(
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let output_ok = crate::api::frb::return_loan(api_id).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__search_all_covers_by_title_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "search_all_covers_by_title",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_title = <String>::sse_decode(&mut deserializer);
+            let api_author = <Option<String>>::sse_decode(&mut deserializer);
+            let api_enable_google = <Option<bool>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::search_all_covers_by_title(
+                            api_title,
+                            api_author,
+                            api_enable_google,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__search_all_covers_for_book_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "search_all_covers_for_book",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_isbn = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::frb::search_all_covers_for_book(api_isbn).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__search_cover_by_title_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "search_cover_by_title",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_title = <String>::sse_decode(&mut deserializer);
+            let api_author = <Option<String>>::sse_decode(&mut deserializer);
+            let api_enable_google = <Option<bool>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::search_cover_by_title(
+                            api_title,
+                            api_author,
+                            api_enable_google,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__search_cover_for_book_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "search_cover_for_book",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_isbn = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::search_cover_for_book(api_isbn).await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -1268,6 +1500,26 @@ impl SseDecode for crate::api::frb::FrbBook {
     }
 }
 
+impl SseDecode for crate::api::frb::FrbBookMetadata {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_title = <Option<String>>::sse_decode(deserializer);
+        let mut var_author = <Option<String>>::sse_decode(deserializer);
+        let mut var_publisher = <Option<String>>::sse_decode(deserializer);
+        let mut var_publicationYear = <Option<String>>::sse_decode(deserializer);
+        let mut var_coverUrl = <Option<String>>::sse_decode(deserializer);
+        let mut var_summary = <Option<String>>::sse_decode(deserializer);
+        return crate::api::frb::FrbBookMetadata {
+            title: var_title,
+            author: var_author,
+            publisher: var_publisher,
+            publication_year: var_publicationYear,
+            cover_url: var_coverUrl,
+            summary: var_summary,
+        };
+    }
+}
+
 impl SseDecode for crate::api::frb::FrbContact {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1306,6 +1558,18 @@ impl SseDecode for crate::api::frb::FrbContact {
             user_id: var_userId,
             library_owner_id: var_libraryOwnerId,
             is_active: var_isActive,
+        };
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbCoverCandidate {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_url = <String>::sse_decode(deserializer);
+        let mut var_source = <String>::sse_decode(deserializer);
+        return crate::api::frb::FrbCoverCandidate {
+            url: var_url,
+            source: var_source,
         };
     }
 }
@@ -1426,6 +1690,20 @@ impl SseDecode for Vec<crate::api::frb::FrbContact> {
     }
 }
 
+impl SseDecode for Vec<crate::api::frb::FrbCoverCandidate> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::frb::FrbCoverCandidate>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::frb::FrbDiscoveredPeer> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1499,11 +1777,33 @@ impl SseDecode for Option<String> {
     }
 }
 
+impl SseDecode for Option<bool> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<bool>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<f64> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<f64>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::frb::FrbBookMetadata> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::frb::FrbBookMetadata>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -1570,23 +1870,39 @@ fn pde_ffi_dispatcher_primary_impl(
         8 => wire__crate__api__frb__delete_book_impl(port, ptr, rust_vec_len, data_len),
         9 => wire__crate__api__frb__delete_contact_impl(port, ptr, rust_vec_len, data_len),
         10 => wire__crate__api__frb__delete_tag_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__frb__get_all_books_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__frb__get_all_contacts_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__frb__get_all_loans_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__frb__get_all_tags_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__frb__get_book_by_id_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__frb__get_contact_by_id_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__frb__get_local_peers_ffi_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__frb__init_backend_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__frb__init_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__frb__reorder_books_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__frb__enrich_missing_covers_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__frb__get_all_books_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__frb__get_all_contacts_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__frb__get_all_loans_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__frb__get_all_tags_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__frb__get_book_by_id_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__frb__get_contact_by_id_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__frb__get_local_peers_ffi_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__frb__init_backend_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__frb__init_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__frb__lookup_book_metadata_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__frb__reorder_books_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__frb__search_all_covers_by_title_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        31 => wire__crate__api__frb__search_all_covers_for_book_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        32 => wire__crate__api__frb__search_cover_by_title_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__frb__search_cover_for_book_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1599,11 +1915,11 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        18 => wire__crate__api__frb__get_mdns_service_type_impl(ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__frb__get_version_impl(ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__frb__greet_impl(ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__frb__health_check_impl(ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__frb__is_mdns_available_impl(ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__frb__get_mdns_service_type_impl(ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__frb__get_version_impl(ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__frb__greet_impl(ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__frb__health_check_impl(ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__frb__is_mdns_available_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1645,6 +1961,31 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbBook> for crate::api:
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbBookMetadata {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.title.into_into_dart().into_dart(),
+            self.author.into_into_dart().into_dart(),
+            self.publisher.into_into_dart().into_dart(),
+            self.publication_year.into_into_dart().into_dart(),
+            self.cover_url.into_into_dart().into_dart(),
+            self.summary.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbBookMetadata
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbBookMetadata>
+    for crate::api::frb::FrbBookMetadata
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbBookMetadata {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbContact {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -1674,6 +2015,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbContact>
     for crate::api::frb::FrbContact
 {
     fn into_into_dart(self) -> crate::api::frb::FrbContact {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbCoverCandidate {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.url.into_into_dart().into_dart(),
+            self.source.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbCoverCandidate
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbCoverCandidate>
+    for crate::api::frb::FrbCoverCandidate
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbCoverCandidate {
         self
     }
 }
@@ -1793,6 +2155,18 @@ impl SseEncode for crate::api::frb::FrbBook {
     }
 }
 
+impl SseEncode for crate::api::frb::FrbBookMetadata {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Option<String>>::sse_encode(self.title, serializer);
+        <Option<String>>::sse_encode(self.author, serializer);
+        <Option<String>>::sse_encode(self.publisher, serializer);
+        <Option<String>>::sse_encode(self.publication_year, serializer);
+        <Option<String>>::sse_encode(self.cover_url, serializer);
+        <Option<String>>::sse_encode(self.summary, serializer);
+    }
+}
+
 impl SseEncode for crate::api::frb::FrbContact {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1813,6 +2187,14 @@ impl SseEncode for crate::api::frb::FrbContact {
         <Option<i32>>::sse_encode(self.user_id, serializer);
         <Option<i32>>::sse_encode(self.library_owner_id, serializer);
         <bool>::sse_encode(self.is_active, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbCoverCandidate {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.url, serializer);
+        <String>::sse_encode(self.source, serializer);
     }
 }
 
@@ -1899,6 +2281,16 @@ impl SseEncode for Vec<crate::api::frb::FrbContact> {
     }
 }
 
+impl SseEncode for Vec<crate::api::frb::FrbCoverCandidate> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::frb::FrbCoverCandidate>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::frb::FrbDiscoveredPeer> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1959,12 +2351,32 @@ impl SseEncode for Option<String> {
     }
 }
 
+impl SseEncode for Option<bool> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <bool>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<f64> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <f64>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::frb::FrbBookMetadata> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::frb::FrbBookMetadata>::sse_encode(value, serializer);
         }
     }
 }
