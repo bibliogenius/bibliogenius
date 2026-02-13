@@ -83,25 +83,24 @@ pub async fn list_books(
         query = query.filter(crate::models::book::Column::Subjects.contains(tag));
     }
 
-    let books = query
+    // Eager-load authors: 2 queries instead of N+1
+    let books_with_authors: Vec<(
+        crate::models::book::Model,
+        Vec<crate::models::author::Model>,
+    )> = query
         .order_by_asc(crate::models::book::Column::ShelfPosition)
+        .find_with_related(crate::models::author::Entity)
         .all(db)
         .await?;
 
-    tracing::info!("DB query returned {} books", books.len());
+    tracing::info!("DB query returned {} books", books_with_authors.len());
 
     let mut book_dtos = Vec::new();
 
-    for book_model in books {
-        let mut book_dto = Book::from(book_model.clone());
+    for (book_model, authors) in books_with_authors {
+        let mut book_dto = Book::from(book_model);
 
-        // Fetch authors via relation
-        if let Ok(authors) = book_model
-            .find_related(crate::models::author::Entity)
-            .all(db)
-            .await
-            && !authors.is_empty()
-        {
+        if !authors.is_empty() {
             book_dto.author = Some(
                 authors
                     .into_iter()

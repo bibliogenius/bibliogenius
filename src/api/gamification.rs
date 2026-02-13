@@ -151,30 +151,28 @@ async fn count_catalogued_books(db: &DatabaseConnection) -> i64 {
 pub async fn get_user_status(State(db): State<DatabaseConnection>) -> impl IntoResponse {
     // For V3 single-user mode, use user_id = 1
     let user_id = 1;
-
-    // 1. Count books (Collector Track)
-    let books_count = book::Entity::find().count(&db).await.unwrap_or(0) as i64;
-
-    // 2. Count books with reading_status = 'read' (Reader Track - all time)
-    let read_count = book::Entity::find()
-        .filter(book::Column::ReadingStatus.eq("read"))
-        .count(&db)
-        .await
-        .unwrap_or(0) as i64;
-
-    // 3. Count books finished THIS YEAR (for yearly reading goal)
     let current_year = Utc::now().format("%Y").to_string();
-    let yearly_read_count = book::Entity::find()
-        .filter(book::Column::FinishedReadingAt.like(format!("{}%", current_year)))
-        .count(&db)
-        .await
-        .unwrap_or(0) as i64;
 
-    // 3. Count loans (Lender Track)
-    let loans_count = loan::Entity::find().count(&db).await.unwrap_or(0) as i64;
-
-    // 4. Count books assigned to at least one shelf/tag (Cataloguer Track)
-    let organized_count = count_catalogued_books(&db).await;
+    // Parallel group 1: All independent COUNT queries
+    let (books_count, read_count, yearly_read_count, loans_count, organized_count) = tokio::join!(
+        async { book::Entity::find().count(&db).await.unwrap_or(0) as i64 },
+        async {
+            book::Entity::find()
+                .filter(book::Column::ReadingStatus.eq("read"))
+                .count(&db)
+                .await
+                .unwrap_or(0) as i64
+        },
+        async {
+            book::Entity::find()
+                .filter(book::Column::FinishedReadingAt.like(format!("{}%", current_year)))
+                .count(&db)
+                .await
+                .unwrap_or(0) as i64
+        },
+        async { loan::Entity::find().count(&db).await.unwrap_or(0) as i64 },
+        count_catalogued_books(&db),
+    );
 
     // Calculate track progress
     let collector_progress =
@@ -184,11 +182,21 @@ pub async fn get_user_status(State(db): State<DatabaseConnection>) -> impl IntoR
     let cataloguer_progress =
         calculate_track_progress(organized_count, &CATALOGUER_THRESHOLDS, CATALOGUER_STEP);
 
-    // Get streak info
-    let streak = gamification_streaks::Entity::find()
-        .filter(gamification_streaks::Column::UserId.eq(user_id))
-        .one(&db)
-        .await
+    // Parallel group 2: Streak, achievements, config (independent)
+    let (streak_result, achievements_result, config_result) = tokio::join!(
+        gamification_streaks::Entity::find()
+            .filter(gamification_streaks::Column::UserId.eq(user_id))
+            .one(&db),
+        gamification_achievements::Entity::find()
+            .filter(gamification_achievements::Column::UserId.eq(user_id))
+            .order_by_desc(gamification_achievements::Column::UnlockedAt)
+            .all(&db),
+        gamification_config::Entity::find()
+            .filter(gamification_config::Column::UserId.eq(user_id))
+            .one(&db),
+    );
+
+    let streak = streak_result
         .ok()
         .flatten()
         .map(|s| StreakInfo {
@@ -200,25 +208,14 @@ pub async fn get_user_status(State(db): State<DatabaseConnection>) -> impl IntoR
             longest: 0,
         });
 
-    // Get recent achievements (last 5)
-    let recent_achievements = gamification_achievements::Entity::find()
-        .filter(gamification_achievements::Column::UserId.eq(user_id))
-        .order_by_desc(gamification_achievements::Column::UnlockedAt)
-        .all(&db)
-        .await
+    let recent_achievements = achievements_result
         .unwrap_or_default()
         .into_iter()
         .take(5)
         .map(|a| a.achievement_id)
         .collect::<Vec<_>>();
 
-    // Get config
-    let config = gamification_config::Entity::find()
-        .filter(gamification_config::Column::UserId.eq(user_id))
-        .one(&db)
-        .await
-        .ok()
-        .flatten();
+    let config = config_result.ok().flatten();
 
     let config_dto = config
         .map(|c| GamificationConfigDto {
