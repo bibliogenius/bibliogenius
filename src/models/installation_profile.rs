@@ -38,6 +38,7 @@ pub struct Model {
     pub enabled_modules: String, // JSON array
     pub theme: Option<String>,
     pub avatar_config: Option<String>, // JSON object
+    pub api_keys: Option<String>,      // JSON object: {"google_books": "AIza..."}
     pub created_at: String,
     pub updated_at: String,
 }
@@ -53,6 +54,7 @@ pub struct ProfileConfig {
     pub enabled_modules: Vec<String>,
     pub theme: String,
     pub avatar_config: Option<serde_json::Value>,
+    pub api_keys: std::collections::HashMap<String, String>,
 }
 
 impl ProfileConfig {
@@ -66,6 +68,12 @@ impl ProfileConfig {
         let enabled_modules: Vec<String> =
             serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
 
+        let api_keys: std::collections::HashMap<String, String> = profile_model
+            .api_keys
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+
         Ok(ProfileConfig {
             profile: InstallationProfile::from(profile_model.profile_type),
             enabled_modules,
@@ -73,6 +81,7 @@ impl ProfileConfig {
             avatar_config: profile_model
                 .avatar_config
                 .and_then(|s| serde_json::from_str(&s).ok()),
+            api_keys,
         })
     }
 
@@ -86,6 +95,12 @@ impl ProfileConfig {
             .as_ref()
             .map(|v| serde_json::to_string(v).unwrap_or_default());
 
+        let api_keys_json = if self.api_keys.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&self.api_keys).unwrap_or_default())
+        };
+
         // Update existing profile (assume ID 1 for now)
         let profile = ActiveModel {
             id: Set(1),
@@ -93,6 +108,7 @@ impl ProfileConfig {
             enabled_modules: Set(modules_json),
             theme: Set(Some(self.theme.clone())),
             avatar_config: Set(avatar_json),
+            api_keys: Set(api_keys_json),
             updated_at: Set(now),
             ..Default::default()
         };

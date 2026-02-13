@@ -931,5 +931,13 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 035: Add api_keys to installation_profile (JSON, e.g. {"google_books": "AIza..."})
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE installation_profile ADD COLUMN api_keys TEXT".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }

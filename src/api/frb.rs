@@ -63,6 +63,23 @@ fn db() -> Option<&'static DatabaseConnection> {
     DB.get()
 }
 
+/// Load the Google Books API key from the installation profile.
+async fn load_google_books_api_key() -> Option<String> {
+    use crate::models::installation_profile::Entity as ProfileEntity;
+    use sea_orm::EntityTrait;
+
+    let db = db()?;
+    if let Ok(Some(profile)) = ProfileEntity::find_by_id(1).one(db).await {
+        let api_keys: std::collections::HashMap<String, String> = profile
+            .api_keys
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        return api_keys.get("google_books").cloned();
+    }
+    None
+}
+
 // ============ FFI-Compatible Data Structures ============
 
 /// Simplified book structure for FFI
@@ -421,10 +438,12 @@ pub async fn search_cover_by_title(
     author: Option<String>,
     enable_google: Option<bool>,
 ) -> Result<Option<String>, String> {
+    let gb_api_key = load_google_books_api_key().await;
     crate::services::book_service::search_cover_by_title(
         &title,
         author.as_deref(),
         enable_google.unwrap_or(false),
+        gb_api_key.as_deref(),
     )
     .await
     .map_err(|e| format!("{:?}", e))
@@ -462,10 +481,12 @@ pub async fn search_all_covers_by_title(
     author: Option<String>,
     enable_google: Option<bool>,
 ) -> Result<Vec<FrbCoverCandidate>, String> {
+    let gb_api_key = load_google_books_api_key().await;
     crate::services::book_service::search_all_covers_by_title(
         &title,
         author.as_deref(),
         enable_google.unwrap_or(false),
+        gb_api_key.as_deref(),
     )
     .await
     .map(|v| v.into_iter().map(FrbCoverCandidate::from).collect())

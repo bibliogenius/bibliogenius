@@ -43,11 +43,23 @@ struct GoogleImageLinks {
 use crate::inventaire_client::AuthorMetadata;
 use crate::openlibrary::BookMetadata;
 
-pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
-    let url = format!(
+/// Build a Google Books API URL, appending the API key if provided.
+fn append_api_key(url: &str, api_key: Option<&str>) -> String {
+    match api_key.filter(|k| !k.is_empty()) {
+        Some(key) => format!("{}&key={}", url, key),
+        None => url.to_string(),
+    }
+}
+
+pub async fn fetch_book_metadata(
+    isbn: &str,
+    api_key: Option<&str>,
+) -> Result<BookMetadata, String> {
+    let base_url = format!(
         "https://www.googleapis.com/books/v1/volumes?q=isbn:{}",
         isbn
     );
+    let url = append_api_key(&base_url, api_key);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -56,8 +68,19 @@ pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
 
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
 
-    if !resp.status().is_success() {
-        return Err(format!("Google Books API Error: {}", resp.status()));
+    let status = resp.status();
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let msg = if api_key.is_none() {
+            "Google Books API quota exceeded (no API key configured). Add your own key in Settings to fix this."
+        } else {
+            "Google Books API quota exceeded for your API key"
+        };
+        tracing::warn!("{}", msg);
+        return Err(msg.to_string());
+    }
+    if !status.is_success() {
+        tracing::warn!("Google Books API error for ISBN {}: HTTP {}", isbn, status);
+        return Err(format!("Google Books API Error: {}", status));
     }
 
     let body = resp.text().await.map_err(|e| e.to_string())?;
@@ -108,11 +131,12 @@ pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
     Err("Book not found in Google Books".to_string())
 }
 
-pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
-    let url = format!(
+pub async fn fetch_cover_url(isbn: &str, api_key: Option<&str>) -> Option<String> {
+    let base_url = format!(
         "https://www.googleapis.com/books/v1/volumes?q=isbn:{}",
         isbn
     );
+    let url = append_api_key(&base_url, api_key);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -121,7 +145,25 @@ pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
 
     let resp = client.get(&url).send().await.ok()?;
 
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        tracing::warn!(
+            "Google Books API quota exceeded fetching cover for ISBN {}{}",
+            isbn,
+            if api_key.is_none() {
+                " (no API key)"
+            } else {
+                ""
+            }
+        );
+        return None;
+    }
+    if !status.is_success() {
+        tracing::warn!(
+            "Google Books cover fetch error for ISBN {}: HTTP {}",
+            isbn,
+            status
+        );
         return None;
     }
 
@@ -143,6 +185,7 @@ pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
 
 pub async fn search_books(
     query: &crate::api::search::SearchQuery,
+    api_key: Option<&str>,
 ) -> Vec<crate::models::book::Model> {
     let mut q_parts = Vec::new();
 
@@ -173,10 +216,11 @@ pub async fn search_books(
     } else {
         15
     };
-    let url = format!(
+    let base_url = format!(
         "https://www.googleapis.com/books/v1/volumes?q={}&maxResults={}",
         q_str, max_results
     );
+    let url = append_api_key(&base_url, api_key);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -185,10 +229,39 @@ pub async fn search_books(
 
     let mut books = Vec::new();
 
-    if let Ok(resp) = client.get(&url).send().await
-        && let Ok(parsed) = resp.json::<GoogleBooksResponse>().await
-        && let Some(items) = parsed.items
-    {
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Google Books search request failed: {}", e);
+            return books;
+        }
+    };
+
+    let status = resp.status();
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        if api_key.is_none() {
+            tracing::warn!(
+                "Google Books search quota exceeded (no API key configured). Add your own key in Settings."
+            );
+        } else {
+            tracing::warn!("Google Books search quota exceeded for your API key");
+        }
+        return books;
+    }
+    if !status.is_success() {
+        tracing::warn!("Google Books search error: HTTP {}", status);
+        return books;
+    }
+
+    let parsed = match resp.json::<GoogleBooksResponse>().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Google Books response parse error: {}", e);
+            return books;
+        }
+    };
+
+    if let Some(items) = parsed.items {
         for item in items {
             let info = item.volume_info;
 
@@ -209,10 +282,7 @@ pub async fn search_books(
             });
 
             if info.industry_identifiers.is_none() {
-                println!(
-                    "DEBUG GOOGLE_BOOKS: No industryIdentifiers at all for '{}'",
-                    info.title
-                );
+                tracing::debug!("Google Books: no industryIdentifiers for '{}'", info.title);
             }
 
             let source_data = serde_json::json!({

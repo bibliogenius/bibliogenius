@@ -474,11 +474,20 @@ pub async fn enrich_missing_covers(
         _ => (true, false),
     };
 
+    let gb_api_key = load_google_books_api_key(db).await;
+
     let total = books.len();
     let mut enriched = 0i32;
 
     for (book_id, isbn) in &books {
-        if let Some(url) = find_cover_url(isbn, enable_inventaire, enable_google).await {
+        if let Some(url) = find_cover_url(
+            isbn,
+            enable_inventaire,
+            enable_google,
+            gb_api_key.as_deref(),
+        )
+        .await
+        {
             book_repo
                 .update_cover_url(*book_id, &url)
                 .await
@@ -542,10 +551,14 @@ pub async fn search_cover_for_book(
     }
 
     // Fallback to Google Books
-    if enable_google
-        && let Some(url) = crate::modules::integrations::google_books::fetch_cover_url(isbn).await
-    {
-        return Ok(Some(url));
+    if enable_google {
+        let gb_api_key = load_google_books_api_key(db).await;
+        if let Some(url) =
+            crate::modules::integrations::google_books::fetch_cover_url(isbn, gb_api_key.as_deref())
+                .await
+        {
+            return Ok(Some(url));
+        }
     }
 
     Ok(None)
@@ -561,6 +574,7 @@ pub async fn search_cover_by_title(
     title: &str,
     author: Option<&str>,
     enable_google: bool,
+    google_api_key: Option<&str>,
 ) -> Result<Option<String>, ServiceError> {
     let author_lower = author.filter(|a| !a.is_empty()).map(|a| a.to_lowercase());
 
@@ -613,7 +627,8 @@ pub async fn search_cover_by_title(
             sources: None,
             autocomplete: Some(true),
         };
-        let books = crate::modules::integrations::google_books::search_books(&query).await;
+        let books =
+            crate::modules::integrations::google_books::search_books(&query, google_api_key).await;
         tracing::info!(
             "search_cover_by_title: Google Books returned {} results",
             books.len()
@@ -714,11 +729,17 @@ pub async fn search_all_covers_for_book(
             })
     };
 
+    let gb_api_key = if enable_google {
+        load_google_books_api_key(db).await
+    } else {
+        None
+    };
+
     let google_fut = async {
         if !enable_google {
             return None;
         }
-        crate::modules::integrations::google_books::fetch_cover_url(isbn)
+        crate::modules::integrations::google_books::fetch_cover_url(isbn, gb_api_key.as_deref())
             .await
             .map(|url| CoverCandidate {
                 url,
@@ -752,6 +773,7 @@ pub async fn search_all_covers_by_title(
     title: &str,
     author: Option<&str>,
     enable_google: bool,
+    google_api_key: Option<&str>,
 ) -> Result<Vec<CoverCandidate>, ServiceError> {
     let author_lower = author.filter(|a| !a.is_empty()).map(|a| a.to_lowercase());
 
@@ -796,6 +818,7 @@ pub async fn search_all_covers_by_title(
     let gb_fut = {
         let title = title.to_string();
         let author_lower = author_lower.clone();
+        let gb_key = google_api_key.map(|s| s.to_string());
         async move {
             if !enable_google {
                 return Vec::new();
@@ -812,7 +835,9 @@ pub async fn search_all_covers_by_title(
                 sources: None,
                 autocomplete: Some(true),
             };
-            let books = crate::modules::integrations::google_books::search_books(&query).await;
+            let books =
+                crate::modules::integrations::google_books::search_books(&query, gb_key.as_deref())
+                    .await;
             let mut results = Vec::new();
             for book in &books {
                 let Some(ref cover_url) = book.cover_url else {
@@ -860,6 +885,7 @@ async fn find_cover_url(
     isbn: &str,
     enable_inventaire: bool,
     enable_google: bool,
+    google_api_key: Option<&str>,
 ) -> Option<String> {
     // Inventaire (best coverage for non-English books)
     if enable_inventaire
@@ -877,7 +903,8 @@ async fn find_cover_url(
 
     // Google Books
     if enable_google
-        && let Some(url) = crate::modules::integrations::google_books::fetch_cover_url(isbn).await
+        && let Some(url) =
+            crate::modules::integrations::google_books::fetch_cover_url(isbn, google_api_key).await
     {
         return Some(url);
     }
@@ -953,6 +980,21 @@ async fn cleanup_stale_openlibrary_covers(db: &DatabaseConnection) {
             stale_models.len()
         );
     }
+}
+
+/// Load the Google Books API key from the installation profile.
+async fn load_google_books_api_key(db: &DatabaseConnection) -> Option<String> {
+    use crate::models::installation_profile::Entity as ProfileEntity;
+
+    if let Ok(Some(profile)) = ProfileEntity::find_by_id(1).one(db).await {
+        let api_keys: std::collections::HashMap<String, String> = profile
+            .api_keys
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        return api_keys.get("google_books").cloned();
+    }
+    None
 }
 
 // Helper: Create or link author to book

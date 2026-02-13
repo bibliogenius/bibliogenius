@@ -22,20 +22,26 @@ pub async fn lookup_metadata_by_isbn(
     use crate::models::installation_profile::Entity as ProfileEntity;
     use sea_orm::EntityTrait;
 
-    // Load profile config to check enabled providers
-    let (enable_openlibrary, enable_google, enable_inventaire, enable_bnf) =
+    // Load profile config to check enabled providers and API keys
+    let (enable_openlibrary, enable_google, enable_inventaire, enable_bnf, google_api_key) =
         match ProfileEntity::find_by_id(1).one(db).await {
             Ok(Some(profile_model)) => {
                 let modules: Vec<String> =
                     serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
+                let api_keys: std::collections::HashMap<String, String> = profile_model
+                    .api_keys
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
                 (
                     !modules.contains(&"disable_fallback:openlibrary".to_string()),
                     modules.contains(&"enable_google_books".to_string()),
                     !modules.contains(&"disable_fallback:inventaire".to_string()),
                     !modules.contains(&"disable_fallback:bnf".to_string()),
+                    api_keys.get("google_books").cloned(),
                 )
             }
-            _ => (true, false, true, true),
+            _ => (true, false, true, true, None),
         };
 
     let clean_isbn = isbn.replace('-', "");
@@ -44,27 +50,58 @@ pub async fn lookup_metadata_by_isbn(
 
     // For French ISBNs, try BNF first (better coverage for French publishers)
     if enable_bnf && is_french_isbn {
-        if let Some(m) = try_bnf_sparql(&clean_isbn, isbn, enable_openlibrary, enable_google).await
+        if let Some(m) = try_bnf_sparql(
+            &clean_isbn,
+            isbn,
+            enable_openlibrary,
+            enable_google,
+            google_api_key.as_deref(),
+        )
+        .await
         {
             return Ok(Some(m));
         }
-        if let Some(m) = try_sudoc(&clean_isbn, isbn, enable_openlibrary, enable_google).await {
+        if let Some(m) = try_sudoc(
+            &clean_isbn,
+            isbn,
+            enable_openlibrary,
+            enable_google,
+            google_api_key.as_deref(),
+        )
+        .await
+        {
             return Ok(Some(m));
         }
-        if let Some(m) = try_bnf_sru(&clean_isbn, isbn, enable_openlibrary, enable_google).await {
+        if let Some(m) = try_bnf_sru(
+            &clean_isbn,
+            isbn,
+            enable_openlibrary,
+            enable_google,
+            google_api_key.as_deref(),
+        )
+        .await
+        {
             return Ok(Some(m));
         }
     }
 
     // 1. Try Inventaire
     if enable_inventaire
-        && let Some(m) = try_inventaire(isbn, enable_openlibrary, enable_google).await
+        && let Some(m) = try_inventaire(
+            isbn,
+            enable_openlibrary,
+            enable_google,
+            google_api_key.as_deref(),
+        )
+        .await
     {
         return Ok(Some(m));
     }
 
     // 2. Fallback to OpenLibrary
-    if enable_openlibrary && let Some(m) = try_openlibrary(isbn, enable_google).await {
+    if enable_openlibrary
+        && let Some(m) = try_openlibrary(isbn, enable_google, google_api_key.as_deref()).await
+    {
         return Ok(Some(m));
     }
 
@@ -72,14 +109,21 @@ pub async fn lookup_metadata_by_isbn(
     if enable_bnf
         && user_lang_is_french
         && !is_french_isbn
-        && let Some(m) = try_bnf_sparql(&clean_isbn, isbn, enable_openlibrary, enable_google).await
+        && let Some(m) = try_bnf_sparql(
+            &clean_isbn,
+            isbn,
+            enable_openlibrary,
+            enable_google,
+            google_api_key.as_deref(),
+        )
+        .await
     {
         return Ok(Some(m));
     }
 
     // 4. Fallback to Google Books
     if enable_google {
-        match crate::google_books::fetch_book_metadata(isbn).await {
+        match crate::google_books::fetch_book_metadata(isbn, google_api_key.as_deref()).await {
             Ok(metadata) => return Ok(Some(metadata)),
             Err(e) => {
                 tracing::debug!("Google Books lookup failed for {}: {}", isbn, e);
@@ -110,6 +154,7 @@ async fn enrich_cover(
     cover_url: Option<String>,
     enable_openlibrary: bool,
     enable_google: bool,
+    google_api_key: Option<&str>,
 ) -> Option<String> {
     if cover_url.is_some() {
         return cover_url;
@@ -120,12 +165,12 @@ async fn enrich_cover(
         (true, true) => {
             let (ol_result, gb_result) = tokio::join!(
                 crate::openlibrary::fetch_cover_url(isbn),
-                crate::google_books::fetch_cover_url(isbn),
+                crate::google_books::fetch_cover_url(isbn, google_api_key),
             );
             ol_result.or(gb_result)
         }
         (true, false) => crate::openlibrary::fetch_cover_url(isbn).await,
-        (false, true) => crate::google_books::fetch_cover_url(isbn).await,
+        (false, true) => crate::google_books::fetch_cover_url(isbn, google_api_key).await,
         (false, false) => None,
     }
 }
@@ -135,13 +180,20 @@ async fn try_bnf_sparql(
     isbn: &str,
     enable_openlibrary: bool,
     enable_google: bool,
+    google_api_key: Option<&str>,
 ) -> Option<BookMetadata> {
     tracing::debug!("Trying BNF SPARQL for ISBN {}", isbn);
     match crate::modules::integrations::bnf::lookup_bnf_isbn(clean_isbn).await {
         Ok(Some(bnf_book)) => {
             tracing::info!("BNF found book for ISBN {}: {}", isbn, bnf_book.title);
-            let cover_url =
-                enrich_cover(isbn, bnf_book.cover_url, enable_openlibrary, enable_google).await;
+            let cover_url = enrich_cover(
+                isbn,
+                bnf_book.cover_url,
+                enable_openlibrary,
+                enable_google,
+                google_api_key,
+            )
+            .await;
             Some(BookMetadata {
                 title: bnf_book.title,
                 authors: make_authors_from_name(bnf_book.author),
@@ -167,12 +219,20 @@ async fn try_sudoc(
     isbn: &str,
     enable_openlibrary: bool,
     enable_google: bool,
+    google_api_key: Option<&str>,
 ) -> Option<BookMetadata> {
     tracing::debug!("Trying SUDOC for French ISBN {}", isbn);
     match crate::modules::integrations::sudoc::fetch_by_isbn(clean_isbn).await {
         Ok(sudoc_book) => {
             tracing::info!("SUDOC found book for ISBN {}: {}", isbn, sudoc_book.title);
-            let cover_url = enrich_cover(isbn, None, enable_openlibrary, enable_google).await;
+            let cover_url = enrich_cover(
+                isbn,
+                None,
+                enable_openlibrary,
+                enable_google,
+                google_api_key,
+            )
+            .await;
             Some(BookMetadata {
                 title: sudoc_book.title,
                 authors: make_authors_from_name(sudoc_book.author),
@@ -194,13 +254,20 @@ async fn try_bnf_sru(
     isbn: &str,
     enable_openlibrary: bool,
     enable_google: bool,
+    google_api_key: Option<&str>,
 ) -> Option<BookMetadata> {
     tracing::debug!("Trying BNF SRU for French ISBN {}", isbn);
     match crate::modules::integrations::bnf::lookup_bnf_sru(clean_isbn).await {
         Ok(Some(bnf_book)) => {
             tracing::info!("BNF SRU found book for ISBN {}: {}", isbn, bnf_book.title);
-            let cover_url =
-                enrich_cover(isbn, bnf_book.cover_url, enable_openlibrary, enable_google).await;
+            let cover_url = enrich_cover(
+                isbn,
+                bnf_book.cover_url,
+                enable_openlibrary,
+                enable_google,
+                google_api_key,
+            )
+            .await;
             Some(BookMetadata {
                 title: bnf_book.title,
                 authors: make_authors_from_name(bnf_book.author),
@@ -225,6 +292,7 @@ async fn try_inventaire(
     isbn: &str,
     enable_openlibrary: bool,
     enable_google: bool,
+    google_api_key: Option<&str>,
 ) -> Option<BookMetadata> {
     tracing::debug!("Trying Inventaire for ISBN {}", isbn);
     match crate::inventaire_client::fetch_inventaire_metadata(isbn).await {
@@ -239,6 +307,7 @@ async fn try_inventaire(
                 inv_metadata.cover_url,
                 enable_openlibrary,
                 enable_google,
+                google_api_key,
             )
             .await;
             Some(BookMetadata {
@@ -257,7 +326,11 @@ async fn try_inventaire(
     }
 }
 
-async fn try_openlibrary(isbn: &str, enable_google: bool) -> Option<BookMetadata> {
+async fn try_openlibrary(
+    isbn: &str,
+    enable_google: bool,
+    google_api_key: Option<&str>,
+) -> Option<BookMetadata> {
     tracing::debug!("Trying OpenLibrary for ISBN {}", isbn);
     match crate::openlibrary::fetch_book_metadata(isbn).await {
         Ok(metadata) => {
@@ -266,7 +339,14 @@ async fn try_openlibrary(isbn: &str, enable_google: bool) -> Option<BookMetadata
                 isbn,
                 metadata.title
             );
-            let cover_url = enrich_cover(isbn, metadata.cover_url, false, enable_google).await;
+            let cover_url = enrich_cover(
+                isbn,
+                metadata.cover_url,
+                false,
+                enable_google,
+                google_api_key,
+            )
+            .await;
             Some(BookMetadata {
                 cover_url,
                 ..metadata

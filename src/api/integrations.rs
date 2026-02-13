@@ -69,7 +69,6 @@ fn lang_matches(book_lang: &str, user_lang: &str) -> bool {
     }
 
     // Simple mapping for common languages
-    // Simple mapping for common languages
     matches!(
         (b.as_str(), u.as_str()),
         ("en", "eng")
@@ -87,6 +86,14 @@ fn lang_matches(book_lang: &str, user_lang: &str) -> bool {
             | ("it", "ita")
             | ("ita", "it")
     )
+}
+
+/// Check if a book language matches ANY of the user's preferred languages
+fn lang_matches_any(book_lang: &str, user_langs: &[String]) -> bool {
+    if user_langs.is_empty() {
+        return true;
+    }
+    user_langs.iter().any(|ul| lang_matches(book_lang, ul))
 }
 
 fn normalize_string(s: &str) -> String {
@@ -391,20 +398,31 @@ pub async fn search_unified(
     use crate::models::installation_profile::Entity as ProfileEntity;
     use sea_orm::EntityTrait;
 
-    // Load profile config to check enabled providers
-    let (mut enable_inventaire, mut enable_bnf, mut enable_openlibrary, mut enable_google_books) =
-        match ProfileEntity::find_by_id(1).one(&db).await {
-            Ok(Some(profile_model)) => {
-                let modules: Vec<String> =
-                    serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
-                let inv = !modules.contains(&"disable_fallback:inventaire".to_string());
-                let bnf = !modules.contains(&"disable_fallback:bnf".to_string());
-                let ol = !modules.contains(&"disable_fallback:openlibrary".to_string());
-                let gb = modules.contains(&"enable_google_books".to_string());
-                (inv, bnf, ol, gb)
-            }
-            _ => (true, true, true, false),
-        };
+    // Load profile config to check enabled providers and API keys
+    let (
+        mut enable_inventaire,
+        mut enable_bnf,
+        mut enable_openlibrary,
+        mut enable_google_books,
+        google_books_api_key,
+    ) = match ProfileEntity::find_by_id(1).one(&db).await {
+        Ok(Some(profile_model)) => {
+            let modules: Vec<String> =
+                serde_json::from_str(&profile_model.enabled_modules).unwrap_or_default();
+            let inv = !modules.contains(&"disable_fallback:inventaire".to_string());
+            let bnf = !modules.contains(&"disable_fallback:bnf".to_string());
+            let ol = !modules.contains(&"disable_fallback:openlibrary".to_string());
+            let gb = modules.contains(&"enable_google_books".to_string());
+            let api_keys: std::collections::HashMap<String, String> = profile_model
+                .api_keys
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            let gb_key = api_keys.get("google_books").cloned();
+            (inv, bnf, ol, gb, gb_key)
+        }
+        _ => (true, true, true, false, None),
+    };
 
     let is_autocomplete = params.autocomplete.unwrap_or(false);
     let mut search_timeout = std::time::Duration::from_secs(8);
@@ -581,9 +599,12 @@ pub async fn search_unified(
         // Task 5: Google Books (wrapped in timeout)
         async move {
             if run_gb {
-                tokio::time::timeout(search_timeout, crate::google_books::search_books(&gb_query))
-                    .await
-                    .unwrap_or_default()
+                tokio::time::timeout(
+                    search_timeout,
+                    crate::google_books::search_books(&gb_query, google_books_api_key.as_deref()),
+                )
+                .await
+                .unwrap_or_default()
             } else {
                 Vec::new()
             }
@@ -963,7 +984,15 @@ pub async fn search_unified(
     let query_author = params.author.as_deref().unwrap_or("").to_lowercase();
     let query_title = params.title.as_deref().unwrap_or("").to_lowercase();
     let query_q = params.q.as_deref().unwrap_or("").to_lowercase();
-    let user_lang = params.lang.as_deref().unwrap_or("").to_lowercase();
+    // Parse multi-language param: "fr,en,es" → Vec<String>
+    let user_langs: Vec<String> = params
+        .lang
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     // 4. Language handling: ORDER by preferred language instead of filtering
     // This keeps all results but puts matching languages first
@@ -977,15 +1006,15 @@ pub async fn search_unified(
     // 2. Title matches query title (if provided)
     // 3. Author matches general query 'q'
     results.sort_by(|a, b| {
-        let score_a = calculate_relevance(a, &query_author, &query_title, &query_q, &user_lang);
-        let score_b = calculate_relevance(b, &query_author, &query_title, &query_q, &user_lang);
+        let score_a = calculate_relevance(a, &query_author, &query_title, &query_q, &user_langs);
+        let score_b = calculate_relevance(b, &query_author, &query_title, &query_q, &user_langs);
 
         // Descending Match: highest scores first
         score_b.cmp(&score_a)
     });
 
     for book in &results {
-        let score = calculate_relevance(book, &query_author, &query_title, &query_q, &user_lang);
+        let score = calculate_relevance(book, &query_author, &query_title, &query_q, &user_langs);
         tracing::debug!(
             "Final Result: {} ({}): Score {}",
             book.title,
@@ -1017,7 +1046,7 @@ fn calculate_relevance(
     q_author: &str,
     q_title: &str,
     q_any: &str,
-    user_lang: &str,
+    user_langs: &[String],
 ) -> i32 {
     let mut score = 0;
 
@@ -1028,10 +1057,10 @@ fn calculate_relevance(
     let q_any = normalize_string(q_any);
 
     // Language Match - highest priority for user experience
-    if !user_lang.is_empty() {
+    if !user_langs.is_empty() {
         // 1. Check direct language field
         if let Some(ref lang) = book.language {
-            if lang_matches(lang, user_lang) {
+            if lang_matches_any(lang, user_langs) {
                 score += 100; // Even stronger boost for direct language match
             } else {
                 score -= 100; // PENALTY for explicit mismatch
@@ -1046,7 +1075,7 @@ fn calculate_relevance(
             let mut found_match = false;
             for lang in languages {
                 if let Some(lang_str) = lang.as_str()
-                    && lang_matches(lang_str, user_lang)
+                    && lang_matches_any(lang_str, user_langs)
                 {
                     score += 60;
                     found_match = true;
@@ -1060,7 +1089,9 @@ fn calculate_relevance(
     }
 
     // Source boost for French users: Prioritize BNF (national library) for French content
-    if (user_lang == "fr" || user_lang == "fra" || user_lang == "fre")
+    if user_langs
+        .iter()
+        .any(|l| l == "fr" || l == "fra" || l == "fre")
         && let Some(source) = &book.source
         && source == "BNF"
     {

@@ -38,6 +38,7 @@ pub async fn setup(
         enabled_modules: Set("[]".to_string()), // Start with no modules
         theme: Set(req.theme.clone().or(Some("default".to_string()))),
         avatar_config: Set(None),
+        api_keys: Set(None),
         updated_at: Set(now.to_rfc3339()),
         created_at: Set(now.to_rfc3339()),
     };

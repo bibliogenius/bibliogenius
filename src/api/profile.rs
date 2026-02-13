@@ -15,6 +15,8 @@ pub struct UpdateProfileRequest {
     pub fallback_preferences: Option<std::collections::HashMap<String, bool>>,
     #[serde(default)]
     pub enabled_modules: Option<Vec<String>>,
+    #[serde(default)]
+    pub api_keys: Option<std::collections::HashMap<String, String>>,
 }
 
 pub async fn update_profile(
@@ -52,6 +54,28 @@ pub async fn update_profile(
             active.avatar_config = Set(Some(
                 serde_json::to_string(&avatar_config).unwrap_or_default(),
             ));
+        }
+
+        if let Some(ref api_keys) = req.api_keys {
+            // Merge with existing api_keys (don't overwrite unrelated keys)
+            let mut existing_keys: std::collections::HashMap<String, String> = existing_profile
+                .api_keys
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            for (k, v) in api_keys {
+                if v.is_empty() {
+                    existing_keys.remove(k);
+                } else {
+                    existing_keys.insert(k.clone(), v.clone());
+                }
+            }
+            let keys_json = if existing_keys.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&existing_keys).unwrap_or_default())
+            };
+            active.api_keys = Set(keys_json);
         }
 
         // Handle direct enabled_modules update
