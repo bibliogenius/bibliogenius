@@ -1,27 +1,28 @@
 # BiblioGenius - Rust Server
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/bibliogenius/bibliogenius/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-0.6.5--alpha-blue)](https://github.com/bibliogenius/bibliogenius/releases)
+[![Version](https://img.shields.io/badge/version-0.7.0--alpha-blue)](https://github.com/bibliogenius/bibliogenius/releases)
 
 **Autonomous library server with REST API, P2P synchronization, and local storage.**
 
 This is the core backend for the BiblioGenius ecosystem, written in Rust. It powers the mobile/desktop app via FFI or runs as a standalone server.
 
-## 🚀 Features
+## Features
 
-- **High Performance**: Built with Rust and Actix Web.
+- **High Performance**: Built with Rust, Axum, and Tokio.
 - **Dual Mode**: Runs embedded (FFI) or standalone (HTTP).
-- **Local First**: Full offline capabilities with SQLite.
-- **P2P Sync**: Decentralized library sharing.
+- **Local First**: Full offline capabilities with SQLite (via SeaORM).
+- **P2P Sync**: Decentralized library sharing between instances.
+- **MCP Server**: Optional Model Context Protocol mode for AI integration.
+- **External Sources**: Metadata lookup from BNF, Inventaire, OpenLibrary, Google Books.
 
-## 📋 Prerequisites
+## Prerequisites
 
 - **Rust**: Latest stable toolchain (`rustup update stable`)
 - **SQLite**: `libsqlite3-dev` (Linux) or bundled (macOS/Windows)
-- **Dart/Flutter**: Only if developing connection layers
+- **Dart/Flutter**: Only if developing the frontend app
 
-## ⚡ Quick Start
+## Quick Start
 
 ### Standalone Server
 
@@ -36,45 +37,42 @@ cd bibliogenius
 cargo run
 ```
 
-The API will be available at `http://localhost:8000`.
+The API will be available at `http://localhost:8000`. Swagger UI is served at `/api/docs`.
 
 ### Embedded Mode (FFI)
 
 If you are developing the [Flutter App](https://github.com/bibliogenius/bibliogenius-app), you generally **do not** need to run this repo manually. The `bibliogenius-app` build process (via Cargokit) automatically compiles and links this Rust crate.
 
-## 🏗️ Architecture
+## Architecture
 
-The backend is designed as a modular library:
+The backend follows a **Clean Architecture** (migration in progress):
 
-1. **`src/api`**: REST endpoints (Actix Web).
-2. **`src/db`**: Database schema and migrations (Rusqlite).
-3. **`src/modules`**: Business logic (Search, Import, P2P).
-4. **`src/bridge`**: Flutter Rust Bridge (FRB) definitions for FFI.
+```
+src/
+├── api/              # HTTP handlers (Axum) — thin delegation layer
+├── domain/           # Pure business abstractions (traits, errors — no framework deps)
+├── services/         # Business logic orchestration
+├── infrastructure/   # SeaORM repository implementations, config, auth
+├── models/           # DTOs and SeaORM entities (API contract)
+└── modules/          # External integrations (BNF, Inventaire, OpenLibrary…)
+```
 
-## 🛠️ Development Setup
+FFI bindings for the Flutter app are defined in `api/frb.rs` via [Flutter Rust Bridge](https://github.com/aspect-build/rules_lint).
 
-1. **Install dependencies**:
+## Development
 
-    ```bash
-    cargo build
-    ```
+```bash
+# Build
+cargo build
 
-2. **Run tests**:
+# Run all checks (format + lint + tests)
+cargo fmt && cargo clippy -- -D warnings && cargo test
+```
 
-    ```bash
-    cargo test
-    ```
+## Related Repositories
 
-3. **Run clippy (linter)**:
+- [**bibliogenius-app**](https://github.com/bibliogenius/bibliogenius-app): Flutter frontend (mobile & desktop).
 
-    ```bash
-    cargo clippy -- -D warnings
-    ```
-
-## 🔗 Related Repositories
-
-- [**bibliogenius-app**](https://github.com/bibliogenius/bibliogenius-app): The frontend Flutter application.
-
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
