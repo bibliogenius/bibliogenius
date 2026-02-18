@@ -21,9 +21,10 @@ ignore = [
 ]
 
 [licenses]
-# This project is MIT-licensed — only allow compatible licenses
+# This project is AGPL-3.0-licensed — allow compatible licenses
 version = 2
 allow = [
+    "AGPL-3.0-or-later",
     "MIT",
     "Apache-2.0",
     "BSD-2-Clause",
