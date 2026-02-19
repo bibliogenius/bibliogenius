@@ -56,13 +56,20 @@ struct OpenLibraryDoc {
     key: String,                      // Work ID (e.g. "/works/OL12345W")
 }
 
-// Helper to check if language matches (handles 2-letter vs 3-letter codes)
+/// Strip regional/country suffix from a BCP 47 tag: "pt-BR" → "pt", "zh-TW" → "zh".
+/// Already-simple codes like "fr" pass through unchanged.
+fn base_lang(code: &str) -> &str {
+    code.split(|c| c == '-' || c == '_').next().unwrap_or(code)
+}
+
+// Helper to check if language matches (handles 2-letter vs 3-letter codes and regional variants)
 fn lang_matches(book_lang: &str, user_lang: &str) -> bool {
     if user_lang.is_empty() {
         return true;
     }
-    let b = book_lang.to_lowercase();
-    let u = user_lang.to_lowercase();
+    // Strip regional codes before comparing: "pt-BR" → "pt"
+    let b = base_lang(&book_lang.to_lowercase()).to_lowercase();
+    let u = base_lang(&user_lang.to_lowercase()).to_lowercase();
 
     if b == u {
         return true;
@@ -85,6 +92,24 @@ fn lang_matches(book_lang: &str, user_lang: &str) -> bool {
             | ("spa", "es")
             | ("it", "ita")
             | ("ita", "it")
+            | ("pt", "por")
+            | ("por", "pt")
+            | ("nl", "dut")
+            | ("dut", "nl")
+            | ("nld", "nl")
+            | ("nl", "nld")
+            | ("ru", "rus")
+            | ("rus", "ru")
+            | ("ja", "jpn")
+            | ("jpn", "ja")
+            | ("zh", "chi")
+            | ("chi", "zh")
+            | ("zho", "zh")
+            | ("zh", "zho")
+            | ("ko", "kor")
+            | ("kor", "ko")
+            | ("ar", "ara")
+            | ("ara", "ar")
     )
 }
 
@@ -1091,7 +1116,7 @@ fn calculate_relevance(
     // Source boost for French users: Prioritize BNF (national library) for French content
     if user_langs
         .iter()
-        .any(|l| l == "fr" || l == "fra" || l == "fre")
+        .any(|l| { let b = base_lang(l); b == "fr" || b == "fra" || b == "fre" })
         && let Some(source) = &book.source
         && source == "BNF"
     {
@@ -1271,4 +1296,65 @@ pub async fn mcp_config() -> impl IntoResponse {
         ],
         "instructions": "Paste this configuration into your AI assistant's MCP configuration file (e.g., claude_desktop_config.json for Claude Desktop)."
     }))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lang_matches_strips_regional_codes() {
+        // pt-BR user should match pt books
+        assert!(lang_matches("pt", "pt-BR"));
+        assert!(lang_matches("pt-BR", "pt"));
+        assert!(lang_matches("pt-BR", "pt-PT"));
+        assert!(lang_matches("pt-PT", "pt-BR"));
+    }
+
+    #[test]
+    fn lang_matches_chinese_variants() {
+        // zh-CN and zh-TW should match zh and each other
+        assert!(lang_matches("zh", "zh-CN"));
+        assert!(lang_matches("zh-CN", "zh"));
+        assert!(lang_matches("zh-TW", "zh"));
+        assert!(lang_matches("zh", "zh-TW"));
+        assert!(lang_matches("zh-CN", "zh-TW"));
+    }
+
+    #[test]
+    fn lang_matches_iso639_2_with_regional() {
+        // 3-letter codes should still work with regional variants
+        assert!(lang_matches("por", "pt-BR"));
+        assert!(lang_matches("chi", "zh-TW"));
+        assert!(lang_matches("zho", "zh-CN"));
+    }
+
+    #[test]
+    fn lang_matches_simple_codes_still_work() {
+        assert!(lang_matches("en", "en"));
+        assert!(lang_matches("en", "eng"));
+        assert!(lang_matches("fr", "fra"));
+        assert!(lang_matches("pt", "por"));
+    }
+
+    #[test]
+    fn lang_matches_empty_user_lang_matches_all() {
+        assert!(lang_matches("anything", ""));
+    }
+
+    #[test]
+    fn lang_matches_different_languages_dont_match() {
+        assert!(!lang_matches("fr", "en"));
+        assert!(!lang_matches("pt", "es"));
+        assert!(!lang_matches("pt-BR", "es"));
+    }
+
+    #[test]
+    fn lang_matches_any_with_regional_codes() {
+        let user_langs = vec!["pt-br".to_string(), "en".to_string()];
+        assert!(lang_matches_any("pt", &user_langs));
+        assert!(lang_matches_any("pt-PT", &user_langs));
+        assert!(lang_matches_any("eng", &user_langs));
+        assert!(!lang_matches_any("fr", &user_langs));
+    }
 }
