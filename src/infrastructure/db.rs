@@ -14,7 +14,7 @@ pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     Ok(db)
 }
 
-async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
+pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // Create books table (new schema without author field)
     db.execute(Statement::from_string(
         db.get_database_backend(),
@@ -978,6 +978,86 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
                 .to_owned(),
         ))
         .await;
+
+    // Migration 038: E2EE Phase 2 — peers.x25519_public_key (hex-encoded X25519 public key)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peers ADD COLUMN x25519_public_key TEXT".to_owned(),
+        ))
+        .await;
+
+    // Migration 039: E2EE Phase 2 — peers.key_exchange_done (both keys exchanged successfully)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peers ADD COLUMN key_exchange_done INTEGER NOT NULL DEFAULT 0".to_owned(),
+        ))
+        .await;
+
+    // Migration 040: E2EE Phase 2 — peers.mailbox_id (for offline message relay)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peers ADD COLUMN mailbox_id TEXT".to_owned(),
+        ))
+        .await;
+
+    // Migration 041: E2EE — Remove FK constraint on crypto_keys.user_id
+    // Node identity is per-device, not per-user. The FK caused failures when
+    // identity init runs before user creation (setup flow).
+    // SQLite doesn't support DROP CONSTRAINT, so we recreate the table.
+    let has_fk: bool = match db
+        .query_one(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='crypto_keys'".to_owned(),
+        ))
+        .await
+    {
+        Ok(Some(row)) => {
+            let sql: String = row.try_get("", "sql").unwrap_or_default();
+            sql.contains("FOREIGN KEY")
+        }
+        _ => false,
+    };
+
+    if has_fk {
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                r#"
+                CREATE TABLE IF NOT EXISTS crypto_keys_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL DEFAULT 0,
+                    key_type TEXT NOT NULL,
+                    public_key BLOB NOT NULL,
+                    encrypted_secret BLOB NOT NULL,
+                    salt BLOB NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    revoked_at TEXT
+                )"#
+                .to_owned(),
+            ))
+            .await;
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                "INSERT INTO crypto_keys_new SELECT * FROM crypto_keys".to_owned(),
+            ))
+            .await;
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                "DROP TABLE crypto_keys".to_owned(),
+            ))
+            .await;
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                "ALTER TABLE crypto_keys_new RENAME TO crypto_keys".to_owned(),
+            ))
+            .await;
+    }
 
     Ok(())
 }

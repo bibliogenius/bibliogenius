@@ -7,6 +7,7 @@ use crate::domain::{AuthorRepository, BookRepository, CollectionRepository, Copy
 use crate::infrastructure::{
     SeaOrmAuthorRepository, SeaOrmBookRepository, SeaOrmCollectionRepository, SeaOrmCopyRepository,
 };
+use crate::services::IdentityService;
 
 /// Application state shared across all handlers
 #[derive(Clone)]
@@ -21,6 +22,8 @@ pub struct AppState {
     pub copy_repo: Arc<dyn CopyRepository>,
     /// Collection repository
     pub collection_repo: Arc<dyn CollectionRepository>,
+    /// Identity service for E2EE key management
+    pub identity_service: Arc<IdentityService>,
 }
 
 impl AppState {
@@ -30,6 +33,7 @@ impl AppState {
         let author_repo = Arc::new(SeaOrmAuthorRepository::new(db.clone()));
         let copy_repo = Arc::new(SeaOrmCopyRepository::new(db.clone()));
         let collection_repo = Arc::new(SeaOrmCollectionRepository::new(db.clone()));
+        let identity_service = Arc::new(IdentityService::new(db.clone()));
 
         Self {
             db,
@@ -37,6 +41,7 @@ impl AppState {
             author_repo,
             copy_repo,
             collection_repo,
+            identity_service,
         }
     }
 

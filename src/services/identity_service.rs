@@ -1,0 +1,377 @@
+//! Identity Service — persistence and lifecycle of the node's cryptographic identity.
+//!
+//! Generates a `NodeIdentity` once, encrypts the secret keys with Argon2(library_uuid),
+//! and stores them in the `crypto_keys` table. Subsequent calls reload and decrypt.
+//!
+//! Thread-safe: the identity is initialized at most once via `tokio::sync::OnceCell`.
+
+use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+use std::sync::Arc;
+use tokio::sync::OnceCell;
+use zeroize::Zeroize;
+
+use crate::crypto::encryption::{
+    decrypt_aes_gcm, derive_key_from_password, encrypt_aes_gcm, generate_salt, zeroize_key,
+};
+use crate::crypto::identity::NodeIdentity;
+
+/// Thread-safe identity service. Ensures generate-once semantics.
+#[derive(Clone)]
+pub struct IdentityService {
+    db: DatabaseConnection,
+    identity: Arc<OnceCell<NodeIdentity>>,
+}
+
+impl IdentityService {
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self {
+            db,
+            identity: Arc::new(OnceCell::new()),
+        }
+    }
+
+    /// Initialize or reload the node identity.
+    ///
+    /// - If `crypto_keys` has existing keys for user_id=1, decrypt and load them.
+    /// - Otherwise, generate a fresh identity, encrypt, and store.
+    ///
+    /// Uses Argon2id(library_uuid) as the encryption password.
+    pub async fn init(&self, library_uuid: &str) -> Result<(), String> {
+        let db = &self.db;
+        let uuid = library_uuid.to_string();
+
+        self.identity
+            .get_or_try_init(|| async {
+                // Try to load existing keys
+                match load_identity_from_db(db, &uuid).await {
+                    Ok(Some(identity)) => {
+                        tracing::info!("Loaded existing node identity from crypto_keys");
+                        Ok(identity)
+                    }
+                    Ok(None) => {
+                        // Generate fresh identity
+                        let identity = NodeIdentity::generate();
+                        store_identity_to_db(db, &identity, &uuid).await?;
+                        tracing::info!("Generated and stored new node identity");
+                        Ok(identity)
+                    }
+                    Err(e) => Err(e),
+                }
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    /// Returns (ed25519_hex, x25519_hex) public keys.
+    pub fn get_public_keys_hex(&self) -> Result<(String, String), String> {
+        let identity = self
+            .identity
+            .get()
+            .ok_or_else(|| "Identity not initialized".to_string())?;
+
+        let ed25519_hex = hex::encode(identity.verifying_key().as_bytes());
+        let x25519_hex = hex::encode(identity.x25519_public_key().as_bytes());
+
+        Ok((ed25519_hex, x25519_hex))
+    }
+
+    /// Access the underlying NodeIdentity (for CryptoService in Phase 3+).
+    pub fn identity(&self) -> Result<&NodeIdentity, String> {
+        self.identity
+            .get()
+            .ok_or_else(|| "Identity not initialized".to_string())
+    }
+}
+
+/// Load identity from crypto_keys table (user_id=1, key_type in {ed25519, x25519}).
+async fn load_identity_from_db(
+    db: &DatabaseConnection,
+    library_uuid: &str,
+) -> Result<Option<NodeIdentity>, String> {
+    // Query both key rows
+    let rows = db
+        .query_all(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "SELECT key_type, public_key, encrypted_secret, salt FROM crypto_keys WHERE user_id = 0 AND revoked_at IS NULL ORDER BY key_type",
+            [],
+        ))
+        .await
+        .map_err(|e| format!("DB query failed: {e}"))?;
+
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    let mut ed25519_data: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = None;
+    let mut x25519_data: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = None;
+
+    for row in &rows {
+        let key_type: String = row
+            .try_get("", "key_type")
+            .map_err(|e| format!("Failed to read key_type: {e}"))?;
+        let _public_key: Vec<u8> = row
+            .try_get("", "public_key")
+            .map_err(|e| format!("Failed to read public_key: {e}"))?;
+        let encrypted_secret: Vec<u8> = row
+            .try_get("", "encrypted_secret")
+            .map_err(|e| format!("Failed to read encrypted_secret: {e}"))?;
+        let salt: Vec<u8> = row
+            .try_get("", "salt")
+            .map_err(|e| format!("Failed to read salt: {e}"))?;
+
+        match key_type.as_str() {
+            "ed25519" => ed25519_data = Some((_public_key, encrypted_secret, salt)),
+            "x25519" => x25519_data = Some((_public_key, encrypted_secret, salt)),
+            _ => {} // ignore unknown key types
+        }
+    }
+
+    let (Some(ed_data), Some(x_data)) = (ed25519_data, x25519_data) else {
+        // Partial data — treat as missing
+        return Ok(None);
+    };
+
+    // Decrypt Ed25519 secret
+    let mut ed_key = derive_argon2_key(library_uuid, &ed_data.2)?;
+    let ed_secret = decrypt_secret(&ed_key, &ed_data.1)?;
+    zeroize_key(&mut ed_key);
+
+    // Decrypt X25519 secret
+    let mut x_key = derive_argon2_key(library_uuid, &x_data.2)?;
+    let x_secret = decrypt_secret(&x_key, &x_data.1)?;
+    zeroize_key(&mut x_key);
+
+    let ed_bytes: [u8; 32] = ed_secret
+        .try_into()
+        .map_err(|_| "Ed25519 secret not 32 bytes".to_string())?;
+    let x_bytes: [u8; 32] = x_secret
+        .try_into()
+        .map_err(|_| "X25519 secret not 32 bytes".to_string())?;
+
+    let identity = NodeIdentity::from_bytes(&ed_bytes, &x_bytes);
+
+    // Zeroize the decrypted bytes (stack arrays)
+    let mut ed_bytes_mut = ed_bytes;
+    let mut x_bytes_mut = x_bytes;
+    ed_bytes_mut.zeroize();
+    x_bytes_mut.zeroize();
+
+    Ok(Some(identity))
+}
+
+/// Store identity in crypto_keys table (2 rows: ed25519 + x25519).
+async fn store_identity_to_db(
+    db: &DatabaseConnection,
+    identity: &NodeIdentity,
+    library_uuid: &str,
+) -> Result<(), String> {
+    let (mut ed_secret, mut x_secret) = identity.export_secret_bytes();
+
+    // Encrypt Ed25519
+    let ed_salt = generate_salt();
+    let mut ed_key = derive_argon2_key(library_uuid, &ed_salt)?;
+    let ed_encrypted = encrypt_secret(&ed_key, &ed_secret)?;
+    zeroize_key(&mut ed_key);
+    ed_secret.zeroize();
+
+    // Encrypt X25519
+    let x_salt = generate_salt();
+    let mut x_key = derive_argon2_key(library_uuid, &x_salt)?;
+    let x_encrypted = encrypt_secret(&x_key, &x_secret)?;
+    zeroize_key(&mut x_key);
+    x_secret.zeroize();
+
+    let ed25519_public = identity.verifying_key().as_bytes().to_vec();
+    let x25519_public = identity.x25519_public_key().as_bytes().to_vec();
+
+    // Insert Ed25519 row
+    db.execute(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "INSERT INTO crypto_keys (user_id, key_type, public_key, encrypted_secret, salt) VALUES (0, 'ed25519', $1, $2, $3)",
+        [ed25519_public.into(), ed_encrypted.into(), ed_salt.to_vec().into()],
+    ))
+    .await
+    .map_err(|e| format!("Failed to store ed25519 key: {e}"))?;
+
+    // Insert X25519 row
+    db.execute(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "INSERT INTO crypto_keys (user_id, key_type, public_key, encrypted_secret, salt) VALUES (0, 'x25519', $1, $2, $3)",
+        [x25519_public.into(), x_encrypted.into(), x_salt.to_vec().into()],
+    ))
+    .await
+    .map_err(|e| format!("Failed to store x25519 key: {e}"))?;
+
+    Ok(())
+}
+
+/// Derive Argon2 key from library_uuid + salt.
+fn derive_argon2_key(library_uuid: &str, salt: &[u8]) -> Result<[u8; 32], String> {
+    let salt_array: [u8; 32] = salt
+        .try_into()
+        .map_err(|_| "Salt must be 32 bytes".to_string())?;
+    derive_key_from_password(library_uuid.as_bytes(), &salt_array)
+        .map_err(|e| format!("Argon2 key derivation failed: {e}"))
+}
+
+/// Encrypt a 32-byte secret with AES-256-GCM. Returns nonce || ciphertext.
+fn encrypt_secret(key: &[u8; 32], secret: &[u8; 32]) -> Result<Vec<u8>, String> {
+    let (nonce, ciphertext) =
+        encrypt_aes_gcm(key, secret).map_err(|e| format!("Encryption failed: {e}"))?;
+    let mut result = Vec::with_capacity(12 + ciphertext.len());
+    result.extend_from_slice(&nonce);
+    result.extend_from_slice(&ciphertext);
+    Ok(result)
+}
+
+/// Decrypt a secret. Input is nonce (12 bytes) || ciphertext.
+fn decrypt_secret(key: &[u8; 32], encrypted: &[u8]) -> Result<Vec<u8>, String> {
+    if encrypted.len() < 12 {
+        return Err("Encrypted data too short".to_string());
+    }
+    let nonce: [u8; 12] = encrypted[..12]
+        .try_into()
+        .map_err(|_| "Invalid nonce".to_string())?;
+    let ciphertext = &encrypted[12..];
+    decrypt_aes_gcm(key, &nonce, ciphertext).map_err(|e| format!("Decryption failed: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::Database;
+
+    async fn setup_test_db() -> DatabaseConnection {
+        use sea_orm::{ConnectionTrait, Statement};
+
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        crate::infrastructure::db::run_migrations(&db)
+            .await
+            .unwrap();
+
+        db
+    }
+
+    #[tokio::test]
+    async fn identity_generate_store_reload_roundtrip() {
+        let db = setup_test_db().await;
+        let uuid = "test-library-uuid-1234";
+
+        // First init → generates new identity
+        let svc1 = IdentityService::new(db.clone());
+        svc1.init(uuid).await.unwrap();
+        let (ed1, x1) = svc1.get_public_keys_hex().unwrap();
+
+        // Second init on fresh service → should reload same keys
+        let svc2 = IdentityService::new(db.clone());
+        svc2.init(uuid).await.unwrap();
+        let (ed2, x2) = svc2.get_public_keys_hex().unwrap();
+
+        assert_eq!(
+            ed1, ed2,
+            "Ed25519 public key should be the same after reload"
+        );
+        assert_eq!(x1, x2, "X25519 public key should be the same after reload");
+    }
+
+    #[tokio::test]
+    async fn wrong_uuid_fails_to_decrypt() {
+        let db = setup_test_db().await;
+
+        // Store with one UUID
+        let svc1 = IdentityService::new(db.clone());
+        svc1.init("correct-uuid").await.unwrap();
+
+        // Try to load with wrong UUID → should fail
+        let svc2 = IdentityService::new(db.clone());
+        let result = svc2.init("wrong-uuid").await;
+        assert!(
+            result.is_err(),
+            "Wrong UUID should fail to decrypt identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_keys_are_valid_hex() {
+        let db = setup_test_db().await;
+        let svc = IdentityService::new(db);
+        svc.init("test-uuid").await.unwrap();
+
+        let (ed, x) = svc.get_public_keys_hex().unwrap();
+        assert_eq!(ed.len(), 64, "Ed25519 hex should be 64 chars");
+        assert_eq!(x.len(), 64, "X25519 hex should be 64 chars");
+        assert!(hex::decode(&ed).is_ok());
+        assert!(hex::decode(&x).is_ok());
+    }
+
+    #[test]
+    fn qr_v2_generate_parse_roundtrip() {
+        let payload = serde_json::json!({
+            "version": 2,
+            "name": "My Library",
+            "url": "http://192.168.1.42:8000",
+            "library_uuid": "550e8400-e29b-41d4-a716-446655440000",
+            "ed25519_public_key": "a".repeat(64),
+            "x25519_public_key": "b".repeat(64),
+        });
+
+        let json_str = payload.to_string();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["version"], 2);
+        assert_eq!(parsed["name"], "My Library");
+        assert_eq!(parsed["url"], "http://192.168.1.42:8000");
+        assert_eq!(parsed["ed25519_public_key"].as_str().unwrap().len(), 64);
+        assert_eq!(parsed["x25519_public_key"].as_str().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn qr_v1_backward_compat() {
+        // QR v1 has no version field, just name + url
+        let v1_payload = r#"{"name": "Old Library", "url": "http://10.0.0.5:8000"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(v1_payload).unwrap();
+
+        let version = parsed.get("version").and_then(|v| v.as_i64()).unwrap_or(1);
+        assert_eq!(version, 1);
+        assert_eq!(parsed["name"], "Old Library");
+        assert_eq!(parsed["url"], "http://10.0.0.5:8000");
+        assert!(parsed.get("ed25519_public_key").is_none());
+    }
+
+    #[test]
+    fn invite_link_generate_parse_roundtrip() {
+        use base64::Engine;
+
+        let payload = serde_json::json!({
+            "version": 2,
+            "name": "Test Lib",
+            "url": "http://192.168.1.10:8000",
+            "library_uuid": "test-uuid-1234",
+            "ed25519_public_key": "c".repeat(64),
+            "x25519_public_key": "d".repeat(64),
+        });
+
+        // Generate
+        let json_bytes = payload.to_string().into_bytes();
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json_bytes);
+        let link = format!("https://bibliogenius.app/invite#{encoded}");
+
+        // Parse
+        let fragment = link.split_once('#').unwrap().1;
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(fragment)
+            .unwrap();
+        let json_str = String::from_utf8(decoded).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["version"], 2);
+        assert_eq!(parsed["name"], "Test Lib");
+        assert_eq!(parsed["url"], "http://192.168.1.10:8000");
+        assert_eq!(parsed["library_uuid"], "test-uuid-1234");
+        assert_eq!(parsed["ed25519_public_key"].as_str().unwrap().len(), 64);
+
+        // Fragment should never be sent to the server (B8)
+        assert!(link.starts_with("https://bibliogenius.app/invite#"));
+    }
+}

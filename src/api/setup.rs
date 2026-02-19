@@ -266,6 +266,12 @@ pub struct ConfigResponse {
     /// Whether this library shares gamification stats with peers
     #[serde(default)]
     pub share_gamification_stats: bool,
+    /// Ed25519 public key (hex-encoded) for E2EE signature verification
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ed25519_public_key: Option<String>,
+    /// X25519 public key (hex-encoded) for E2EE key exchange
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x25519_public_key: Option<String>,
 }
 
 pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoResponse {
@@ -301,6 +307,9 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
     let share_gamification_stats =
         enabled_modules.contains(&"share_gamification_stats".to_string());
 
+    // Load E2EE public keys from crypto_keys table (if identity has been initialized)
+    let (ed25519_public_key, x25519_public_key) = load_public_keys_from_db(&db).await;
+
     (
         StatusCode::OK,
         Json(ConfigResponse {
@@ -324,9 +333,51 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
             show_borrowed_books: config.show_borrowed_books.unwrap_or(false),
             allow_library_caching,
             share_gamification_stats,
+            ed25519_public_key,
+            x25519_public_key,
         }),
     )
         .into_response()
+}
+
+/// Load hex-encoded public keys from crypto_keys table.
+/// Returns (ed25519_hex, x25519_hex), both Option.
+pub async fn load_public_keys_from_db(db: &DatabaseConnection) -> (Option<String>, Option<String>) {
+    use sea_orm::ConnectionTrait;
+
+    let rows = match db
+        .query_all(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT key_type, public_key FROM crypto_keys WHERE user_id = 0 AND revoked_at IS NULL"
+                .to_owned(),
+        ))
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return (None, None),
+    };
+
+    let mut ed25519: Option<String> = None;
+    let mut x25519: Option<String> = None;
+
+    for row in &rows {
+        let key_type: String = match row.try_get("", "key_type") {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let public_key: Vec<u8> = match row.try_get("", "public_key") {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        match key_type.as_str() {
+            "ed25519" => ed25519 = Some(hex::encode(&public_key)),
+            "x25519" => x25519 = Some(hex::encode(&public_key)),
+            _ => {}
+        }
+    }
+
+    (ed25519, x25519)
 }
 
 pub async fn reset_app(

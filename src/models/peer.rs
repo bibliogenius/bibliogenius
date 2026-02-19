@@ -12,6 +12,13 @@ pub struct Model {
     /// Stable UUID for P2P deduplication (survives IP changes)
     pub library_uuid: Option<String>,
     pub public_key: Option<String>,
+    /// Hex-encoded X25519 public key for E2EE key exchange
+    pub x25519_public_key: Option<String>,
+    /// Whether both Ed25519 and X25519 keys have been exchanged with this peer
+    #[sea_orm(default_value = "0")]
+    pub key_exchange_done: bool,
+    /// Mailbox ID for offline message relay (future use)
+    pub mailbox_id: Option<String>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
     #[sea_orm(default_value = "false")]

@@ -119,6 +119,12 @@ pub struct ConnectRequest {
     name: String,
     url: String,
     public_key: Option<String>,
+    /// Ed25519 public key (hex) from the remote peer — for E2EE
+    #[serde(default)]
+    ed25519_public_key: Option<String>,
+    /// X25519 public key (hex) from the remote peer — for E2EE
+    #[serde(default)]
+    x25519_public_key: Option<String>,
 }
 
 pub async fn connect(
@@ -134,7 +140,16 @@ pub async fn connect(
     let client = get_safe_client();
     let config_url = format!("{}/api/config", payload.url.trim_end_matches('/'));
 
-    let (latitude, longitude, remote_name) = match client.get(&config_url).send().await {
+    // Struct to hold remote config data including E2EE keys
+    struct RemoteConfigData {
+        latitude: Option<f64>,
+        longitude: Option<f64>,
+        remote_name: Option<String>,
+        ed25519_public_key: Option<String>,
+        x25519_public_key: Option<String>,
+    }
+
+    let remote_data = match client.get(&config_url).send().await {
         Ok(res) => {
             if res.status().is_success() {
                 match res.json::<crate::api::setup::ConfigResponse>().await {
@@ -144,62 +159,136 @@ pub async fn connect(
                         } else {
                             (None, None)
                         };
-                        (lat, long, Some(config.library_name))
+                        RemoteConfigData {
+                            latitude: lat,
+                            longitude: long,
+                            remote_name: Some(config.library_name),
+                            ed25519_public_key: config.ed25519_public_key,
+                            x25519_public_key: config.x25519_public_key,
+                        }
                     }
-                    _ => (None, None, None),
+                    _ => RemoteConfigData {
+                        latitude: None,
+                        longitude: None,
+                        remote_name: None,
+                        ed25519_public_key: None,
+                        x25519_public_key: None,
+                    },
                 }
             } else {
-                (None, None, None)
+                RemoteConfigData {
+                    latitude: None,
+                    longitude: None,
+                    remote_name: None,
+                    ed25519_public_key: None,
+                    x25519_public_key: None,
+                }
             }
         }
-        Err(_) => (None, None, None),
+        Err(_) => RemoteConfigData {
+            latitude: None,
+            longitude: None,
+            remote_name: None,
+            ed25519_public_key: None,
+            x25519_public_key: None,
+        },
     };
 
     // Use provided name or fallback to remote name or "Unknown"
     let name = if !payload.name.is_empty() {
         payload.name
     } else {
-        remote_name.unwrap_or_else(|| "Unknown Library".to_string())
+        remote_data
+            .remote_name
+            .unwrap_or_else(|| "Unknown Library".to_string())
     };
+
+    // Prefer keys from the request payload (QR/invite), fall back to ConfigResponse keys.
+    // Legacy `public_key` field is used as fallback for ed25519 (backward compat).
+    let ed25519_key = payload
+        .ed25519_public_key
+        .or(remote_data.ed25519_public_key)
+        .or(payload.public_key);
+    let x25519_key = payload.x25519_public_key.or(remote_data.x25519_public_key);
+
+    // Key exchange is done if we have both keys
+    let key_exchange_done = ed25519_key.is_some() && x25519_key.is_some();
 
     // Translate localhost URLs to Docker service names for inter-container communication
     let docker_url = translate_url_for_docker(&payload.url);
     let peer_url_for_sync = docker_url.clone(); // Clone before moving into ActiveModel
 
-    let peer = peer::ActiveModel {
-        name: Set(name),
-        url: Set(docker_url),
-        public_key: Set(payload.public_key),
-        latitude: Set(latitude),
-        longitude: Set(longitude),
-        last_seen: Set(Some(chrono::Utc::now().to_rfc3339())),
-        created_at: Set(chrono::Utc::now().to_rfc3339()),
-        updated_at: Set(chrono::Utc::now().to_rfc3339()),
-        auto_approve: Set(true),
-        ..Default::default()
+    // Upsert: update existing peer by URL, or insert new
+    let existing = peer::Entity::find()
+        .filter(peer::Column::Url.eq(&docker_url))
+        .one(&db)
+        .await;
+
+    let peer_id = match existing {
+        Ok(Some(existing_peer)) => {
+            // Update existing peer with new keys and info
+            let peer_id = existing_peer.id;
+            let mut active: peer::ActiveModel = existing_peer.into();
+            active.name = Set(name);
+            active.public_key = Set(ed25519_key.clone());
+            active.x25519_public_key = Set(x25519_key);
+            active.key_exchange_done = Set(key_exchange_done);
+            active.latitude = Set(remote_data.latitude);
+            active.longitude = Set(remote_data.longitude);
+            active.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
+            active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+            active.auto_approve = Set(true);
+            active.connection_status = Set("accepted".to_string());
+            match active.update(&db).await {
+                Ok(_) => peer_id,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": e.to_string() })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        _ => {
+            // Insert new peer
+            let peer = peer::ActiveModel {
+                name: Set(name),
+                url: Set(docker_url),
+                public_key: Set(ed25519_key.clone()),
+                x25519_public_key: Set(x25519_key),
+                key_exchange_done: Set(key_exchange_done),
+                latitude: Set(remote_data.latitude),
+                longitude: Set(remote_data.longitude),
+                last_seen: Set(Some(chrono::Utc::now().to_rfc3339())),
+                created_at: Set(chrono::Utc::now().to_rfc3339()),
+                updated_at: Set(chrono::Utc::now().to_rfc3339()),
+                auto_approve: Set(true),
+                ..Default::default()
+            };
+            match peer::Entity::insert(peer).exec(&db).await {
+                Ok(res) => res.last_insert_id,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": e.to_string() })),
+                    )
+                        .into_response();
+                }
+            }
+        }
     };
 
-    match peer::Entity::insert(peer).exec(&db).await {
-        Ok(res) => {
-            let peer_id = res.last_insert_id;
-
-            // Trigger background sync of peer catalog
-            let db_clone = db.clone();
-            tokio::spawn(async move {
-                tracing::info!("🔄 Background sync triggered for new peer {}", peer_id);
-                if let Err(e) = sync_peer_internal(&db_clone, peer_id, &peer_url_for_sync).await {
-                    tracing::warn!("⚠️ Background sync failed for peer {}: {}", peer_id, e);
-                }
-            });
-
-            (StatusCode::CREATED, Json(json!({ "id": peer_id }))).into_response()
+    // Trigger background sync of peer catalog
+    let db_clone = db.clone();
+    tokio::spawn(async move {
+        tracing::info!("🔄 Background sync triggered for new peer {}", peer_id);
+        if let Err(e) = sync_peer_internal(&db_clone, peer_id, &peer_url_for_sync).await {
+            tracing::warn!("⚠️ Background sync failed for peer {}: {}", peer_id, e);
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
+    });
+
+    (StatusCode::CREATED, Json(json!({ "id": peer_id }))).into_response()
 }
 
 /// Internal sync function for background sync after connect
@@ -445,6 +534,12 @@ pub(crate) async fn sync_peer_gamification_stats(
 pub struct IncomingConnectionRequest {
     name: String,
     url: String,
+    /// Ed25519 public key (hex) from the requesting peer — for E2EE
+    #[serde(default)]
+    ed25519_public_key: Option<String>,
+    /// X25519 public key (hex) from the requesting peer — for E2EE
+    #[serde(default)]
+    x25519_public_key: Option<String>,
 }
 
 /// Receive an incoming connection request from a remote peer.
@@ -485,12 +580,34 @@ pub async fn receive_connection_request(
         .one(&db)
         .await;
 
+    // Load our own public keys to include in the response
+    let (my_ed25519, my_x25519) = crate::api::setup::load_public_keys_from_db(&db).await;
+
+    // Determine if peer sent E2EE keys
+    let key_exchange_done =
+        payload.ed25519_public_key.is_some() && payload.x25519_public_key.is_some();
+
     match existing {
-        Ok(Some(_)) => (
-            StatusCode::OK,
-            Json(json!({ "message": "Peer already exists locally" })),
-        )
-            .into_response(),
+        Ok(Some(existing_peer)) => {
+            // Peer already exists — update keys if provided and not yet exchanged
+            if key_exchange_done && !existing_peer.key_exchange_done {
+                let mut active: peer::ActiveModel = existing_peer.into();
+                active.public_key = Set(payload.ed25519_public_key);
+                active.x25519_public_key = Set(payload.x25519_public_key);
+                active.key_exchange_done = Set(true);
+                active.updated_at = Set(Utc::now().to_rfc3339());
+                let _ = active.update(&db).await;
+            }
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "message": "Peer already exists locally",
+                    "ed25519_public_key": my_ed25519,
+                    "x25519_public_key": my_x25519,
+                })),
+            )
+                .into_response()
+        }
         Ok(None) => {
             // Check if connection_validation module is enabled
             let connection_status = if is_connection_validation_enabled(&db).await {
@@ -502,6 +619,9 @@ pub async fn receive_connection_request(
             let new_peer = peer::ActiveModel {
                 name: Set(payload.name),
                 url: Set(payload.url),
+                public_key: Set(payload.ed25519_public_key),
+                x25519_public_key: Set(payload.x25519_public_key),
+                key_exchange_done: Set(key_exchange_done),
                 auto_approve: Set(connection_status == "accepted"),
                 connection_status: Set(connection_status.to_string()),
                 created_at: Set(Utc::now().to_rfc3339()),
@@ -512,7 +632,12 @@ pub async fn receive_connection_request(
             match new_peer.insert(&db).await {
                 Ok(_) => (
                     StatusCode::OK,
-                    Json(json!({ "message": "Connection request saved locally", "connection_status": connection_status })),
+                    Json(json!({
+                        "message": "Connection request saved locally",
+                        "connection_status": connection_status,
+                        "ed25519_public_key": my_ed25519,
+                        "x25519_public_key": my_x25519,
+                    })),
                 )
                     .into_response(),
                 Err(e) => (

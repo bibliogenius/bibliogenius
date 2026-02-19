@@ -24,6 +24,10 @@ pub struct DiscoveredPeer {
     pub port: u16,
     pub addresses: Vec<String>,
     pub library_id: Option<String>,
+    /// Ed25519 public key (hex-encoded) from mDNS TXT record
+    pub ed25519_public_key: Option<String>,
+    /// X25519 public key (hex-encoded) from mDNS TXT record
+    pub x25519_public_key: Option<String>,
     pub discovered_at: String,
 }
 
@@ -42,7 +46,15 @@ impl MdnsService {
     /// * `library_name` - The name to announce on the network
     /// * `port` - The port the Axum server is listening on
     /// * `library_id` - Optional unique identifier for the library
-    pub fn new(library_name: &str, port: u16, library_id: Option<String>) -> Result<Self, String> {
+    /// * `ed25519_public_key` - Optional hex-encoded Ed25519 public key for E2EE
+    /// * `x25519_public_key` - Optional hex-encoded X25519 public key for E2EE
+    pub fn new(
+        library_name: &str,
+        port: u16,
+        library_id: Option<String>,
+        ed25519_public_key: Option<String>,
+        x25519_public_key: Option<String>,
+    ) -> Result<Self, String> {
         let daemon =
             ServiceDaemon::new().map_err(|e| format!("Failed to create mDNS daemon: {}", e))?;
 
@@ -57,7 +69,13 @@ impl MdnsService {
         };
 
         // Register our service
-        service.register_service(library_name, port, library_id)?;
+        service.register_service(
+            library_name,
+            port,
+            library_id,
+            ed25519_public_key,
+            x25519_public_key,
+        )?;
 
         // Start discovery in background
         service.start_discovery()?;
@@ -71,6 +89,8 @@ impl MdnsService {
         library_name: &str,
         port: u16,
         library_id: Option<String>,
+        ed25519_public_key: Option<String>,
+        x25519_public_key: Option<String>,
     ) -> Result<(), String> {
         // Sanitize the library name for mDNS (alphanumeric and hyphens only)
         let safe_name: String = library_name
@@ -88,13 +108,25 @@ impl MdnsService {
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "bibliogenius".to_string());
 
-        // Build properties
+        // Build properties — 64-char hex keys fit well within mDNS TXT limit (~1300 bytes)
         let mut properties = vec![("version", "1.0")];
 
         let lib_id_string;
         if let Some(ref id) = library_id {
             lib_id_string = id.clone();
             properties.push(("library_id", &lib_id_string));
+        }
+
+        let ed_key_string;
+        if let Some(ref key) = ed25519_public_key {
+            ed_key_string = key.clone();
+            properties.push(("ed25519", &ed_key_string));
+        }
+
+        let x_key_string;
+        if let Some(ref key) = x25519_public_key {
+            x_key_string = key.clone();
+            properties.push(("x25519", &x_key_string));
         }
 
         let service_info = ServiceInfo::new(
@@ -114,9 +146,10 @@ impl MdnsService {
             .map_err(|e| format!("Failed to register mDNS service: {}", e))?;
 
         tracing::info!(
-            "📡 mDNS: Announcing library '{}' on port {}",
+            "mDNS: Announcing library '{}' on port {} (e2ee={})",
             safe_name,
-            port
+            port,
+            ed25519_public_key.is_some()
         );
 
         Ok(())
@@ -163,6 +196,12 @@ impl MdnsService {
                                         .collect(),
                                     library_id: info
                                         .get_property_val_str("library_id")
+                                        .map(|s| s.to_string()),
+                                    ed25519_public_key: info
+                                        .get_property_val_str("ed25519")
+                                        .map(|s| s.to_string()),
+                                    x25519_public_key: info
+                                        .get_property_val_str("x25519")
                                         .map(|s| s.to_string()),
                                     discovered_at: chrono::Utc::now().to_rfc3339(),
                                 };
@@ -244,8 +283,20 @@ impl Drop for MdnsService {
 static MDNS_SERVICE: std::sync::OnceLock<RwLock<Option<MdnsService>>> = std::sync::OnceLock::new();
 
 /// Initialize the global mDNS service
-pub fn init_mdns(library_name: &str, port: u16, library_id: Option<String>) -> Result<(), String> {
-    let service = MdnsService::new(library_name, port, library_id)?;
+pub fn init_mdns(
+    library_name: &str,
+    port: u16,
+    library_id: Option<String>,
+    ed25519_public_key: Option<String>,
+    x25519_public_key: Option<String>,
+) -> Result<(), String> {
+    let service = MdnsService::new(
+        library_name,
+        port,
+        library_id,
+        ed25519_public_key,
+        x25519_public_key,
+    )?;
 
     let global = MDNS_SERVICE.get_or_init(|| RwLock::new(None));
     *global.write().unwrap() = Some(service);

@@ -183,7 +183,7 @@ async fn main() {
     if mdns_enabled {
         let library_name = "BiblioGenius Library".to_string();
 
-        match rust_lib_app::services::init_mdns(&library_name, port, None) {
+        match rust_lib_app::services::init_mdns(&library_name, port, None, None, None) {
             Ok(()) => {
                 tracing::info!("📡 mDNS service started - library discoverable on local network");
             }

@@ -200,6 +200,8 @@ pub struct FrbDiscoveredPeer {
     pub port: u16,
     pub addresses: Vec<String>,
     pub library_id: Option<String>,
+    pub ed25519_public_key: Option<String>,
+    pub x25519_public_key: Option<String>,
     pub discovered_at: String,
 }
 
@@ -211,6 +213,8 @@ impl From<crate::services::mdns::DiscoveredPeer> for FrbDiscoveredPeer {
             port: peer.port,
             addresses: peer.addresses,
             library_id: peer.library_id,
+            ed25519_public_key: peer.ed25519_public_key,
+            x25519_public_key: peer.x25519_public_key,
             discovered_at: peer.discovered_at,
         }
     }
@@ -254,20 +258,29 @@ pub async fn init_mdns_ffi(
     library_name: String,
     port: u16,
     library_id: Option<String>,
+    ed25519_public_key: Option<String>,
+    x25519_public_key: Option<String>,
 ) -> Result<String, String> {
     tracing::info!(
-        "🚀 mDNS FFI: init_mdns_ffi called with name='{}', port={}",
+        "mDNS FFI: init_mdns_ffi called with name='{}', port={}, has_keys={}",
         library_name,
-        port
+        port,
+        ed25519_public_key.is_some()
     );
 
-    match crate::services::mdns::init_mdns(&library_name, port, library_id) {
+    match crate::services::mdns::init_mdns(
+        &library_name,
+        port,
+        library_id,
+        ed25519_public_key,
+        x25519_public_key,
+    ) {
         Ok(_) => {
-            tracing::info!("✅ mDNS FFI: Service started successfully");
+            tracing::info!("mDNS FFI: Service started successfully");
             Ok("mDNS service started".to_string())
         }
         Err(e) => {
-            tracing::error!("❌ mDNS FFI: Failed to start - {}", e);
+            tracing::error!("mDNS FFI: Failed to start - {}", e);
             Err(e.to_string())
         }
     }
@@ -277,6 +290,136 @@ pub async fn init_mdns_ffi(
 pub async fn stop_mdns_ffi() -> Result<String, String> {
     crate::services::mdns::stop_mdns();
     Ok("mDNS service stopped".to_string())
+}
+
+// ============ E2EE Identity & Key Exchange (FFI) ============
+
+/// Global identity service (initialized once, similar to DB)
+static IDENTITY_SERVICE: OnceLock<crate::services::IdentityService> = OnceLock::new();
+
+/// Initialize the node's cryptographic identity.
+/// Must be called after init_backend and after obtaining the library UUID.
+/// Uses Argon2(library_uuid) to encrypt/decrypt the stored keypair.
+pub async fn init_identity_ffi(library_uuid: String) -> Result<String, String> {
+    let db_conn = db().ok_or("Database not initialized")?;
+
+    let svc =
+        IDENTITY_SERVICE.get_or_init(|| crate::services::IdentityService::new(db_conn.clone()));
+
+    svc.init(&library_uuid).await?;
+    Ok("Identity initialized".to_string())
+}
+
+/// Get the node's public keys as JSON: {"ed25519": "hex...", "x25519": "hex..."}
+pub async fn get_public_keys_ffi() -> Result<String, String> {
+    let svc = IDENTITY_SERVICE.get().ok_or("Identity not initialized")?;
+
+    let (ed25519, x25519) = svc.get_public_keys_hex()?;
+    Ok(serde_json::json!({
+        "ed25519": ed25519,
+        "x25519": x25519,
+    })
+    .to_string())
+}
+
+/// Generate a QR v2 payload as JSON string.
+/// Includes library name, URL, UUID, and public keys.
+pub async fn generate_qr_payload_ffi(
+    library_name: String,
+    url: String,
+    library_uuid: String,
+) -> Result<String, String> {
+    let svc = IDENTITY_SERVICE.get().ok_or("Identity not initialized")?;
+
+    let (ed25519, x25519) = svc.get_public_keys_hex()?;
+
+    let payload = serde_json::json!({
+        "version": 2,
+        "name": library_name,
+        "url": url,
+        "library_uuid": library_uuid,
+        "ed25519_public_key": ed25519,
+        "x25519_public_key": x25519,
+    });
+
+    Ok(payload.to_string())
+}
+
+/// Parse a QR payload (supports both v1 and v2 formats).
+/// Returns a normalized JSON string with all available fields.
+pub async fn parse_qr_payload_ffi(payload: String) -> Result<String, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(&payload).map_err(|e| format!("Invalid QR JSON: {e}"))?;
+
+    // Check for version field to determine format
+    let version = parsed.get("version").and_then(|v| v.as_i64()).unwrap_or(1);
+
+    let result = if version >= 2 {
+        // QR v2: full payload with keys
+        parsed
+    } else {
+        // QR v1: legacy format with just name + url
+        serde_json::json!({
+            "version": 1,
+            "name": parsed.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+            "url": parsed.get("url").and_then(|v| v.as_str()).unwrap_or(""),
+        })
+    };
+
+    Ok(result.to_string())
+}
+
+/// Generate an invite link with the library's connection info encoded in the URL fragment.
+/// Format: https://bibliogenius.app/invite#BASE64URL(json)
+/// The fragment (#) is never sent to the web server (B8 compliance).
+pub async fn generate_invite_link_ffi(
+    library_name: String,
+    url: String,
+    library_uuid: String,
+) -> Result<String, String> {
+    use base64::Engine;
+
+    let svc = IDENTITY_SERVICE.get().ok_or("Identity not initialized")?;
+
+    let (ed25519, x25519) = svc.get_public_keys_hex()?;
+
+    let payload = serde_json::json!({
+        "version": 2,
+        "name": library_name,
+        "url": url,
+        "library_uuid": library_uuid,
+        "ed25519_public_key": ed25519,
+        "x25519_public_key": x25519,
+    });
+
+    let json_bytes = payload.to_string().into_bytes();
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json_bytes);
+
+    Ok(format!("https://bibliogenius.app/invite#{encoded}"))
+}
+
+/// Parse an invite link, extracting the JSON payload from the URL fragment.
+pub async fn parse_invite_link_ffi(link: String) -> Result<String, String> {
+    use base64::Engine;
+
+    let fragment = link
+        .split_once('#')
+        .map(|(_, f)| f)
+        .ok_or("Invalid invite link: no fragment")?;
+
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(fragment)
+        .map_err(|e| format!("Invalid base64 in invite link: {e}"))?;
+
+    let json_str =
+        String::from_utf8(decoded).map_err(|e| format!("Invalid UTF-8 in invite link: {e}"))?;
+
+    // Validate it's valid JSON
+    let _: serde_json::Value =
+        serde_json::from_str(&json_str).map_err(|e| format!("Invalid JSON in invite: {e}"))?;
+
+    // Re-parse to normalize (same as QR parse for consistency)
+    parse_qr_payload_ffi(json_str).await
 }
 
 // ============ Initializers & Converters ============
