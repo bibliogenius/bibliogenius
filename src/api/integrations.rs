@@ -59,7 +59,7 @@ struct OpenLibraryDoc {
 /// Strip regional/country suffix from a BCP 47 tag: "pt-BR" → "pt", "zh-TW" → "zh".
 /// Already-simple codes like "fr" pass through unchanged.
 fn base_lang(code: &str) -> &str {
-    code.split(|c| c == '-' || c == '_').next().unwrap_or(code)
+    code.split(['-', '_']).next().unwrap_or(code)
 }
 
 // Helper to check if language matches (handles 2-letter vs 3-letter codes and regional variants)
