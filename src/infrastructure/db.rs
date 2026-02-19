@@ -939,5 +939,45 @@ async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 036: E2EE — crypto_keys table (stores encrypted identity keypairs)
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS crypto_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            key_type TEXT NOT NULL,
+            public_key BLOB NOT NULL,
+            encrypted_secret BLOB NOT NULL,
+            salt BLOB NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            revoked_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )"#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Migration 037: E2EE — seen_envelopes table for replay protection (B4)
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS seen_envelopes (
+            nonce BLOB PRIMARY KEY,
+            received_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )"#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Index for periodic cleanup of old seen_envelopes
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE INDEX IF NOT EXISTS idx_seen_envelopes_received_at ON seen_envelopes(received_at)"
+                .to_owned(),
+        ))
+        .await;
+
     Ok(())
 }

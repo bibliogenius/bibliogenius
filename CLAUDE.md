@@ -394,11 +394,18 @@ pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<Metadata, String> {
 
 ## Security Checklist
 
+> **For E2EE / crypto code: READ `bibliogenius-docs/docs/technical/SECURITY_GUIDELINES.md` FIRST.**
+> It contains the binding security audit (14 findings) and the corrected crypto pipeline.
+> Non-compliance with that file is a blocking issue.
+
 - [ ] JWT tokens validated via middleware (currently per-endpoint)
 - [ ] SSRF protection: `validate_url()` blocks localhost/loopback
 - [ ] Input validation on all user-provided data
 - [ ] SQL injection: Use SeaORM parameterized queries (never raw SQL with user input)
 - [ ] Secrets: Never log tokens, passwords, or API keys
+- [ ] Crypto secrets: `Zeroize` + `SecretBox` wrappers (see SECURITY_GUIDELINES.md §A1)
+- [ ] No secrets in logs, even in debug builds (see SECURITY_GUIDELINES.md §A2)
+- [ ] Crate audit: `cargo audit` clean before release (see SECURITY_GUIDELINES.md §A4)
 
 ---
 

@@ -5,6 +5,7 @@
 
 pub mod book_service;
 pub mod contact_service;
+pub mod crypto_service;
 pub mod loan_service;
 pub mod lookup_service;
 pub mod mdns;

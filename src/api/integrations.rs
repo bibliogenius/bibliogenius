@@ -1114,10 +1114,10 @@ fn calculate_relevance(
     }
 
     // Source boost for French users: Prioritize BNF (national library) for French content
-    if user_langs
-        .iter()
-        .any(|l| { let b = base_lang(l); b == "fr" || b == "fra" || b == "fre" })
-        && let Some(source) = &book.source
+    if user_langs.iter().any(|l| {
+        let b = base_lang(l);
+        b == "fr" || b == "fra" || b == "fre"
+    }) && let Some(source) = &book.source
         && source == "BNF"
     {
         score += 50; // National library bonus for French users
