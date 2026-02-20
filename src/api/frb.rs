@@ -1205,6 +1205,17 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                     db,
                     std::sync::Arc::new(shared_id_svc.clone()),
                 );
+
+                // Spawn relay poller (checks relay hub for incoming messages)
+                let poller_state = state.clone();
+                tokio::spawn(async move {
+                    crate::services::relay_poller::start_relay_polling(
+                        poller_state,
+                        std::time::Duration::from_secs(60),
+                    )
+                    .await;
+                });
+
                 let api = crate::api::api_router_with_state(state);
                 // Allow CORS for all origins/methods/headers for P2P ease
                 let cors = CorsLayer::new()

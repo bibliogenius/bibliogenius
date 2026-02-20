@@ -127,8 +127,21 @@ async fn main() {
         rust_lib_app::sync::processor::run_processor(processor_db).await;
     });
 
-    // Build API router
-    let api_router = api::api_router(db);
+    // Build API router with explicit AppState (needed for relay poller)
+    let state = rust_lib_app::infrastructure::AppState::new(db);
+    let api_router = api::api_router_with_state(state.clone());
+
+    // Spawn relay poller (checks for incoming relay messages in the background)
+    {
+        let poller_state = state.clone();
+        tokio::spawn(async move {
+            rust_lib_app::services::relay_poller::start_relay_polling(
+                poller_state,
+                std::time::Duration::from_secs(60),
+            )
+            .await;
+        });
+    }
 
     // Swagger UI
     use rust_lib_app::api_docs::ApiDoc;

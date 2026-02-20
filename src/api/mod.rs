@@ -21,6 +21,7 @@ pub mod loan;
 pub mod lookup;
 pub mod peer;
 pub mod profile;
+pub mod relay;
 pub mod sales; // Sales endpoints for bookseller profile
 pub mod scan;
 pub mod search;
@@ -222,6 +223,7 @@ fn build_routes() -> Router<AppState> {
         .route("/setup", axum::routing::post(setup::setup))
         .route("/reset", axum::routing::post(setup::reset_app))
         .route("/config", get(setup::get_config))
+        .route("/identity/init", post(setup::init_identity))
         // Integrations (Professional)
         .route(
             "/integrations/sudoc/search",
@@ -249,6 +251,19 @@ fn build_routes() -> Router<AppState> {
         .route(
             "/gamification/refresh-leaderboard",
             post(gamification::refresh_leaderboard),
+        )
+        // Peer relay setup
+        .route("/peers/relay/setup", post(peer::setup_relay))
+        .route("/peers/relay/config", get(peer::get_relay_config_endpoint))
+        // Relay hub endpoints (any instance can serve as a relay)
+        .route("/relay/mailbox", post(relay::create_mailbox))
+        .route(
+            "/relay/mailbox/:uuid/messages",
+            post(relay::deposit_message).get(relay::collect_messages),
+        )
+        .route(
+            "/relay/mailbox/:uuid/messages/:id",
+            axum::routing::delete(relay::ack_message),
         )
         // E2EE encrypted peer messages
         .route("/e2ee/message", post(e2ee::receive_encrypted_message))

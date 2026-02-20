@@ -17,8 +17,12 @@ pub struct Model {
     /// Whether both Ed25519 and X25519 keys have been exchanged with this peer
     #[sea_orm(default_value = "0")]
     pub key_exchange_done: bool,
-    /// Mailbox ID for offline message relay (future use)
+    /// Mailbox UUID for offline message relay via hub
     pub mailbox_id: Option<String>,
+    /// Relay hub URL for this peer (e.g., https://hub.bibliogenius.org)
+    pub relay_url: Option<String>,
+    /// Write token for depositing messages in this peer's relay mailbox
+    pub relay_write_token: Option<String>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
     #[sea_orm(default_value = "false")]

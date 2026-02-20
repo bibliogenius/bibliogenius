@@ -1069,5 +1069,84 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 043: E2EE Phase 4 — Relay WAN tables and peer relay columns
+
+    // Relay mailboxes (one per user on this relay hub)
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS relay_mailboxes (
+            uuid TEXT PRIMARY KEY,
+            read_token TEXT NOT NULL,
+            write_token TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_accessed TEXT
+        )"#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Relay messages (opaque encrypted blobs stored on the hub)
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS relay_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mailbox_uuid TEXT NOT NULL,
+            blob BLOB NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (mailbox_uuid) REFERENCES relay_mailboxes(uuid) ON DELETE CASCADE
+        )"#
+        .to_owned(),
+    ))
+    .await?;
+
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE INDEX IF NOT EXISTS idx_relay_messages_mailbox ON relay_messages(mailbox_uuid)"
+                .to_owned(),
+        ))
+        .await;
+
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE INDEX IF NOT EXISTS idx_relay_messages_created ON relay_messages(created_at)"
+                .to_owned(),
+        ))
+        .await;
+
+    // Peer relay columns (for reaching peers via relay)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peers ADD COLUMN relay_url TEXT".to_owned(),
+        ))
+        .await;
+
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peers ADD COLUMN relay_write_token TEXT".to_owned(),
+        ))
+        .await;
+
+    // Local relay config (singleton: my mailbox on the relay hub)
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS my_relay_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            relay_url TEXT NOT NULL,
+            mailbox_uuid TEXT NOT NULL,
+            read_token TEXT NOT NULL,
+            write_token TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )"#
+        .to_owned(),
+    ))
+    .await?;
+
     Ok(())
 }

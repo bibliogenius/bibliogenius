@@ -160,7 +160,7 @@ async fn try_send_e2ee(
         x25519_public: peer_x25519,
     };
 
-    let transport = crate::services::e2ee_transport::DirectTransport::new(crypto_service);
+    let transport = crate::services::e2ee_transport::DirectTransport::new(crypto_service.clone());
     let message =
         crate::services::e2ee_transport::DirectTransport::build_message(message_type, payload);
 
@@ -176,6 +176,52 @@ async fn try_send_e2ee(
                 peer.id
             );
             Ok(Some(response))
+        }
+        Err(crate::services::e2ee_transport::E2eeTransportError::Network(ref net_err)) => {
+            // Network error — peer unreachable. Try relay fallback for fire-and-forget messages.
+            // Request-response messages (search_request, book_sync_request) are NOT relayed
+            // because the relay model doesn't support synchronous responses.
+            let is_fire_and_forget =
+                !matches!(message_type, "search_request" | "book_sync_request");
+
+            if is_fire_and_forget
+                && let (Some(relay_url), Some(mailbox_id), Some(write_token)) =
+                    (&peer.relay_url, &peer.mailbox_id, &peer.relay_write_token)
+            {
+                tracing::info!(
+                    "E2EE: Direct failed ({}), trying relay for '{}' to peer {}",
+                    net_err,
+                    message_type,
+                    peer.name
+                );
+
+                let relay = crate::services::relay_transport::RelayTransport::new(crypto_service);
+                match relay
+                    .send(relay_url, mailbox_id, write_token, &peer_x25519, &message)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            "E2EE Relay: Sent '{}' to peer {} via relay",
+                            message_type,
+                            peer.name
+                        );
+                        // Relay is fire-and-forget: no response
+                        return Ok(Some(None));
+                    }
+                    Err(relay_err) => {
+                        tracing::warn!(
+                            "E2EE Relay: Also failed for peer {}: {relay_err}",
+                            peer.name
+                        );
+                        return Err(format!(
+                            "E2EE send failed (direct: {net_err}, relay: {relay_err})"
+                        ));
+                    }
+                }
+            }
+
+            Err(format!("E2EE send failed: network error: {net_err}"))
         }
         Err(e) => Err(format!("E2EE send failed: {e}")),
     }
@@ -206,6 +252,157 @@ pub async fn auto_approve_all_peers(State(db): State<DatabaseConnection>) -> imp
         .into_response()
 }
 
+// ── Relay setup ──────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SetupRelayRequest {
+    pub relay_url: String,
+}
+
+/// POST /api/peers/relay/setup — Register a mailbox on a relay hub.
+///
+/// Calls the relay hub to create a new mailbox, then stores the config locally.
+pub async fn setup_relay(
+    State(state): State<crate::infrastructure::AppState>,
+    Json(payload): Json<SetupRelayRequest>,
+) -> impl IntoResponse {
+    use crate::models::relay_config;
+
+    let db = state.db();
+
+    // 1. Validate relay URL
+    if let Err(e) = validate_url(&payload.relay_url) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
+    }
+
+    // 2. Call relay hub to create a mailbox
+    let client = get_safe_client();
+    let url = format!(
+        "{}/api/relay/mailbox",
+        payload.relay_url.trim_end_matches('/')
+    );
+
+    let response = match client.post(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("Failed to reach relay hub: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    if !response.status().is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("Relay hub returned error: {body}") })),
+        )
+            .into_response();
+    }
+
+    let result: serde_json::Value = match response.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("Invalid relay response: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let mailbox_uuid = result
+        .get("uuid")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let read_token = result
+        .get("read_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let write_token = result
+        .get("write_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if mailbox_uuid.is_empty() || read_token.is_empty() || write_token.is_empty() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "Relay hub returned incomplete mailbox data" })),
+        )
+            .into_response();
+    }
+
+    // 3. Store in my_relay_config (upsert singleton row)
+    use sea_orm::ConnectionTrait;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Delete existing config if any, then insert
+    let _ = db
+        .execute(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM my_relay_config".to_owned(),
+        ))
+        .await;
+
+    let config = relay_config::ActiveModel {
+        id: Set(1),
+        relay_url: Set(payload.relay_url),
+        mailbox_uuid: Set(mailbox_uuid.clone()),
+        read_token: Set(read_token),
+        write_token: Set(write_token.clone()),
+        created_at: Set(now),
+    };
+
+    match config.insert(db).await {
+        Ok(_) => {
+            tracing::info!("Relay: Mailbox registered: {mailbox_uuid}");
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "mailbox_uuid": mailbox_uuid,
+                    "write_token": write_token,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to save relay config: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/peers/relay/config — Get current relay config (if any).
+pub async fn get_relay_config_endpoint(
+    State(state): State<crate::infrastructure::AppState>,
+) -> impl IntoResponse {
+    let db = state.db();
+
+    match crate::api::relay::get_my_relay_config(db).await {
+        Some(config) => (
+            StatusCode::OK,
+            Json(json!({
+                "relay_url": config.relay_url,
+                "mailbox_uuid": config.mailbox_uuid,
+                "write_token": config.write_token,
+                "created_at": config.created_at,
+            })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "No relay configured" })),
+        )
+            .into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct ConnectRequest {
     name: String,
@@ -217,6 +414,15 @@ pub struct ConnectRequest {
     /// X25519 public key (hex) from the remote peer — for E2EE
     #[serde(default)]
     x25519_public_key: Option<String>,
+    /// Peer's relay hub URL
+    #[serde(default)]
+    relay_url: Option<String>,
+    /// Peer's relay mailbox UUID
+    #[serde(default)]
+    mailbox_id: Option<String>,
+    /// Token to write to peer's relay mailbox
+    #[serde(default)]
+    relay_write_token: Option<String>,
 }
 
 pub async fn connect(
@@ -232,13 +438,16 @@ pub async fn connect(
     let client = get_safe_client();
     let config_url = format!("{}/api/config", payload.url.trim_end_matches('/'));
 
-    // Struct to hold remote config data including E2EE keys
+    // Struct to hold remote config data including E2EE keys and relay info
     struct RemoteConfigData {
         latitude: Option<f64>,
         longitude: Option<f64>,
         remote_name: Option<String>,
         ed25519_public_key: Option<String>,
         x25519_public_key: Option<String>,
+        relay_url: Option<String>,
+        mailbox_id: Option<String>,
+        relay_write_token: Option<String>,
     }
 
     let remote_data = match client.get(&config_url).send().await {
@@ -257,6 +466,9 @@ pub async fn connect(
                             remote_name: Some(config.library_name),
                             ed25519_public_key: config.ed25519_public_key,
                             x25519_public_key: config.x25519_public_key,
+                            relay_url: config.relay_url,
+                            mailbox_id: config.mailbox_id,
+                            relay_write_token: config.relay_write_token,
                         }
                     }
                     _ => RemoteConfigData {
@@ -265,6 +477,9 @@ pub async fn connect(
                         remote_name: None,
                         ed25519_public_key: None,
                         x25519_public_key: None,
+                        relay_url: None,
+                        mailbox_id: None,
+                        relay_write_token: None,
                     },
                 }
             } else {
@@ -274,6 +489,9 @@ pub async fn connect(
                     remote_name: None,
                     ed25519_public_key: None,
                     x25519_public_key: None,
+                    relay_url: None,
+                    mailbox_id: None,
+                    relay_write_token: None,
                 }
             }
         }
@@ -283,6 +501,9 @@ pub async fn connect(
             remote_name: None,
             ed25519_public_key: None,
             x25519_public_key: None,
+            relay_url: None,
+            mailbox_id: None,
+            relay_write_token: None,
         },
     };
 
@@ -316,6 +537,11 @@ pub async fn connect(
         .one(&db)
         .await;
 
+    // Relay info: prefer payload, fall back to remote config
+    let relay_url = payload.relay_url.or(remote_data.relay_url);
+    let mailbox_id = payload.mailbox_id.or(remote_data.mailbox_id);
+    let relay_write_token = payload.relay_write_token.or(remote_data.relay_write_token);
+
     let peer_id = match existing {
         Ok(Some(existing_peer)) => {
             // Update existing peer with new keys and info
@@ -331,6 +557,16 @@ pub async fn connect(
             active.updated_at = Set(chrono::Utc::now().to_rfc3339());
             active.auto_approve = Set(true);
             active.connection_status = Set("accepted".to_string());
+            // Store relay info if provided
+            if relay_url.is_some() {
+                active.relay_url = Set(relay_url);
+            }
+            if mailbox_id.is_some() {
+                active.mailbox_id = Set(mailbox_id);
+            }
+            if relay_write_token.is_some() {
+                active.relay_write_token = Set(relay_write_token);
+            }
             match active.update(&db).await {
                 Ok(_) => peer_id,
                 Err(e) => {
@@ -352,6 +588,9 @@ pub async fn connect(
                 key_exchange_done: Set(key_exchange_done),
                 latitude: Set(remote_data.latitude),
                 longitude: Set(remote_data.longitude),
+                relay_url: Set(relay_url),
+                mailbox_id: Set(mailbox_id),
+                relay_write_token: Set(relay_write_token),
                 last_seen: Set(Some(chrono::Utc::now().to_rfc3339())),
                 created_at: Set(chrono::Utc::now().to_rfc3339()),
                 updated_at: Set(chrono::Utc::now().to_rfc3339()),
@@ -632,6 +871,15 @@ pub struct IncomingConnectionRequest {
     /// X25519 public key (hex) from the requesting peer — for E2EE
     #[serde(default)]
     x25519_public_key: Option<String>,
+    /// Peer's relay hub URL
+    #[serde(default)]
+    relay_url: Option<String>,
+    /// Peer's relay mailbox UUID
+    #[serde(default)]
+    mailbox_id: Option<String>,
+    /// Token to write to peer's relay mailbox
+    #[serde(default)]
+    relay_write_token: Option<String>,
 }
 
 /// Receive an incoming connection request from a remote peer.
@@ -681,21 +929,37 @@ pub async fn receive_connection_request(
 
     match existing {
         Ok(Some(existing_peer)) => {
-            // Peer already exists — update keys if provided and not yet exchanged
+            // Peer already exists — update keys and relay info if provided
             if key_exchange_done && !existing_peer.key_exchange_done {
                 let mut active: peer::ActiveModel = existing_peer.into();
                 active.public_key = Set(payload.ed25519_public_key);
                 active.x25519_public_key = Set(payload.x25519_public_key);
                 active.key_exchange_done = Set(true);
+                if payload.relay_url.is_some() {
+                    active.relay_url = Set(payload.relay_url);
+                }
+                if payload.mailbox_id.is_some() {
+                    active.mailbox_id = Set(payload.mailbox_id);
+                }
+                if payload.relay_write_token.is_some() {
+                    active.relay_write_token = Set(payload.relay_write_token);
+                }
                 active.updated_at = Set(Utc::now().to_rfc3339());
                 let _ = active.update(&db).await;
             }
+
+            // Load our relay config to include in response
+            let my_relay = crate::api::relay::get_my_relay_config(&db).await;
+
             (
                 StatusCode::OK,
                 Json(json!({
                     "message": "Peer already exists locally",
                     "ed25519_public_key": my_ed25519,
                     "x25519_public_key": my_x25519,
+                    "relay_url": my_relay.as_ref().map(|r| &r.relay_url),
+                    "mailbox_id": my_relay.as_ref().map(|r| &r.mailbox_uuid),
+                    "relay_write_token": my_relay.as_ref().map(|r| &r.write_token),
                 })),
             )
                 .into_response()
@@ -714,12 +978,18 @@ pub async fn receive_connection_request(
                 public_key: Set(payload.ed25519_public_key),
                 x25519_public_key: Set(payload.x25519_public_key),
                 key_exchange_done: Set(key_exchange_done),
+                relay_url: Set(payload.relay_url),
+                mailbox_id: Set(payload.mailbox_id),
+                relay_write_token: Set(payload.relay_write_token),
                 auto_approve: Set(connection_status == "accepted"),
                 connection_status: Set(connection_status.to_string()),
                 created_at: Set(Utc::now().to_rfc3339()),
                 updated_at: Set(Utc::now().to_rfc3339()),
                 ..Default::default()
             };
+
+            // Load our relay config to include in response
+            let my_relay = crate::api::relay::get_my_relay_config(&db).await;
 
             match new_peer.insert(&db).await {
                 Ok(_) => (
@@ -729,6 +999,9 @@ pub async fn receive_connection_request(
                         "connection_status": connection_status,
                         "ed25519_public_key": my_ed25519,
                         "x25519_public_key": my_x25519,
+                        "relay_url": my_relay.as_ref().map(|r| &r.relay_url),
+                        "mailbox_id": my_relay.as_ref().map(|r| &r.mailbox_uuid),
+                        "relay_write_token": my_relay.as_ref().map(|r| &r.write_token),
                     })),
                 )
                     .into_response(),
@@ -825,6 +1098,9 @@ pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoRespon
                 "auto_approve": p.auto_approve,
                 "connection_status": p.connection_status,
                 "status": status,
+                "relay_url": p.relay_url,
+                "mailbox_id": p.mailbox_id,
+                "relay_write_token": p.relay_write_token,
                 "last_seen": p.last_seen,
                 "created_at": p.created_at,
                 "updated_at": p.updated_at,

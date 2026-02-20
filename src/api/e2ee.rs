@@ -55,28 +55,7 @@ pub async fn receive_encrypted_message(
     };
 
     // 3. Build PeerInfo vec from peers with valid keys
-    let mut known_peers: Vec<PeerInfo> = Vec::new();
-    let mut peer_models: Vec<&peer::Model> = Vec::new();
-
-    for p in &peers {
-        if let (Some(ed_hex), Some(x_hex)) = (&p.public_key, &p.x25519_public_key)
-            && let (Ok(ed_bytes), Ok(x_bytes)) = (hex::decode(ed_hex), hex::decode(x_hex))
-            && ed_bytes.len() == 32
-            && x_bytes.len() == 32
-        {
-            let ed_arr: [u8; 32] = ed_bytes.try_into().unwrap();
-            let x_arr: [u8; 32] = x_bytes.try_into().unwrap();
-
-            if let Ok(verifying_key) = ed25519_dalek::VerifyingKey::from_bytes(&ed_arr) {
-                let x25519_public = x25519_dalek::PublicKey::from(x_arr);
-                known_peers.push(PeerInfo {
-                    verifying_key,
-                    x25519_public,
-                });
-                peer_models.push(p);
-            }
-        }
-    }
+    let (known_peers, peer_models) = build_known_peers(&peers);
 
     if known_peers.is_empty() {
         return (
@@ -101,7 +80,7 @@ pub async fn receive_encrypted_message(
         }
     };
 
-    let sender_peer = peer_models[peer_index];
+    let sender_peer = &peer_models[peer_index];
     tracing::info!(
         "E2EE: Received '{}' from peer {} ({})",
         clear_message.message_type,
@@ -110,16 +89,69 @@ pub async fn receive_encrypted_message(
     );
 
     // 5. Dispatch by message_type
-    match clear_message.message_type.as_str() {
-        "loan_request" => handle_loan_request(db, sender_peer, &clear_message).await,
+    dispatch_clear_message(
+        db,
+        &crypto_service,
+        &clear_message,
+        &known_peers,
+        peer_index,
+        sender_peer,
+    )
+    .await
+}
 
-        "loan_confirmation" => handle_loan_confirmation(db, &clear_message).await,
+/// Build PeerInfo vec from peer models with valid E2EE keys.
+/// Returns (known_peers, peer_models) where indices are aligned.
+pub fn build_known_peers(peers: &[peer::Model]) -> (Vec<PeerInfo>, Vec<peer::Model>) {
+    let mut known_peers: Vec<PeerInfo> = Vec::new();
+    let mut peer_models: Vec<peer::Model> = Vec::new();
+
+    for p in peers {
+        if let (Some(ed_hex), Some(x_hex)) = (&p.public_key, &p.x25519_public_key)
+            && let (Ok(ed_bytes), Ok(x_bytes)) = (hex::decode(ed_hex), hex::decode(x_hex))
+            && ed_bytes.len() == 32
+            && x_bytes.len() == 32
+        {
+            let ed_arr: [u8; 32] = ed_bytes.try_into().unwrap();
+            let x_arr: [u8; 32] = x_bytes.try_into().unwrap();
+
+            if let Ok(verifying_key) = ed25519_dalek::VerifyingKey::from_bytes(&ed_arr) {
+                let x25519_public = x25519_dalek::PublicKey::from(x_arr);
+                known_peers.push(PeerInfo {
+                    verifying_key,
+                    x25519_public,
+                });
+                peer_models.push(p.clone());
+            }
+        }
+    }
+
+    (known_peers, peer_models)
+}
+
+/// Dispatch a decrypted ClearMessage to the appropriate handler.
+/// Shared by both the HTTP endpoint and the relay poller.
+pub async fn dispatch_clear_message(
+    db: &sea_orm::DatabaseConnection,
+    crypto_service: &std::sync::Arc<
+        crate::services::crypto_service::CryptoService<
+            crate::infrastructure::nonce_store::SqliteNonceStore,
+        >,
+    >,
+    clear_message: &ClearMessage,
+    known_peers: &[PeerInfo],
+    peer_index: usize,
+    sender_peer: &peer::Model,
+) -> axum::response::Response {
+    match clear_message.message_type.as_str() {
+        "loan_request" => handle_loan_request(db, sender_peer, clear_message).await,
+
+        "loan_confirmation" => handle_loan_confirmation(db, clear_message).await,
 
         "book_sync_request" => {
             let response_payload = handle_book_sync_request(db).await;
-            // Seal response back to sender
             seal_response(
-                &crypto_service,
+                crypto_service,
                 &known_peers[peer_index],
                 "book_sync_response",
                 response_payload,
@@ -127,16 +159,16 @@ pub async fn receive_encrypted_message(
         }
 
         "search_request" => {
-            let response_payload = handle_search_request(db, &clear_message).await;
+            let response_payload = handle_search_request(db, clear_message).await;
             seal_response(
-                &crypto_service,
+                crypto_service,
                 &known_peers[peer_index],
                 "search_response",
                 response_payload,
             )
         }
 
-        "status_update" => handle_status_update(db, &clear_message).await,
+        "status_update" => handle_status_update(db, clear_message).await,
 
         _ => {
             tracing::warn!(

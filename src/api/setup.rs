@@ -272,6 +272,15 @@ pub struct ConfigResponse {
     /// X25519 public key (hex-encoded) for E2EE key exchange
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x25519_public_key: Option<String>,
+    /// Relay hub URL (if relay is configured)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
+    /// Relay mailbox UUID (if relay is configured)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox_id: Option<String>,
+    /// Write token for peers to deposit relay messages
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_write_token: Option<String>,
 }
 
 pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoResponse {
@@ -310,6 +319,9 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
     // Load E2EE public keys from crypto_keys table (if identity has been initialized)
     let (ed25519_public_key, x25519_public_key) = load_public_keys_from_db(&db).await;
 
+    // Load relay config (if configured)
+    let relay_config = crate::api::relay::get_my_relay_config(&db).await;
+
     (
         StatusCode::OK,
         Json(ConfigResponse {
@@ -335,6 +347,9 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
             share_gamification_stats,
             ed25519_public_key,
             x25519_public_key,
+            relay_url: relay_config.as_ref().map(|r| r.relay_url.clone()),
+            mailbox_id: relay_config.as_ref().map(|r| r.mailbox_uuid.clone()),
+            relay_write_token: relay_config.as_ref().map(|r| r.write_token.clone()),
         }),
     )
         .into_response()
@@ -378,6 +393,40 @@ pub async fn load_public_keys_from_db(db: &DatabaseConnection) -> (Option<String
     }
 
     (ed25519, x25519)
+}
+
+/// POST /api/identity/init — Initialize the node's E2EE identity (desktop/test mode).
+/// In FFI mode, Flutter calls init_identity_ffi() instead.
+pub async fn init_identity(
+    State(state): State<crate::infrastructure::AppState>,
+    Json(payload): Json<InitIdentityRequest>,
+) -> impl IntoResponse {
+    match state.identity_service.init(&payload.library_uuid).await {
+        Ok(()) => {
+            // Trigger lazy init of CryptoService
+            let _ = state.crypto_service();
+            let (ed25519, x25519) = load_public_keys_from_db(state.db()).await;
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "message": "Identity initialized",
+                    "ed25519_public_key": ed25519,
+                    "x25519_public_key": x25519,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to initialize identity: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InitIdentityRequest {
+    pub library_uuid: String,
 }
 
 pub async fn reset_app(
