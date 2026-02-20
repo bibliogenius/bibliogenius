@@ -3220,7 +3220,7 @@ pub async fn update_outgoing_status(
                     // 3. Check if book should be deleted
                     // Conditions: owned=false, reading_status != wishlist, no copies left
                     let should_delete_book = !book.owned
-                        && book.reading_status != "READING_STATUS_WISHLIST"
+                        && book.reading_status != "wanting"
                         && copy::Entity::find()
                             .filter(copy::Column::BookId.eq(book.id))
                             .count(&db)
@@ -3435,7 +3435,7 @@ pub async fn return_borrowed_book(
     // 6. Clean up book if no longer needed
     if let Ok(Some(bk)) = book::Entity::find_by_id(the_copy.book_id).one(&db).await {
         let should_delete = !bk.owned
-            && bk.reading_status != "READING_STATUS_WISHLIST"
+            && bk.reading_status != "wanting"
             && copy::Entity::find()
                 .filter(copy::Column::BookId.eq(bk.id))
                 .count(&db)

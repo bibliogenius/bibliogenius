@@ -8,7 +8,10 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
+    Set,
+};
 use serde_json::json;
 
 use crate::crypto::envelope::{ClearMessage, EncryptedEnvelope};
@@ -259,7 +262,7 @@ async fn handle_loan_confirmation(
     db: &DatabaseConnection,
     msg: &ClearMessage,
 ) -> axum::response::Response {
-    use crate::models::{book, copy};
+    use crate::models::{book, copy, p2p_outgoing_request};
 
     let title = msg
         .payload
@@ -291,6 +294,12 @@ async fn handle_loan_confirmation(
         .get("due_date")
         .and_then(|v| v.as_str())
         .unwrap_or("Unknown");
+
+    let lender_request_id = msg
+        .payload
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     if title.is_empty() {
         return (
@@ -330,7 +339,7 @@ async fn handle_loan_confirmation(
             let summary_text = author.map(|a| format!("Auteur: {a}"));
             let new_book = book::ActiveModel {
                 title: Set(title.to_string()),
-                isbn: Set(isbn),
+                isbn: Set(isbn.clone()),
                 summary: Set(summary_text),
                 cover_url: Set(cover_url.clone()),
                 owned: Set(false),
@@ -367,15 +376,49 @@ async fn handle_loan_confirmation(
     };
 
     match new_copy.insert(db).await {
-        Ok(c) => (
-            StatusCode::OK,
-            Json(json!({
-                "message": "Loan confirmed",
-                "book_id": book_id,
-                "copy_id": c.id
-            })),
-        )
-            .into_response(),
+        Ok(c) => {
+            tracing::info!(
+                "E2EE: Created borrowed copy id={} for book_id={}",
+                c.id,
+                book_id
+            );
+
+            // Store lender_request_id on the matching outgoing request
+            // (same logic as receive_loan_confirmation in peer.rs)
+            if let Some(ref lender_req_id) = lender_request_id {
+                let isbn_filter = isbn.clone().unwrap_or_default();
+                if let Ok(Some(outgoing)) = p2p_outgoing_request::Entity::find()
+                    .filter(p2p_outgoing_request::Column::BookIsbn.eq(&isbn_filter))
+                    .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
+                    .one(db)
+                    .await
+                {
+                    let mut active: p2p_outgoing_request::ActiveModel = outgoing.into();
+                    active.lender_request_id = Set(Some(lender_req_id.clone()));
+                    active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+                    if let Err(e) = active.update(db).await {
+                        tracing::warn!(
+                            "E2EE: Failed to store lender_request_id on outgoing request: {e}"
+                        );
+                    } else {
+                        tracing::info!(
+                            "E2EE: Stored lender_request_id={} on outgoing request",
+                            lender_req_id
+                        );
+                    }
+                }
+            }
+
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "message": "Loan confirmed",
+                    "book_id": book_id,
+                    "copy_id": c.id
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("Failed to create copy: {e}") })),
@@ -416,11 +459,15 @@ async fn handle_search_request(db: &DatabaseConnection, msg: &ClearMessage) -> s
 }
 
 /// Handle a status update from a peer (loan status change notification).
+///
+/// This handler serves two directions:
+/// - Lender → Borrower (accepted/rejected): updates `p2p_outgoing_request`
+/// - Borrower → Lender (returned): updates `p2p_request` + loan + copy
 async fn handle_status_update(
     db: &DatabaseConnection,
     msg: &ClearMessage,
 ) -> axum::response::Response {
-    use crate::models::p2p_outgoing_request;
+    use crate::models::{contact, copy, loan, p2p_outgoing_request, p2p_request, peer};
 
     let loan_id = msg
         .payload
@@ -441,18 +488,145 @@ async fn handle_status_update(
             .into_response();
     }
 
-    // Update the outgoing request status
-    match p2p_outgoing_request::Entity::find_by_id(loan_id)
+    // 1. Try borrower-side: update outgoing request (lender sent us accept/reject/returned)
+    if let Ok(Some(req)) = p2p_outgoing_request::Entity::find_by_id(loan_id)
         .one(db)
         .await
     {
+        let book_isbn = req.book_isbn.clone();
+        let mut active: p2p_outgoing_request::ActiveModel = req.into();
+        active.status = Set(status.to_string());
+        active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        match active.update(db).await {
+            Ok(_) => {
+                tracing::info!("E2EE: Updated outgoing request {} to '{}'", loan_id, status);
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("Failed to update: {e}") })),
+                )
+                    .into_response();
+            }
+        }
+
+        // If lender reclaimed the book, clean up the borrowed copy + book
+        if status == "returned"
+            && let Ok(Some(bk)) = crate::models::book::Entity::find()
+                .filter(crate::models::book::Column::Isbn.eq(&book_isbn))
+                .one(db)
+                .await
+        {
+            // Delete borrowed copies for this book
+            let borrowed = copy::Entity::find()
+                .filter(copy::Column::BookId.eq(bk.id))
+                .filter(copy::Column::Status.eq("borrowed"))
+                .all(db)
+                .await
+                .unwrap_or_default();
+            for c in borrowed {
+                let _ = copy::Entity::delete_by_id(c.id).exec(db).await;
+            }
+
+            // Clean up book if not owned, not wishlist, and no remaining copies
+            if !bk.owned && bk.reading_status != "wanting" {
+                let remaining = copy::Entity::find()
+                    .filter(copy::Column::BookId.eq(bk.id))
+                    .count(db)
+                    .await
+                    .unwrap_or(1);
+                if remaining == 0 {
+                    let _ = crate::models::book::Entity::delete_by_id(bk.id)
+                        .exec(db)
+                        .await;
+                    tracing::info!(
+                        "E2EE: Cleaned up book (isbn={}) after lender reclaim",
+                        book_isbn
+                    );
+                }
+            }
+        }
+
+        return (StatusCode::OK, Json(json!({ "message": "Status updated" }))).into_response();
+    }
+
+    // 2. Try lender-side: update incoming request (borrower sent us return)
+    let incoming = p2p_request::Entity::find_by_id(loan_id).one(db).await;
+    match incoming {
         Ok(Some(req)) => {
-            let mut active: p2p_outgoing_request::ActiveModel = req.into();
+            // Process return logic (same as update_request_status for "returned")
+            if status == "returned" && req.status == "accepted" {
+                // Find peer → contact → book → loan → mark returned + copy available
+                if let Ok(Some(the_peer)) = peer::Entity::find_by_id(req.from_peer_id).one(db).await
+                {
+                    let the_contact = contact::Entity::find()
+                        .filter(contact::Column::Name.eq(&the_peer.name))
+                        .filter(contact::Column::Type.eq("Library"))
+                        .one(db)
+                        .await
+                        .unwrap_or(None);
+
+                    if let Some(the_contact) = the_contact {
+                        let book = crate::models::book::Entity::find()
+                            .filter(crate::models::book::Column::Isbn.eq(&req.book_isbn))
+                            .one(db)
+                            .await
+                            .unwrap_or(None);
+
+                        if let Some(book) = book {
+                            let copies = copy::Entity::find()
+                                .filter(copy::Column::BookId.eq(book.id))
+                                .all(db)
+                                .await
+                                .unwrap_or_default();
+
+                            let copy_ids: Vec<i32> = copies.iter().map(|c| c.id).collect();
+
+                            let active_loan = loan::Entity::find()
+                                .filter(loan::Column::ContactId.eq(the_contact.id))
+                                .filter(loan::Column::Status.eq("active"))
+                                .filter(loan::Column::CopyId.is_in(copy_ids))
+                                .one(db)
+                                .await
+                                .unwrap_or(None);
+
+                            if let Some(l) = active_loan {
+                                let copy_id = l.copy_id;
+                                let mut active_loan: loan::ActiveModel = l.into();
+                                active_loan.status = Set("returned".to_string());
+                                active_loan.return_date =
+                                    Set(Some(chrono::Utc::now().to_rfc3339()));
+                                active_loan.updated_at = Set(chrono::Utc::now().to_rfc3339());
+                                let _ = active_loan.update(db).await;
+
+                                if let Some(the_copy) = copy::Entity::find_by_id(copy_id)
+                                    .one(db)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                {
+                                    let mut active_copy: copy::ActiveModel = the_copy.into();
+                                    active_copy.status = Set("available".to_string());
+                                    let _ = active_copy.update(db).await;
+                                }
+
+                                tracing::info!(
+                                    "E2EE: Processed return for request {} — loan + copy updated",
+                                    loan_id
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Update the incoming request status
+            let mut active: p2p_request::ActiveModel = req.into();
             active.status = Set(status.to_string());
             active.updated_at = Set(chrono::Utc::now().to_rfc3339());
             match active.update(db).await {
                 Ok(_) => {
-                    tracing::info!("E2EE: Updated outgoing request {} to '{}'", loan_id, status);
+                    tracing::info!("E2EE: Updated incoming request {} to '{}'", loan_id, status);
                     (StatusCode::OK, Json(json!({ "message": "Status updated" }))).into_response()
                 }
                 Err(e) => (
@@ -462,11 +636,17 @@ async fn handle_status_update(
                     .into_response(),
             }
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "Request not found" })),
-        )
-            .into_response(),
+        Ok(None) => {
+            tracing::warn!(
+                "E2EE: status_update for unknown request {} (not in outgoing or incoming)",
+                loan_id
+            );
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "Request not found" })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
