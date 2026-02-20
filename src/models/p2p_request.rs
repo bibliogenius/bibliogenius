@@ -12,6 +12,7 @@ pub struct Model {
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+    pub requester_request_id: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

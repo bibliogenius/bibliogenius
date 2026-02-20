@@ -1148,5 +1148,13 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
     ))
     .await?;
 
+    // Migration 044: Add requester_request_id to p2p_requests (loan ID from borrower's side)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE p2p_requests ADD COLUMN requester_request_id TEXT".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }

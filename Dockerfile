@@ -7,17 +7,17 @@ WORKDIR /app
 COPY Cargo.toml ./
 
 # Build dependencies only (caching step)
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release
+RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs
+RUN cargo build --release --features desktop
 RUN rm -rf src
 
 # Copy source code
 COPY src ./src
 COPY migrations ./migrations
 
-# Build release binary (app only)
-RUN touch src/main.rs
-RUN cargo build --release
+# Build release binary
+RUN touch src/main.rs src/lib.rs
+RUN cargo build --release --features desktop
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -35,8 +35,6 @@ WORKDIR /app
 # Copy the built binary from the builder stage
 COPY --from=builder /app/target/release/bibliogenius /usr/local/bin/bibliogenius
 
-# Copy static files for Web UI
-COPY static /app/static
 COPY migrations ./migrations
 COPY .env.example .env
 

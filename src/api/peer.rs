@@ -1963,8 +1963,9 @@ pub async fn request_book(
     };
 
     // 2. Save Outgoing Request
+    let outgoing_id = uuid::Uuid::new_v4().to_string();
     let outgoing = crate::models::p2p_outgoing_request::ActiveModel {
-        id: Set(uuid::Uuid::new_v4().to_string()),
+        id: Set(outgoing_id.clone()),
         to_peer_id: Set(peer.id),
         book_isbn: Set(payload.book_isbn.clone()),
         book_title: Set(payload.book_title.clone()),
@@ -2013,7 +2014,8 @@ pub async fn request_book(
         "from_peer_url": crate::utils::net::get_public_url(8000),
         "from_peer_name": my_config.name,
         "book_isbn": payload.book_isbn,
-        "book_title": payload.book_title
+        "book_title": payload.book_title,
+        "requester_request_id": outgoing_id
     });
 
     match try_send_e2ee(&state, &peer, "loan_request", e2ee_payload.clone()).await {
@@ -2106,8 +2108,9 @@ pub async fn request_book_by_url(
     };
 
     // 2. Save Outgoing Request
+    let outgoing_id = uuid::Uuid::new_v4().to_string();
     let outgoing = crate::models::p2p_outgoing_request::ActiveModel {
-        id: Set(uuid::Uuid::new_v4().to_string()),
+        id: Set(outgoing_id.clone()),
         to_peer_id: Set(peer.id),
         book_isbn: Set(payload.book_isbn.clone()),
         book_title: Set(payload.book_title.clone()),
@@ -2153,7 +2156,8 @@ pub async fn request_book_by_url(
         "from_peer_url": crate::utils::net::get_public_url(8000),
         "from_peer_name": my_config.name,
         "book_isbn": payload.book_isbn,
-        "book_title": payload.book_title
+        "book_title": payload.book_title,
+        "requester_request_id": outgoing_id
     });
 
     // Try E2EE path first
@@ -2232,6 +2236,7 @@ pub struct IncomingRequest {
     from_peer_name: String,
     book_isbn: String,
     book_title: String,
+    requester_request_id: Option<String>,
 }
 
 pub async fn receive_request(
@@ -2289,6 +2294,7 @@ pub async fn receive_request(
         status: Set("pending".to_string()),
         created_at: Set(chrono::Utc::now().to_rfc3339()),
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
+        requester_request_id: Set(payload.requester_request_id),
     };
 
     match crate::models::p2p_request::Entity::insert(request)
@@ -2706,8 +2712,16 @@ pub async fn update_request_status(
         .flatten();
 
     if let Some(peer) = peer_for_notify {
+        // Use the borrower's original request ID so they can match
+        // the status update to their outgoing request. Fall back to
+        // our local ID for backward compat with old peers.
+        let borrower_loan_id = req
+            .requester_request_id
+            .clone()
+            .unwrap_or_else(|| req.id.clone());
+
         let status_payload = json!({
-            "loan_id": req.id,
+            "loan_id": borrower_loan_id,
             "status": new_status,
         });
 
@@ -2724,7 +2738,7 @@ pub async fn update_request_status(
             Ok(None) => {
                 // E2EE not available for this peer — fall back to plaintext
                 let peer_url = peer.url.clone();
-                let request_id = req.id.clone();
+                let request_id = borrower_loan_id;
                 let status_to_send = new_status.to_string();
 
                 tokio::spawn(async move {

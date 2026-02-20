@@ -213,6 +213,12 @@ async fn handle_loan_request(
             .into_response();
     }
 
+    let requester_request_id = msg
+        .payload
+        .get("requester_request_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let request_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -224,6 +230,7 @@ async fn handle_loan_request(
         status: Set("pending".to_owned()),
         created_at: Set(now.clone()),
         updated_at: Set(now),
+        requester_request_id: Set(requester_request_id),
     };
 
     match new_request.insert(db).await {
