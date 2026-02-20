@@ -9,6 +9,7 @@ pub mod contact;
 pub mod copy;
 pub mod data;
 pub mod discovery;
+pub mod e2ee;
 pub mod export;
 pub mod frb; // FFI API for flutter_rust_bridge
 pub mod gamification;
@@ -248,6 +249,8 @@ fn build_routes() -> Router<AppState> {
             "/gamification/refresh-leaderboard",
             post(gamification::refresh_leaderboard),
         )
+        // E2EE encrypted peer messages
+        .route("/e2ee/message", post(e2ee::receive_encrypted_message))
         // Export/Import
         .route("/export", get(export::export_data))
         .route("/import", post(export::import_data))

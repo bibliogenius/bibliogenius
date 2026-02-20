@@ -26,6 +26,7 @@ pub trait NonceStore: Send + Sync {
 }
 
 /// Peer info needed for sender identification.
+#[derive(Clone)]
 pub struct PeerInfo {
     /// Ed25519 verifying key (to check signatures after decryption).
     pub verifying_key: ed25519_dalek::VerifyingKey,

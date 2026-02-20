@@ -89,6 +89,88 @@ async fn is_peer_approved(db: &DatabaseConnection, peer: &peer::Model) -> bool {
     peer.connection_status == "accepted"
 }
 
+/// Try to send a message to a peer via E2EE. Returns Ok(Some(response)) if E2EE succeeded,
+/// Ok(None) if E2EE is not available for this peer (caller should fall back to plaintext).
+async fn try_send_e2ee(
+    state: &crate::infrastructure::AppState,
+    peer: &peer::Model,
+    message_type: &str,
+    payload: serde_json::Value,
+) -> Result<Option<Option<crate::crypto::envelope::ClearMessage>>, String> {
+    // Check if peer supports E2EE
+    if !peer.key_exchange_done {
+        tracing::warn!(
+            "E2EE: Skipping — peer {} key_exchange_done=false",
+            peer.name
+        );
+        return Ok(None); // Plaintext fallback
+    }
+
+    let crypto_service = match state.crypto_service() {
+        Some(svc) => svc.clone(),
+        None => {
+            tracing::warn!("E2EE: Skipping — CryptoService not initialized");
+            return Ok(None); // Identity not ready, fallback
+        }
+    };
+
+    // Parse peer's X25519 public key
+    let x25519_hex = match &peer.x25519_public_key {
+        Some(hex) => hex,
+        None => {
+            tracing::warn!(
+                "E2EE: Skipping — peer {} missing x25519_public_key",
+                peer.name
+            );
+            return Ok(None);
+        }
+    };
+    let x_bytes = hex::decode(x25519_hex).map_err(|e| format!("Invalid x25519 key: {e}"))?;
+    if x_bytes.len() != 32 {
+        return Ok(None);
+    }
+    let x_arr: [u8; 32] = x_bytes.try_into().unwrap();
+    let peer_x25519 = x25519_dalek::PublicKey::from(x_arr);
+
+    // Parse peer's Ed25519 verifying key (for opening responses)
+    let ed_hex = match &peer.public_key {
+        Some(hex) => hex,
+        None => return Ok(None),
+    };
+    let ed_bytes = hex::decode(ed_hex).map_err(|e| format!("Invalid ed25519 key: {e}"))?;
+    if ed_bytes.len() != 32 {
+        return Ok(None);
+    }
+    let ed_arr: [u8; 32] = ed_bytes.try_into().unwrap();
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&ed_arr)
+        .map_err(|e| format!("Invalid ed25519 key: {e}"))?;
+
+    let peer_info = crate::services::crypto_service::PeerInfo {
+        verifying_key,
+        x25519_public: peer_x25519,
+    };
+
+    let transport = crate::services::e2ee_transport::DirectTransport::new(crypto_service);
+    let message =
+        crate::services::e2ee_transport::DirectTransport::build_message(message_type, payload);
+
+    match transport
+        .send(&peer.url, &peer_x25519, &peer_info, &message)
+        .await
+    {
+        Ok(response) => {
+            tracing::info!(
+                "E2EE: Sent '{}' to peer {} ({})",
+                message_type,
+                peer.name,
+                peer.id
+            );
+            Ok(Some(response))
+        }
+        Err(e) => Err(format!("E2EE send failed: {e}")),
+    }
+}
+
 /// Bulk-approve all pending peers (called when connection_validation is toggled OFF)
 pub async fn auto_approve_all_peers(State(db): State<DatabaseConnection>) -> impl IntoResponse {
     let peers = peer::Entity::find()
@@ -1022,12 +1104,14 @@ pub struct ProxySearchRequest {
 }
 
 pub async fn proxy_search(
-    State(db): State<DatabaseConnection>,
+    State(state): State<crate::infrastructure::AppState>,
     Json(payload): Json<ProxySearchRequest>,
 ) -> impl IntoResponse {
+    let db = state.db();
+
     // 1. Find peer
     let peer = peer::Entity::find_by_id(payload.peer_id)
-        .one(&db)
+        .one(db)
         .await
         .unwrap_or(None);
 
@@ -1041,7 +1125,38 @@ pub async fn proxy_search(
                 .into_response();
         }
 
-        // 2. Call peer's search endpoint
+        // Try E2EE path first (search is request-response: returns encrypted results)
+        match try_send_e2ee(
+            &state,
+            &peer,
+            "search_request",
+            json!({ "query": payload.query }),
+        )
+        .await
+        {
+            Ok(Some(Some(response_msg))) => {
+                // Got encrypted search results
+                let results: Vec<crate::models::Book> = serde_json::from_value(
+                    response_msg
+                        .payload
+                        .get("results")
+                        .cloned()
+                        .unwrap_or(json!([])),
+                )
+                .unwrap_or_default();
+                return (StatusCode::OK, Json(results)).into_response();
+            }
+            Ok(Some(None)) => {
+                // E2EE sent but no response body (unexpected for search)
+                return (StatusCode::OK, Json(Vec::<crate::models::Book>::new())).into_response();
+            }
+            Ok(None) => {} // Fallback to plaintext
+            Err(e) => {
+                tracing::warn!("E2EE proxy_search failed, falling back to plaintext: {}", e);
+            }
+        }
+
+        // 2. Legacy plaintext: call peer's search endpoint
         let client = get_safe_client();
         let url = format!("{}/api/peers/search", peer.url);
 
@@ -1512,12 +1627,14 @@ pub struct BookRequest {
 }
 
 pub async fn request_book(
-    State(db): State<DatabaseConnection>,
+    State(state): State<crate::infrastructure::AppState>,
     Path(peer_id): Path<i32>,
     Json(payload): Json<BookRequest>,
 ) -> impl IntoResponse {
+    let db = state.db();
+
     // 1. Find peer
-    let peer = match peer::Entity::find_by_id(peer_id).one(&db).await {
+    let peer = match peer::Entity::find_by_id(peer_id).one(db).await {
         Ok(Some(p)) => p,
         _ => {
             return (
@@ -1540,7 +1657,7 @@ pub async fn request_book(
     };
 
     if let Err(e) = crate::models::p2p_outgoing_request::Entity::insert(outgoing)
-        .exec(&db)
+        .exec(db)
         .await
     {
         tracing::error!("❌ Failed to save outgoing status: {}", e);
@@ -1561,11 +1678,8 @@ pub async fn request_book(
             .into_response();
     }
 
-    let client = get_safe_client();
-    let url = format!("{}/api/peers/request", peer.url);
-
-    // Get my config to identify myself
-    let my_config = match crate::models::library_config::Entity::find().one(&db).await {
+    // Try E2EE path first
+    let my_config = match crate::models::library_config::Entity::find().one(db).await {
         Ok(Some(config)) => config,
         _ => {
             tracing::error!("❌ Library config not found when sending request");
@@ -1577,23 +1691,48 @@ pub async fn request_book(
         }
     };
 
-    let res = client
-        .post(&url)
-        .json(&json!({
-            "from_peer_url": crate::utils::net::get_public_url(8000),
-            "from_peer_name": my_config.name,
-            "book_isbn": payload.book_isbn,
-            "book_title": payload.book_title
-        }))
-        .send()
-        .await;
+    let e2ee_payload = json!({
+        "from_peer_url": crate::utils::net::get_public_url(8000),
+        "from_peer_name": my_config.name,
+        "book_isbn": payload.book_isbn,
+        "book_title": payload.book_title
+    });
+
+    match try_send_e2ee(&state, &peer, "loan_request", e2ee_payload.clone()).await {
+        Ok(Some(_)) => {
+            // E2EE succeeded
+            return (
+                StatusCode::OK,
+                Json(json!({ "message": "Request sent (encrypted)" })),
+            )
+                .into_response();
+        }
+        Ok(None) => {
+            // Peer doesn't support E2EE, fall through to plaintext
+        }
+        Err(e) => {
+            // E2EE transport error — message MAY have been delivered.
+            // Do NOT fall back to plaintext to avoid duplicate requests.
+            tracing::warn!("E2EE send failed (no plaintext fallback): {}", e);
+            return (
+                StatusCode::OK,
+                Json(json!({ "message": "Request sent (e2ee error, no fallback)" })),
+            )
+                .into_response();
+        }
+    }
+
+    // Legacy plaintext path (only reached if E2EE returned Ok(None))
+    let client = get_safe_client();
+    let url = format!("{}/api/peers/request", peer.url);
+
+    let res = client.post(&url).json(&e2ee_payload).send().await;
 
     match res {
         Ok(response) => {
             if response.status().is_success() {
                 (StatusCode::OK, Json(json!({ "message": "Request sent" }))).into_response()
             } else {
-                // TODO: Update outgoing request status to 'failed' if rejected immediately?
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(json!({ "error": "Peer rejected request" })),
@@ -1617,25 +1756,22 @@ pub struct BookRequestByUrl {
 }
 
 pub async fn request_book_by_url(
-    State(db): State<DatabaseConnection>,
+    State(state): State<crate::infrastructure::AppState>,
     Json(payload): Json<BookRequestByUrl>,
 ) -> impl IntoResponse {
+    let db = state.db();
+
     // Translate localhost URL to Docker service name if needed
     let docker_url = translate_url_for_docker(&payload.peer_url);
 
     // 1. Find peer by URL
     let peer = match peer::Entity::find()
         .filter(peer::Column::Url.eq(&docker_url))
-        .one(&db)
+        .one(db)
         .await
     {
         Ok(Some(p)) => p,
         Ok(None) => {
-            // Optional: Auto-create peer if not found?
-            // For now, let's return 404 to be safe, assuming they should have synced first.
-            // But wait, if they are viewing books, they might be viewing them from a "Search Network" result
-            // which might not have created the peer yet?
-            // Actually, list_peer_books_by_url requires peer to exist.
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": format!("Peer not found with URL: {}", docker_url) })),
@@ -1663,7 +1799,7 @@ pub async fn request_book_by_url(
     };
 
     if let Err(e) = crate::models::p2p_outgoing_request::Entity::insert(outgoing)
-        .exec(&db)
+        .exec(db)
         .await
     {
         return (
@@ -1682,11 +1818,8 @@ pub async fn request_book_by_url(
             .into_response();
     }
 
-    let client = get_safe_client();
-    let url = format!("{}/api/peers/request", peer.url);
-
     // Get my config to identify myself
-    let my_config = match crate::models::library_config::Entity::find().one(&db).await {
+    let my_config = match crate::models::library_config::Entity::find().one(db).await {
         Ok(Some(config)) => config,
         _ => {
             return (
@@ -1697,16 +1830,38 @@ pub async fn request_book_by_url(
         }
     };
 
-    let res = client
-        .post(&url)
-        .json(&json!({
-            "from_peer_url": crate::utils::net::get_public_url(8000),
-            "from_peer_name": my_config.name,
-            "book_isbn": payload.book_isbn,
-            "book_title": payload.book_title
-        }))
-        .send()
-        .await;
+    let e2ee_payload = json!({
+        "from_peer_url": crate::utils::net::get_public_url(8000),
+        "from_peer_name": my_config.name,
+        "book_isbn": payload.book_isbn,
+        "book_title": payload.book_title
+    });
+
+    // Try E2EE path first
+    match try_send_e2ee(&state, &peer, "loan_request", e2ee_payload.clone()).await {
+        Ok(Some(_)) => {
+            return (
+                StatusCode::OK,
+                Json(json!({ "message": "Request sent (encrypted)" })),
+            )
+                .into_response();
+        }
+        Ok(None) => {
+            // E2EE not available for this peer — fall back to plaintext.
+        }
+        Err(e) => {
+            // E2EE transport error — message MAY have been delivered.
+            // Do NOT fall back to plaintext to avoid duplicate requests.
+            tracing::warn!("E2EE loan_request error (no plaintext fallback): {e}");
+            return (StatusCode::OK, Json(json!({ "message": "Request sent" }))).into_response();
+        }
+    }
+
+    // Legacy plaintext path (only reached if E2EE returned Ok(None))
+    let client = get_safe_client();
+    let url = format!("{}/api/peers/request", peer.url);
+
+    let res = client.post(&url).json(&e2ee_payload).send().await;
 
     match res {
         Ok(response) => {
@@ -1799,12 +1954,8 @@ pub async fn receive_request(
         }
     };
 
-    // 2. Create Request Record
-    let initial_status = if peer.auto_approve {
-        "accepted"
-    } else {
-        "pending"
-    };
+    // 2. Create Request Record — always "pending" so the owner can review
+    let initial_status = "pending";
 
     let request = crate::models::p2p_request::ActiveModel {
         id: Set(uuid::Uuid::new_v4().to_string()),
@@ -1863,11 +2014,12 @@ pub struct RequestAction {
 }
 
 pub async fn update_request_status(
-    State(db): State<DatabaseConnection>,
+    State(state): State<crate::infrastructure::AppState>,
     Path(id): Path<String>,
     Json(payload): Json<RequestAction>,
 ) -> impl IntoResponse {
     use crate::models::{book, contact, copy, loan, p2p_request};
+    let db = state.db().clone();
 
     let req = match p2p_request::Entity::find_by_id(&id).one(&db).await {
         Ok(Some(r)) => r,
@@ -2070,35 +2222,56 @@ pub async fn update_request_status(
             _ => "Unknown Library".to_string(),
         };
 
-        tokio::spawn(async move {
-            let client = reqwest::Client::new();
-            let confirm_result = client
-                .post(format!("{}/api/peers/loans/confirm", peer_url))
-                .json(&serde_json::json!({
-                    "isbn": book_isbn,
-                    "title": book_title,
-                    "author": Option::<String>::None, // TODO: fetch from relation
-                    "cover_url": book_cover,
-                    "lender_name": lender_name,
-                    "due_date": due_date,
-                }))
-                .timeout(std::time::Duration::from_secs(10))
-                .send()
-                .await;
-
-            match confirm_result {
-                Ok(resp) => {
-                    tracing::info!(
-                        "📤 Loan confirmation sent to {}: {}",
-                        peer_url,
-                        resp.status()
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!("⚠️ Failed to send loan confirmation to {}: {}", peer_url, e);
-                }
-            }
+        let confirm_payload = serde_json::json!({
+            "isbn": book_isbn,
+            "title": book_title,
+            "author": Option::<String>::None,
+            "cover_url": book_cover,
+            "lender_name": lender_name,
+            "due_date": due_date,
         });
+
+        // Try E2EE path first
+        match try_send_e2ee(&state, &peer, "loan_confirmation", confirm_payload.clone()).await {
+            Ok(Some(_)) => {
+                tracing::info!("E2EE: Loan confirmation sent to {} (encrypted)", peer.name);
+            }
+            Err(e) => {
+                // E2EE transport error — message MAY have been delivered.
+                // Do NOT fall back to plaintext to avoid duplicate borrowed copies.
+                tracing::warn!("E2EE: Loan confirmation error (no plaintext fallback): {e}");
+            }
+            Ok(None) => {
+                // E2EE not available for this peer — fall back to plaintext
+                let peer_url_clone = peer_url.clone();
+                tokio::spawn(async move {
+                    let client = reqwest::Client::new();
+                    let confirm_result = client
+                        .post(format!("{}/api/peers/loans/confirm", peer_url_clone))
+                        .json(&confirm_payload)
+                        .timeout(std::time::Duration::from_secs(10))
+                        .send()
+                        .await;
+
+                    match confirm_result {
+                        Ok(resp) => {
+                            tracing::info!(
+                                "Loan confirmation sent to {}: {}",
+                                peer_url_clone,
+                                resp.status()
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to send loan confirmation to {}: {}",
+                                peer_url_clone,
+                                e
+                            );
+                        }
+                    }
+                });
+            }
+        }
     } else if new_status == "returned" && req.status == "accepted" {
         // Handle Return
         // Find the loan associated with this peer (contact) and book
@@ -2191,35 +2364,55 @@ pub async fn update_request_status(
         .flatten();
 
     if let Some(peer) = peer_for_notify {
-        let peer_url = peer.url.clone();
-        let request_id = req.id.clone();
-        let status_to_send = new_status.to_string();
-
-        tokio::spawn(async move {
-            let client = get_safe_client();
-            let notify_url = format!("{}/api/peers/requests/status/{}", peer_url, request_id);
-
-            tracing::info!(
-                "📡 Notifying borrower {} of status change: {} -> {}",
-                peer_url,
-                request_id,
-                status_to_send
-            );
-
-            match client
-                .put(&notify_url)
-                .json(&serde_json::json!({ "status": status_to_send }))
-                .send()
-                .await
-            {
-                Ok(res) => {
-                    tracing::info!("✅ Borrower notified: {}", res.status());
-                }
-                Err(e) => {
-                    tracing::warn!("⚠️ Failed to notify borrower: {}", e);
-                }
-            }
+        let status_payload = json!({
+            "loan_id": req.id,
+            "status": new_status,
         });
+
+        // Try E2EE first
+        match try_send_e2ee(&state, &peer, "status_update", status_payload).await {
+            Ok(Some(_)) => {
+                tracing::info!("E2EE: Status update sent to {} (encrypted)", peer.name);
+            }
+            Err(e) => {
+                // E2EE transport error — message MAY have been delivered.
+                // Do NOT fall back to plaintext to avoid duplicate status updates.
+                tracing::warn!("E2EE: Status update error (no plaintext fallback): {e}");
+            }
+            Ok(None) => {
+                // E2EE not available for this peer — fall back to plaintext
+                let peer_url = peer.url.clone();
+                let request_id = req.id.clone();
+                let status_to_send = new_status.to_string();
+
+                tokio::spawn(async move {
+                    let client = get_safe_client();
+                    let notify_url =
+                        format!("{}/api/peers/requests/status/{}", peer_url, request_id);
+
+                    tracing::info!(
+                        "Notifying borrower {} of status change: {} -> {}",
+                        peer_url,
+                        request_id,
+                        status_to_send
+                    );
+
+                    match client
+                        .put(&notify_url)
+                        .json(&serde_json::json!({ "status": status_to_send }))
+                        .send()
+                        .await
+                    {
+                        Ok(res) => {
+                            tracing::info!("Borrower notified: {}", res.status());
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to notify borrower: {}", e);
+                        }
+                    }
+                });
+            }
+        }
     }
 
     match active.update(&db).await {

@@ -1195,7 +1195,17 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                     .map_err(|e| format!("Failed to get local address: {}", e))?
                     .port();
 
-                let api = crate::api::api_router(db);
+                // Create a shared IdentityService and register it in the global
+                // OnceLock so that init_identity_ffi() (called later by Flutter)
+                // initializes the SAME instance. IdentityService uses Arc<OnceCell>
+                // internally, so clones share the same identity state.
+                let shared_id_svc = IDENTITY_SERVICE
+                    .get_or_init(|| crate::services::IdentityService::new(db.clone()));
+                let state = crate::infrastructure::AppState::with_identity_service(
+                    db,
+                    std::sync::Arc::new(shared_id_svc.clone()),
+                );
+                let api = crate::api::api_router_with_state(state);
                 // Allow CORS for all origins/methods/headers for P2P ease
                 let cors = CorsLayer::new()
                     .allow_origin(Any)
