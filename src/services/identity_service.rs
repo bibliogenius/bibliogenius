@@ -243,8 +243,6 @@ mod tests {
     use sea_orm::Database;
 
     async fn setup_test_db() -> DatabaseConnection {
-        use sea_orm::{ConnectionTrait, Statement};
-
         let db = Database::connect("sqlite::memory:").await.unwrap();
         crate::infrastructure::db::run_migrations(&db)
             .await
