@@ -596,6 +596,7 @@ async fn create_test_outgoing_request(
         book_isbn: Set(isbn.to_string()),
         book_title: Set(title.to_string()),
         status: Set(status.to_string()),
+        lender_request_id: Set(None),
         created_at: Set(now.clone()),
         updated_at: Set(now),
     };

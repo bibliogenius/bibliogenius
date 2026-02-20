@@ -143,6 +143,7 @@ fn build_routes() -> Router<AppState> {
         ) // TTL cleanup for privacy
         .route("/peers/search", post(peer::search_local))
         .route("/peers/proxy_search", post(peer::proxy_search))
+        .route("/peers/return_book", post(peer::return_borrowed_book)) // Borrower-initiated return
         .route("/peers/request_by_url", post(peer::request_book_by_url)) // Send request by URL
         .route("/peers/:id/request", post(peer::request_book)) // Send request
         .route("/peers/request", post(peer::receive_request)) // Receive request

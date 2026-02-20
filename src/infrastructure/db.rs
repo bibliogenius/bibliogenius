@@ -1059,5 +1059,15 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
             .await;
     }
 
+    // Migration 042: Add lender_request_id to p2p_outgoing_requests
+    // Stores the lender's p2p_request.id so the borrower can notify
+    // the lender when returning a book.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE p2p_outgoing_requests ADD COLUMN lender_request_id TEXT".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }

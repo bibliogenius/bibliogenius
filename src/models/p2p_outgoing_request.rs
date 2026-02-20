@@ -10,6 +10,7 @@ pub struct Model {
     pub book_isbn: String,
     pub book_title: String,
     pub status: String,
+    pub lender_request_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
