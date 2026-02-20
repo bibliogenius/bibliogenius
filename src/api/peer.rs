@@ -1099,7 +1099,8 @@ pub async fn search_local(
 
 #[derive(Deserialize)]
 pub struct ProxySearchRequest {
-    peer_id: i32,
+    peer_id: Option<i32>,
+    peer_url: Option<String>,
     query: String,
 }
 
@@ -1109,11 +1110,22 @@ pub async fn proxy_search(
 ) -> impl IntoResponse {
     let db = state.db();
 
-    // 1. Find peer
-    let peer = peer::Entity::find_by_id(payload.peer_id)
-        .one(db)
-        .await
-        .unwrap_or(None);
+    // 1. Find peer by id or url
+    let peer = if let Some(id) = payload.peer_id {
+        peer::Entity::find_by_id(id).one(db).await.unwrap_or(None)
+    } else if let Some(ref url) = payload.peer_url {
+        peer::Entity::find()
+            .filter(peer::Column::Url.eq(url.as_str()))
+            .one(db)
+            .await
+            .unwrap_or(None)
+    } else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "peer_id or peer_url required" })),
+        )
+            .into_response();
+    };
 
     if let Some(peer) = peer {
         // Validate Peer URL (just in case it was modified in DB)
@@ -1156,20 +1168,32 @@ pub async fn proxy_search(
             }
         }
 
-        // 2. Legacy plaintext: call peer's search endpoint
+        // 2. Legacy plaintext fallback
         let client = get_safe_client();
-        let url = format!("{}/api/peers/search", peer.url);
-
-        let res = client
-            .post(&url)
-            .json(&json!({ "query": payload.query }))
-            .send()
-            .await;
+        let res = if payload.query.is_empty() {
+            // Empty query = fetch all books
+            let url = format!("{}/api/books", peer.url);
+            client.get(&url).send().await
+        } else {
+            let url = format!("{}/api/peers/search", peer.url);
+            client
+                .post(&url)
+                .json(&json!({ "query": payload.query }))
+                .send()
+                .await
+        };
 
         match res {
             Ok(response) => {
                 if response.status().is_success() {
-                    let books: Vec<crate::models::Book> = response.json().await.unwrap_or(vec![]);
+                    // /api/books returns {"books": [...], "total": N}
+                    // /api/peers/search returns [...]
+                    let body: serde_json::Value = response.json().await.unwrap_or(json!([]));
+                    let books: Vec<crate::models::Book> = if let Some(arr) = body.get("books") {
+                        serde_json::from_value(arr.clone()).unwrap_or_default()
+                    } else {
+                        serde_json::from_value(body).unwrap_or_default()
+                    };
                     return (StatusCode::OK, Json(books)).into_response();
                 }
             }
@@ -1317,10 +1341,11 @@ pub async fn sync_peer(
 
 /// Sync peer by URL (solves ID mismatch between Hub and Backend)
 pub async fn sync_peer_by_url(
-    State(db): State<DatabaseConnection>,
+    State(state): State<crate::infrastructure::AppState>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use crate::models::peer_book;
+    let db = state.db().clone();
 
     // Extract URL from payload
     let peer_url = match payload.get("url").and_then(|v| v.as_str()) {
@@ -1477,93 +1502,99 @@ pub async fn sync_peer_by_url(
             .into_response();
     }
 
-    // 4. Fetch remote books
-    let url = format!("{}/api/books", peer.url);
-
-    let res = client.get(&url).send().await;
-
-    match res {
-        Ok(response) => {
-            if response.status().is_success() {
-                // Parse response: { "books": [...] }
-                #[derive(Deserialize)]
-                struct BooksResponse {
-                    books: Vec<crate::models::Book>,
-                }
-
-                match response.json::<BooksResponse>().await {
-                    Ok(data) => {
-                        // 3. Clear old cache for this peer
-                        let _ = peer_book::Entity::delete_many()
-                            .filter(peer_book::Column::PeerId.eq(peer.id))
-                            .exec(&db)
-                            .await;
-
-                        let count = data.books.len();
-
-                        // 4. Insert new cache
-                        for book in data.books {
-                            let cache = peer_book::ActiveModel {
-                                peer_id: Set(peer.id),
-                                remote_book_id: Set(book.id.unwrap_or(0)),
-                                title: Set(book.title),
-                                isbn: Set(book.isbn),
-                                author: Set(book.author),
-                                cover_url: Set(book.cover_url),
-                                summary: Set(book.summary),
-                                synced_at: Set(chrono::Utc::now().to_rfc3339()),
-                                ..Default::default()
-                            };
-                            let _ = peer_book::Entity::insert(cache).exec(&db).await;
-                        }
-
-                        // Sync gamification stats
-                        sync_peer_gamification_stats(
-                            &db,
-                            peer.id,
-                            &peer.url,
-                            &client,
-                            shares_gamification,
-                        )
-                        .await;
-
-                        // Update peer's last_seen (and name if changed) after successful sync
-                        let peer_id = peer.id; // Save before moving
-                        let mut active_peer: peer::ActiveModel = peer.into();
-                        if let Some(ref new_name) = updated_name {
-                            active_peer.name = Set(new_name.clone());
-                            tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
-                        }
-                        active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
-                        active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
-                        let _ = active_peer.update(&db).await;
-
-                        (
-                        StatusCode::OK,
-                        Json(json!({ "message": "Sync successful", "count": count, "peer_id": peer_id })),
-                    )
-                        .into_response()
-                    }
-                    _ => (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": "Invalid response format" })),
-                    )
-                        .into_response(),
-                }
-            } else {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": "Peer returned error" })),
+    // 4. Fetch remote books — try E2EE first, then plaintext fallback
+    let books: Vec<crate::models::Book> =
+        match try_send_e2ee(&state, &peer, "book_sync_request", json!({})).await {
+            Ok(Some(Some(response_msg))) => {
+                // Got encrypted book list
+                serde_json::from_value(
+                    response_msg
+                        .payload
+                        .get("books")
+                        .cloned()
+                        .unwrap_or(json!([])),
                 )
-                    .into_response()
+                .unwrap_or_default()
             }
-        }
-        Err(_) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": "Failed to contact peer" })),
-        )
-            .into_response(),
+            Ok(Some(None)) => {
+                // E2EE sent but no response body (unexpected for sync)
+                vec![]
+            }
+            Ok(None) | Err(_) => {
+                // Fallback to plaintext
+                let url = format!("{}/api/books", peer.url);
+                match client.get(&url).send().await {
+                    Ok(response) if response.status().is_success() => {
+                        #[derive(Deserialize)]
+                        struct BooksResponse {
+                            books: Vec<crate::models::Book>,
+                        }
+                        response
+                            .json::<BooksResponse>()
+                            .await
+                            .map(|d| d.books)
+                            .unwrap_or_default()
+                    }
+                    Ok(_) => {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({ "error": "Peer returned error" })),
+                        )
+                            .into_response();
+                    }
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({ "error": "Failed to contact peer" })),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        };
+
+    // 5. Clear old cache and insert new books
+    let _ = peer_book::Entity::delete_many()
+        .filter(peer_book::Column::PeerId.eq(peer.id))
+        .exec(&db)
+        .await;
+
+    let count = books.len();
+
+    for book in books {
+        let cache = peer_book::ActiveModel {
+            peer_id: Set(peer.id),
+            remote_book_id: Set(book.id.unwrap_or(0)),
+            title: Set(book.title),
+            isbn: Set(book.isbn),
+            author: Set(book.author),
+            cover_url: Set(book.cover_url),
+            summary: Set(book.summary),
+            synced_at: Set(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+        let _ = peer_book::Entity::insert(cache).exec(&db).await;
     }
+
+    // 6. Sync gamification stats
+    sync_peer_gamification_stats(&db, peer.id, &peer.url, &client, shares_gamification).await;
+
+    // 7. Update peer's last_seen (and name if changed)
+    let peer_id = peer.id;
+    let mut active_peer: peer::ActiveModel = peer.into();
+    if let Some(ref new_name) = updated_name {
+        active_peer.name = Set(new_name.clone());
+        tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
+    }
+    active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
+    active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
+    let _ = active_peer.update(&db).await;
+
+    (
+        StatusCode::OK,
+        Json(json!({ "message": "Sync successful", "count": count, "peer_id": peer_id })),
+    )
+        .into_response()
 }
 
 // --- Federated Search Helper ---
