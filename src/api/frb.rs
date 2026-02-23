@@ -1277,3 +1277,131 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
         last_error
     ))
 }
+
+// ============ Memory Game (FFI) ============
+
+/// A card in the memory game (FFI-safe)
+pub struct FrbMemoryCard {
+    pub book_id: i32,
+    pub title: String,
+    pub cover_url: String,
+}
+
+/// A saved memory game score (FFI-safe)
+pub struct FrbMemoryScore {
+    pub id: Option<i32>,
+    pub difficulty: String,
+    pub pairs_count: i32,
+    pub elapsed_seconds: f64,
+    pub errors: i32,
+    pub normalized_score: f64,
+    pub played_at: String,
+}
+
+/// A leaderboard entry (FFI-safe)
+pub struct FrbMemoryLeaderboardEntry {
+    pub peer_id: i32,
+    pub library_name: String,
+    pub best_score: f64,
+    pub difficulty: String,
+    pub played_at: String,
+}
+
+/// Get available difficulty levels based on books with covers
+pub async fn memory_game_available_difficulties() -> Result<Vec<String>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+    let difficulties = crate::modules::memory_game::service::available_difficulties(&repo)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(difficulties
+        .iter()
+        .map(|d| d.as_str().to_string())
+        .collect())
+}
+
+/// Set up a new memory game with the given difficulty
+pub async fn memory_game_setup(difficulty: String) -> Result<Vec<FrbMemoryCard>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+    let diff = crate::modules::memory_game::service::MemoryDifficulty::parse(&difficulty)
+        .map_err(|e| e.to_string())?;
+    let cards = crate::modules::memory_game::service::setup_game(&repo, diff)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(cards
+        .into_iter()
+        .map(|c| FrbMemoryCard {
+            book_id: c.book_id,
+            title: c.title,
+            cover_url: c.cover_url,
+        })
+        .collect())
+}
+
+/// Submit a completed game and get the score back
+pub async fn memory_game_finish(
+    difficulty: String,
+    elapsed_seconds: f64,
+    errors: i32,
+    pairs_count: i32,
+) -> Result<FrbMemoryScore, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+    let result = crate::modules::memory_game::domain::MemoryGameResult {
+        difficulty,
+        elapsed_seconds,
+        errors,
+        pairs_count,
+    };
+    let score = crate::modules::memory_game::service::finish_game(&repo, result)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(FrbMemoryScore {
+        id: score.id,
+        difficulty: score.difficulty,
+        pairs_count: score.pairs_count,
+        elapsed_seconds: score.elapsed_seconds,
+        errors: score.errors,
+        normalized_score: score.normalized_score,
+        played_at: score.played_at,
+    })
+}
+
+/// Get top memory game scores
+pub async fn memory_game_top_scores() -> Result<Vec<FrbMemoryScore>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+    use crate::modules::memory_game::domain::MemoryGameRepository;
+    let scores = repo.get_top_scores(10).await.map_err(|e| e.to_string())?;
+    Ok(scores
+        .into_iter()
+        .map(|s| FrbMemoryScore {
+            id: s.id,
+            difficulty: s.difficulty,
+            pairs_count: s.pairs_count,
+            elapsed_seconds: s.elapsed_seconds,
+            errors: s.errors,
+            normalized_score: s.normalized_score,
+            played_at: s.played_at,
+        })
+        .collect())
+}
+
+/// Get leaderboard (peer scores)
+pub async fn memory_game_leaderboard() -> Result<Vec<FrbMemoryLeaderboardEntry>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+    use crate::modules::memory_game::domain::MemoryGameRepository;
+    let scores = repo.get_peer_scores().await.map_err(|e| e.to_string())?;
+    Ok(scores
+        .into_iter()
+        .map(|s| FrbMemoryLeaderboardEntry {
+            peer_id: s.peer_id,
+            library_name: s.library_name,
+            best_score: s.best_score,
+            difficulty: s.difficulty,
+            played_at: s.played_at,
+        })
+        .collect())
+}

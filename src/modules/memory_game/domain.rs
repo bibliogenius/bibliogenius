@@ -1,8 +1,12 @@
-//! Memory Game repository trait and related types
+//! Memory Game domain types and repository trait
+//!
+//! Self-contained domain layer for the memory game module.
+//! No framework dependencies (no SeaORM, no Axum).
 
 use async_trait::async_trait;
 
-use super::DomainError;
+/// Domain error type (re-exported from main domain for consistency)
+pub use crate::domain::DomainError;
 
 /// A book card for the memory game (book with a cover)
 #[derive(Debug, Clone, serde::Serialize)]

@@ -252,6 +252,8 @@ fn build_routes() -> Router<AppState> {
             "/gamification/refresh-leaderboard",
             post(gamification::refresh_leaderboard),
         )
+        // Memory Game (self-contained module)
+        .merge(crate::modules::memory_game::routes())
         // Peer relay setup
         .route("/peers/relay/setup", post(peer::setup_relay))
         .route("/peers/relay/config", get(peer::get_relay_config_endpoint))
