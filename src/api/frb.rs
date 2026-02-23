@@ -1307,6 +1307,8 @@ pub struct FrbMemoryLeaderboardEntry {
     pub best_score: f64,
     pub difficulty: String,
     pub played_at: String,
+    /// True if this entry is the local user (not a peer)
+    pub is_self: bool,
 }
 
 /// Get available difficulty levels based on books with covers
@@ -1405,13 +1407,18 @@ pub async fn memory_game_top_scores() -> Result<Vec<FrbMemoryScore>, String> {
         .collect())
 }
 
-/// Get leaderboard (peer scores)
+/// Get leaderboard (peer scores + local user's best)
 pub async fn memory_game_leaderboard() -> Result<Vec<FrbMemoryLeaderboardEntry>, String> {
     let db = db().ok_or("Database not initialized")?;
-    let repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+    let game_repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
     use crate::modules::memory_game::domain::MemoryGameRepository;
-    let scores = repo.get_peer_scores().await.map_err(|e| e.to_string())?;
-    Ok(scores
+
+    // Peer scores
+    let peer_scores = game_repo
+        .get_peer_scores()
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut entries: Vec<FrbMemoryLeaderboardEntry> = peer_scores
         .into_iter()
         .map(|s| FrbMemoryLeaderboardEntry {
             peer_id: s.peer_id,
@@ -1419,8 +1426,41 @@ pub async fn memory_game_leaderboard() -> Result<Vec<FrbMemoryLeaderboardEntry>,
             best_score: s.best_score,
             difficulty: s.difficulty,
             played_at: s.played_at,
+            is_self: false,
         })
-        .collect())
+        .collect();
+
+    // Add local user's best score
+    let top_scores = game_repo
+        .get_top_scores(1)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(best) = top_scores.first() {
+        let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
+        use crate::domain::GamificationRepository;
+        let library_name = gamification_repo
+            .get_library_name()
+            .await
+            .unwrap_or_else(|_| "My Library".to_string());
+
+        entries.push(FrbMemoryLeaderboardEntry {
+            peer_id: 0,
+            library_name,
+            best_score: best.normalized_score,
+            difficulty: best.difficulty.clone(),
+            played_at: best.played_at.clone(),
+            is_self: true,
+        });
+    }
+
+    // Sort by best_score descending
+    entries.sort_by(|a, b| {
+        b.best_score
+            .partial_cmp(&a.best_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Ok(entries)
 }
 
 // ─── Gamification (FFI direct) ──────────────────────────────────────────────

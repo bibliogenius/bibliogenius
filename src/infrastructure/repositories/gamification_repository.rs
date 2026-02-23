@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set,
+    QueryOrder, Set,
 };
 
 use crate::domain::{
@@ -12,7 +12,7 @@ use crate::domain::{
     PeerGamificationStatsRow,
 };
 use crate::models::{
-    book, book_tags, gamification_achievements, gamification_config, gamification_streaks,
+    book, gamification_achievements, gamification_config, gamification_streaks,
     installation_profile, library_config, loan, peer_gamification_stats,
 };
 
@@ -52,17 +52,16 @@ impl GamificationRepository for SeaOrmGamificationRepository {
     }
 
     async fn count_catalogued_books(&self) -> Result<i64, DomainError> {
-        let count = book_tags::Entity::find()
-            .select_only()
-            .column_as(
-                sea_orm::sea_query::Expr::cust("COUNT(DISTINCT book_id)"),
-                "count",
-            )
-            .into_tuple::<i64>()
-            .one(&self.db)
-            .await?
-            .unwrap_or(0);
-        Ok(count)
+        // Books are tagged via the `subjects` JSON column (e.g. '["classique","littérature"]'),
+        // NOT via the `book_tags` junction table (which is unused).
+        // Count books that have at least one subject assigned.
+        Ok(book::Entity::find()
+            .filter(book::Column::Subjects.is_not_null())
+            .filter(book::Column::Subjects.ne(""))
+            .filter(book::Column::Subjects.ne("[]"))
+            .filter(book::Column::Subjects.ne("null"))
+            .count(&self.db)
+            .await? as i64)
     }
 
     async fn get_streak(

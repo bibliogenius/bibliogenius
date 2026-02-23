@@ -2380,12 +2380,14 @@ impl SseDecode for crate::api::frb::FrbMemoryLeaderboardEntry {
         let mut var_bestScore = <f64>::sse_decode(deserializer);
         let mut var_difficulty = <String>::sse_decode(deserializer);
         let mut var_playedAt = <String>::sse_decode(deserializer);
+        let mut var_isSelf = <bool>::sse_decode(deserializer);
         return crate::api::frb::FrbMemoryLeaderboardEntry {
             peer_id: var_peerId,
             library_name: var_libraryName,
             best_score: var_bestScore,
             difficulty: var_difficulty,
             played_at: var_playedAt,
+            is_self: var_isSelf,
         };
     }
 }
@@ -3149,6 +3151,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbMemoryLeaderboardEntr
             self.best_score.into_into_dart().into_dart(),
             self.difficulty.into_into_dart().into_dart(),
             self.played_at.into_into_dart().into_dart(),
+            self.is_self.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -3449,6 +3452,7 @@ impl SseEncode for crate::api::frb::FrbMemoryLeaderboardEntry {
         <f64>::sse_encode(self.best_score, serializer);
         <String>::sse_encode(self.difficulty, serializer);
         <String>::sse_encode(self.played_at, serializer);
+        <bool>::sse_encode(self.is_self, serializer);
     }
 }
 
