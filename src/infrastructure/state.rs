@@ -4,10 +4,13 @@ use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-use crate::domain::{AuthorRepository, BookRepository, CollectionRepository, CopyRepository};
+use crate::domain::{
+    AuthorRepository, BookRepository, CollectionRepository, CopyRepository, GamificationRepository,
+};
 use crate::infrastructure::nonce_store::SqliteNonceStore;
 use crate::infrastructure::{
     SeaOrmAuthorRepository, SeaOrmBookRepository, SeaOrmCollectionRepository, SeaOrmCopyRepository,
+    SeaOrmGamificationRepository,
 };
 use crate::services::IdentityService;
 use crate::services::crypto_service::CryptoService;
@@ -25,6 +28,8 @@ pub struct AppState {
     pub copy_repo: Arc<dyn CopyRepository>,
     /// Collection repository
     pub collection_repo: Arc<dyn CollectionRepository>,
+    /// Gamification repository
+    pub gamification_repo: Arc<dyn GamificationRepository>,
     /// Identity service for E2EE key management
     pub identity_service: Arc<IdentityService>,
     /// Crypto service for E2EE seal/open (lazily initialized after identity is ready)
@@ -48,6 +53,7 @@ impl AppState {
         let author_repo = Arc::new(SeaOrmAuthorRepository::new(db.clone()));
         let copy_repo = Arc::new(SeaOrmCopyRepository::new(db.clone()));
         let collection_repo = Arc::new(SeaOrmCollectionRepository::new(db.clone()));
+        let gamification_repo = Arc::new(SeaOrmGamificationRepository::new(db.clone()));
 
         Self {
             db,
@@ -55,6 +61,7 @@ impl AppState {
             author_repo,
             copy_repo,
             collection_repo,
+            gamification_repo,
             identity_service,
             crypto_service: Arc::new(OnceCell::new()),
         }

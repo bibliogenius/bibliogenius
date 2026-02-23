@@ -26,7 +26,7 @@
 // Section: imports
 
 use flutter_rust_bridge::for_generated::byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
-use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
+use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
 use flutter_rust_bridge::{Handler, IntoIntoDart};
 
 // Section: boilerplate
@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 128243172;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1952719176;
 
 // Section: executor
 
@@ -444,6 +444,222 @@ fn wire__crate__api__frb__enrich_missing_covers_impl(
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let output_ok = crate::api::frb::enrich_missing_covers().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__gamification_check_achievements_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "gamification_check_achievements",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::gamification_check_achievements().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__gamification_get_leaderboard_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "gamification_get_leaderboard",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::gamification_get_leaderboard().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__gamification_get_status_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "gamification_get_status",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::gamification_get_status().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__gamification_refresh_leaderboard_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "gamification_refresh_leaderboard",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::gamification_refresh_leaderboard().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__gamification_update_config_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "gamification_update_config",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_reading_goal_yearly = <Option<i32>>::sse_decode(&mut deserializer);
+            let api_achievements_style = <Option<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::gamification_update_config(
+                            api_reading_goal_yearly,
+                            api_achievements_style,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__gamification_update_streak_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "gamification_update_streak",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::gamification_update_streak().await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -1866,6 +2082,13 @@ impl SseDecode for bool {
     }
 }
 
+impl SseDecode for f32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_f32::<NativeEndian>().unwrap()
+    }
+}
+
 impl SseDecode for f64 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2019,6 +2242,92 @@ impl SseDecode for crate::api::frb::FrbDiscoveredPeer {
     }
 }
 
+impl SseDecode for crate::api::frb::FrbGamificationConfig {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_achievementsStyle = <String>::sse_decode(deserializer);
+        let mut var_readingGoalYearly = <i32>::sse_decode(deserializer);
+        let mut var_readingGoalProgress = <i32>::sse_decode(deserializer);
+        let mut var_totalBooksRead = <i32>::sse_decode(deserializer);
+        return crate::api::frb::FrbGamificationConfig {
+            achievements_style: var_achievementsStyle,
+            reading_goal_yearly: var_readingGoalYearly,
+            reading_goal_progress: var_readingGoalProgress,
+            total_books_read: var_totalBooksRead,
+        };
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbGamificationStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_collector = <crate::api::frb::FrbTrackProgress>::sse_decode(deserializer);
+        let mut var_reader = <crate::api::frb::FrbTrackProgress>::sse_decode(deserializer);
+        let mut var_lender = <crate::api::frb::FrbTrackProgress>::sse_decode(deserializer);
+        let mut var_cataloguer = <crate::api::frb::FrbTrackProgress>::sse_decode(deserializer);
+        let mut var_streak = <crate::api::frb::FrbStreakInfo>::sse_decode(deserializer);
+        let mut var_recentAchievements = <Vec<String>>::sse_decode(deserializer);
+        let mut var_config = <crate::api::frb::FrbGamificationConfig>::sse_decode(deserializer);
+        let mut var_level = <String>::sse_decode(deserializer);
+        let mut var_loansCount = <i64>::sse_decode(deserializer);
+        let mut var_editsCount = <i64>::sse_decode(deserializer);
+        let mut var_nextLevelProgress = <f32>::sse_decode(deserializer);
+        let mut var_badgeUrl = <String>::sse_decode(deserializer);
+        return crate::api::frb::FrbGamificationStatus {
+            collector: var_collector,
+            reader: var_reader,
+            lender: var_lender,
+            cataloguer: var_cataloguer,
+            streak: var_streak,
+            recent_achievements: var_recentAchievements,
+            config: var_config,
+            level: var_level,
+            loans_count: var_loansCount,
+            edits_count: var_editsCount,
+            next_level_progress: var_nextLevelProgress,
+            badge_url: var_badgeUrl,
+        };
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbLeaderboardEntry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_libraryName = <String>::sse_decode(deserializer);
+        let mut var_level = <i32>::sse_decode(deserializer);
+        let mut var_current = <i64>::sse_decode(deserializer);
+        let mut var_isSelf = <bool>::sse_decode(deserializer);
+        let mut var_peerId = <Option<i32>>::sse_decode(deserializer);
+        return crate::api::frb::FrbLeaderboardEntry {
+            library_name: var_libraryName,
+            level: var_level,
+            current: var_current,
+            is_self: var_isSelf,
+            peer_id: var_peerId,
+        };
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbLeaderboardResponse {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_collector =
+            <Vec<crate::api::frb::FrbLeaderboardEntry>>::sse_decode(deserializer);
+        let mut var_reader = <Vec<crate::api::frb::FrbLeaderboardEntry>>::sse_decode(deserializer);
+        let mut var_lender = <Vec<crate::api::frb::FrbLeaderboardEntry>>::sse_decode(deserializer);
+        let mut var_cataloguer =
+            <Vec<crate::api::frb::FrbLeaderboardEntry>>::sse_decode(deserializer);
+        let mut var_lastRefreshed = <Option<String>>::sse_decode(deserializer);
+        return crate::api::frb::FrbLeaderboardResponse {
+            collector: var_collector,
+            reader: var_reader,
+            lender: var_lender,
+            cataloguer: var_cataloguer,
+            last_refreshed: var_lastRefreshed,
+        };
+    }
+}
+
 impl SseDecode for crate::api::frb::FrbLoan {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2091,6 +2400,7 @@ impl SseDecode for crate::api::frb::FrbMemoryScore {
         let mut var_errors = <i32>::sse_decode(deserializer);
         let mut var_normalizedScore = <f64>::sse_decode(deserializer);
         let mut var_playedAt = <String>::sse_decode(deserializer);
+        let mut var_newAchievements = <Vec<String>>::sse_decode(deserializer);
         return crate::api::frb::FrbMemoryScore {
             id: var_id,
             difficulty: var_difficulty,
@@ -2099,6 +2409,19 @@ impl SseDecode for crate::api::frb::FrbMemoryScore {
             errors: var_errors,
             normalized_score: var_normalizedScore,
             played_at: var_playedAt,
+            new_achievements: var_newAchievements,
+        };
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbStreakInfo {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_current = <i32>::sse_decode(deserializer);
+        let mut var_longest = <i32>::sse_decode(deserializer);
+        return crate::api::frb::FrbStreakInfo {
+            current: var_current,
+            longest: var_longest,
         };
     }
 }
@@ -2115,6 +2438,22 @@ impl SseDecode for crate::api::frb::FrbTag {
             name: var_name,
             parent_id: var_parentId,
             count: var_count,
+        };
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbTrackProgress {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_level = <i32>::sse_decode(deserializer);
+        let mut var_progress = <f32>::sse_decode(deserializer);
+        let mut var_current = <i64>::sse_decode(deserializer);
+        let mut var_nextThreshold = <i32>::sse_decode(deserializer);
+        return crate::api::frb::FrbTrackProgress {
+            level: var_level,
+            progress: var_progress,
+            current: var_current,
+            next_threshold: var_nextThreshold,
         };
     }
 }
@@ -2190,6 +2529,20 @@ impl SseDecode for Vec<crate::api::frb::FrbDiscoveredPeer> {
         let mut ans_ = vec![];
         for idx_ in 0..len_ {
             ans_.push(<crate::api::frb::FrbDiscoveredPeer>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::frb::FrbLeaderboardEntry> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::frb::FrbLeaderboardEntry>::sse_decode(
                 deserializer,
             ));
         }
@@ -2388,60 +2741,93 @@ fn pde_ffi_dispatcher_primary_impl(
         9 => wire__crate__api__frb__delete_contact_impl(port, ptr, rust_vec_len, data_len),
         10 => wire__crate__api__frb__delete_tag_impl(port, ptr, rust_vec_len, data_len),
         11 => wire__crate__api__frb__enrich_missing_covers_impl(port, ptr, rust_vec_len, data_len),
-        12 => {
+        12 => wire__crate__api__frb__gamification_check_achievements_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        13 => wire__crate__api__frb__gamification_get_leaderboard_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        14 => {
+            wire__crate__api__frb__gamification_get_status_impl(port, ptr, rust_vec_len, data_len)
+        }
+        15 => wire__crate__api__frb__gamification_refresh_leaderboard_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        16 => wire__crate__api__frb__gamification_update_config_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        17 => wire__crate__api__frb__gamification_update_streak_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        18 => {
             wire__crate__api__frb__generate_invite_link_ffi_impl(port, ptr, rust_vec_len, data_len)
         }
-        13 => {
+        19 => {
             wire__crate__api__frb__generate_qr_payload_ffi_impl(port, ptr, rust_vec_len, data_len)
         }
-        14 => wire__crate__api__frb__get_all_books_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__frb__get_all_contacts_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__frb__get_all_loans_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__frb__get_all_tags_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__frb__get_book_by_id_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__frb__get_contact_by_id_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__frb__get_local_peers_ffi_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__frb__get_public_keys_ffi_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__frb__init_backend_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__frb__init_identity_ffi_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__frb__init_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__frb__lookup_book_metadata_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__frb__memory_game_available_difficulties_impl(
+        20 => wire__crate__api__frb__get_all_books_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__frb__get_all_contacts_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__frb__get_all_loans_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__frb__get_all_tags_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__frb__get_book_by_id_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__frb__get_contact_by_id_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__frb__get_local_peers_ffi_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__frb__get_public_keys_ffi_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__frb__init_backend_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__frb__init_identity_ffi_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__frb__init_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__frb__lookup_book_metadata_impl(port, ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__frb__memory_game_available_difficulties_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        32 => wire__crate__api__frb__memory_game_finish_impl(port, ptr, rust_vec_len, data_len),
-        33 => {
+        38 => wire__crate__api__frb__memory_game_finish_impl(port, ptr, rust_vec_len, data_len),
+        39 => {
             wire__crate__api__frb__memory_game_leaderboard_impl(port, ptr, rust_vec_len, data_len)
         }
-        34 => wire__crate__api__frb__memory_game_setup_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__frb__memory_game_top_scores_impl(port, ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__frb__parse_invite_link_ffi_impl(port, ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__frb__parse_qr_payload_ffi_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__frb__reorder_books_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__frb__search_all_covers_by_title_impl(
+        40 => wire__crate__api__frb__memory_game_setup_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__frb__memory_game_top_scores_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__frb__parse_invite_link_ffi_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__frb__parse_qr_payload_ffi_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__frb__reorder_books_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
+        47 => wire__crate__api__frb__search_all_covers_by_title_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        42 => wire__crate__api__frb__search_all_covers_for_book_impl(
+        48 => wire__crate__api__frb__search_all_covers_for_book_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        43 => wire__crate__api__frb__search_cover_by_title_impl(port, ptr, rust_vec_len, data_len),
-        44 => wire__crate__api__frb__search_cover_for_book_impl(port, ptr, rust_vec_len, data_len),
-        45 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
-        47 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
-        48 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__frb__search_cover_by_title_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__frb__search_cover_for_book_impl(port, ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
+        55 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -2454,11 +2840,11 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        21 => wire__crate__api__frb__get_mdns_service_type_impl(ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__frb__get_version_impl(ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__frb__greet_impl(ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__frb__health_check_impl(ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__frb__is_mdns_available_impl(ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__frb__get_mdns_service_type_impl(ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__frb__get_version_impl(ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__frb__greet_impl(ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__frb__health_check_impl(ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__frb__is_mdns_available_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -2606,6 +2992,108 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbDiscoveredPeer>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbGamificationConfig {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.achievements_style.into_into_dart().into_dart(),
+            self.reading_goal_yearly.into_into_dart().into_dart(),
+            self.reading_goal_progress.into_into_dart().into_dart(),
+            self.total_books_read.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbGamificationConfig
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbGamificationConfig>
+    for crate::api::frb::FrbGamificationConfig
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbGamificationConfig {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbGamificationStatus {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.collector.into_into_dart().into_dart(),
+            self.reader.into_into_dart().into_dart(),
+            self.lender.into_into_dart().into_dart(),
+            self.cataloguer.into_into_dart().into_dart(),
+            self.streak.into_into_dart().into_dart(),
+            self.recent_achievements.into_into_dart().into_dart(),
+            self.config.into_into_dart().into_dart(),
+            self.level.into_into_dart().into_dart(),
+            self.loans_count.into_into_dart().into_dart(),
+            self.edits_count.into_into_dart().into_dart(),
+            self.next_level_progress.into_into_dart().into_dart(),
+            self.badge_url.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbGamificationStatus
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbGamificationStatus>
+    for crate::api::frb::FrbGamificationStatus
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbGamificationStatus {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbLeaderboardEntry {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.library_name.into_into_dart().into_dart(),
+            self.level.into_into_dart().into_dart(),
+            self.current.into_into_dart().into_dart(),
+            self.is_self.into_into_dart().into_dart(),
+            self.peer_id.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbLeaderboardEntry
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbLeaderboardEntry>
+    for crate::api::frb::FrbLeaderboardEntry
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbLeaderboardEntry {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbLeaderboardResponse {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.collector.into_into_dart().into_dart(),
+            self.reader.into_into_dart().into_dart(),
+            self.lender.into_into_dart().into_dart(),
+            self.cataloguer.into_into_dart().into_dart(),
+            self.last_refreshed.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbLeaderboardResponse
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbLeaderboardResponse>
+    for crate::api::frb::FrbLeaderboardResponse
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbLeaderboardResponse {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbLoan {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -2687,6 +3175,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbMemoryScore {
             self.errors.into_into_dart().into_dart(),
             self.normalized_score.into_into_dart().into_dart(),
             self.played_at.into_into_dart().into_dart(),
+            self.new_achievements.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -2699,6 +3188,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbMemoryScore>
     for crate::api::frb::FrbMemoryScore
 {
     fn into_into_dart(self) -> crate::api::frb::FrbMemoryScore {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbStreakInfo {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.current.into_into_dart().into_dart(),
+            self.longest.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbStreakInfo
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbStreakInfo>
+    for crate::api::frb::FrbStreakInfo
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbStreakInfo {
         self
     }
 }
@@ -2720,6 +3230,29 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbTag> for crate::api::
         self
     }
 }
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbTrackProgress {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.level.into_into_dart().into_dart(),
+            self.progress.into_into_dart().into_dart(),
+            self.current.into_into_dart().into_dart(),
+            self.next_threshold.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbTrackProgress
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbTrackProgress>
+    for crate::api::frb::FrbTrackProgress
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbTrackProgress {
+        self
+    }
+}
 
 impl SseEncode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2732,6 +3265,13 @@ impl SseEncode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_u8(self as _).unwrap();
+    }
+}
+
+impl SseEncode for f32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_f32::<NativeEndian>(self).unwrap();
     }
 }
 
@@ -2825,6 +3365,56 @@ impl SseEncode for crate::api::frb::FrbDiscoveredPeer {
     }
 }
 
+impl SseEncode for crate::api::frb::FrbGamificationConfig {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.achievements_style, serializer);
+        <i32>::sse_encode(self.reading_goal_yearly, serializer);
+        <i32>::sse_encode(self.reading_goal_progress, serializer);
+        <i32>::sse_encode(self.total_books_read, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbGamificationStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::frb::FrbTrackProgress>::sse_encode(self.collector, serializer);
+        <crate::api::frb::FrbTrackProgress>::sse_encode(self.reader, serializer);
+        <crate::api::frb::FrbTrackProgress>::sse_encode(self.lender, serializer);
+        <crate::api::frb::FrbTrackProgress>::sse_encode(self.cataloguer, serializer);
+        <crate::api::frb::FrbStreakInfo>::sse_encode(self.streak, serializer);
+        <Vec<String>>::sse_encode(self.recent_achievements, serializer);
+        <crate::api::frb::FrbGamificationConfig>::sse_encode(self.config, serializer);
+        <String>::sse_encode(self.level, serializer);
+        <i64>::sse_encode(self.loans_count, serializer);
+        <i64>::sse_encode(self.edits_count, serializer);
+        <f32>::sse_encode(self.next_level_progress, serializer);
+        <String>::sse_encode(self.badge_url, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbLeaderboardEntry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.library_name, serializer);
+        <i32>::sse_encode(self.level, serializer);
+        <i64>::sse_encode(self.current, serializer);
+        <bool>::sse_encode(self.is_self, serializer);
+        <Option<i32>>::sse_encode(self.peer_id, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbLeaderboardResponse {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::frb::FrbLeaderboardEntry>>::sse_encode(self.collector, serializer);
+        <Vec<crate::api::frb::FrbLeaderboardEntry>>::sse_encode(self.reader, serializer);
+        <Vec<crate::api::frb::FrbLeaderboardEntry>>::sse_encode(self.lender, serializer);
+        <Vec<crate::api::frb::FrbLeaderboardEntry>>::sse_encode(self.cataloguer, serializer);
+        <Option<String>>::sse_encode(self.last_refreshed, serializer);
+    }
+}
+
 impl SseEncode for crate::api::frb::FrbLoan {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2872,6 +3462,15 @@ impl SseEncode for crate::api::frb::FrbMemoryScore {
         <i32>::sse_encode(self.errors, serializer);
         <f64>::sse_encode(self.normalized_score, serializer);
         <String>::sse_encode(self.played_at, serializer);
+        <Vec<String>>::sse_encode(self.new_achievements, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbStreakInfo {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.current, serializer);
+        <i32>::sse_encode(self.longest, serializer);
     }
 }
 
@@ -2882,6 +3481,16 @@ impl SseEncode for crate::api::frb::FrbTag {
         <String>::sse_encode(self.name, serializer);
         <Option<i32>>::sse_encode(self.parent_id, serializer);
         <i64>::sse_encode(self.count, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbTrackProgress {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.level, serializer);
+        <f32>::sse_encode(self.progress, serializer);
+        <i64>::sse_encode(self.current, serializer);
+        <i32>::sse_encode(self.next_threshold, serializer);
     }
 }
 
@@ -2945,6 +3554,16 @@ impl SseEncode for Vec<crate::api::frb::FrbDiscoveredPeer> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::frb::FrbDiscoveredPeer>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::frb::FrbLeaderboardEntry> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::frb::FrbLeaderboardEntry>::sse_encode(item, serializer);
         }
     }
 }
@@ -3109,7 +3728,7 @@ mod io {
     use flutter_rust_bridge::for_generated::byteorder::{
         NativeEndian, ReadBytesExt, WriteBytesExt,
     };
-    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
+    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate
@@ -3133,7 +3752,7 @@ mod web {
     };
     use flutter_rust_bridge::for_generated::wasm_bindgen;
     use flutter_rust_bridge::for_generated::wasm_bindgen::prelude::*;
-    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
+    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate
