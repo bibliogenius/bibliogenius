@@ -476,7 +476,21 @@ pub async fn create_book(book: FrbBook) -> Result<FrbBook, String> {
     let book_dto: crate::models::Book = book.into();
 
     match crate::services::book_service::create_book(db, book_dto).await {
-        Ok(created_book) => Ok(FrbBook::from(created_book)),
+        Ok(created_book) => {
+            // Check achievements after book creation (e.g. first_book, collector badges)
+            let _ = {
+                let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
+                let game_repo =
+                    crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+                crate::services::gamification_service::check_and_unlock_achievements(
+                    &gamification_repo,
+                    &game_repo,
+                    1,
+                )
+                .await
+            };
+            Ok(FrbBook::from(created_book))
+        }
         Err(crate::services::book_service::ServiceError::InvalidInput(msg)) => Err(msg),
         Err(e) => Err(format!("{:?}", e)),
     }
