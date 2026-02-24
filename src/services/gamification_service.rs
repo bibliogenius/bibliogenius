@@ -193,7 +193,7 @@ pub async fn get_user_status(
     // Parallel group 2: Streak, achievements, config
     let (streak_result, achievements_result, config_result) = tokio::join!(
         repo.get_streak(user_id),
-        repo.get_recent_achievements(user_id, 5),
+        repo.get_recent_achievements(user_id, 50),
         repo.get_config(user_id),
     );
 

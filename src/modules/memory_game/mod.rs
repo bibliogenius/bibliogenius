@@ -9,7 +9,7 @@
 //!   - `infrastructure/db.rs`:  modules::memory_game::migrate(&db).await?;
 
 pub mod domain;
-mod handlers;
+pub(crate) mod handlers;
 mod models;
 pub mod repository;
 pub mod service;
@@ -34,6 +34,10 @@ pub fn routes() -> Router<AppState> {
         .route("/game/memory/scores", get(handlers::get_top_scores))
         .route("/game/memory/leaderboard", get(handlers::get_leaderboard))
         .route("/game/memory/public-best", get(handlers::get_public_best))
+        .route(
+            "/game/memory/refresh-leaderboard",
+            post(handlers::refresh_leaderboard),
+        )
 }
 
 /// Run database migrations for this module

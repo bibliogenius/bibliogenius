@@ -648,8 +648,12 @@ async fn sync_peer_internal(
         .as_ref()
         .is_some_and(|c| c.allow_library_caching);
     let shares_gamification = peer_config.as_ref().map(|c| c.share_gamification_stats);
+    let peer_has_memory_game = peer_config
+        .as_ref()
+        .map(|c| c.enabled_modules.contains(&"memory_game".to_string()));
 
     // Extract updated name from peer config (if changed)
+    let peer_library_name = peer_config.as_ref().map(|c| c.library_name.clone());
     let updated_name = if let Some(config) = &peer_config {
         if let Ok(Some(p)) = peer::Entity::find_by_id(peer_id).one(db).await {
             if p.name != config.library_name {
@@ -664,6 +668,9 @@ async fn sync_peer_internal(
         None
     };
 
+    // Resolve peer display name for memory score upsert
+    let display_name = peer_library_name.as_deref().unwrap_or(peer_url);
+
     if !allows_caching {
         tracing::info!(
             "Peer {} does not allow library caching, skipping book sync",
@@ -671,6 +678,16 @@ async fn sync_peer_internal(
         );
         // Still sync gamification stats if available
         sync_peer_gamification_stats(db, peer_id, peer_url, &client, shares_gamification).await;
+        // Still sync memory game scores
+        crate::modules::memory_game::handlers::sync_peer_memory_scores(
+            db,
+            peer_id,
+            peer_url,
+            display_name,
+            &client,
+            peer_has_memory_game,
+        )
+        .await;
         // Still update last_seen (and name if changed)
         if let Ok(Some(peer)) = crate::models::peer::Entity::find_by_id(peer_id)
             .one(db)
@@ -738,6 +755,17 @@ async fn sync_peer_internal(
 
     // Sync gamification stats if both sides have the module enabled
     sync_peer_gamification_stats(db, peer_id, peer_url, &client, shares_gamification).await;
+
+    // Sync memory game scores
+    crate::modules::memory_game::handlers::sync_peer_memory_scores(
+        db,
+        peer_id,
+        peer_url,
+        display_name,
+        &client,
+        peer_has_memory_game,
+    )
+    .await;
 
     // Update peer's last_seen (and name if changed)
     if let Ok(Some(peer)) = crate::models::peer::Entity::find_by_id(peer_id)
@@ -1378,8 +1406,7 @@ pub async fn search_local(
         .await
         .unwrap_or(vec![]);
 
-    let book_dtos: Vec<crate::models::Book> =
-        books.into_iter().map(crate::models::Book::from).collect();
+    let book_dtos = crate::models::Book::populate_authors(&db, books).await;
     (StatusCode::OK, Json(book_dtos)).into_response()
 }
 
@@ -1547,6 +1574,13 @@ pub async fn sync_peer(
         _ => None,
     };
     let shares_gamification = peer_config.as_ref().map(|c| c.share_gamification_stats);
+    let peer_has_memory_game = peer_config
+        .as_ref()
+        .map(|c| c.enabled_modules.contains(&"memory_game".to_string()));
+    let peer_display_name = peer_config
+        .as_ref()
+        .map(|c| c.library_name.clone())
+        .unwrap_or_else(|| peer.name.clone());
 
     let url = format!("{}/api/books", peer.url);
 
@@ -1594,6 +1628,17 @@ pub async fn sync_peer(
                             &peer.url,
                             &client,
                             shares_gamification,
+                        )
+                        .await;
+
+                        // Sync memory game scores
+                        crate::modules::memory_game::handlers::sync_peer_memory_scores(
+                            &db,
+                            peer.id,
+                            &peer.url,
+                            &peer_display_name,
+                            &client,
+                            peer_has_memory_game,
                         )
                         .await;
 
@@ -1755,6 +1800,13 @@ pub async fn sync_peer_by_url(
         .as_ref()
         .is_some_and(|c| c.allow_library_caching);
     let shares_gamification = peer_config.as_ref().map(|c| c.share_gamification_stats);
+    let peer_has_memory_game_url = peer_config
+        .as_ref()
+        .map(|c| c.enabled_modules.contains(&"memory_game".to_string()));
+    let peer_display_name_url = peer_config
+        .as_ref()
+        .map(|c| c.library_name.clone())
+        .unwrap_or_else(|| peer.name.clone());
 
     // Extract updated name from peer config (if changed)
     let updated_name = peer_config
@@ -1765,6 +1817,16 @@ pub async fn sync_peer_by_url(
     if !allows_caching {
         // Peer doesn't allow caching - still sync gamification stats
         sync_peer_gamification_stats(&db, peer.id, &peer.url, &client, shares_gamification).await;
+        // Still sync memory game scores
+        crate::modules::memory_game::handlers::sync_peer_memory_scores(
+            &db,
+            peer.id,
+            &peer.url,
+            &peer_display_name_url,
+            &client,
+            peer_has_memory_game_url,
+        )
+        .await;
 
         let peer_id = peer.id;
         let mut active_peer: peer::ActiveModel = peer.into();
@@ -1864,6 +1926,17 @@ pub async fn sync_peer_by_url(
 
     // 6. Sync gamification stats
     sync_peer_gamification_stats(&db, peer.id, &peer.url, &client, shares_gamification).await;
+
+    // 6b. Sync memory game scores
+    crate::modules::memory_game::handlers::sync_peer_memory_scores(
+        &db,
+        peer.id,
+        &peer.url,
+        &peer_display_name_url,
+        &client,
+        peer_has_memory_game_url,
+    )
+    .await;
 
     // 7. Update peer's last_seen (and name if changed)
     let peer_id = peer.id;

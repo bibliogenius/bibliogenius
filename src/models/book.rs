@@ -1,5 +1,5 @@
 use sea_orm::entity::prelude::*;
-use sea_orm::{NotSet, Set};
+use sea_orm::{ModelTrait, NotSet, Set};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
@@ -175,6 +175,28 @@ impl From<Model> for Book {
             language,
             digital_formats,
         }
+    }
+}
+
+impl Book {
+    /// Convert book models to DTOs with author names populated from the book_authors table.
+    pub async fn populate_authors(
+        db: &sea_orm::DatabaseConnection,
+        models: Vec<Model>,
+    ) -> Vec<Book> {
+        let mut dtos = Vec::with_capacity(models.len());
+        for model in models {
+            let mut dto = Book::from(model.clone());
+            if let Ok(authors) = model.find_related(super::author::Entity).all(db).await
+                && !authors.is_empty()
+            {
+                let names: Vec<String> = authors.into_iter().map(|a| a.name).collect();
+                dto.author = Some(names.join(", "));
+                dto.authors = Some(names);
+            }
+            dtos.push(dto);
+        }
+        dtos
     }
 }
 

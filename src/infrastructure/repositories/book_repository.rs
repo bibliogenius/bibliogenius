@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, ModelTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, Set,
 };
 
 use crate::domain::{BookFilter, BookRepository, DomainError, PaginatedBooks};
@@ -77,24 +77,7 @@ impl BookRepository for SeaOrmBookRepository {
         };
 
         // Convert to DTOs and fetch related authors
-        let mut book_dtos = Vec::with_capacity(books.len());
-        for book_model in books {
-            let mut book_dto = Book::from(book_model.clone());
-
-            // Fetch authors
-            if let Ok(authors) = book_model
-                .find_related(crate::models::author::Entity)
-                .all(&self.db)
-                .await
-                && !authors.is_empty()
-            {
-                let author_names: Vec<String> = authors.into_iter().map(|a| a.name).collect();
-                book_dto.author = Some(author_names.join(", "));
-                book_dto.authors = Some(author_names);
-            }
-
-            book_dtos.push(book_dto);
-        }
+        let book_dtos = Book::populate_authors(&self.db, books).await;
 
         Ok(PaginatedBooks {
             books: book_dtos,
@@ -107,21 +90,8 @@ impl BookRepository for SeaOrmBookRepository {
 
         match book_model {
             Some(model) => {
-                let mut book_dto = Book::from(model.clone());
-
-                // Fetch authors
-                if let Ok(authors) = model
-                    .find_related(crate::models::author::Entity)
-                    .all(&self.db)
-                    .await
-                    && !authors.is_empty()
-                {
-                    let author_names: Vec<String> = authors.into_iter().map(|a| a.name).collect();
-                    book_dto.author = Some(author_names.join(", "));
-                    book_dto.authors = Some(author_names);
-                }
-
-                Ok(Some(book_dto))
+                let mut dtos = Book::populate_authors(&self.db, vec![model]).await;
+                Ok(dtos.pop())
             }
             None => Ok(None),
         }

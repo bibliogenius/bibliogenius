@@ -62,6 +62,12 @@ pub trait MemoryGameRepository: Send + Sync {
     /// Get the personal best normalized score
     async fn get_personal_best(&self) -> Result<Option<f64>, DomainError>;
 
+    /// Get the full best score entry (score + difficulty + played_at)
+    async fn get_best_score_entry(&self) -> Result<Option<MemoryGameScore>, DomainError>;
+
+    /// Delete all cached peer memory scores for a given peer
+    async fn delete_peer_scores(&self, peer_id: i32) -> Result<(), DomainError>;
+
     /// Upsert a peer's best memory game score (for leaderboard)
     async fn upsert_peer_score(
         &self,

@@ -427,13 +427,12 @@ async fn handle_loan_confirmation(
     }
 }
 
-/// Handle a book sync request — return local books as JSON payload.
+/// Handle a book sync request - return local books as JSON payload.
 async fn handle_book_sync_request(db: &DatabaseConnection) -> serde_json::Value {
     use crate::models::book;
 
     let books = book::Entity::find().all(db).await.unwrap_or_default();
-    let book_dtos: Vec<crate::models::Book> =
-        books.into_iter().map(crate::models::Book::from).collect();
+    let book_dtos = crate::models::Book::populate_authors(db, books).await;
     json!({ "books": book_dtos })
 }
 
@@ -453,8 +452,7 @@ async fn handle_search_request(db: &DatabaseConnection, msg: &ClearMessage) -> s
         .await
         .unwrap_or_default();
 
-    let book_dtos: Vec<crate::models::Book> =
-        books.into_iter().map(crate::models::Book::from).collect();
+    let book_dtos = crate::models::Book::populate_authors(db, books).await;
     json!({ "results": book_dtos })
 }
 

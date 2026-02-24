@@ -1477,6 +1477,118 @@ pub async fn memory_game_leaderboard() -> Result<Vec<FrbMemoryLeaderboardEntry>,
     Ok(entries)
 }
 
+/// Refresh the network memory game leaderboard by syncing with all accepted peers.
+/// Fetches each peer's /api/game/memory/public-best, upserts into peer_memory_scores,
+/// then returns the merged leaderboard.
+pub async fn memory_game_refresh_leaderboard() -> Result<Vec<FrbMemoryLeaderboardEntry>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let game_repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+    use crate::modules::memory_game::domain::MemoryGameRepository;
+
+    // Check if memory_game module is enabled locally
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
+        .one(db)
+        .await
+    {
+        Ok(Some(p)) => {
+            let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
+            modules.contains(&"memory_game".to_string())
+        }
+        _ => true, // Default to enabled if no profile (dev mode)
+    };
+
+    if local_enabled {
+        // Fetch all accepted peers
+        let peers = crate::models::peer::Entity::find()
+            .filter(crate::models::peer::Column::ConnectionStatus.eq("accepted"))
+            .all(db)
+            .await
+            .unwrap_or_default();
+
+        if !peers.is_empty() {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_default();
+
+            for peer in &peers {
+                // Fetch peer config to check enabled_modules
+                let config_url = format!("{}/api/config", peer.url);
+                let peer_has_memory_game = match client.get(&config_url).send().await {
+                    Ok(res) if res.status().is_success() => {
+                        match res.json::<crate::api::setup::ConfigResponse>().await {
+                            Ok(config) => {
+                                Some(config.enabled_modules.contains(&"memory_game".to_string()))
+                            }
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                };
+
+                crate::modules::memory_game::handlers::sync_peer_memory_scores(
+                    db,
+                    peer.id,
+                    &peer.url,
+                    &peer.name,
+                    &client,
+                    peer_has_memory_game,
+                )
+                .await;
+            }
+        }
+    }
+
+    // Return merged leaderboard (same logic as memory_game_leaderboard)
+    let peer_scores = game_repo
+        .get_peer_scores()
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut entries: Vec<FrbMemoryLeaderboardEntry> = peer_scores
+        .into_iter()
+        .map(|s| FrbMemoryLeaderboardEntry {
+            peer_id: s.peer_id,
+            library_name: s.library_name,
+            best_score: s.best_score,
+            difficulty: s.difficulty,
+            played_at: s.played_at,
+            is_self: false,
+        })
+        .collect();
+
+    // Add local user's best score
+    let top_scores = game_repo
+        .get_top_scores(1)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(best) = top_scores.first() {
+        let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
+        use crate::domain::GamificationRepository;
+        let library_name = gamification_repo
+            .get_library_name()
+            .await
+            .unwrap_or_else(|_| "My Library".to_string());
+
+        entries.push(FrbMemoryLeaderboardEntry {
+            peer_id: 0,
+            library_name,
+            best_score: best.normalized_score,
+            difficulty: best.difficulty.clone(),
+            played_at: best.played_at.clone(),
+            is_self: true,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        b.best_score
+            .partial_cmp(&a.best_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Ok(entries)
+}
+
 // ─── Gamification (FFI direct) ──────────────────────────────────────────────
 
 /// Track progress (FFI-safe)

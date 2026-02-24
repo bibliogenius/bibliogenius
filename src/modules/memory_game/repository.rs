@@ -100,6 +100,32 @@ impl MemoryGameRepository for SeaOrmGameRepository {
         Ok(score.map(|s| s.normalized_score))
     }
 
+    async fn get_best_score_entry(&self) -> Result<Option<MemoryGameScore>, DomainError> {
+        let score = ScoreEntity::find()
+            .order_by_desc(super::models::memory_game_score::Column::NormalizedScore)
+            .limit(Some(1))
+            .one(&self.db)
+            .await?;
+
+        Ok(score.map(|s| MemoryGameScore {
+            id: Some(s.id),
+            difficulty: s.difficulty,
+            pairs_count: s.pairs_count,
+            elapsed_seconds: s.elapsed_seconds,
+            errors: s.errors,
+            normalized_score: s.normalized_score,
+            played_at: s.played_at,
+        }))
+    }
+
+    async fn delete_peer_scores(&self, peer_id: i32) -> Result<(), DomainError> {
+        PeerScoreEntity::delete_many()
+            .filter(PeerScoreColumn::PeerId.eq(peer_id))
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
     async fn upsert_peer_score(
         &self,
         peer_id: i32,
