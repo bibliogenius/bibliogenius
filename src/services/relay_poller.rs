@@ -130,9 +130,10 @@ async fn process_relay_message(
         sender_peer.id
     );
 
-    // Dispatch through the shared handler (response is discarded for relay messages
-    // since relay is fire-and-forget only)
-    let _response = dispatch_clear_message(
+    // Dispatch through the shared handler and check the response status.
+    // 5xx errors are transient - don't ack so the message is retried next poll.
+    // 4xx errors mean the message is malformed - ack to avoid infinite retries.
+    let response = dispatch_clear_message(
         db,
         crypto_service,
         &clear_message,
@@ -141,6 +142,15 @@ async fn process_relay_message(
         sender_peer,
     )
     .await;
+
+    if response.status().is_server_error() {
+        return Err(format!(
+            "handler returned {} for '{}' from peer {}",
+            response.status(),
+            clear_message.message_type,
+            sender_peer.name
+        ));
+    }
 
     Ok(())
 }

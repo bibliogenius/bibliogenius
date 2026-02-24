@@ -2104,12 +2104,12 @@ pub async fn request_book(
             // Peer doesn't support E2EE, fall through to plaintext
         }
         Err(e) => {
-            // E2EE transport error — message MAY have been delivered.
+            // E2EE transport error - both direct and relay failed.
             // Do NOT fall back to plaintext to avoid duplicate requests.
             tracing::warn!("E2EE send failed (no plaintext fallback): {}", e);
             return (
-                StatusCode::OK,
-                Json(json!({ "message": "Request sent (e2ee error, no fallback)" })),
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "Failed to deliver request to peer" })),
             )
                 .into_response();
         }
@@ -2246,10 +2246,14 @@ pub async fn request_book_by_url(
             // E2EE not available for this peer — fall back to plaintext.
         }
         Err(e) => {
-            // E2EE transport error — message MAY have been delivered.
+            // E2EE transport error - both direct and relay failed.
             // Do NOT fall back to plaintext to avoid duplicate requests.
             tracing::warn!("E2EE loan_request error (no plaintext fallback): {e}");
-            return (StatusCode::OK, Json(json!({ "message": "Request sent" }))).into_response();
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "Failed to deliver request to peer" })),
+            )
+                .into_response();
         }
     }
 
