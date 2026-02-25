@@ -13,7 +13,7 @@ use crate::domain::{
 };
 use crate::models::{
     book, gamification_achievements, gamification_config, gamification_streaks,
-    installation_profile, library_config, loan, peer_gamification_stats,
+    installation_profile, library_config, loan, peer_gamification_stats, user,
 };
 
 /// SeaORM-based implementation of GamificationRepository
@@ -251,5 +251,13 @@ impl GamificationRepository for SeaOrmGamificationRepository {
         let config = library_config::Entity::find_by_id(1).one(&self.db).await?;
 
         Ok(config.map(|c| c.name).unwrap_or("My Library".to_string()))
+    }
+
+    async fn get_user_id(&self) -> Result<i32, DomainError> {
+        let user = user::Entity::find()
+            .one(&self.db)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+        Ok(user.id)
     }
 }

@@ -482,10 +482,14 @@ pub async fn create_book(book: FrbBook) -> Result<FrbBook, String> {
                 let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
                 let game_repo =
                     crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+                let puzzle_repo =
+                    crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(
+                        db.clone(),
+                    );
                 crate::services::gamification_service::check_and_unlock_achievements(
                     &gamification_repo,
                     &game_repo,
-                    1,
+                    Some(&puzzle_repo),
                 )
                 .await
             };
@@ -1379,10 +1383,12 @@ pub async fn memory_game_finish(
     // Check achievements after game completion
     let new_achievements = {
         let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
+        let puzzle_repo =
+            crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
         crate::services::gamification_service::check_and_unlock_achievements(
             &gamification_repo,
             &game_repo,
-            1,
+            Some(&puzzle_repo),
         )
         .await
         .unwrap_or_default()
@@ -1589,6 +1595,318 @@ pub async fn memory_game_refresh_leaderboard() -> Result<Vec<FrbMemoryLeaderboar
     Ok(entries)
 }
 
+// ============ Sliding Puzzle (FFI) ============
+
+/// A generated puzzle board (FFI-safe)
+pub struct FrbPuzzleBoard {
+    pub book_id: i32,
+    pub title: String,
+    pub cover_url: String,
+    pub grid_size: u8,
+    pub tiles: Vec<u8>,
+    pub empty_index: u32,
+    pub par_moves: u32,
+}
+
+/// A saved sliding puzzle score (FFI-safe)
+pub struct FrbPuzzleScore {
+    pub id: Option<i32>,
+    pub difficulty: String,
+    pub grid_size: i32,
+    pub elapsed_seconds: f64,
+    pub move_count: i32,
+    pub par_moves: i32,
+    pub normalized_score: f64,
+    pub played_at: String,
+    /// Achievements unlocked after this game (empty if none)
+    pub new_achievements: Vec<String>,
+}
+
+/// Get available puzzle difficulty levels based on books with covers
+pub async fn puzzle_available_difficulties() -> Result<Vec<String>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
+    let difficulties = crate::modules::sliding_puzzle::service::available_difficulties(&repo)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(difficulties
+        .iter()
+        .map(|d| d.as_str().to_string())
+        .collect())
+}
+
+/// Set up a new sliding puzzle with the given difficulty
+pub async fn puzzle_setup(difficulty: String) -> Result<FrbPuzzleBoard, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
+    let diff = crate::modules::sliding_puzzle::service::PuzzleDifficulty::parse(&difficulty)
+        .map_err(|e| e.to_string())?;
+    let board = crate::modules::sliding_puzzle::service::setup_game(&repo, diff)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(FrbPuzzleBoard {
+        book_id: board.book_id,
+        title: board.title,
+        cover_url: board.cover_url,
+        grid_size: board.grid_size,
+        tiles: board.tiles,
+        empty_index: board.empty_index as u32,
+        par_moves: board.par_moves,
+    })
+}
+
+/// Submit a completed sliding puzzle and get the score back
+pub async fn puzzle_finish(
+    difficulty: String,
+    grid_size: u8,
+    elapsed_seconds: f64,
+    move_count: u32,
+    par_moves: u32,
+) -> Result<FrbPuzzleScore, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let puzzle_repo =
+        crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
+    let result = crate::modules::sliding_puzzle::domain::PuzzleResult {
+        difficulty,
+        grid_size,
+        elapsed_seconds,
+        move_count,
+        par_moves,
+    };
+    let score = crate::modules::sliding_puzzle::service::finish_game(&puzzle_repo, result)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Check achievements after game completion
+    let new_achievements = {
+        let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
+        let game_repo =
+            crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+        crate::services::gamification_service::check_and_unlock_achievements(
+            &gamification_repo,
+            &game_repo,
+            Some(&puzzle_repo),
+        )
+        .await
+        .unwrap_or_default()
+    };
+
+    Ok(FrbPuzzleScore {
+        id: score.id,
+        difficulty: score.difficulty,
+        grid_size: score.grid_size,
+        elapsed_seconds: score.elapsed_seconds,
+        move_count: score.move_count,
+        par_moves: score.par_moves,
+        normalized_score: score.normalized_score,
+        played_at: score.played_at,
+        new_achievements,
+    })
+}
+
+/// Get top sliding puzzle scores
+pub async fn puzzle_top_scores() -> Result<Vec<FrbPuzzleScore>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
+    use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
+    let scores = repo.get_top_scores(10).await.map_err(|e| e.to_string())?;
+    Ok(scores
+        .into_iter()
+        .map(|s| FrbPuzzleScore {
+            id: s.id,
+            difficulty: s.difficulty,
+            grid_size: s.grid_size,
+            elapsed_seconds: s.elapsed_seconds,
+            move_count: s.move_count,
+            par_moves: s.par_moves,
+            normalized_score: s.normalized_score,
+            played_at: s.played_at,
+            new_achievements: vec![],
+        })
+        .collect())
+}
+
+/// A leaderboard entry for the sliding puzzle (FFI-safe)
+pub struct FrbPuzzleLeaderboardEntry {
+    pub peer_id: i32,
+    pub library_name: String,
+    pub best_score: f64,
+    pub difficulty: String,
+    pub played_at: String,
+    pub is_self: bool,
+}
+
+/// Get puzzle leaderboard (peer scores + local user's best)
+pub async fn puzzle_game_leaderboard() -> Result<Vec<FrbPuzzleLeaderboardEntry>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let puzzle_repo =
+        crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
+    use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
+
+    // Peer scores
+    let peer_scores = puzzle_repo
+        .get_peer_scores()
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut entries: Vec<FrbPuzzleLeaderboardEntry> = peer_scores
+        .into_iter()
+        .map(|s| FrbPuzzleLeaderboardEntry {
+            peer_id: s.peer_id,
+            library_name: s.library_name,
+            best_score: s.best_score,
+            difficulty: s.difficulty,
+            played_at: s.played_at,
+            is_self: false,
+        })
+        .collect();
+
+    // Add local user's best score
+    let top_scores = puzzle_repo
+        .get_top_scores(1)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(best) = top_scores.first() {
+        let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
+        use crate::domain::GamificationRepository;
+        let library_name = gamification_repo
+            .get_library_name()
+            .await
+            .unwrap_or_else(|_| "My Library".to_string());
+
+        entries.push(FrbPuzzleLeaderboardEntry {
+            peer_id: 0,
+            library_name,
+            best_score: best.normalized_score,
+            difficulty: best.difficulty.clone(),
+            played_at: best.played_at.clone(),
+            is_self: true,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        b.best_score
+            .partial_cmp(&a.best_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Ok(entries)
+}
+
+/// Refresh the network puzzle leaderboard by syncing with all accepted peers.
+/// Fetches each peer's /api/game/puzzle/public-best, upserts into peer_puzzle_scores,
+/// then returns the merged leaderboard.
+pub async fn puzzle_game_refresh_leaderboard() -> Result<Vec<FrbPuzzleLeaderboardEntry>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let puzzle_repo =
+        crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
+    use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
+
+    // Check if sliding_puzzle module is enabled locally
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
+        .one(db)
+        .await
+    {
+        Ok(Some(p)) => {
+            let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
+            modules.contains(&"sliding_puzzle".to_string())
+        }
+        _ => true, // Default to enabled if no profile (dev mode)
+    };
+
+    if local_enabled {
+        // Fetch all accepted peers
+        let peers = crate::models::peer::Entity::find()
+            .filter(crate::models::peer::Column::ConnectionStatus.eq("accepted"))
+            .all(db)
+            .await
+            .unwrap_or_default();
+
+        if !peers.is_empty() {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_default();
+
+            for peer in &peers {
+                // Fetch peer config to check enabled_modules
+                let config_url = format!("{}/api/config", peer.url);
+                let peer_has_sliding_puzzle = match client.get(&config_url).send().await {
+                    Ok(res) if res.status().is_success() => {
+                        match res.json::<crate::api::setup::ConfigResponse>().await {
+                            Ok(config) => Some(
+                                config
+                                    .enabled_modules
+                                    .contains(&"sliding_puzzle".to_string()),
+                            ),
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                };
+
+                crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
+                    db,
+                    peer.id,
+                    &peer.url,
+                    &peer.name,
+                    &client,
+                    peer_has_sliding_puzzle,
+                )
+                .await;
+            }
+        }
+    }
+
+    // Return merged leaderboard (same logic as puzzle_game_leaderboard)
+    let peer_scores = puzzle_repo
+        .get_peer_scores()
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut entries: Vec<FrbPuzzleLeaderboardEntry> = peer_scores
+        .into_iter()
+        .map(|s| FrbPuzzleLeaderboardEntry {
+            peer_id: s.peer_id,
+            library_name: s.library_name,
+            best_score: s.best_score,
+            difficulty: s.difficulty,
+            played_at: s.played_at,
+            is_self: false,
+        })
+        .collect();
+
+    // Add local user's best score
+    let top_scores = puzzle_repo
+        .get_top_scores(1)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(best) = top_scores.first() {
+        let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
+        use crate::domain::GamificationRepository;
+        let library_name = gamification_repo
+            .get_library_name()
+            .await
+            .unwrap_or_else(|_| "My Library".to_string());
+
+        entries.push(FrbPuzzleLeaderboardEntry {
+            peer_id: 0,
+            library_name,
+            best_score: best.normalized_score,
+            difficulty: best.difficulty.clone(),
+            played_at: best.played_at.clone(),
+            is_self: true,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        b.best_score
+            .partial_cmp(&a.best_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Ok(entries)
+}
+
 // ─── Gamification (FFI direct) ──────────────────────────────────────────────
 
 /// Track progress (FFI-safe)
@@ -1735,11 +2053,12 @@ pub async fn gamification_update_config(
     use crate::domain::GamificationRepository;
     let db = db().ok_or("Database not initialized")?;
     let repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
+    let user_id = repo.get_user_id().await.map_err(|e| e.to_string())?;
     let update = crate::domain::GamificationConfigUpdate {
         reading_goal_yearly,
         achievements_style,
     };
-    repo.update_config(1, update)
+    repo.update_config(user_id, update)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1749,10 +2068,12 @@ pub async fn gamification_check_achievements() -> Result<Vec<String>, String> {
     let db = db().ok_or("Database not initialized")?;
     let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
     let game_repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+    let puzzle_repo =
+        crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
     crate::services::gamification_service::check_and_unlock_achievements(
         &gamification_repo,
         &game_repo,
-        1,
+        Some(&puzzle_repo),
     )
     .await
     .map_err(|e| e.to_string())
@@ -1762,7 +2083,7 @@ pub async fn gamification_check_achievements() -> Result<Vec<String>, String> {
 pub async fn gamification_update_streak() -> Result<FrbStreakInfo, String> {
     let db = db().ok_or("Database not initialized")?;
     let repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
-    let streak = crate::services::gamification_service::update_streak(&repo, 1)
+    let streak = crate::services::gamification_service::update_streak(&repo)
         .await
         .map_err(|e| e.to_string())?;
     Ok(FrbStreakInfo {

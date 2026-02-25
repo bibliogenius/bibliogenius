@@ -651,6 +651,9 @@ async fn sync_peer_internal(
     let peer_has_memory_game = peer_config
         .as_ref()
         .map(|c| c.enabled_modules.contains(&"memory_game".to_string()));
+    let peer_has_sliding_puzzle = peer_config
+        .as_ref()
+        .map(|c| c.enabled_modules.contains(&"sliding_puzzle".to_string()));
 
     // Extract updated name from peer config (if changed)
     let peer_library_name = peer_config.as_ref().map(|c| c.library_name.clone());
@@ -686,6 +689,16 @@ async fn sync_peer_internal(
             display_name,
             &client,
             peer_has_memory_game,
+        )
+        .await;
+        // Still sync sliding puzzle scores
+        crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
+            db,
+            peer_id,
+            peer_url,
+            display_name,
+            &client,
+            peer_has_sliding_puzzle,
         )
         .await;
         // Still update last_seen (and name if changed)
@@ -764,6 +777,17 @@ async fn sync_peer_internal(
         display_name,
         &client,
         peer_has_memory_game,
+    )
+    .await;
+
+    // Sync sliding puzzle scores
+    crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
+        db,
+        peer_id,
+        peer_url,
+        display_name,
+        &client,
+        peer_has_sliding_puzzle,
     )
     .await;
 
@@ -1577,6 +1601,9 @@ pub async fn sync_peer(
     let peer_has_memory_game = peer_config
         .as_ref()
         .map(|c| c.enabled_modules.contains(&"memory_game".to_string()));
+    let peer_has_sliding_puzzle = peer_config
+        .as_ref()
+        .map(|c| c.enabled_modules.contains(&"sliding_puzzle".to_string()));
     let peer_display_name = peer_config
         .as_ref()
         .map(|c| c.library_name.clone())
@@ -1639,6 +1666,17 @@ pub async fn sync_peer(
                             &peer_display_name,
                             &client,
                             peer_has_memory_game,
+                        )
+                        .await;
+
+                        // Sync sliding puzzle scores
+                        crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
+                            &db,
+                            peer.id,
+                            &peer.url,
+                            &peer_display_name,
+                            &client,
+                            peer_has_sliding_puzzle,
                         )
                         .await;
 
@@ -1803,6 +1841,9 @@ pub async fn sync_peer_by_url(
     let peer_has_memory_game_url = peer_config
         .as_ref()
         .map(|c| c.enabled_modules.contains(&"memory_game".to_string()));
+    let peer_has_sliding_puzzle_url = peer_config
+        .as_ref()
+        .map(|c| c.enabled_modules.contains(&"sliding_puzzle".to_string()));
     let peer_display_name_url = peer_config
         .as_ref()
         .map(|c| c.library_name.clone())
@@ -1825,6 +1866,16 @@ pub async fn sync_peer_by_url(
             &peer_display_name_url,
             &client,
             peer_has_memory_game_url,
+        )
+        .await;
+        // Still sync sliding puzzle scores
+        crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
+            &db,
+            peer.id,
+            &peer.url,
+            &peer_display_name_url,
+            &client,
+            peer_has_sliding_puzzle_url,
         )
         .await;
 
@@ -1935,6 +1986,17 @@ pub async fn sync_peer_by_url(
         &peer_display_name_url,
         &client,
         peer_has_memory_game_url,
+    )
+    .await;
+
+    // 6c. Sync sliding puzzle scores
+    crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
+        &db,
+        peer.id,
+        &peer.url,
+        &peer_display_name_url,
+        &client,
+        peer_has_sliding_puzzle_url,
     )
     .await;
 

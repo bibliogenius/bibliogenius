@@ -1,0 +1,282 @@
+//! Sliding Puzzle API handlers
+//!
+//! Handlers create their own repository from the DB connection.
+//! No dependency on AppState beyond database access.
+
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use serde::Deserialize;
+use serde_json::json;
+
+use super::domain::{PuzzleResult, SlidingPuzzleRepository};
+use super::repository::SeaOrmPuzzleRepository;
+use super::service;
+use crate::infrastructure::AppState;
+
+/// Create a repository from AppState's DB connection
+fn repo(state: &AppState) -> SeaOrmPuzzleRepository {
+    SeaOrmPuzzleRepository::new(state.db().clone())
+}
+
+/// GET /api/game/puzzle/difficulties
+pub async fn available_difficulties(State(state): State<AppState>) -> impl IntoResponse {
+    match service::available_difficulties(&repo(&state)).await {
+        Ok(difficulties) => {
+            let names: Vec<&str> = difficulties.iter().map(|d| d.as_str()).collect();
+            (StatusCode::OK, Json(json!(names))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SetupRequest {
+    pub difficulty: String,
+}
+
+/// POST /api/game/puzzle/setup
+pub async fn setup_game(
+    State(state): State<AppState>,
+    Json(payload): Json<SetupRequest>,
+) -> impl IntoResponse {
+    let difficulty = match service::PuzzleDifficulty::parse(&payload.difficulty) {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    match service::setup_game(&repo(&state), difficulty).await {
+        Ok(board) => (StatusCode::OK, Json(board)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/game/puzzle/finish
+pub async fn finish_game(
+    State(state): State<AppState>,
+    Json(result): Json<PuzzleResult>,
+) -> impl IntoResponse {
+    match service::finish_game(&repo(&state), result).await {
+        Ok(score) => (StatusCode::OK, Json(score)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/game/puzzle/scores
+pub async fn get_top_scores(State(state): State<AppState>) -> impl IntoResponse {
+    match repo(&state).get_top_scores(10).await {
+        Ok(scores) => (StatusCode::OK, Json(scores)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/game/puzzle/public-best
+pub async fn get_public_best(State(state): State<AppState>) -> impl IntoResponse {
+    match repo(&state).get_best_score_entry().await {
+        Ok(Some(entry)) => (
+            StatusCode::OK,
+            Json(json!({
+                "best_score": entry.normalized_score,
+                "difficulty": entry.difficulty,
+                "played_at": entry.played_at,
+            })),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::OK,
+            Json(json!({
+                "best_score": null,
+                "difficulty": null,
+                "played_at": null,
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/game/puzzle/leaderboard
+pub async fn get_leaderboard(State(state): State<AppState>) -> impl IntoResponse {
+    let r = repo(&state);
+    let personal_best = r.get_personal_best().await.unwrap_or(None);
+    let peer_scores = r.get_peer_scores().await.unwrap_or_default();
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "personal_best": personal_best,
+            "peers": peer_scores,
+        })),
+    )
+        .into_response()
+}
+
+/// Sync sliding puzzle scores from a single peer.
+///
+/// `peer_has_sliding_puzzle`:
+///   - `Some(true)`:  peer has sliding_puzzle in enabled_modules - fetch score
+///   - `Some(false)`: peer does NOT have sliding_puzzle - delete cached scores
+///   - `None`:        peer was unreachable (config unknown) - preserve cache
+pub(crate) async fn sync_peer_puzzle_scores(
+    db: &sea_orm::DatabaseConnection,
+    peer_id: i32,
+    peer_url: &str,
+    peer_name: &str,
+    client: &reqwest::Client,
+    peer_has_sliding_puzzle: Option<bool>,
+) {
+    use super::domain::SlidingPuzzleRepository;
+    use super::repository::SeaOrmPuzzleRepository;
+
+    let puzzle_repo = SeaOrmPuzzleRepository::new(db.clone());
+
+    match peer_has_sliding_puzzle {
+        None => {
+            tracing::debug!(
+                "Peer {} config unknown, preserving cached puzzle scores",
+                peer_url
+            );
+            return;
+        }
+        Some(false) => {
+            let _ = puzzle_repo.delete_peer_scores(peer_id).await;
+            return;
+        }
+        Some(true) => {}
+    }
+
+    // Fetch peer's public best score
+    let url = format!("{}/api/game/puzzle/public-best", peer_url);
+    let response = match client.get(&url).send().await {
+        Ok(res) if res.status().is_success() => res,
+        _ => {
+            tracing::warn!("Failed to fetch puzzle score from peer {}", peer_url);
+            return;
+        }
+    };
+
+    #[derive(serde::Deserialize)]
+    struct PublicBestResponse {
+        best_score: Option<f64>,
+        difficulty: Option<String>,
+        played_at: Option<String>,
+    }
+
+    let data: PublicBestResponse = match response.json().await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("Failed to parse puzzle score from peer {}: {}", peer_url, e);
+            return;
+        }
+    };
+
+    if let (Some(score), Some(difficulty), Some(played_at)) =
+        (data.best_score, data.difficulty, data.played_at)
+        && score > 0.0
+    {
+        if let Err(e) = puzzle_repo
+            .upsert_peer_score(peer_id, peer_name, score, &difficulty, &played_at)
+            .await
+        {
+            tracing::warn!("Failed to upsert peer puzzle score: {}", e);
+        } else {
+            tracing::info!("Puzzle score synced for peer {}", peer_id);
+        }
+    }
+}
+
+/// POST /api/game/puzzle/refresh-leaderboard
+/// Fetches each accepted peer's puzzle score and upserts into cache.
+/// Returns the combined leaderboard.
+pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResponse {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let db = state.db();
+
+    // Check if sliding_puzzle module is enabled locally
+    let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
+        .one(db)
+        .await
+    {
+        Ok(Some(p)) => {
+            let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
+            modules.contains(&"sliding_puzzle".to_string())
+        }
+        _ => false,
+    };
+
+    if !local_enabled {
+        return (
+            StatusCode::OK,
+            Json(json!({"personal_best": null, "peers": []})),
+        )
+            .into_response();
+    }
+
+    // Get all accepted peers
+    let peers = crate::models::peer::Entity::find()
+        .filter(crate::models::peer::Column::ConnectionStatus.eq("accepted"))
+        .all(db)
+        .await
+        .unwrap_or_default();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+
+    for peer in &peers {
+        // Fetch peer config to check enabled_modules
+        let config_url = format!("{}/api/config", peer.url);
+        let peer_has_sliding_puzzle = match client.get(&config_url).send().await {
+            Ok(res) if res.status().is_success() => {
+                match res.json::<crate::api::setup::ConfigResponse>().await {
+                    Ok(config) => Some(
+                        config
+                            .enabled_modules
+                            .contains(&"sliding_puzzle".to_string()),
+                    ),
+                    Err(_) => None,
+                }
+            }
+            _ => None,
+        };
+
+        sync_peer_puzzle_scores(
+            db,
+            peer.id,
+            &peer.url,
+            &peer.name,
+            &client,
+            peer_has_sliding_puzzle,
+        )
+        .await;
+    }
+
+    // Return combined leaderboard
+    get_leaderboard(State(state)).await.into_response()
+}

@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1986960431;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1269005272;
 
 // Section: executor
 
@@ -1650,6 +1650,229 @@ fn wire__crate__api__frb__parse_qr_payload_ffi_impl(
         },
     )
 }
+fn wire__crate__api__frb__puzzle_available_difficulties_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "puzzle_available_difficulties",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::puzzle_available_difficulties().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__puzzle_finish_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "puzzle_finish",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_difficulty = <String>::sse_decode(&mut deserializer);
+            let api_grid_size = <u8>::sse_decode(&mut deserializer);
+            let api_elapsed_seconds = <f64>::sse_decode(&mut deserializer);
+            let api_move_count = <u32>::sse_decode(&mut deserializer);
+            let api_par_moves = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::puzzle_finish(
+                            api_difficulty,
+                            api_grid_size,
+                            api_elapsed_seconds,
+                            api_move_count,
+                            api_par_moves,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__puzzle_game_leaderboard_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "puzzle_game_leaderboard",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::puzzle_game_leaderboard().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__puzzle_game_refresh_leaderboard_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "puzzle_game_refresh_leaderboard",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::puzzle_game_refresh_leaderboard().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__puzzle_setup_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "puzzle_setup",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_difficulty = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::puzzle_setup(api_difficulty).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__puzzle_top_scores_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "puzzle_top_scores",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::puzzle_top_scores().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__frb__reorder_books_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2451,6 +2674,74 @@ impl SseDecode for crate::api::frb::FrbMemoryScore {
     }
 }
 
+impl SseDecode for crate::api::frb::FrbPuzzleBoard {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_bookId = <i32>::sse_decode(deserializer);
+        let mut var_title = <String>::sse_decode(deserializer);
+        let mut var_coverUrl = <String>::sse_decode(deserializer);
+        let mut var_gridSize = <u8>::sse_decode(deserializer);
+        let mut var_tiles = <Vec<u8>>::sse_decode(deserializer);
+        let mut var_emptyIndex = <u32>::sse_decode(deserializer);
+        let mut var_parMoves = <u32>::sse_decode(deserializer);
+        return crate::api::frb::FrbPuzzleBoard {
+            book_id: var_bookId,
+            title: var_title,
+            cover_url: var_coverUrl,
+            grid_size: var_gridSize,
+            tiles: var_tiles,
+            empty_index: var_emptyIndex,
+            par_moves: var_parMoves,
+        };
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbPuzzleLeaderboardEntry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_peerId = <i32>::sse_decode(deserializer);
+        let mut var_libraryName = <String>::sse_decode(deserializer);
+        let mut var_bestScore = <f64>::sse_decode(deserializer);
+        let mut var_difficulty = <String>::sse_decode(deserializer);
+        let mut var_playedAt = <String>::sse_decode(deserializer);
+        let mut var_isSelf = <bool>::sse_decode(deserializer);
+        return crate::api::frb::FrbPuzzleLeaderboardEntry {
+            peer_id: var_peerId,
+            library_name: var_libraryName,
+            best_score: var_bestScore,
+            difficulty: var_difficulty,
+            played_at: var_playedAt,
+            is_self: var_isSelf,
+        };
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbPuzzleScore {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <Option<i32>>::sse_decode(deserializer);
+        let mut var_difficulty = <String>::sse_decode(deserializer);
+        let mut var_gridSize = <i32>::sse_decode(deserializer);
+        let mut var_elapsedSeconds = <f64>::sse_decode(deserializer);
+        let mut var_moveCount = <i32>::sse_decode(deserializer);
+        let mut var_parMoves = <i32>::sse_decode(deserializer);
+        let mut var_normalizedScore = <f64>::sse_decode(deserializer);
+        let mut var_playedAt = <String>::sse_decode(deserializer);
+        let mut var_newAchievements = <Vec<String>>::sse_decode(deserializer);
+        return crate::api::frb::FrbPuzzleScore {
+            id: var_id,
+            difficulty: var_difficulty,
+            grid_size: var_gridSize,
+            elapsed_seconds: var_elapsedSeconds,
+            move_count: var_moveCount,
+            par_moves: var_parMoves,
+            normalized_score: var_normalizedScore,
+            played_at: var_playedAt,
+            new_achievements: var_newAchievements,
+        };
+    }
+}
+
 impl SseDecode for crate::api::frb::FrbStreakInfo {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2637,6 +2928,32 @@ impl SseDecode for Vec<crate::api::frb::FrbMemoryScore> {
     }
 }
 
+impl SseDecode for Vec<crate::api::frb::FrbPuzzleLeaderboardEntry> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::frb::FrbPuzzleLeaderboardEntry>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::frb::FrbPuzzleScore> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::frb::FrbPuzzleScore>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::frb::FrbTag> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2746,6 +3063,13 @@ impl SseDecode for u16 {
     }
 }
 
+impl SseDecode for u32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_u32::<NativeEndian>().unwrap()
+    }
+}
+
 impl SseDecode for u8 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2849,28 +3173,46 @@ fn pde_ffi_dispatcher_primary_impl(
         42 => wire__crate__api__frb__memory_game_top_scores_impl(port, ptr, rust_vec_len, data_len),
         43 => wire__crate__api__frb__parse_invite_link_ffi_impl(port, ptr, rust_vec_len, data_len),
         44 => wire__crate__api__frb__parse_qr_payload_ffi_impl(port, ptr, rust_vec_len, data_len),
-        45 => wire__crate__api__frb__reorder_books_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
-        47 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
-        48 => wire__crate__api__frb__search_all_covers_by_title_impl(
+        45 => wire__crate__api__frb__puzzle_available_difficulties_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        49 => wire__crate__api__frb__search_all_covers_for_book_impl(
+        46 => wire__crate__api__frb__puzzle_finish_impl(port, ptr, rust_vec_len, data_len),
+        47 => {
+            wire__crate__api__frb__puzzle_game_leaderboard_impl(port, ptr, rust_vec_len, data_len)
+        }
+        48 => wire__crate__api__frb__puzzle_game_refresh_leaderboard_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        50 => wire__crate__api__frb__search_cover_by_title_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__frb__search_cover_for_book_impl(port, ptr, rust_vec_len, data_len),
-        52 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
-        54 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
-        55 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
-        56 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__frb__puzzle_setup_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__frb__puzzle_top_scores_impl(port, ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__frb__reorder_books_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__frb__search_all_covers_by_title_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        55 => wire__crate__api__frb__search_all_covers_for_book_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        56 => wire__crate__api__frb__search_cover_by_title_impl(port, ptr, rust_vec_len, data_len),
+        57 => wire__crate__api__frb__search_cover_for_book_impl(port, ptr, rust_vec_len, data_len),
+        58 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
+        62 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -3236,6 +3578,85 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbMemoryScore>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbPuzzleBoard {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.book_id.into_into_dart().into_dart(),
+            self.title.into_into_dart().into_dart(),
+            self.cover_url.into_into_dart().into_dart(),
+            self.grid_size.into_into_dart().into_dart(),
+            self.tiles.into_into_dart().into_dart(),
+            self.empty_index.into_into_dart().into_dart(),
+            self.par_moves.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbPuzzleBoard
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbPuzzleBoard>
+    for crate::api::frb::FrbPuzzleBoard
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbPuzzleBoard {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbPuzzleLeaderboardEntry {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.peer_id.into_into_dart().into_dart(),
+            self.library_name.into_into_dart().into_dart(),
+            self.best_score.into_into_dart().into_dart(),
+            self.difficulty.into_into_dart().into_dart(),
+            self.played_at.into_into_dart().into_dart(),
+            self.is_self.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbPuzzleLeaderboardEntry
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbPuzzleLeaderboardEntry>
+    for crate::api::frb::FrbPuzzleLeaderboardEntry
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbPuzzleLeaderboardEntry {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbPuzzleScore {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.difficulty.into_into_dart().into_dart(),
+            self.grid_size.into_into_dart().into_dart(),
+            self.elapsed_seconds.into_into_dart().into_dart(),
+            self.move_count.into_into_dart().into_dart(),
+            self.par_moves.into_into_dart().into_dart(),
+            self.normalized_score.into_into_dart().into_dart(),
+            self.played_at.into_into_dart().into_dart(),
+            self.new_achievements.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbPuzzleScore
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbPuzzleScore>
+    for crate::api::frb::FrbPuzzleScore
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbPuzzleScore {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbStreakInfo {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -3511,6 +3932,46 @@ impl SseEncode for crate::api::frb::FrbMemoryScore {
     }
 }
 
+impl SseEncode for crate::api::frb::FrbPuzzleBoard {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.book_id, serializer);
+        <String>::sse_encode(self.title, serializer);
+        <String>::sse_encode(self.cover_url, serializer);
+        <u8>::sse_encode(self.grid_size, serializer);
+        <Vec<u8>>::sse_encode(self.tiles, serializer);
+        <u32>::sse_encode(self.empty_index, serializer);
+        <u32>::sse_encode(self.par_moves, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbPuzzleLeaderboardEntry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.peer_id, serializer);
+        <String>::sse_encode(self.library_name, serializer);
+        <f64>::sse_encode(self.best_score, serializer);
+        <String>::sse_encode(self.difficulty, serializer);
+        <String>::sse_encode(self.played_at, serializer);
+        <bool>::sse_encode(self.is_self, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbPuzzleScore {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Option<i32>>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.difficulty, serializer);
+        <i32>::sse_encode(self.grid_size, serializer);
+        <f64>::sse_encode(self.elapsed_seconds, serializer);
+        <i32>::sse_encode(self.move_count, serializer);
+        <i32>::sse_encode(self.par_moves, serializer);
+        <f64>::sse_encode(self.normalized_score, serializer);
+        <String>::sse_encode(self.played_at, serializer);
+        <Vec<String>>::sse_encode(self.new_achievements, serializer);
+    }
+}
+
 impl SseEncode for crate::api::frb::FrbStreakInfo {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -3653,6 +4114,26 @@ impl SseEncode for Vec<crate::api::frb::FrbMemoryScore> {
     }
 }
 
+impl SseEncode for Vec<crate::api::frb::FrbPuzzleLeaderboardEntry> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::frb::FrbPuzzleLeaderboardEntry>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::frb::FrbPuzzleScore> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::frb::FrbPuzzleScore>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::frb::FrbTag> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -3747,6 +4228,13 @@ impl SseEncode for u16 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_u16::<NativeEndian>(self).unwrap();
+    }
+}
+
+impl SseEncode for u32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_u32::<NativeEndian>(self).unwrap();
     }
 }
 

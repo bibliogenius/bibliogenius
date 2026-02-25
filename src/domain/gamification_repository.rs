@@ -102,4 +102,7 @@ pub trait GamificationRepository: Send + Sync {
 
     /// Get library name from library_config
     async fn get_library_name(&self) -> Result<String, DomainError>;
+
+    /// Get the ID of the single local user (single-user mode)
+    async fn get_user_id(&self) -> Result<i32, DomainError>;
 }

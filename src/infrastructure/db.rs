@@ -1158,6 +1158,7 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
 
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
+    crate::modules::sliding_puzzle::migrate(db).await?;
 
     Ok(())
 }

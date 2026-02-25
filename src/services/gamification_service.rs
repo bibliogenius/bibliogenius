@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{DomainError, GamificationRepository};
 use crate::modules::memory_game::domain::MemoryGameRepository;
+use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
 
 // ─── Track thresholds ───────────────────────────────────────────────────────
 
@@ -166,7 +167,7 @@ pub fn calculate_track_progress(current: i64) -> TrackProgress {
 pub async fn get_user_status(
     repo: &dyn GamificationRepository,
 ) -> Result<UserStatusV2, DomainError> {
-    let user_id = 1; // V3 single-user mode
+    let user_id = repo.get_user_id().await?;
     let current_year = Utc::now().format("%Y").to_string();
 
     // Parallel group 1: COUNT queries
@@ -417,10 +418,8 @@ pub async fn build_leaderboard(
 /// Update the daily streak.
 ///
 /// Returns the updated streak info.
-pub async fn update_streak(
-    repo: &dyn GamificationRepository,
-    user_id: i32,
-) -> Result<StreakInfo, DomainError> {
+pub async fn update_streak(repo: &dyn GamificationRepository) -> Result<StreakInfo, DomainError> {
+    let user_id = repo.get_user_id().await?;
     let now = Utc::now();
     let today = now.format("%Y-%m-%d").to_string();
     let yesterday = (now - chrono::Duration::days(1))
@@ -461,8 +460,9 @@ pub async fn update_streak(
 pub async fn check_and_unlock_achievements(
     repo: &dyn GamificationRepository,
     game_repo: &dyn MemoryGameRepository,
-    user_id: i32,
+    puzzle_repo: Option<&dyn SlidingPuzzleRepository>,
 ) -> Result<Vec<String>, DomainError> {
+    let user_id = repo.get_user_id().await?;
     let mut newly_unlocked = Vec::new();
 
     // Gather stats
@@ -486,8 +486,14 @@ pub async fn check_and_unlock_achievements(
     // Memory game stats
     let memory_scores = game_repo.get_top_scores(100).await.unwrap_or_default();
 
+    // Sliding puzzle stats
+    let puzzle_scores = match puzzle_repo {
+        Some(pr) => pr.get_top_scores(100).await.unwrap_or_default(),
+        None => vec![],
+    };
+
     // Define achievement checks
-    let checks: Vec<(&str, bool)> = vec![
+    let mut checks: Vec<(&str, bool)> = vec![
         ("first_book", books >= 1),
         ("collector_10", books >= 10),
         ("collector_100", books >= 100),
@@ -506,6 +512,17 @@ pub async fn check_and_unlock_achievements(
             memory_scores.iter().any(|s| s.difficulty == "master"),
         ),
     ];
+
+    // Sliding puzzle achievements
+    checks.push(("puzzle_first_game", !puzzle_scores.is_empty()));
+    checks.push((
+        "puzzle_perfect",
+        puzzle_scores.iter().any(|s| s.move_count <= s.par_moves),
+    ));
+    checks.push((
+        "puzzle_master",
+        puzzle_scores.iter().any(|s| s.grid_size == 5),
+    ));
 
     for (achievement_id, eligible) in checks {
         if eligible && repo.unlock_achievement(user_id, achievement_id).await? {

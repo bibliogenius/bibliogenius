@@ -254,6 +254,8 @@ fn build_routes() -> Router<AppState> {
         )
         // Memory Game (self-contained module)
         .merge(crate::modules::memory_game::routes())
+        // Sliding Puzzle (self-contained module)
+        .merge(crate::modules::sliding_puzzle::routes())
         // Peer relay setup
         .route("/peers/relay/setup", post(peer::setup_relay))
         .route("/peers/relay/config", get(peer::get_relay_config_endpoint))
