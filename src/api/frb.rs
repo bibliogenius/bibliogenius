@@ -1124,6 +1124,60 @@ pub async fn create_loan(
     }
 }
 
+/// Count returned loans (for cleanup confirmation dialog)
+pub async fn count_returned_loans() -> Result<i64, String> {
+    let db = db().ok_or("Database not initialized")?;
+
+    crate::services::loan_service::count_returned_loans(db)
+        .await
+        .map_err(|e| format!("{:?}", e))
+}
+
+/// Delete all returned loans, returns the number of deleted rows
+pub async fn delete_returned_loans() -> Result<u64, String> {
+    let db = db().ok_or("Database not initialized")?;
+
+    crate::services::loan_service::delete_returned_loans(db)
+        .await
+        .map_err(|e| format!("{:?}", e))
+}
+
+/// Count closed incoming P2P requests (not pending)
+pub async fn count_closed_incoming_requests() -> Result<i64, String> {
+    let db = db().ok_or("Database not initialized")?;
+
+    crate::services::loan_service::count_closed_incoming_requests(db)
+        .await
+        .map_err(|e| format!("{:?}", e))
+}
+
+/// Delete all closed incoming P2P requests (not pending)
+pub async fn delete_closed_incoming_requests() -> Result<u64, String> {
+    let db = db().ok_or("Database not initialized")?;
+
+    crate::services::loan_service::delete_closed_incoming_requests(db)
+        .await
+        .map_err(|e| format!("{:?}", e))
+}
+
+/// Count closed outgoing P2P requests (not pending)
+pub async fn count_closed_outgoing_requests() -> Result<i64, String> {
+    let db = db().ok_or("Database not initialized")?;
+
+    crate::services::loan_service::count_closed_outgoing_requests(db)
+        .await
+        .map_err(|e| format!("{:?}", e))
+}
+
+/// Delete all closed outgoing P2P requests (not pending)
+pub async fn delete_closed_outgoing_requests() -> Result<u64, String> {
+    let db = db().ok_or("Database not initialized")?;
+
+    crate::services::loan_service::delete_closed_outgoing_requests(db)
+        .await
+        .map_err(|e| format!("{:?}", e))
+}
+
 /// Return a loan
 pub async fn return_loan(id: i32) -> Result<String, String> {
     let db = db().ok_or("Database not initialized")?;

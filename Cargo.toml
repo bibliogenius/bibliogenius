@@ -1,7 +1,8 @@
 [package]
 name = "bibliogenius"
-version = "0.8.0-alpha.2"
+version = "0.8.1-alpha.1"
 edition = "2024"
+
 license = "AGPL-3.0-or-later"
 
 [lints.rust]

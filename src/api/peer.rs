@@ -2527,9 +2527,19 @@ pub async fn update_request_status(
         let peer = match peer::Entity::find_by_id(req.from_peer_id).one(&db).await {
             Ok(Some(p)) => p,
             _ => {
+                // Peer no longer exists: auto-reject the request since we
+                // cannot create the contact/loan without peer info.
+                tracing::warn!(
+                    "Peer {} not found for request {} - auto-rejecting",
+                    req.from_peer_id,
+                    req.id
+                );
+                active.status = Set("rejected".to_string());
+                active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+                let _ = active.update(&db).await;
                 return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": "Peer not found" })),
+                    StatusCode::OK,
+                    Json(json!({ "message": "Request auto-rejected: peer no longer available" })),
                 )
                     .into_response();
             }
@@ -2765,31 +2775,30 @@ pub async fn update_request_status(
         // This is tricky because we didn't link Loan to Request directly.
         // We have to infer: Find active loan for this book's copy where contact matches peer.
 
-        // 1. Find Peer/Contact
-        let peer = match peer::Entity::find_by_id(req.from_peer_id).one(&db).await {
-            Ok(Some(p)) => p,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({ "error": "Peer not found" })),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": e.to_string() })),
-                )
-                    .into_response();
-            }
-        };
-
-        let contact = contact::Entity::find()
-            .filter(contact::Column::Name.eq(&peer.name))
-            .filter(contact::Column::Type.eq("Library"))
+        // 1. Find Peer/Contact (graceful: if peer is gone, still update request status)
+        let peer_opt = peer::Entity::find_by_id(req.from_peer_id)
             .one(&db)
             .await
-            .unwrap_or(None);
+            .ok()
+            .flatten();
+
+        if peer_opt.is_none() {
+            tracing::warn!(
+                "Peer {} not found for return of request {} - updating request status only",
+                req.from_peer_id,
+                req.id
+            );
+        }
+
+        let contact = match &peer_opt {
+            Some(peer) => contact::Entity::find()
+                .filter(contact::Column::Name.eq(&peer.name))
+                .filter(contact::Column::Type.eq("Library"))
+                .one(&db)
+                .await
+                .unwrap_or(None),
+            None => None,
+        };
 
         if let Some(contact) = contact {
             let book = book::Entity::find()

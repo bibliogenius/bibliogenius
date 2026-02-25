@@ -8,6 +8,8 @@ use crate::models::book::Entity as Book;
 use crate::models::contact::Entity as Contact;
 use crate::models::copy::{self, Entity as Copy};
 use crate::models::loan::{self, Entity as Loan, LoanDto};
+use crate::models::p2p_outgoing_request::{self, Entity as P2pOutgoingRequest};
+use crate::models::p2p_request::{self, Entity as P2pRequest};
 
 /// Error type for service operations
 #[derive(Debug)]
@@ -219,4 +221,58 @@ pub async fn count_active_loans(db: &DatabaseConnection) -> Result<i64, ServiceE
         .count(db)
         .await?;
     Ok(count as i64)
+}
+
+/// Count returned loans
+pub async fn count_returned_loans(db: &DatabaseConnection) -> Result<i64, ServiceError> {
+    let count = Loan::find()
+        .filter(loan::Column::Status.eq("returned"))
+        .count(db)
+        .await?;
+    Ok(count as i64)
+}
+
+/// Delete all returned loans, returns the number of deleted rows
+pub async fn delete_returned_loans(db: &DatabaseConnection) -> Result<u64, ServiceError> {
+    let result = Loan::delete_many()
+        .filter(loan::Column::Status.eq("returned"))
+        .exec(db)
+        .await?;
+    Ok(result.rows_affected)
+}
+
+/// Count closed incoming P2P requests (not pending)
+pub async fn count_closed_incoming_requests(db: &DatabaseConnection) -> Result<i64, ServiceError> {
+    let count = P2pRequest::find()
+        .filter(p2p_request::Column::Status.ne("pending"))
+        .count(db)
+        .await?;
+    Ok(count as i64)
+}
+
+/// Delete all closed incoming P2P requests (not pending)
+pub async fn delete_closed_incoming_requests(db: &DatabaseConnection) -> Result<u64, ServiceError> {
+    let result = P2pRequest::delete_many()
+        .filter(p2p_request::Column::Status.ne("pending"))
+        .exec(db)
+        .await?;
+    Ok(result.rows_affected)
+}
+
+/// Count closed outgoing P2P requests (not pending)
+pub async fn count_closed_outgoing_requests(db: &DatabaseConnection) -> Result<i64, ServiceError> {
+    let count = P2pOutgoingRequest::find()
+        .filter(p2p_outgoing_request::Column::Status.ne("pending"))
+        .count(db)
+        .await?;
+    Ok(count as i64)
+}
+
+/// Delete all closed outgoing P2P requests (not pending)
+pub async fn delete_closed_outgoing_requests(db: &DatabaseConnection) -> Result<u64, ServiceError> {
+    let result = P2pOutgoingRequest::delete_many()
+        .filter(p2p_outgoing_request::Column::Status.ne("pending"))
+        .exec(db)
+        .await?;
+    Ok(result.rows_affected)
 }
