@@ -3,6 +3,8 @@
 //! Handles difficulty configuration, card selection, scoring formula,
 //! and game lifecycle. All DB access goes through MemoryGameRepository trait.
 
+use std::collections::HashSet;
+
 use chrono::Local;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -114,7 +116,13 @@ pub async fn available_difficulties(
     repo: &dyn MemoryGameRepository,
 ) -> Result<Vec<MemoryDifficulty>, DomainError> {
     let books = repo.find_books_with_covers().await?;
-    let count = books.len();
+
+    // Count only books with distinct covers to match setup_game dedup logic
+    let mut seen = HashSet::new();
+    let count = books
+        .into_iter()
+        .filter(|b| seen.insert(b.cover_url.clone()))
+        .count();
 
     let available = MemoryDifficulty::all()
         .iter()
@@ -130,20 +138,28 @@ pub async fn setup_game(
     repo: &dyn MemoryGameRepository,
     difficulty: MemoryDifficulty,
 ) -> Result<Vec<MemoryGameCard>, DomainError> {
-    let mut books = repo.find_books_with_covers().await?;
+    let books = repo.find_books_with_covers().await?;
     let pairs = difficulty.pairs_count();
 
-    if books.len() < pairs {
+    // Deduplicate by cover_url so two books sharing the same cover
+    // never appear as separate pairs on the board.
+    let mut seen_covers = HashSet::new();
+    let mut unique_books: Vec<MemoryGameCard> = books
+        .into_iter()
+        .filter(|b| seen_covers.insert(b.cover_url.clone()))
+        .collect();
+
+    if unique_books.len() < pairs {
         return Err(DomainError::Validation(format!(
-            "Not enough books with covers: need {}, have {}",
+            "Not enough books with distinct covers: need {}, have {}",
             pairs,
-            books.len()
+            unique_books.len()
         )));
     }
 
     let mut rng = thread_rng();
-    books.shuffle(&mut rng);
-    let selected: Vec<MemoryGameCard> = books.into_iter().take(pairs).collect();
+    unique_books.shuffle(&mut rng);
+    let selected: Vec<MemoryGameCard> = unique_books.into_iter().take(pairs).collect();
 
     let mut cards: Vec<MemoryGameCard> = Vec::with_capacity(pairs * 2);
     for card in &selected {
