@@ -142,6 +142,8 @@ pub async fn create_contact(
 
     let saved_contact = new_contact.insert(db).await?;
 
+    let _ = crate::sync::log_operation(db, "contact", saved_contact.id, "INSERT", None).await;
+
     Ok(ContactDto::from(saved_contact))
 }
 
@@ -183,6 +185,9 @@ pub async fn update_contact(
     active_model.updated_at = Set(now);
 
     let model = active_model.update(db).await?;
+
+    let _ = crate::sync::log_operation(db, "contact", model.id, "UPDATE", None).await;
+
     Ok(ContactDto::from(model))
 }
 
@@ -198,6 +203,9 @@ pub async fn delete_contact(db: &DatabaseConnection, id: i32) -> Result<(), Serv
     active_model.updated_at = Set(chrono::Utc::now().to_rfc3339());
 
     active_model.update(db).await?;
+
+    let _ = crate::sync::log_operation(db, "contact", id, "DELETE", None).await;
+
     Ok(())
 }
 

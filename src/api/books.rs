@@ -173,15 +173,7 @@ pub async fn create_book(
                 }
             }
 
-            // Log sync operation
-            let _ = crate::sync::log_operation(
-                db,
-                "book",
-                book_id,
-                "INSERT",
-                Some(serde_json::to_value(&created_book).unwrap_or_default()),
-            )
-            .await;
+            let _ = crate::sync::log_operation(db, "book", book_id, "INSERT", None).await;
 
             // Create default copy only if owned
             if owned {
@@ -194,7 +186,16 @@ pub async fn create_book(
                     updated_at: Set(now.to_rfc3339()),
                     ..Default::default()
                 };
-                let _ = copy.insert(db).await;
+                if let Ok(saved_copy) = copy.insert(db).await {
+                    let _ = crate::sync::log_operation(
+                        db,
+                        "copy",
+                        saved_copy.id,
+                        "INSERT",
+                        Some(serde_json::json!({ "book_id": book_id })),
+                    )
+                    .await;
+                }
             }
 
             (
@@ -234,11 +235,14 @@ pub async fn delete_book(
 
     // Idempotent DELETE: return 200 OK even if book doesn't exist
     match state.book_repo.delete(id).await {
-        Ok(()) | Err(DomainError::NotFound) => (
-            StatusCode::OK,
-            Json(json!({"message": "Book deleted successfully"})),
-        )
-            .into_response(),
+        Ok(()) | Err(DomainError::NotFound) => {
+            let _ = crate::sync::log_operation(state.db(), "book", id, "DELETE", None).await;
+            (
+                StatusCode::OK,
+                Json(json!({"message": "Book deleted successfully"})),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -297,6 +301,8 @@ pub async fn update_book(
     // Update book via repository
     match state.book_repo.update(id, book_data).await {
         Ok(updated_book) => {
+            let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
+
             // Handle owned change: create or delete copies
             if new_owned != old_owned {
                 use crate::models::copy::{self as copy_model, Entity as CopyEntity};
@@ -318,10 +324,30 @@ pub async fn update_book(
                             updated_at: Set(now.to_rfc3339()),
                             ..Default::default()
                         };
-                        let _ = copy.insert(db).await;
+                        if let Ok(saved) = copy.insert(db).await {
+                            let _ = crate::sync::log_operation(
+                                db,
+                                "copy",
+                                saved.id,
+                                "INSERT",
+                                Some(serde_json::json!({ "book_id": id })),
+                            )
+                            .await;
+                        }
                     }
                 } else {
                     // owned: true -> false: delete all copies for this book
+                    // Log each copy before bulk delete
+                    if let Ok(copies) = CopyEntity::find()
+                        .filter(copy_model::Column::BookId.eq(id))
+                        .all(db)
+                        .await
+                    {
+                        for c in &copies {
+                            let _ =
+                                crate::sync::log_operation(db, "copy", c.id, "DELETE", None).await;
+                        }
+                    }
                     let _ = CopyEntity::delete_many()
                         .filter(copy_model::Column::BookId.eq(id))
                         .exec(db)

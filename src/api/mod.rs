@@ -8,6 +8,7 @@ pub mod collections;
 pub mod contact;
 pub mod copy;
 pub mod data;
+pub mod device;
 pub mod discovery;
 pub mod e2ee;
 pub mod export;
@@ -34,7 +35,7 @@ pub mod mcp;
 
 use axum::{
     Router,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use sea_orm::DatabaseConnection;
 
@@ -65,9 +66,22 @@ fn build_routes() -> Router<AppState> {
         .route("/auth/me", get(auth::get_me))
         .route("/auth/2fa/setup", post(auth::setup_2fa))
         .route("/auth/2fa/verify", post(auth::verify_2fa))
-        // Pairing
+        // Pairing (legacy)
         .route("/auth/pairing/code", post(auth::pairing_generate_code))
         .route("/auth/pairing/verify", post(auth::pairing_verify_code))
+        // Device pairing and management (ADR-011)
+        .route("/devices/pair/offer", post(device::generate_offer))
+        .route("/devices/pair/accept", post(device::accept_offer))
+        .route("/devices", get(device::list_devices))
+        .route("/devices/:id", delete(device::remove_device))
+        // Device sync
+        .route(
+            "/devices/sync/pending-review",
+            get(device::sync_pending_review),
+        )
+        .route("/devices/sync/approve", post(device::sync_approve))
+        .route("/devices/sync/reject", post(device::sync_reject))
+        .route("/devices/sync/:id", post(device::trigger_sync))
         // Library config
         .route("/library/config", get(library::get_config))
         .route("/library/config", post(library::update_config))
@@ -256,6 +270,8 @@ fn build_routes() -> Router<AppState> {
         .merge(crate::modules::memory_game::routes())
         // Sliding Puzzle (self-contained module)
         .merge(crate::modules::sliding_puzzle::routes())
+        // Operation Log Viewer (self-contained module)
+        .merge(crate::modules::operation_log_viewer::routes())
         // Peer relay setup
         .route("/peers/relay/setup", post(peer::setup_relay))
         .route("/peers/relay/config", get(peer::get_relay_config_endpoint))

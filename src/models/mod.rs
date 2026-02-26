@@ -13,6 +13,7 @@ pub mod gamification_streaks;
 pub mod installation_profile;
 pub mod library;
 pub mod library_config;
+pub mod linked_device;
 pub mod loan;
 pub mod operation_log;
 pub mod p2p_outgoing_request;

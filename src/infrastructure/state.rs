@@ -6,14 +6,17 @@ use tokio::sync::OnceCell;
 
 use crate::domain::{
     AuthorRepository, BookRepository, CollectionRepository, CopyRepository, GamificationRepository,
+    LinkedDeviceRepository,
 };
 use crate::infrastructure::nonce_store::SqliteNonceStore;
 use crate::infrastructure::{
     SeaOrmAuthorRepository, SeaOrmBookRepository, SeaOrmCollectionRepository, SeaOrmCopyRepository,
-    SeaOrmGamificationRepository,
+    SeaOrmGamificationRepository, SeaOrmLinkedDeviceRepository,
 };
 use crate::services::IdentityService;
 use crate::services::crypto_service::CryptoService;
+use crate::services::device_pairing_service::DevicePairingService;
+use crate::services::device_sync_service::DeviceSyncService;
 
 /// Application state shared across all handlers
 #[derive(Clone)]
@@ -30,10 +33,16 @@ pub struct AppState {
     pub collection_repo: Arc<dyn CollectionRepository>,
     /// Gamification repository
     pub gamification_repo: Arc<dyn GamificationRepository>,
+    /// Linked device repository (multi-device sync)
+    pub linked_device_repo: Arc<dyn LinkedDeviceRepository>,
     /// Identity service for E2EE key management
     pub identity_service: Arc<IdentityService>,
     /// Crypto service for E2EE seal/open (lazily initialized after identity is ready)
     crypto_service: Arc<OnceCell<Arc<CryptoService<SqliteNonceStore>>>>,
+    /// Device pairing service for multi-device sync
+    pub device_pairing: Arc<DevicePairingService>,
+    /// Device sync service for operation log exchange
+    pub device_sync: Arc<DeviceSyncService>,
 }
 
 impl AppState {
@@ -54,6 +63,17 @@ impl AppState {
         let copy_repo = Arc::new(SeaOrmCopyRepository::new(db.clone()));
         let collection_repo = Arc::new(SeaOrmCollectionRepository::new(db.clone()));
         let gamification_repo = Arc::new(SeaOrmGamificationRepository::new(db.clone()));
+        let linked_device_repo = Arc::new(SeaOrmLinkedDeviceRepository::new(db.clone()));
+
+        let device_pairing = Arc::new(DevicePairingService::new(
+            identity_service.clone(),
+            linked_device_repo.clone(),
+        ));
+
+        let device_sync = Arc::new(DeviceSyncService::new(
+            db.clone(),
+            linked_device_repo.clone(),
+        ));
 
         Self {
             db,
@@ -62,8 +82,11 @@ impl AppState {
             copy_repo,
             collection_repo,
             gamification_repo,
+            linked_device_repo,
             identity_service,
             crypto_service: Arc::new(OnceCell::new()),
+            device_pairing,
+            device_sync,
         }
     }
 

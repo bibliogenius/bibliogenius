@@ -163,10 +163,28 @@ pub async fn create_loan(
 
     let saved_loan = new_loan.insert(db).await?;
 
+    let _ = crate::sync::log_operation(
+        db,
+        "loan",
+        saved_loan.id,
+        "INSERT",
+        Some(serde_json::json!({ "copy_id": saved_loan.copy_id })),
+    )
+    .await;
+
     // 3. Update Copy status to 'loaned'
     let mut copy_active: copy::ActiveModel = copy.into();
     copy_active.status = Set("loaned".to_owned());
     copy_active.update(db).await?;
+
+    let _ = crate::sync::log_operation(
+        db,
+        "copy",
+        dto.copy_id,
+        "UPDATE",
+        Some(serde_json::json!({ "status": "loaned" })),
+    )
+    .await;
 
     Ok(saved_loan)
 }
@@ -195,6 +213,15 @@ pub async fn return_loan(db: &DatabaseConnection, id: i32) -> Result<loan::Model
 
     let updated_loan = loan_active.update(db).await?;
 
+    let _ = crate::sync::log_operation(
+        db,
+        "loan",
+        updated_loan.id,
+        "UPDATE",
+        Some(serde_json::json!({ "status": "returned" })),
+    )
+    .await;
+
     // 3. Update Copy status to 'available'
     let copy = Copy::find_by_id(loan.copy_id)
         .one(db)
@@ -204,6 +231,15 @@ pub async fn return_loan(db: &DatabaseConnection, id: i32) -> Result<loan::Model
     let mut copy_active: copy::ActiveModel = copy.into();
     copy_active.status = Set("available".to_owned());
     copy_active.update(db).await?;
+
+    let _ = crate::sync::log_operation(
+        db,
+        "copy",
+        loan.copy_id,
+        "UPDATE",
+        Some(serde_json::json!({ "status": "available" })),
+    )
+    .await;
 
     Ok(updated_loan)
 }

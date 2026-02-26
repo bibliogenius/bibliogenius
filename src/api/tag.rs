@@ -50,7 +50,10 @@ pub async fn create_tag(
     };
 
     match tag.insert(&db).await {
-        Ok(model) => (StatusCode::CREATED, Json(model)).into_response(),
+        Ok(model) => {
+            let _ = crate::sync::log_operation(&db, "tag", model.id, "INSERT", None).await;
+            (StatusCode::CREATED, Json(model)).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -81,9 +84,11 @@ pub async fn delete_tag(
     let tag = Tag::find_by_id(id).one(&db).await.unwrap_or(None);
     match tag {
         Some(tag) => {
+            let tag_id = tag.id;
             let res = tag.delete(&db).await;
             match res {
                 Ok(_) => {
+                    let _ = crate::sync::log_operation(&db, "tag", tag_id, "DELETE", None).await;
                     (StatusCode::OK, Json(json!({ "message": "Tag deleted" }))).into_response()
                 }
                 Err(e) => (

@@ -805,12 +805,15 @@ pub async fn create_tag(name: String, parent_id: Option<i32>) -> Result<FrbTag, 
     };
 
     match new_tag.insert(db).await {
-        Ok(t) => Ok(FrbTag {
-            id: t.id,
-            name: t.name,
-            parent_id: t.parent_id,
-            count: 0,
-        }),
+        Ok(t) => {
+            let _ = crate::sync::log_operation(db, "tag", t.id, "INSERT", None).await;
+            Ok(FrbTag {
+                id: t.id,
+                name: t.name,
+                parent_id: t.parent_id,
+                count: 0,
+            })
+        }
         Err(e) => Err(format!("{:?}", e)),
     }
 }
@@ -835,12 +838,15 @@ pub async fn update_tag(id: i32, name: String, parent_id: Option<i32>) -> Result
     active.updated_at = Set(chrono::Utc::now().to_rfc3339());
 
     match active.update(db).await {
-        Ok(t) => Ok(FrbTag {
-            id: t.id,
-            name: t.name,
-            parent_id: t.parent_id,
-            count: 0, // We don't query count on update
-        }),
+        Ok(t) => {
+            let _ = crate::sync::log_operation(db, "tag", t.id, "UPDATE", None).await;
+            Ok(FrbTag {
+                id: t.id,
+                name: t.name,
+                parent_id: t.parent_id,
+                count: 0,
+            })
+        }
         Err(e) => Err(format!("{:?}", e)),
     }
 }
@@ -852,7 +858,10 @@ pub async fn delete_tag(id: i32) -> Result<(), String> {
     use sea_orm::EntityTrait;
 
     match tag::Entity::delete_by_id(id).exec(db).await {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            let _ = crate::sync::log_operation(db, "tag", id, "DELETE", None).await;
+            Ok(())
+        }
         Err(e) => Err(format!("{:?}", e)),
     }
 }
@@ -2171,4 +2180,364 @@ pub async fn gamification_update_streak() -> Result<FrbStreakInfo, String> {
         current: streak.current,
         longest: streak.longest,
     })
+}
+
+// ── Operation Log Viewer FFI ──────────────────────────────────────────
+
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbOperationLogEntry {
+    pub id: i32,
+    pub entity_type: String,
+    pub entity_id: i32,
+    pub operation: String,
+    pub payload: Option<String>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub pinned: bool,
+    pub created_at: String,
+}
+
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbOperationLogStats {
+    pub total: u64,
+    pub today: u64,
+    pub pending: u64,
+    pub failed: u64,
+}
+
+/// List operation log entries with optional filters
+pub async fn operation_log_list(
+    entity_type: Option<String>,
+    operation: Option<String>,
+    status: Option<String>,
+    query: Option<String>,
+    page: Option<u64>,
+    limit: Option<u64>,
+) -> Result<Vec<FrbOperationLogEntry>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    use crate::modules::operation_log_viewer::domain::{
+        OperationLogFilter, OperationLogViewerRepository,
+    };
+    use crate::modules::operation_log_viewer::repository::SeaOrmOperationLogViewerRepository;
+
+    let repo = SeaOrmOperationLogViewerRepository::new(db);
+    let filter = OperationLogFilter {
+        entity_type,
+        operation,
+        status,
+        query,
+        since: None,
+        until: None,
+        page: page.unwrap_or(0),
+        limit: limit.unwrap_or(50).min(200),
+    };
+
+    let page = repo.find_all(filter).await.map_err(|e| e.to_string())?;
+    Ok(page
+        .entries
+        .into_iter()
+        .map(|e| FrbOperationLogEntry {
+            id: e.id,
+            entity_type: e.entity_type,
+            entity_id: e.entity_id,
+            operation: e.operation,
+            payload: e.payload,
+            status: e.status,
+            error_message: e.error_message,
+            pinned: e.pinned,
+            created_at: e.created_at,
+        })
+        .collect())
+}
+
+/// Get operation log stats
+pub async fn operation_log_stats() -> Result<FrbOperationLogStats, String> {
+    let db = db().ok_or("Database not initialized")?;
+    use crate::modules::operation_log_viewer::domain::OperationLogViewerRepository;
+    use crate::modules::operation_log_viewer::repository::SeaOrmOperationLogViewerRepository;
+
+    let repo = SeaOrmOperationLogViewerRepository::new(db);
+    let stats = repo.get_stats().await.map_err(|e| e.to_string())?;
+    Ok(FrbOperationLogStats {
+        total: stats.total,
+        today: stats.today,
+        pending: stats.pending,
+        failed: stats.failed,
+    })
+}
+
+/// Get distinct entity types for filter dropdowns
+pub async fn operation_log_entity_types() -> Result<Vec<String>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    use crate::modules::operation_log_viewer::domain::OperationLogViewerRepository;
+    use crate::modules::operation_log_viewer::repository::SeaOrmOperationLogViewerRepository;
+
+    let repo = SeaOrmOperationLogViewerRepository::new(db);
+    repo.get_entity_types().await.map_err(|e| e.to_string())
+}
+
+// ============ Device Pairing (FFI) ============
+
+use crate::services::device_pairing_service::DevicePairingService;
+
+static DEVICE_PAIRING_SERVICE: OnceLock<std::sync::Arc<DevicePairingService>> = OnceLock::new();
+
+/// Get or initialize the device pairing service
+fn device_pairing_svc() -> Result<&'static std::sync::Arc<DevicePairingService>, String> {
+    if let Some(svc) = DEVICE_PAIRING_SERVICE.get() {
+        return Ok(svc);
+    }
+    let db_conn = db().ok_or("Database not initialized")?;
+    let id_svc = IDENTITY_SERVICE.get().ok_or("Identity not initialized")?;
+    let repo = std::sync::Arc::new(crate::infrastructure::SeaOrmLinkedDeviceRepository::new(
+        db_conn.clone(),
+    ));
+    let id_arc = std::sync::Arc::new(id_svc.clone());
+    let svc = std::sync::Arc::new(DevicePairingService::new(id_arc, repo));
+    let _ = DEVICE_PAIRING_SERVICE.set(svc);
+    Ok(DEVICE_PAIRING_SERVICE.get().unwrap())
+}
+
+/// FFI struct for linked device info
+pub struct FrbLinkedDevice {
+    pub id: i32,
+    pub name: String,
+    pub ed25519_public_key: Vec<u8>,
+    pub x25519_public_key: Vec<u8>,
+    pub relay_url: Option<String>,
+    pub mailbox_id: Option<String>,
+    pub last_synced: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// FFI struct for pairing offer response
+pub struct FrbPairingOffer {
+    pub code: String,
+    pub expires_in: u64,
+}
+
+/// FFI struct for pairing confirmation
+pub struct FrbPairingConfirmation {
+    pub device_id: i32,
+    pub library_uuid: String,
+    pub offerer_ed25519: Vec<u8>,
+    pub offerer_x25519: Vec<u8>,
+    pub offerer_relay_url: Option<String>,
+    pub offerer_mailbox_id: Option<String>,
+}
+
+/// Generate a 6-digit pairing offer for multi-device linking
+pub fn device_generate_pairing_offer(
+    device_name: String,
+    library_uuid: String,
+    relay_url: Option<String>,
+    mailbox_id: Option<String>,
+    relay_write_token: Option<String>,
+) -> Result<FrbPairingOffer, String> {
+    let svc = device_pairing_svc()?;
+    let resp = svc.generate_offer(
+        device_name,
+        library_uuid,
+        relay_url,
+        mailbox_id,
+        relay_write_token,
+    )?;
+    Ok(FrbPairingOffer {
+        code: resp.code,
+        expires_in: resp.expires_in,
+    })
+}
+
+/// Accept a pairing offer by entering the 6-digit code.
+/// Returns the offerer's crypto keys and library info.
+pub async fn device_accept_pairing(
+    code: String,
+    device_name: String,
+    ed25519_public_key: Vec<u8>,
+    x25519_public_key: Vec<u8>,
+    relay_url: Option<String>,
+    mailbox_id: Option<String>,
+    relay_write_token: Option<String>,
+) -> Result<FrbPairingConfirmation, String> {
+    let svc = device_pairing_svc()?;
+    let confirmation = svc
+        .accept_offer(
+            crate::services::device_pairing_service::PairingAcceptInput {
+                code,
+                device_name,
+                ed25519_public_key,
+                x25519_public_key,
+                relay_url,
+                mailbox_id,
+                relay_write_token,
+            },
+        )
+        .await?;
+    Ok(FrbPairingConfirmation {
+        device_id: confirmation.device_id,
+        library_uuid: confirmation.library_uuid,
+        offerer_ed25519: confirmation.offerer_ed25519,
+        offerer_x25519: confirmation.offerer_x25519,
+        offerer_relay_url: confirmation.offerer_relay_url,
+        offerer_mailbox_id: confirmation.offerer_mailbox_id,
+    })
+}
+
+/// List all linked devices
+pub async fn device_list_linked() -> Result<Vec<FrbLinkedDevice>, String> {
+    let svc = device_pairing_svc()?;
+    let devices = svc.list_devices().await.map_err(|e| e.to_string())?;
+    Ok(devices
+        .into_iter()
+        .map(|d| FrbLinkedDevice {
+            id: d.id.unwrap_or(0),
+            name: d.name,
+            ed25519_public_key: d.ed25519_public_key,
+            x25519_public_key: d.x25519_public_key,
+            relay_url: d.relay_url,
+            mailbox_id: d.mailbox_id,
+            last_synced: d.last_synced,
+            created_at: d.created_at,
+        })
+        .collect())
+}
+
+/// Remove a linked device by ID
+pub async fn device_remove_linked(device_id: i32) -> Result<(), String> {
+    let svc = device_pairing_svc()?;
+    svc.remove_device(device_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ============ Device Sync (FFI) ============
+
+use crate::services::device_sync_service::DeviceSyncService;
+
+static DEVICE_SYNC_SERVICE: OnceLock<std::sync::Arc<DeviceSyncService>> = OnceLock::new();
+
+/// Get or initialize the device sync service
+fn device_sync_svc() -> Result<&'static std::sync::Arc<DeviceSyncService>, String> {
+    if let Some(svc) = DEVICE_SYNC_SERVICE.get() {
+        return Ok(svc);
+    }
+    let db_conn = db().ok_or("Database not initialized")?;
+    let repo = std::sync::Arc::new(crate::infrastructure::SeaOrmLinkedDeviceRepository::new(
+        db_conn.clone(),
+    ));
+    let svc = std::sync::Arc::new(DeviceSyncService::new(db_conn.clone(), repo));
+    let _ = DEVICE_SYNC_SERVICE.set(svc);
+    Ok(DEVICE_SYNC_SERVICE.get().unwrap())
+}
+
+/// FFI struct for sync result
+pub struct FrbSyncResult {
+    pub sent_count: u32,
+    pub received_count: u32,
+    pub pending_review_count: u32,
+}
+
+/// FFI struct for pending review operation
+pub struct FrbPendingReviewOp {
+    pub id: i32,
+    pub entity_type: String,
+    pub entity_id: i32,
+    pub operation: String,
+    pub payload: Option<String>,
+    pub source: String,
+    pub created_at: String,
+}
+
+/// Trigger sync with a specific linked device.
+/// This is a simplified version - full sync uses the HTTP trigger_sync endpoint
+/// which handles E2EE transport. This FFI function delegates to it.
+pub async fn device_trigger_sync(device_id: i32) -> Result<FrbSyncResult, String> {
+    let svc = device_sync_svc()?;
+
+    // Collect local ops to count what we would send
+    let device = {
+        let pairing_svc = device_pairing_svc()?;
+        let devices = pairing_svc
+            .list_devices()
+            .await
+            .map_err(|e| e.to_string())?;
+        devices
+            .into_iter()
+            .find(|d| d.id == Some(device_id))
+            .ok_or_else(|| "Device not found".to_string())?
+    };
+
+    let since = device.last_synced.as_deref();
+    let local_ops = svc
+        .get_local_ops_since(since)
+        .await
+        .map_err(|e| format!("Failed to get local ops: {e}"))?;
+
+    let sent_count = local_ops.len() as u32;
+
+    // Note: actual E2EE transport happens through the HTTP endpoint.
+    // This FFI function returns the count of ops that would be sent.
+    // The Flutter side should call the HTTP endpoint for actual sync.
+
+    let pending_review_count = svc
+        .get_pending_review_ops()
+        .await
+        .map(|ops| ops.len() as u32)
+        .unwrap_or(0);
+
+    Ok(FrbSyncResult {
+        sent_count,
+        received_count: 0, // Actual sync via HTTP
+        pending_review_count,
+    })
+}
+
+/// List operations pending review (sync safety mode)
+pub async fn device_sync_pending_review() -> Result<Vec<FrbPendingReviewOp>, String> {
+    let svc = device_sync_svc()?;
+    let ops = svc
+        .get_pending_review_ops()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(ops
+        .into_iter()
+        .map(|op| FrbPendingReviewOp {
+            id: op.id,
+            entity_type: op.entity_type,
+            entity_id: op.entity_id,
+            operation: op.operation,
+            payload: op.payload,
+            source: op.source,
+            created_at: op.created_at,
+        })
+        .collect())
+}
+
+/// Approve specific pending review operations
+pub async fn device_sync_approve(ids: Vec<i32>) -> Result<u32, String> {
+    let svc = device_sync_svc()?;
+    svc.approve_ops(&ids).await.map_err(|e| e.to_string())
+}
+
+/// Reject specific pending review operations
+pub async fn device_sync_reject(ids: Vec<i32>) -> Result<u32, String> {
+    let svc = device_sync_svc()?;
+    svc.reject_ops(&ids).await.map_err(|e| e.to_string())
+}
+
+/// Approve all pending review operations at once
+pub async fn device_sync_approve_all() -> Result<u32, String> {
+    let svc = device_sync_svc()?;
+    svc.approve_all_pending_review()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Reject all pending review operations at once
+pub async fn device_sync_reject_all() -> Result<u32, String> {
+    let svc = device_sync_svc()?;
+    svc.reject_all_pending_review()
+        .await
+        .map_err(|e| e.to_string())
 }

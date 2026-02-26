@@ -56,14 +56,26 @@ pub async fn create_copy(
     };
 
     match state.copy_repo.create(input).await {
-        Ok(copy) => (
-            StatusCode::CREATED,
-            Json(json!({
-                "copy": copy,
-                "message": "Copy created successfully"
-            })),
-        )
-            .into_response(),
+        Ok(copy) => {
+            if let Some(copy_id) = copy.id {
+                let _ = crate::sync::log_operation(
+                    state.db(),
+                    "copy",
+                    copy_id,
+                    "INSERT",
+                    Some(serde_json::json!({ "book_id": copy.book_id })),
+                )
+                .await;
+            }
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "copy": copy,
+                    "message": "Copy created successfully"
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("Failed to create copy: {}", e)})),
@@ -149,11 +161,14 @@ pub async fn get_borrowed_copies(State(state): State<AppState>) -> impl IntoResp
 // Delete a copy
 pub async fn delete_copy(State(state): State<AppState>, Path(id): Path<i32>) -> impl IntoResponse {
     match state.copy_repo.delete(id).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(json!({"message": "Copy deleted successfully"})),
-        )
-            .into_response(),
+        Ok(()) => {
+            let _ = crate::sync::log_operation(state.db(), "copy", id, "DELETE", None).await;
+            (
+                StatusCode::OK,
+                Json(json!({"message": "Copy deleted successfully"})),
+            )
+                .into_response()
+        }
         Err(DomainError::NotFound) => {
             // Idempotent delete - return OK even if not found
             (
@@ -193,7 +208,10 @@ pub async fn update_copy(
     };
 
     match state.copy_repo.update(id, input).await {
-        Ok(copy) => (StatusCode::OK, Json(json!({"copy": copy}))).into_response(),
+        Ok(copy) => {
+            let _ = crate::sync::log_operation(state.db(), "copy", id, "UPDATE", None).await;
+            (StatusCode::OK, Json(json!({"copy": copy}))).into_response()
+        }
         Err(DomainError::NotFound) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "Copy not found"})),

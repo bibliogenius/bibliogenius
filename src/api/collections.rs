@@ -44,7 +44,17 @@ pub async fn create_collection(
     };
 
     match state.collection_repo.create(input).await {
-        Ok(collection) => (StatusCode::CREATED, Json(collection)).into_response(),
+        Ok(collection) => {
+            let _ = crate::sync::log_operation_with_str_id(
+                state.db(),
+                "collection",
+                &collection.id,
+                "INSERT",
+                None,
+            )
+            .await;
+            (StatusCode::CREATED, Json(collection)).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -79,7 +89,17 @@ pub async fn delete_collection(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.collection_repo.delete(&id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            let _ = crate::sync::log_operation_with_str_id(
+                state.db(),
+                "collection",
+                &id,
+                "DELETE",
+                None,
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(DomainError::NotFound) => {
             // Idempotent delete
             StatusCode::NO_CONTENT.into_response()
@@ -117,7 +137,17 @@ pub async fn add_book_to_collection(
         .add_book(&collection_id, book_id)
         .await
     {
-        Ok(()) => StatusCode::CREATED.into_response(),
+        Ok(()) => {
+            let _ = crate::sync::log_operation_with_str_id(
+                state.db(),
+                "collection_book",
+                &collection_id,
+                "INSERT",
+                Some(serde_json::json!({ "book_id": book_id })),
+            )
+            .await;
+            StatusCode::CREATED.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -136,7 +166,17 @@ pub async fn remove_book_from_collection(
         .remove_book(&collection_id, book_id)
         .await
     {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            let _ = crate::sync::log_operation_with_str_id(
+                state.db(),
+                "collection_book",
+                &collection_id,
+                "DELETE",
+                Some(serde_json::json!({ "book_id": book_id })),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -176,7 +216,12 @@ pub async fn update_book_collections(
         .update_book_collections(book_id, payload.collection_ids)
         .await
     {
-        Ok(()) => StatusCode::OK.into_response(),
+        Ok(()) => {
+            let _ =
+                crate::sync::log_operation(state.db(), "collection_book", book_id, "UPDATE", None)
+                    .await;
+            StatusCode::OK.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -243,6 +288,15 @@ pub async fn import_collection(
                         };
                         match new_book.insert(db).await {
                             Ok(created_book) => {
+                                let _ = crate::sync::log_operation(
+                                    db,
+                                    "book",
+                                    created_book.id,
+                                    "INSERT",
+                                    None,
+                                )
+                                .await;
+
                                 // 2. Link to Collection via repository
                                 if let Err(e) =
                                     state.collection_repo.add_book(&id, created_book.id).await
@@ -250,6 +304,14 @@ pub async fn import_collection(
                                     errors.push(format!("Failed to link {}: {}", req.title, e));
                                     continue;
                                 }
+                                let _ = crate::sync::log_operation_with_str_id(
+                                    db,
+                                    "collection_book",
+                                    &id,
+                                    "INSERT",
+                                    Some(serde_json::json!({ "book_id": created_book.id })),
+                                )
+                                .await;
                                 count += 1;
 
                                 // 3. Create Copy if owned
@@ -263,7 +325,16 @@ pub async fn import_collection(
                                         updated_at: Set(now.to_rfc3339()),
                                         ..Default::default()
                                     };
-                                    let _ = copy_model.insert(db).await;
+                                    if let Ok(saved_copy) = copy_model.insert(db).await {
+                                        let _ = crate::sync::log_operation(
+                                            db,
+                                            "copy",
+                                            saved_copy.id,
+                                            "INSERT",
+                                            Some(serde_json::json!({ "book_id": created_book.id })),
+                                        )
+                                        .await;
+                                    }
                                 }
                             }
                             Err(e) => errors.push(format!("{}: {}", req.title, e)),

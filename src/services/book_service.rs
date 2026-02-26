@@ -219,15 +219,8 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         let _ = create_or_link_author(db, model.id, &author_name).await;
     }
 
-    // Log sync operation
-    let _ = crate::sync::log_operation(
-        db,
-        "book",
-        model.id,
-        "INSERT",
-        Some(serde_json::to_value(&model).unwrap()),
-    )
-    .await;
+    // Log sync operation (minimal payload, no sensitive data)
+    let _ = crate::sync::log_operation(db, "book", model.id, "INSERT", None).await;
 
     // Create default copy only for individual/kid profiles AND only if book is owned
     // Librarians manage copies manually through inventory
@@ -254,7 +247,16 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
                 updated_at: Set(now.to_rfc3339()),
                 ..Default::default()
             };
-            let _ = copy.insert(db).await;
+            if let Ok(saved_copy) = copy.insert(db).await {
+                let _ = crate::sync::log_operation(
+                    db,
+                    "copy",
+                    saved_copy.id,
+                    "INSERT",
+                    Some(serde_json::json!({ "book_id": model.id })),
+                )
+                .await;
+            }
         }
     }
 
@@ -317,6 +319,8 @@ pub async fn update_book(
 
     let model = book.update(db).await?;
 
+    let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
+
     // Handle author update: if author field is provided, update the book_authors join table
     let author_names: Vec<String> = if let Some(ref authors_list) = book_data.authors {
         authors_list.clone()
@@ -340,6 +344,15 @@ pub async fn update_book(
             .exec(db)
             .await?;
 
+        let _ = crate::sync::log_operation(
+            db,
+            "book_author",
+            id,
+            "DELETE",
+            Some(serde_json::json!({ "book_id": id })),
+        )
+        .await;
+
         // Find or create each author and link to book
         for author_name in author_names {
             let author_model = match AuthorEntity::find()
@@ -355,7 +368,10 @@ pub async fn update_book(
                         updated_at: Set(now.to_rfc3339()),
                         ..Default::default()
                     };
-                    new_author.insert(db).await?
+                    let created = new_author.insert(db).await?;
+                    let _ =
+                        crate::sync::log_operation(db, "author", created.id, "INSERT", None).await;
+                    created
                 }
             };
 
@@ -364,7 +380,16 @@ pub async fn update_book(
                 author_id: Set(author_model.id),
                 ..Default::default()
             };
-            let _ = book_author.insert(db).await;
+            if book_author.insert(db).await.is_ok() {
+                let _ = crate::sync::log_operation(
+                    db,
+                    "book_author",
+                    id,
+                    "INSERT",
+                    Some(serde_json::json!({ "book_id": id, "author_id": author_model.id })),
+                )
+                .await;
+            }
         }
     }
 
@@ -374,6 +399,9 @@ pub async fn update_book(
 /// Delete a book by ID
 pub async fn delete_book(db: &DatabaseConnection, id: i32) -> Result<(), ServiceError> {
     BookEntity::delete_by_id(id).exec(db).await?;
+
+    let _ = crate::sync::log_operation(db, "book", id, "DELETE", None).await;
+
     Ok(())
 }
 
@@ -1022,7 +1050,9 @@ async fn create_or_link_author(
                 updated_at: Set(now.to_rfc3339()),
                 ..Default::default()
             };
-            new_author.insert(db).await?
+            let created = new_author.insert(db).await?;
+            let _ = crate::sync::log_operation(db, "author", created.id, "INSERT", None).await;
+            created
         }
     };
 
@@ -1032,7 +1062,16 @@ async fn create_or_link_author(
         author_id: Set(author.id),
         ..Default::default()
     };
-    let _ = book_author.insert(db).await;
+    if book_author.insert(db).await.is_ok() {
+        let _ = crate::sync::log_operation(
+            db,
+            "book_author",
+            book_id,
+            "INSERT",
+            Some(serde_json::json!({ "book_id": book_id, "author_id": author.id })),
+        )
+        .await;
+    }
 
     Ok(())
 }

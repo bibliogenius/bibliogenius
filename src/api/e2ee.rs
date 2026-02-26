@@ -173,6 +173,18 @@ pub async fn dispatch_clear_message(
 
         "status_update" => handle_status_update(db, clear_message).await,
 
+        "device_sync_request" => {
+            let response_payload = handle_device_sync_request(db, clear_message).await;
+            seal_response(
+                crypto_service,
+                &known_peers[peer_index],
+                "device_sync_response",
+                response_payload,
+            )
+        }
+
+        "device_sync_push" => handle_device_sync_push(db, clear_message).await,
+
         _ => {
             tracing::warn!(
                 "E2EE: Unknown message type '{}'",
@@ -650,6 +662,175 @@ async fn handle_status_update(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+// ── Device sync handlers ──────────────────────────────────────────────
+
+/// Check if sync safety mode is enabled (module "sync_safety" in enabled_modules).
+async fn is_sync_safety_enabled(db: &DatabaseConnection) -> bool {
+    use crate::models::installation_profile::ProfileConfig;
+
+    match ProfileConfig::load(db).await {
+        Ok(config) => config.is_module_enabled("sync_safety"),
+        Err(_) => true, // Default to safe mode if profile can't be loaded
+    }
+}
+
+/// Handle a device sync request (LAN, request-response).
+///
+/// Receives remote ops from the sender, stores them with appropriate status,
+/// then returns our local ops since the sender's last sync point.
+async fn handle_device_sync_request(
+    db: &DatabaseConnection,
+    msg: &ClearMessage,
+) -> serde_json::Value {
+    use crate::services::device_sync_service::{DeviceSyncService, RemoteOp};
+
+    let since = msg.payload.get("since").and_then(|v| v.as_str());
+
+    let device_id = msg
+        .payload
+        .get("device_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
+
+    let remote_ops: Vec<RemoteOp> = msg
+        .payload
+        .get("ops")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let safety_mode = is_sync_safety_enabled(db).await;
+
+    // 1. Receive and store remote ops
+    let repo: std::sync::Arc<dyn crate::domain::LinkedDeviceRepository> = std::sync::Arc::new(
+        crate::infrastructure::SeaOrmLinkedDeviceRepository::new(db.clone()),
+    );
+    let svc = DeviceSyncService::new(db.clone(), repo.clone());
+
+    let received_count = if !remote_ops.is_empty() {
+        match svc
+            .receive_remote_ops(device_id, remote_ops, safety_mode)
+            .await
+        {
+            Ok(result) => result.inserted_count,
+            Err(e) => {
+                tracing::error!("E2EE: Failed to receive remote ops: {e}");
+                0
+            }
+        }
+    } else {
+        0
+    };
+
+    // 2. Fetch our local ops since the given timestamp
+    let local_ops = svc.get_local_ops_since(since).await.unwrap_or_default();
+
+    let ops_payload: Vec<serde_json::Value> = local_ops
+        .iter()
+        .map(|op| {
+            json!({
+                "entity_type": op.entity_type,
+                "entity_id": op.entity_id,
+                "operation": op.operation,
+                "payload": op.payload.as_ref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
+                "created_at": op.created_at,
+            })
+        })
+        .collect();
+
+    // 3. Update last_synced on the device
+    if device_id > 0 {
+        let _ = svc
+            .update_device_last_synced(device_id, &chrono::Utc::now().to_rfc3339())
+            .await;
+    }
+
+    tracing::info!(
+        "E2EE: device_sync_request - received {} ops, sending {} ops back",
+        received_count,
+        ops_payload.len()
+    );
+
+    json!({
+        "ops": ops_payload,
+        "received_count": received_count,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+/// Handle a device sync push (WAN/relay, fire-and-forget).
+///
+/// Receives remote ops and stores them. No response ops (relay is one-way).
+async fn handle_device_sync_push(
+    db: &DatabaseConnection,
+    msg: &ClearMessage,
+) -> axum::response::Response {
+    use crate::services::device_sync_service::{DeviceSyncService, RemoteOp};
+
+    let device_id = msg
+        .payload
+        .get("device_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
+
+    let remote_ops: Vec<RemoteOp> = msg
+        .payload
+        .get("ops")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    if remote_ops.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(json!({ "message": "No ops to process" })),
+        )
+            .into_response();
+    }
+
+    let safety_mode = is_sync_safety_enabled(db).await;
+
+    let repo: std::sync::Arc<dyn crate::domain::LinkedDeviceRepository> = std::sync::Arc::new(
+        crate::infrastructure::SeaOrmLinkedDeviceRepository::new(db.clone()),
+    );
+    let svc = DeviceSyncService::new(db.clone(), repo);
+
+    match svc
+        .receive_remote_ops(device_id, remote_ops, safety_mode)
+        .await
+    {
+        Ok(result) => {
+            // Update last_synced
+            if device_id > 0 {
+                let _ = svc
+                    .update_device_last_synced(device_id, &chrono::Utc::now().to_rfc3339())
+                    .await;
+            }
+
+            tracing::info!(
+                "E2EE: device_sync_push - stored {} ops from device {}",
+                result.inserted_count,
+                device_id
+            );
+
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "message": "Sync push processed",
+                    "received_count": result.inserted_count,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("E2EE: device_sync_push failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Failed to process sync: {e}") })),
+            )
+                .into_response()
+        }
     }
 }
 

@@ -31,7 +31,11 @@ pub async fn create_author(
     Json(payload): Json<CreateAuthorRequest>,
 ) -> impl IntoResponse {
     match state.author_repo.create(payload.name).await {
-        Ok(author) => (StatusCode::CREATED, Json(author)).into_response(),
+        Ok(author) => {
+            let _ =
+                crate::sync::log_operation(state.db(), "author", author.id, "INSERT", None).await;
+            (StatusCode::CREATED, Json(author)).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -61,7 +65,10 @@ pub async fn delete_author(
     Path(id): Path<i32>,
 ) -> impl IntoResponse {
     match state.author_repo.delete(id).await {
-        Ok(()) => (StatusCode::OK, Json(json!({ "message": "Author deleted" }))).into_response(),
+        Ok(()) => {
+            let _ = crate::sync::log_operation(state.db(), "author", id, "DELETE", None).await;
+            (StatusCode::OK, Json(json!({ "message": "Author deleted" }))).into_response()
+        }
         Err(DomainError::NotFound) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "Author not found" })),

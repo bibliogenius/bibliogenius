@@ -34,16 +34,22 @@ pub async fn batch_edit(
 ) -> impl IntoResponse {
     match payload.action {
         BatchAction::Delete => {
+            let ids_to_log = payload.ids.clone();
             match book::Entity::delete_many()
                 .filter(book::Column::Id.is_in(payload.ids))
                 .exec(&db)
                 .await
             {
-                Ok(res) => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({ "deleted": res.rows_affected })),
-                )
-                    .into_response(),
+                Ok(res) => {
+                    for id in &ids_to_log {
+                        let _ = crate::sync::log_operation(&db, "book", *id, "DELETE", None).await;
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({ "deleted": res.rows_affected })),
+                    )
+                        .into_response()
+                }
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({ "error": e.to_string() })),

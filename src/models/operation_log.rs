@@ -13,6 +13,10 @@ pub struct Model {
     #[sea_orm(default_value = "pending")]
     pub status: String, // pending, applied, failed, skipped
     pub error_message: Option<String>,
+    #[sea_orm(default_value = "0")]
+    pub pinned: i32,
+    #[sea_orm(default_value = "local")]
+    pub source: String, // "local" or "device:<id>"
     pub created_at: String,
 }
 

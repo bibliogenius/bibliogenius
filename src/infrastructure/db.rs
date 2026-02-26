@@ -1156,6 +1156,40 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 047: Multi-device sync - linked devices registry
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"CREATE TABLE IF NOT EXISTS linked_devices (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            name                TEXT NOT NULL,
+            ed25519_public_key  BLOB NOT NULL,
+            x25519_public_key   BLOB NOT NULL,
+            relay_url           TEXT,
+            mailbox_id          TEXT,
+            relay_write_token   TEXT,
+            last_synced         TEXT,
+            created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+        )"#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Migration 048: Add pinned column to operation_log for milestone preservation
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE operation_log ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0".to_owned(),
+        ))
+        .await;
+
+    // Migration 049: Add source column to operation_log for multi-device sync echo prevention
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE operation_log ADD COLUMN source TEXT NOT NULL DEFAULT 'local'".to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;
