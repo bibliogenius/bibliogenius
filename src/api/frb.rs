@@ -370,12 +370,16 @@ pub async fn parse_qr_payload_ffi(payload: String) -> Result<String, String> {
 }
 
 /// Generate an invite link with the library's connection info encoded in the URL fragment.
-/// Format: https://bibliogenius.app/invite#BASE64URL(json)
+/// Format: https://bibliogenius.org/invite#BASE64URL(json)
 /// The fragment (#) is never sent to the web server (B8 compliance).
+/// Payload v3 adds optional relay info for WAN connectivity.
 pub async fn generate_invite_link_ffi(
     library_name: String,
     url: String,
     library_uuid: String,
+    relay_url: Option<String>,
+    mailbox_id: Option<String>,
+    relay_write_token: Option<String>,
 ) -> Result<String, String> {
     use base64::Engine;
 
@@ -383,8 +387,8 @@ pub async fn generate_invite_link_ffi(
 
     let (ed25519, x25519) = svc.get_public_keys_hex()?;
 
-    let payload = serde_json::json!({
-        "version": 2,
+    let mut payload = serde_json::json!({
+        "version": 3,
         "name": library_name,
         "url": url,
         "library_uuid": library_uuid,
@@ -392,10 +396,21 @@ pub async fn generate_invite_link_ffi(
         "x25519_public_key": x25519,
     });
 
+    // Include relay info if available (for WAN connectivity)
+    if let Some(ref r) = relay_url {
+        payload["relay_url"] = serde_json::Value::String(r.clone());
+    }
+    if let Some(ref m) = mailbox_id {
+        payload["mailbox_id"] = serde_json::Value::String(m.clone());
+    }
+    if let Some(ref t) = relay_write_token {
+        payload["relay_write_token"] = serde_json::Value::String(t.clone());
+    }
+
     let json_bytes = payload.to_string().into_bytes();
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json_bytes);
 
-    Ok(format!("https://bibliogenius.app/invite#{encoded}"))
+    Ok(format!("https://bibliogenius.org/invite#{encoded}"))
 }
 
 /// Parse an invite link, extracting the JSON payload from the URL fragment.

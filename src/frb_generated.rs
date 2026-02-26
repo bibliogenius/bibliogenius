@@ -903,6 +903,9 @@ fn wire__crate__api__frb__generate_invite_link_ffi_impl(
             let api_library_name = <String>::sse_decode(&mut deserializer);
             let api_url = <String>::sse_decode(&mut deserializer);
             let api_library_uuid = <String>::sse_decode(&mut deserializer);
+            let api_relay_url = <Option<String>>::sse_decode(&mut deserializer);
+            let api_mailbox_id = <Option<String>>::sse_decode(&mut deserializer);
+            let api_relay_write_token = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -911,6 +914,9 @@ fn wire__crate__api__frb__generate_invite_link_ffi_impl(
                             api_library_name,
                             api_url,
                             api_library_uuid,
+                            api_relay_url,
+                            api_mailbox_id,
+                            api_relay_write_token,
                         )
                         .await?;
                         Ok(output_ok)
