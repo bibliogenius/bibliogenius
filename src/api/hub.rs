@@ -3,6 +3,7 @@ use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::api::peer::{get_safe_client, validate_url};
 use crate::models::LibraryConfig;
 use crate::models::library_config::Entity as LibraryConfigEntity;
 use sea_orm::EntityTrait;
@@ -50,10 +51,16 @@ pub async fn register_with_hub(
         description: library_config.description,
     };
 
+    // Validate hub URL to prevent SSRF (OWASP A10)
+    let hub_url = validate_url(&req.hub_url).map_err(|_| StatusCode::BAD_REQUEST)?;
+
     // Send registration to hub
-    let client = reqwest::Client::new();
+    let client = get_safe_client();
     let response = client
-        .post(format!("{}/api/registry/register", req.hub_url))
+        .post(format!(
+            "{}/api/registry/register",
+            hub_url.trim_end_matches('/')
+        ))
         .json(&registration)
         .send()
         .await
@@ -73,10 +80,16 @@ pub async fn discover_peers(
     State(_db): State<DatabaseConnection>,
     Json(req): Json<RegistrationRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    // Validate hub URL to prevent SSRF (OWASP A10)
+    let hub_url = validate_url(&req.hub_url).map_err(|_| StatusCode::BAD_REQUEST)?;
+
     // Query hub for peers
-    let client = reqwest::Client::new();
+    let client = get_safe_client();
     let response = client
-        .get(format!("{}/api/discovery/peers", req.hub_url))
+        .get(format!(
+            "{}/api/discovery/peers",
+            hub_url.trim_end_matches('/')
+        ))
         .send()
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;

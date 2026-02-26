@@ -16,12 +16,19 @@ use serde_json::json;
 use tracing::{error, info};
 use url::Url;
 
-/// Validate URL to prevent SSRF
+/// Validate URL to prevent SSRF (OWASP A10).
+///
 /// Blocks:
+/// - Non-HTTP/HTTPS schemes (file://, ftp://, javascript:, etc.)
 /// - Loopback (127.0.0.0/8, ::1)
-/// - Link-Local (169.254.0.0/16, fe80::/10)
-/// - AWS Metadata Service (169.254.169.254)
+/// - Link-local (169.254.0.0/16, fe80::/10) - includes AWS metadata 169.254.169.254
+/// - Multicast (224.0.0.0/4, ff00::/8)
+/// - Unspecified (0.0.0.0, ::)
+/// - Broadcast (255.255.255.255)
 /// - "localhost" hostname
+///
+/// Allows:
+/// - Private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) for P2P LAN use
 pub fn validate_url(url_str: &str) -> Result<String, String> {
     let url = Url::parse(url_str).map_err(|_| "Invalid URL format".to_string())?;
 
@@ -35,11 +42,44 @@ pub fn validate_url(url_str: &str) -> Result<String, String> {
         Some(url::Host::Domain("localhost")) => {
             return Err("Localhost access is blocked".to_string());
         }
-        Some(url::Host::Ipv4(ip)) if ip.is_loopback() => {
-            return Err("Loopback addresses blocked".to_string());
+        Some(url::Host::Ipv4(ip)) => {
+            if ip.is_loopback() {
+                return Err("Loopback addresses blocked".to_string());
+            }
+            // Link-local: 169.254.0.0/16 (includes AWS metadata endpoint 169.254.169.254)
+            let octets = ip.octets();
+            if octets[0] == 169 && octets[1] == 254 {
+                return Err("Link-local addresses blocked".to_string());
+            }
+            if ip.is_multicast() {
+                return Err("Multicast addresses blocked".to_string());
+            }
+            if ip.is_unspecified() {
+                return Err("Unspecified address blocked".to_string());
+            }
+            // Broadcast: 255.255.255.255
+            if octets == [255, 255, 255, 255] {
+                return Err("Broadcast address blocked".to_string());
+            }
         }
-        Some(url::Host::Ipv6(ip)) if ip.is_loopback() => {
-            return Err("Loopback addresses blocked".to_string());
+        Some(url::Host::Ipv6(ip)) => {
+            if ip.is_loopback() {
+                return Err("Loopback addresses blocked".to_string());
+            }
+            if ip.is_multicast() {
+                return Err("Multicast addresses blocked".to_string());
+            }
+            if ip.is_unspecified() {
+                return Err("Unspecified address blocked".to_string());
+            }
+            // IPv6 link-local: fe80::/10
+            let segments = ip.segments();
+            if (segments[0] & 0xffc0) == 0xfe80 {
+                return Err("Link-local addresses blocked".to_string());
+            }
+        }
+        None => {
+            return Err("URL must have a host".to_string());
         }
         _ => {}
     }

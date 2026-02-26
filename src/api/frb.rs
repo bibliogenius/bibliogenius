@@ -1588,6 +1588,12 @@ pub async fn memory_game_refresh_leaderboard() -> Result<Vec<FrbMemoryLeaderboar
                 .unwrap_or_default();
 
             for peer in &peers {
+                // Validate peer URL before making outbound request (SSRF protection)
+                if crate::api::peer::validate_url(&peer.url).is_err() {
+                    tracing::warn!("Skipping peer {} with invalid URL: {}", peer.id, peer.name);
+                    continue;
+                }
+
                 // Fetch peer config to check enabled_modules
                 let config_url = format!("{}/api/config", peer.url);
                 let peer_has_memory_game = match client.get(&config_url).send().await {
@@ -1898,6 +1904,12 @@ pub async fn puzzle_game_refresh_leaderboard() -> Result<Vec<FrbPuzzleLeaderboar
                 .unwrap_or_default();
 
             for peer in &peers {
+                // Validate peer URL before making outbound request (SSRF protection)
+                if crate::api::peer::validate_url(&peer.url).is_err() {
+                    tracing::warn!("Skipping peer {} with invalid URL: {}", peer.id, peer.name);
+                    continue;
+                }
+
                 // Fetch peer config to check enabled_modules
                 let config_url = format!("{}/api/config", peer.url);
                 let peer_has_sliding_puzzle = match client.get(&config_url).send().await {

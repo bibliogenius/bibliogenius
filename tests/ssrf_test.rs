@@ -117,3 +117,136 @@ fn test_url_without_port_accepted() {
     let result = validate_url("http://192.168.1.100");
     assert!(result.is_ok(), "URL without port should be accepted");
 }
+
+// --- Link-local (169.254.0.0/16) ---
+
+#[test]
+fn test_link_local_169_254_blocked() {
+    let result = validate_url("http://169.254.1.1:8000");
+    assert!(result.is_err(), "Link-local 169.254.x.x must be blocked");
+    assert!(
+        result.unwrap_err().contains("Link-local"),
+        "Error should mention link-local"
+    );
+}
+
+#[test]
+fn test_aws_metadata_endpoint_blocked() {
+    let result = validate_url("http://169.254.169.254/latest/meta-data/");
+    assert!(
+        result.is_err(),
+        "AWS metadata endpoint 169.254.169.254 must be blocked"
+    );
+}
+
+#[test]
+fn test_aws_metadata_with_path_blocked() {
+    let result =
+        validate_url("http://169.254.169.254/latest/meta-data/iam/security-credentials/role");
+    assert!(
+        result.is_err(),
+        "AWS metadata credential path must be blocked"
+    );
+}
+
+// --- IPv6 link-local (fe80::/10) ---
+
+#[test]
+fn test_ipv6_link_local_blocked() {
+    let result = validate_url("http://[fe80::1]:8000");
+    assert!(result.is_err(), "IPv6 link-local fe80::1 must be blocked");
+    assert!(
+        result.unwrap_err().contains("Link-local"),
+        "Error should mention link-local"
+    );
+}
+
+#[test]
+fn test_ipv6_link_local_variant_blocked() {
+    let result = validate_url("http://[fe80::a1:b2:c3:d4]:8000");
+    assert!(
+        result.is_err(),
+        "IPv6 link-local fe80::a1:b2:c3:d4 must be blocked"
+    );
+}
+
+// --- Multicast ---
+
+#[test]
+fn test_ipv4_multicast_blocked() {
+    let result = validate_url("http://224.0.0.1:8000");
+    assert!(result.is_err(), "IPv4 multicast 224.0.0.1 must be blocked");
+    assert!(
+        result.unwrap_err().contains("Multicast"),
+        "Error should mention multicast"
+    );
+}
+
+#[test]
+fn test_ipv4_multicast_high_range_blocked() {
+    let result = validate_url("http://239.255.255.250:1900");
+    assert!(
+        result.is_err(),
+        "IPv4 multicast 239.255.255.250 must be blocked"
+    );
+}
+
+#[test]
+fn test_ipv6_multicast_blocked() {
+    let result = validate_url("http://[ff02::1]:8000");
+    assert!(result.is_err(), "IPv6 multicast ff02::1 must be blocked");
+    assert!(
+        result.unwrap_err().contains("Multicast"),
+        "Error should mention multicast"
+    );
+}
+
+// --- Unspecified (0.0.0.0, ::) ---
+
+#[test]
+fn test_unspecified_ipv4_blocked() {
+    let result = validate_url("http://0.0.0.0:8000");
+    assert!(
+        result.is_err(),
+        "Unspecified address 0.0.0.0 must be blocked"
+    );
+    assert!(
+        result.unwrap_err().contains("Unspecified"),
+        "Error should mention unspecified"
+    );
+}
+
+#[test]
+fn test_unspecified_ipv6_blocked() {
+    let result = validate_url("http://[::]:8000");
+    assert!(result.is_err(), "Unspecified address :: must be blocked");
+}
+
+// --- Broadcast ---
+
+#[test]
+fn test_broadcast_blocked() {
+    let result = validate_url("http://255.255.255.255:8000");
+    assert!(
+        result.is_err(),
+        "Broadcast address 255.255.255.255 must be blocked"
+    );
+    assert!(
+        result.unwrap_err().contains("Broadcast"),
+        "Error should mention broadcast"
+    );
+}
+
+// --- Valid public URLs (should still pass) ---
+
+#[test]
+fn test_public_domain_accepted() {
+    let result = validate_url("https://example.com:8000/api");
+    assert!(result.is_ok(), "Public domain should be accepted");
+}
+
+#[test]
+fn test_public_ip_accepted() {
+    let result = validate_url("http://203.0.113.50:8000");
+    assert!(result.is_ok(), "Public IP should be accepted");
+}
