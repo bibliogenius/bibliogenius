@@ -31,6 +31,10 @@ pub struct Model {
     #[sea_orm(default_value = "accepted")]
     pub connection_status: String,
     pub last_seen: Option<String>,
+    /// SHA-256 hash of peer's catalog for change detection (ADR-012)
+    pub catalog_hash: Option<String>,
+    /// ISO 8601 timestamp of last catalog sync (ADR-012)
+    pub last_catalog_sync: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

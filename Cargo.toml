@@ -75,6 +75,7 @@ once_cell = "1.18"
 futures = "0.3"
 urlencoding = "2.1"
 url = "2.5"
+dashmap = "5"
 
 # Documentation
 utoipa = { version = "4.2", features = ["axum_extras"] }

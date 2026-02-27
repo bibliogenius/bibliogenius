@@ -2,6 +2,7 @@
 // Used by both CLI (main.rs) and FFI (frb.rs)
 
 use axum::Router;
+use axum::routing::get;
 use sea_orm::DatabaseConnection;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +30,10 @@ pub fn build_router(db: DatabaseConnection) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    Router::new().nest("/api", api_router).layer(cors)
+    Router::new()
+        .route("/invite", get(api::invite_page::invite_page))
+        .nest("/api", api_router)
+        .layer(cors)
 }
 
 /// Find an available port starting from the preferred port on a specific IP

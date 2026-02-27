@@ -17,6 +17,7 @@ pub mod gamification;
 pub mod health;
 pub mod hub;
 pub mod integrations;
+pub mod invite_page;
 pub mod library;
 pub mod loan;
 pub mod lookup;
@@ -275,7 +276,17 @@ fn build_routes() -> Router<AppState> {
         // Peer relay setup
         .route("/peers/relay/setup", post(peer::setup_relay))
         .route("/peers/relay/config", get(peer::get_relay_config_endpoint))
+        // Peer relay library sync (ADR-012)
+        .route(
+            "/peers/relay/library_request",
+            post(peer::relay_library_request),
+        )
+        .route(
+            "/peers/relay/await_response",
+            post(peer::await_relay_response),
+        )
         // Relay hub endpoints (any instance can serve as a relay)
+        .route("/relay/poll_now", post(relay::poll_now))
         .route("/relay/mailbox", post(relay::create_mailbox))
         .route(
             "/relay/mailbox/:uuid/messages",

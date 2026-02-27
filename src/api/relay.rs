@@ -434,6 +434,26 @@ pub async fn ack_message(
     }
 }
 
+// ── Adaptive polling (ADR-012) ─────────────────────────────────────
+
+/// POST /api/relay/poll_now - Trigger an immediate relay poll cycle.
+///
+/// Used by Flutter when awaiting a relay response to reduce latency
+/// from ~120s (background polling) to ~10-15s (adaptive fast-polling).
+pub async fn poll_now(State(state): State<crate::infrastructure::AppState>) -> impl IntoResponse {
+    match crate::services::relay_poller::poll_once(&state).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "message": "Poll completed" }))).into_response(),
+        Err(e) => {
+            tracing::warn!("poll_now: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e })),
+            )
+                .into_response()
+        }
+    }
+}
+
 // ── Client-side helpers (used by peer.rs setup_relay) ────────────────
 
 /// Get the local relay config (singleton row from my_relay_config).

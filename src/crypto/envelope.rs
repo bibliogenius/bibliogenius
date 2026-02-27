@@ -43,4 +43,14 @@ pub struct ClearMessage {
     pub timestamp: i64,
     /// Random message nonce (for deduplication, separate from AES nonce).
     pub message_id: String,
+    // ── Reply-to fields for relay request-response (ADR-012) ──
+    /// UUID to match response to original request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// Requester's relay mailbox UUID (for depositing the response).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_mailbox: Option<String>,
+    /// Write token to deposit response in requester's mailbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_write_token: Option<String>,
 }

@@ -18,6 +18,12 @@ use crate::services::crypto_service::CryptoService;
 use crate::services::device_pairing_service::DevicePairingService;
 use crate::services::device_sync_service::DeviceSyncService;
 
+/// Pending relay request-response entry (ADR-012).
+/// When a relay request is sent with a `correlation_id`, a oneshot sender is stored here.
+/// The relay poller resolves it when a matching response arrives.
+type PendingRelayRequests =
+    Arc<dashmap::DashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>;
+
 /// Application state shared across all handlers
 #[derive(Clone)]
 pub struct AppState {
@@ -43,6 +49,8 @@ pub struct AppState {
     pub device_pairing: Arc<DevicePairingService>,
     /// Device sync service for operation log exchange
     pub device_sync: Arc<DeviceSyncService>,
+    /// Pending relay request-response correlation map (ADR-012).
+    pending_relay_requests: PendingRelayRequests,
 }
 
 impl AppState {
@@ -87,6 +95,7 @@ impl AppState {
             crypto_service: Arc::new(OnceCell::new()),
             device_pairing,
             device_sync,
+            pending_relay_requests: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -112,6 +121,34 @@ impl AppState {
         } else {
             None
         }
+    }
+
+    // ── Relay request-response correlation (ADR-012) ───────────────────
+
+    /// Register a pending relay request. Returns a oneshot receiver that will
+    /// be resolved when the relay poller receives a matching response.
+    pub fn register_relay_request(
+        &self,
+        correlation_id: String,
+    ) -> tokio::sync::oneshot::Receiver<serde_json::Value> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending_relay_requests.insert(correlation_id, tx);
+        rx
+    }
+
+    /// Try to resolve a pending relay request by correlation_id.
+    /// Returns true if a listener was found and the value was sent.
+    pub fn resolve_relay_request(&self, correlation_id: &str, value: serde_json::Value) -> bool {
+        if let Some((_, tx)) = self.pending_relay_requests.remove(correlation_id) {
+            tx.send(value).is_ok()
+        } else {
+            false
+        }
+    }
+
+    /// Clean up a pending relay request (e.g. on timeout).
+    pub fn cancel_relay_request(&self, correlation_id: &str) {
+        self.pending_relay_requests.remove(correlation_id);
     }
 
     /// Get the database connection (for backward compatibility during migration)

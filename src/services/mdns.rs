@@ -10,11 +10,16 @@
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 /// Service type for BiblioGenius mDNS announcements
 const SERVICE_TYPE: &str = "_bibliogenius._tcp.local.";
+
+/// Maximum number of discovered peers to keep in memory.
+/// On noisy networks (schools, libraries), mDNS can discover many services.
+/// Oldest peers are evicted when this limit is exceeded.
+pub const MAX_DISCOVERED_PEERS: usize = 50;
 
 /// Represents a discovered peer on the local network
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -29,6 +34,35 @@ pub struct DiscoveredPeer {
     /// X25519 public key (hex-encoded) from mDNS TXT record
     pub x25519_public_key: Option<String>,
     pub discovered_at: String,
+}
+
+/// Stored configuration for restarting mDNS without requiring callers to re-supply parameters.
+#[derive(Clone)]
+struct MdnsConfig {
+    library_name: String,
+    port: u16,
+    library_id: Option<String>,
+    ed25519_public_key: Option<String>,
+    x25519_public_key: Option<String>,
+}
+
+/// Evict the oldest peer from the map if it exceeds `max_peers`.
+/// Returns the evicted key if one was removed.
+fn evict_oldest_peer_if_over_limit(
+    peers: &mut HashMap<String, DiscoveredPeer>,
+    max_peers: usize,
+) -> Option<String> {
+    if peers.len() <= max_peers {
+        return None;
+    }
+    let oldest_key = peers
+        .iter()
+        .min_by_key(|(_, p)| &p.discovered_at)
+        .map(|(k, _)| k.clone());
+    if let Some(ref key) = oldest_key {
+        peers.remove(key);
+    }
+    oldest_key
 }
 
 /// Manages mDNS service announcement and discovery
@@ -213,7 +247,21 @@ impl MdnsService {
                                     peer.port
                                 );
 
-                                peers.write().unwrap().insert(fullname, peer);
+                                let mut peers_guard = peers.write().unwrap();
+                                peers_guard.insert(fullname, peer);
+
+                                if evict_oldest_peer_if_over_limit(
+                                    &mut peers_guard,
+                                    MAX_DISCOVERED_PEERS,
+                                )
+                                .is_some()
+                                {
+                                    tracing::warn!(
+                                        "mDNS: Peer limit ({}) reached, evicted oldest entry",
+                                        MAX_DISCOVERED_PEERS
+                                    );
+                                }
+                                drop(peers_guard);
                             }
                             ServiceEvent::ServiceRemoved(_, fullname) => {
                                 if let Some(peer) = peers.write().unwrap().remove(&fullname) {
@@ -280,7 +328,10 @@ impl Drop for MdnsService {
 }
 
 // Global singleton for the mDNS service
-static MDNS_SERVICE: std::sync::OnceLock<RwLock<Option<MdnsService>>> = std::sync::OnceLock::new();
+static MDNS_SERVICE: OnceLock<RwLock<Option<MdnsService>>> = OnceLock::new();
+
+// Stored config so we can restart mDNS without re-supplying parameters
+static MDNS_CONFIG: OnceLock<RwLock<Option<MdnsConfig>>> = OnceLock::new();
 
 /// Initialize the global mDNS service
 pub fn init_mdns(
@@ -290,6 +341,17 @@ pub fn init_mdns(
     ed25519_public_key: Option<String>,
     x25519_public_key: Option<String>,
 ) -> Result<(), String> {
+    // Save config for potential restarts
+    let config = MdnsConfig {
+        library_name: library_name.to_string(),
+        port,
+        library_id: library_id.clone(),
+        ed25519_public_key: ed25519_public_key.clone(),
+        x25519_public_key: x25519_public_key.clone(),
+    };
+    let config_global = MDNS_CONFIG.get_or_init(|| RwLock::new(None));
+    *config_global.write().unwrap() = Some(config);
+
     let service = MdnsService::new(
         library_name,
         port,
@@ -304,6 +366,28 @@ pub fn init_mdns(
     Ok(())
 }
 
+/// Restart mDNS using the previously stored configuration.
+/// Returns an error if init_mdns was never called.
+pub fn restart_mdns() -> Result<(), String> {
+    let config = MDNS_CONFIG
+        .get()
+        .and_then(|lock| lock.read().ok())
+        .and_then(|opt| opt.clone())
+        .ok_or_else(|| {
+            "Cannot restart mDNS: no stored configuration (init_mdns was never called)".to_string()
+        })?;
+
+    stop_mdns();
+
+    init_mdns(
+        &config.library_name,
+        config.port,
+        config.library_id,
+        config.ed25519_public_key,
+        config.x25519_public_key,
+    )
+}
+
 /// Get discovered peers from the global service
 pub fn get_local_peers() -> Vec<DiscoveredPeer> {
     MDNS_SERVICE
@@ -311,6 +395,18 @@ pub fn get_local_peers() -> Vec<DiscoveredPeer> {
         .and_then(|lock| lock.read().ok())
         .and_then(|opt| opt.as_ref().map(|s| s.get_discovered_peers()))
         .unwrap_or_default()
+}
+
+/// Get the number of currently discovered peers
+pub fn get_local_peer_count() -> usize {
+    MDNS_SERVICE
+        .get()
+        .and_then(|lock| lock.read().ok())
+        .and_then(|opt| {
+            opt.as_ref()
+                .map(|s| s.discovered_peers.read().unwrap().len())
+        })
+        .unwrap_or(0)
 }
 
 /// Check if mDNS is currently active
@@ -336,9 +432,150 @@ pub fn stop_mdns() {
 mod tests {
     use super::*;
 
+    /// Helper: create a DiscoveredPeer with a given timestamp string.
+    fn make_peer(name: &str, discovered_at: &str) -> DiscoveredPeer {
+        DiscoveredPeer {
+            name: name.to_string(),
+            host: format!("{}.local.", name),
+            port: 8000,
+            addresses: vec!["192.168.1.1".to_string()],
+            library_id: None,
+            ed25519_public_key: None,
+            x25519_public_key: None,
+            discovered_at: discovered_at.to_string(),
+        }
+    }
+
     #[test]
     fn test_service_type_format() {
         assert!(SERVICE_TYPE.starts_with("_"));
         assert!(SERVICE_TYPE.ends_with(".local."));
+    }
+
+    #[test]
+    fn test_max_discovered_peers_is_reasonable() {
+        assert!(MAX_DISCOVERED_PEERS >= 10, "limit too low for normal use");
+        assert!(
+            MAX_DISCOVERED_PEERS <= 200,
+            "limit too high, defeats purpose"
+        );
+    }
+
+    #[test]
+    fn test_eviction_does_nothing_under_limit() {
+        let mut peers = HashMap::new();
+        peers.insert("a".to_string(), make_peer("a", "2026-01-01T00:00:00Z"));
+        peers.insert("b".to_string(), make_peer("b", "2026-01-02T00:00:00Z"));
+
+        let evicted = evict_oldest_peer_if_over_limit(&mut peers, 5);
+        assert!(evicted.is_none());
+        assert_eq!(peers.len(), 2);
+    }
+
+    #[test]
+    fn test_eviction_does_nothing_at_exact_limit() {
+        let mut peers = HashMap::new();
+        for i in 0..3 {
+            peers.insert(
+                format!("peer-{i}"),
+                make_peer(
+                    &format!("lib-{i}"),
+                    &format!("2026-01-0{}T00:00:00Z", i + 1),
+                ),
+            );
+        }
+
+        let evicted = evict_oldest_peer_if_over_limit(&mut peers, 3);
+        assert!(evicted.is_none());
+        assert_eq!(peers.len(), 3);
+    }
+
+    #[test]
+    fn test_eviction_removes_oldest_peer() {
+        let mut peers = HashMap::new();
+        peers.insert(
+            "old".to_string(),
+            make_peer("oldest-lib", "2026-01-01T00:00:00Z"),
+        );
+        peers.insert(
+            "mid".to_string(),
+            make_peer("middle-lib", "2026-01-02T00:00:00Z"),
+        );
+        peers.insert(
+            "new".to_string(),
+            make_peer("newest-lib", "2026-01-03T00:00:00Z"),
+        );
+
+        // limit=2 but we have 3 -> evict oldest
+        let evicted = evict_oldest_peer_if_over_limit(&mut peers, 2);
+        assert_eq!(evicted, Some("old".to_string()));
+        assert_eq!(peers.len(), 2);
+        assert!(!peers.contains_key("old"));
+        assert!(peers.contains_key("mid"));
+        assert!(peers.contains_key("new"));
+    }
+
+    #[test]
+    fn test_eviction_at_max_discovered_peers_limit() {
+        let mut peers = HashMap::new();
+        // Fill to MAX + 1
+        for i in 0..=MAX_DISCOVERED_PEERS {
+            peers.insert(
+                format!("peer-{i:03}"),
+                make_peer(
+                    &format!("lib-{i}"),
+                    &format!("2026-01-01T{:02}:00:00Z", i % 24),
+                ),
+            );
+        }
+        assert_eq!(peers.len(), MAX_DISCOVERED_PEERS + 1);
+
+        let evicted = evict_oldest_peer_if_over_limit(&mut peers, MAX_DISCOVERED_PEERS);
+        assert!(evicted.is_some());
+        assert_eq!(peers.len(), MAX_DISCOVERED_PEERS);
+    }
+
+    #[test]
+    fn test_eviction_repeated_stays_bounded() {
+        let mut peers = HashMap::new();
+        // Simulate adding peers one by one, evicting after each
+        for i in 0..100 {
+            peers.insert(
+                format!("peer-{i}"),
+                make_peer(
+                    &format!("lib-{i}"),
+                    &format!("2026-01-01T00:{:02}:00Z", i % 60),
+                ),
+            );
+            evict_oldest_peer_if_over_limit(&mut peers, 5);
+        }
+        assert!(peers.len() <= 5);
+    }
+
+    #[test]
+    fn test_mdns_config_clone_preserves_fields() {
+        let config = MdnsConfig {
+            library_name: "My Library".to_string(),
+            port: 8080,
+            library_id: Some("lib-123".to_string()),
+            ed25519_public_key: Some("aabbcc".to_string()),
+            x25519_public_key: None,
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.library_name, "My Library");
+        assert_eq!(cloned.port, 8080);
+        assert_eq!(cloned.library_id, Some("lib-123".to_string()));
+        assert_eq!(cloned.ed25519_public_key, Some("aabbcc".to_string()));
+        assert!(cloned.x25519_public_key.is_none());
+    }
+
+    #[test]
+    fn test_discovered_peer_serialization_roundtrip() {
+        let peer = make_peer("test-lib", "2026-02-27T10:00:00Z");
+        let json = serde_json::to_string(&peer).expect("serialize");
+        let deserialized: DiscoveredPeer = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized.name, "test-lib");
+        assert_eq!(deserialized.discovered_at, "2026-02-27T10:00:00Z");
+        assert_eq!(deserialized.port, 8000);
     }
 }

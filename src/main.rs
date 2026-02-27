@@ -1,4 +1,5 @@
 use axum::Router;
+use axum::routing::get;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use tower_http::cors::{Any, CorsLayer};
@@ -158,6 +159,9 @@ async fn main() {
 
     let app = Router::new()
         .merge(SwaggerUi::new("/api/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        // Invite landing page at root level (not under /api)
+        // Serves HTML redirect to bibliogenius:// custom scheme
+        .route("/invite", get(api::invite_page::invite_page))
         .nest("/api", api_router)
         // CORS
         .layer(

@@ -1190,6 +1190,20 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 050: Add catalog tracking columns to peers for relay library sync (ADR-012)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peers ADD COLUMN catalog_hash TEXT".to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peers ADD COLUMN last_catalog_sync TEXT".to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

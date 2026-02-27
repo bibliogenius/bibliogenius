@@ -346,6 +346,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "csv",
+ "dashmap",
  "dotenvy",
  "ed25519-dalek",
  "flutter_rust_bridge",

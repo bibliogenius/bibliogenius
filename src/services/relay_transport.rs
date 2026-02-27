@@ -14,6 +14,15 @@ use crate::infrastructure::nonce_store::SqliteNonceStore;
 use crate::services::crypto_service::CryptoService;
 use crate::services::e2ee_transport::E2eeTransportError;
 
+/// A message retrieved from a relay mailbox: either an encrypted envelope or a raw blob.
+///
+/// Raw blobs are messages that failed to parse as `EncryptedEnvelope`.
+/// Used for non-E2EE relay messages such as connection requests.
+pub enum RelayBlob {
+    Encrypted(EncryptedEnvelope),
+    Raw(i64, Vec<u8>),
+}
+
 /// Relay transport for sending encrypted messages via a hub mailbox.
 pub struct RelayTransport {
     crypto_service: Arc<CryptoService<SqliteNonceStore>>,
@@ -91,13 +100,15 @@ impl RelayTransport {
 
     /// Poll relay for pending messages.
     ///
-    /// Returns Vec<(message_id, EncryptedEnvelope)> for each pending blob.
+    /// Returns encrypted envelopes and raw blobs (non-E2EE messages such as
+    /// connection requests). Raw blobs carry their message_id inside the enum
+    /// variant so the caller can acknowledge them separately.
     pub async fn poll(
         &self,
         relay_url: &str,
         mailbox_uuid: &str,
         read_token: &str,
-    ) -> Result<Vec<(i64, EncryptedEnvelope)>, E2eeTransportError> {
+    ) -> Result<(Vec<(i64, EncryptedEnvelope)>, Vec<RelayBlob>), E2eeTransportError> {
         let url = format!(
             "{}/api/relay/mailbox/{}/messages",
             relay_url.trim_end_matches('/'),
@@ -129,7 +140,8 @@ impl RelayTransport {
             .cloned()
             .unwrap_or_default();
 
-        let mut result = Vec::new();
+        let mut envelopes = Vec::new();
+        let mut raw_blobs = Vec::new();
         for msg in messages {
             let id = msg.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
             let blob_b64 = msg.get("blob").and_then(|v| v.as_str()).unwrap_or("");
@@ -144,14 +156,52 @@ impl RelayTransport {
             };
 
             match serde_json::from_slice::<EncryptedEnvelope>(&blob_bytes) {
-                Ok(envelope) => result.push((id, envelope)),
-                Err(e) => {
-                    tracing::warn!("Relay: Failed to parse envelope {id}: {e}");
+                Ok(envelope) => envelopes.push((id, envelope)),
+                Err(_) => {
+                    // Not an E2EE envelope - keep as raw blob for caller to handle
+                    // (e.g., connection_request messages from new peers)
+                    raw_blobs.push(RelayBlob::Raw(id, blob_bytes));
                 }
             }
         }
 
-        Ok(result)
+        Ok((envelopes, raw_blobs))
+    }
+
+    /// Deposit a raw (non-E2EE) message into a peer's relay mailbox.
+    ///
+    /// Used for connection requests where the recipient doesn't know the sender
+    /// yet (no E2EE possible). The message is a JSON blob deposited as-is.
+    pub async fn deposit_raw(
+        &self,
+        relay_url: &str,
+        mailbox_uuid: &str,
+        write_token: &str,
+        body: &[u8],
+    ) -> Result<(), E2eeTransportError> {
+        let url = format!(
+            "{}/api/relay/mailbox/{}/messages",
+            relay_url.trim_end_matches('/'),
+            mailbox_uuid
+        );
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {write_token}"))
+            .header("Content-Type", "application/octet-stream")
+            .body(body.to_vec())
+            .send()
+            .await
+            .map_err(|e| E2eeTransportError::Network(format!("relay raw POST failed: {e}")))?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let body = response.text().await.unwrap_or_default();
+            return Err(E2eeTransportError::PeerError(status, body));
+        }
+
+        Ok(())
     }
 
     /// Acknowledge (delete) a processed message from the relay.
@@ -182,6 +232,63 @@ impl RelayTransport {
             let body = response.text().await.unwrap_or_default();
             return Err(E2eeTransportError::PeerError(status, body));
         }
+
+        Ok(())
+    }
+
+    /// Deposit an encrypted response into a requester's mailbox (ADR-012 reply-to).
+    ///
+    /// Used when the relay poller processes a request that has `reply_to_mailbox`
+    /// and `reply_to_write_token` fields. The response is encrypted and deposited
+    /// directly into the requester's mailbox so they can pick it up on their next poll.
+    pub async fn deposit_response(
+        &self,
+        relay_url: &str,
+        reply_to_mailbox: &str,
+        reply_to_write_token: &str,
+        peer_x25519_public: &X25519PublicKey,
+        response_message: &ClearMessage,
+    ) -> Result<(), E2eeTransportError> {
+        // 1. Seal the response
+        let envelope = self
+            .crypto_service
+            .seal(peer_x25519_public, response_message)
+            .map_err(|e| E2eeTransportError::Crypto(e.to_string()))?;
+
+        // 2. Serialize envelope to bytes
+        let blob =
+            serde_json::to_vec(&envelope).map_err(|e| E2eeTransportError::Crypto(e.to_string()))?;
+
+        // 3. POST to requester's mailbox
+        let url = format!(
+            "{}/api/relay/mailbox/{}/messages",
+            relay_url.trim_end_matches('/'),
+            reply_to_mailbox
+        );
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {reply_to_write_token}"))
+            .header("Content-Type", "application/octet-stream")
+            .body(blob)
+            .send()
+            .await
+            .map_err(|e| {
+                E2eeTransportError::Network(format!("relay deposit_response POST failed: {e}"))
+            })?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let body = response.text().await.unwrap_or_default();
+            return Err(E2eeTransportError::PeerError(status, body));
+        }
+
+        tracing::info!(
+            "E2EE Relay: Deposited response '{}' to requester mailbox {}",
+            response_message.message_type,
+            reply_to_mailbox
+        );
 
         Ok(())
     }

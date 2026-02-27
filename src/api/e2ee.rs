@@ -185,6 +185,51 @@ pub async fn dispatch_clear_message(
 
         "device_sync_push" => handle_device_sync_push(db, clear_message).await,
 
+        // ── Library sync via relay (ADR-012) ─────────────────────────
+        "library_manifest_request" => {
+            let response_payload = handle_library_manifest_request(db).await;
+            seal_response(
+                crypto_service,
+                &known_peers[peer_index],
+                "library_manifest_response",
+                response_payload,
+            )
+        }
+
+        "library_page_request" => {
+            let response_payload = handle_library_page_request(db, clear_message).await;
+            seal_response(
+                crypto_service,
+                &known_peers[peer_index],
+                "library_page_response",
+                response_payload,
+            )
+        }
+
+        "library_search_request" => {
+            let response_payload = handle_library_search_via_relay(db, clear_message).await;
+            seal_response(
+                crypto_service,
+                &known_peers[peer_index],
+                "library_search_response",
+                response_payload,
+            )
+        }
+
+        // Response message types - these are handled by correlation matching
+        // in the relay poller, not dispatched to handlers.
+        "library_manifest_response" | "library_page_response" | "library_search_response" => {
+            tracing::debug!(
+                "E2EE: Received '{}' (handled by correlation)",
+                clear_message.message_type
+            );
+            (
+                StatusCode::OK,
+                Json(json!({ "message": "Response processed by correlation" })),
+            )
+                .into_response()
+        }
+
         _ => {
             tracing::warn!(
                 "E2EE: Unknown message type '{}'",
@@ -440,7 +485,7 @@ async fn handle_loan_confirmation(
 }
 
 /// Handle a book sync request - return local books as JSON payload.
-async fn handle_book_sync_request(db: &DatabaseConnection) -> serde_json::Value {
+pub async fn handle_book_sync_request(db: &DatabaseConnection) -> serde_json::Value {
     use crate::models::book;
 
     let books = book::Entity::find().all(db).await.unwrap_or_default();
@@ -448,8 +493,11 @@ async fn handle_book_sync_request(db: &DatabaseConnection) -> serde_json::Value 
     json!({ "books": book_dtos })
 }
 
-/// Handle a search request — search local books and return results.
-async fn handle_search_request(db: &DatabaseConnection, msg: &ClearMessage) -> serde_json::Value {
+/// Handle a search request - search local books and return results.
+pub async fn handle_search_request(
+    db: &DatabaseConnection,
+    msg: &ClearMessage,
+) -> serde_json::Value {
     use crate::models::book;
 
     let query = msg
@@ -665,6 +713,151 @@ async fn handle_status_update(
     }
 }
 
+// ── Library sync handlers (ADR-012) ───────────────────────────────────
+
+/// Handle a library manifest request - return catalog hash and book count.
+/// Used for quick "has anything changed?" checks (like HTTP ETag).
+pub async fn handle_library_manifest_request(db: &DatabaseConnection) -> serde_json::Value {
+    use crate::models::book;
+    use sha2::{Digest, Sha256};
+
+    let books = book::Entity::find().all(db).await.unwrap_or_default();
+
+    let total_books = books.len();
+
+    // Compute catalog_hash: SHA-256 of sorted (id, updated_at) pairs
+    let mut pairs: Vec<(i32, String)> =
+        books.iter().map(|b| (b.id, b.updated_at.clone())).collect();
+    pairs.sort_by_key(|(id, _)| *id);
+
+    let mut hasher = Sha256::new();
+    for (id, updated_at) in &pairs {
+        hasher.update(format!("{id}:{updated_at}"));
+    }
+    let hash = hex::encode(hasher.finalize());
+
+    let last_updated = books
+        .iter()
+        .map(|b| b.updated_at.as_str())
+        .max()
+        .unwrap_or("")
+        .to_string();
+
+    json!({
+        "total_books": total_books,
+        "catalog_hash": hash,
+        "last_updated": last_updated,
+    })
+}
+
+/// Handle a library page request - return paginated books (browse profile).
+/// Cursor-based pagination: { cursor: null|int, limit: 50 }
+pub async fn handle_library_page_request(
+    db: &DatabaseConnection,
+    msg: &ClearMessage,
+) -> serde_json::Value {
+    use crate::models::book;
+    use sea_orm::QueryOrder;
+
+    let cursor = msg
+        .payload
+        .get("cursor")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+    let limit = msg
+        .payload
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50)
+        .min(50) as usize;
+
+    let mut query = book::Entity::find().order_by_asc(book::Column::Id);
+    if let Some(c) = cursor {
+        query = query.filter(book::Column::Id.gt(c));
+    }
+
+    let books = query.all(db).await.unwrap_or_default();
+
+    let total = book::Entity::find().count(db).await.unwrap_or(0) as i64;
+
+    let page: Vec<_> = books.into_iter().take(limit).collect();
+    let next_cursor = page.last().map(|b| b.id);
+
+    // Populate authors for browse profile
+    let book_dtos = crate::models::Book::populate_authors(db, page).await;
+
+    // Browse profile: only title, author, isbn, cover_url (~250 bytes/book)
+    let browse_books: Vec<serde_json::Value> = book_dtos
+        .iter()
+        .map(|b| {
+            json!({
+                "id": b.id,
+                "title": b.title,
+                "author": b.author,
+                "isbn": b.isbn,
+                "cover_url": b.cover_url,
+            })
+        })
+        .collect();
+
+    json!({
+        "books": browse_books,
+        "next_cursor": next_cursor,
+        "total": total,
+    })
+}
+
+/// Handle a library search request via relay - search local books and return results.
+/// Separate from handle_search_request to keep the existing one untouched.
+pub async fn handle_library_search_via_relay(
+    db: &DatabaseConnection,
+    msg: &ClearMessage,
+) -> serde_json::Value {
+    use crate::models::book;
+
+    let query = msg
+        .payload
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let limit = msg
+        .payload
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(20)
+        .min(50) as usize;
+
+    let books = book::Entity::find()
+        .filter(book::Column::Title.contains(query))
+        .all(db)
+        .await
+        .unwrap_or_default();
+
+    let total_matches = books.len();
+    let page: Vec<_> = books.into_iter().take(limit).collect();
+    let book_dtos = crate::models::Book::populate_authors(db, page).await;
+
+    // Browse profile
+    let browse_books: Vec<serde_json::Value> = book_dtos
+        .iter()
+        .map(|b| {
+            json!({
+                "id": b.id,
+                "title": b.title,
+                "author": b.author,
+                "isbn": b.isbn,
+                "cover_url": b.cover_url,
+            })
+        })
+        .collect();
+
+    json!({
+        "books": browse_books,
+        "total_matches": total_matches,
+    })
+}
+
 // ── Device sync handlers ──────────────────────────────────────────────
 
 /// Check if sync safety mode is enabled (module "sync_safety" in enabled_modules).
@@ -852,6 +1045,9 @@ fn seal_response(
         payload,
         timestamp: chrono::Utc::now().timestamp(),
         message_id: uuid::Uuid::new_v4().to_string(),
+        correlation_id: None,
+        reply_to_mailbox: None,
+        reply_to_write_token: None,
     };
 
     match crypto_service.seal(&sender_peer_info.x25519_public, &response_msg) {

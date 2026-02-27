@@ -141,6 +141,10 @@ async fn is_peer_approved(db: &DatabaseConnection, peer: &peer::Model) -> bool {
 
 /// Try to send a message to a peer via E2EE. Returns Ok(Some(response)) if E2EE succeeded,
 /// Ok(None) if E2EE is not available for this peer (caller should fall back to plaintext).
+///
+/// ADR-012: All message types now support relay fallback. Request-response messages
+/// (search_request, book_sync_request, library_*) attach reply_to fields so the
+/// responder can deposit the answer in our mailbox.
 async fn try_send_e2ee(
     state: &crate::infrastructure::AppState,
     peer: &peer::Model,
@@ -150,7 +154,7 @@ async fn try_send_e2ee(
     // Check if peer supports E2EE
     if !peer.key_exchange_done {
         tracing::warn!(
-            "E2EE: Skipping — peer {} key_exchange_done=false",
+            "E2EE: Skipping - peer {} key_exchange_done=false",
             peer.name
         );
         return Ok(None); // Plaintext fallback
@@ -159,7 +163,7 @@ async fn try_send_e2ee(
     let crypto_service = match state.crypto_service() {
         Some(svc) => svc.clone(),
         None => {
-            tracing::warn!("E2EE: Skipping — CryptoService not initialized");
+            tracing::warn!("E2EE: Skipping - CryptoService not initialized");
             return Ok(None); // Identity not ready, fallback
         }
     };
@@ -169,7 +173,7 @@ async fn try_send_e2ee(
         Some(hex) => hex,
         None => {
             tracing::warn!(
-                "E2EE: Skipping — peer {} missing x25519_public_key",
+                "E2EE: Skipping - peer {} missing x25519_public_key",
                 peer.name
             );
             return Ok(None);
@@ -218,15 +222,11 @@ async fn try_send_e2ee(
             Ok(Some(response))
         }
         Err(crate::services::e2ee_transport::E2eeTransportError::Network(ref net_err)) => {
-            // Network error — peer unreachable. Try relay fallback for fire-and-forget messages.
-            // Request-response messages (search_request, book_sync_request) are NOT relayed
-            // because the relay model doesn't support synchronous responses.
-            let is_fire_and_forget =
-                !matches!(message_type, "search_request" | "book_sync_request");
-
-            if is_fire_and_forget
-                && let (Some(relay_url), Some(mailbox_id), Some(write_token)) =
-                    (&peer.relay_url, &peer.mailbox_id, &peer.relay_write_token)
+            // Network error - peer unreachable. Try relay fallback.
+            // ADR-012: All message types can now be relayed. Request-response messages
+            // attach reply_to fields so responses come back via our mailbox.
+            if let (Some(relay_url), Some(mailbox_id), Some(write_token)) =
+                (&peer.relay_url, &peer.mailbox_id, &peer.relay_write_token)
             {
                 tracing::info!(
                     "E2EE: Direct failed ({}), trying relay for '{}' to peer {}",
@@ -235,21 +235,86 @@ async fn try_send_e2ee(
                     peer.name
                 );
 
+                // For relay messages, attach reply_to fields from our relay config
+                // so the responder can deposit the answer in our mailbox.
+                let mut relay_message = message.clone();
+                let mut correlation_id_for_await: Option<String> = None;
+                if let Some(my_config) = crate::api::relay::get_my_relay_config(state.db()).await {
+                    let correlation_id = uuid::Uuid::new_v4().to_string();
+                    relay_message.correlation_id = Some(correlation_id.clone());
+                    relay_message.reply_to_mailbox = Some(my_config.mailbox_uuid.clone());
+                    relay_message.reply_to_write_token = Some(my_config.write_token.clone());
+                    correlation_id_for_await = Some(correlation_id);
+                }
+
                 let relay = crate::services::relay_transport::RelayTransport::new(crypto_service);
-                match relay
-                    .send(relay_url, mailbox_id, write_token, &peer_x25519, &message)
+
+                // Try relay send, with automatic retry on 404 (expired mailbox)
+                let relay_send_ok = match relay
+                    .send(
+                        relay_url,
+                        mailbox_id,
+                        write_token,
+                        &peer_x25519,
+                        &relay_message,
+                    )
                     .await
                 {
-                    Ok(()) => {
-                        tracing::info!(
-                            "E2EE Relay: Sent '{}' to peer {} via relay",
-                            message_type,
-                            peer.name
+                    Ok(()) => true,
+                    Err(crate::services::e2ee_transport::E2eeTransportError::PeerError(
+                        404,
+                        ref body,
+                    )) => {
+                        // Peer's mailbox expired/deleted on the hub.
+                        // Try to refresh their relay credentials from /api/config.
+                        tracing::warn!(
+                            "E2EE Relay: Peer {} mailbox not found ({}), attempting credential refresh",
+                            peer.name,
+                            body
                         );
-                        // Relay is fire-and-forget: no response
-                        return Ok(Some(None));
+                        if let Some(refreshed) =
+                            refresh_peer_relay_credentials(state.db(), peer).await
+                        {
+                            match relay
+                                .send(
+                                    &refreshed.0,
+                                    &refreshed.1,
+                                    &refreshed.2,
+                                    &peer_x25519,
+                                    &relay_message,
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        "E2EE Relay: Retry succeeded for peer {} with refreshed credentials",
+                                        peer.name
+                                    );
+                                    true
+                                }
+                                Err(retry_err) => {
+                                    if let Some(corr_id) = correlation_id_for_await {
+                                        state.cancel_relay_request(&corr_id);
+                                    }
+                                    return Err(format!(
+                                        "E2EE relay failed after credential refresh: {retry_err}"
+                                    ));
+                                }
+                            }
+                        } else {
+                            if let Some(corr_id) = correlation_id_for_await {
+                                state.cancel_relay_request(&corr_id);
+                            }
+                            return Err(format!(
+                                "E2EE relay: peer {} mailbox expired, peer unreachable for credential refresh",
+                                peer.name
+                            ));
+                        }
                     }
                     Err(relay_err) => {
+                        if let Some(corr_id) = correlation_id_for_await {
+                            state.cancel_relay_request(&corr_id);
+                        }
                         tracing::warn!(
                             "E2EE Relay: Also failed for peer {}: {relay_err}",
                             peer.name
@@ -258,6 +323,70 @@ async fn try_send_e2ee(
                             "E2EE send failed (direct: {net_err}, relay: {relay_err})"
                         ));
                     }
+                };
+
+                if relay_send_ok {
+                    tracing::info!(
+                        "E2EE Relay: Sent '{}' to peer {} via relay",
+                        message_type,
+                        peer.name
+                    );
+
+                    // Await the relay response with periodic polling instead
+                    // of returning 202 and relying on Flutter adaptive polling.
+                    if let Some(corr_id) = correlation_id_for_await {
+                        let mut rx = state.register_relay_request(corr_id.clone());
+                        let start = std::time::Instant::now();
+                        let overall_timeout = std::time::Duration::from_secs(25);
+
+                        // Trigger immediate poll (don't wait for 60s background cycle)
+                        let _ = crate::services::relay_poller::poll_once(state).await;
+
+                        loop {
+                            tokio::select! {
+                                result = &mut rx => {
+                                    match result {
+                                        Ok(payload) => {
+                                            tracing::info!(
+                                                "E2EE Relay: Got response for '{}' from peer {} ({}ms)",
+                                                message_type,
+                                                peer.name,
+                                                start.elapsed().as_millis()
+                                            );
+                                            let response_msg = crate::crypto::envelope::ClearMessage {
+                                                message_type: format!("{message_type}_response"),
+                                                payload,
+                                                timestamp: chrono::Utc::now().timestamp(),
+                                                message_id: uuid::Uuid::new_v4().to_string(),
+                                                correlation_id: Some(corr_id),
+                                                reply_to_mailbox: None,
+                                                reply_to_write_token: None,
+                                            };
+                                            return Ok(Some(Some(response_msg)));
+                                        }
+                                        Err(_) => {
+                                            return Ok(Some(None));
+                                        }
+                                    }
+                                }
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                                    if start.elapsed() >= overall_timeout {
+                                        tracing::info!(
+                                            "E2EE Relay: Timeout waiting for '{}' response from peer {} ({}s)",
+                                            message_type,
+                                            peer.name,
+                                            start.elapsed().as_secs()
+                                        );
+                                        state.cancel_relay_request(&corr_id);
+                                        return Ok(Some(None));
+                                    }
+                                    let _ = crate::services::relay_poller::poll_once(state).await;
+                                }
+                            }
+                        }
+                    }
+
+                    return Ok(Some(None));
                 }
             }
 
@@ -265,6 +394,51 @@ async fn try_send_e2ee(
         }
         Err(e) => Err(format!("E2EE send failed: {e}")),
     }
+}
+
+/// Attempt to refresh a peer's relay credentials by fetching their `/api/config`.
+///
+/// Returns `Some((relay_url, mailbox_id, write_token))` if the peer is reachable
+/// and has relay credentials. Updates the peer record in the database.
+/// Returns `None` if the peer is unreachable or has no relay config.
+async fn refresh_peer_relay_credentials(
+    db: &DatabaseConnection,
+    peer_model: &peer::Model,
+) -> Option<(String, String, String)> {
+    let client = get_safe_client();
+    let config_url = format!("{}/api/config", peer_model.url.trim_end_matches('/'));
+
+    let response = client.get(&config_url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let config: crate::api::setup::ConfigResponse = response.json().await.ok()?;
+
+    let relay_url = config.relay_url?;
+    let mailbox_id = config.mailbox_id?;
+    let write_token = config.relay_write_token?;
+
+    if relay_url.is_empty() || mailbox_id.is_empty() || write_token.is_empty() {
+        return None;
+    }
+
+    // Update peer record with fresh relay credentials
+    if let Ok(Some(existing)) = peer::Entity::find_by_id(peer_model.id).one(db).await {
+        let mut active: peer::ActiveModel = existing.into();
+        active.relay_url = Set(Some(relay_url.clone()));
+        active.mailbox_id = Set(Some(mailbox_id.clone()));
+        active.relay_write_token = Set(Some(write_token.clone()));
+        active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        let _ = active.update(db).await;
+        tracing::info!(
+            "Relay: Refreshed credentials for peer {} (mailbox: {})",
+            peer_model.name,
+            mailbox_id
+        );
+    }
+
+    Some((relay_url, mailbox_id, write_token))
 }
 
 /// Bulk-approve all pending peers (called when connection_validation is toggled OFF)
@@ -443,12 +617,162 @@ pub async fn get_relay_config_endpoint(
     }
 }
 
+// ── Relay library sync endpoints (ADR-012) ──────────────────────────
+
+/// Send a library sync request to a peer via E2EE (relay or direct).
+/// Returns the response payload if available, or starts async relay flow.
+///
+/// POST /api/peers/relay/library_request
+/// Body: { "peer_id": int, "request_type": "manifest"|"page"|"search", ... }
+#[derive(Deserialize)]
+pub struct RelayLibraryRequest {
+    pub peer_id: i32,
+    pub request_type: String,
+    #[serde(default)]
+    pub cursor: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+    #[serde(default)]
+    pub query: Option<String>,
+}
+
+pub async fn relay_library_request(
+    State(state): State<crate::infrastructure::AppState>,
+    Json(req): Json<RelayLibraryRequest>,
+) -> impl IntoResponse {
+    let db = state.db();
+
+    // 1. Find the peer
+    let the_peer = match peer::Entity::find_by_id(req.peer_id).one(db).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "Peer not found" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Build the E2EE message type and payload
+    let (message_type, payload) = match req.request_type.as_str() {
+        "manifest" => ("library_manifest_request", json!({})),
+        "page" => (
+            "library_page_request",
+            json!({
+                "cursor": req.cursor,
+                "limit": req.limit.unwrap_or(50),
+            }),
+        ),
+        "search" => (
+            "library_search_request",
+            json!({
+                "query": req.query.unwrap_or_default(),
+                "limit": req.limit.unwrap_or(20),
+            }),
+        ),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Invalid request_type. Use: manifest, page, search" })),
+            )
+                .into_response();
+        }
+    };
+
+    // 3. Send via E2EE (direct or relay with reply-to)
+    match try_send_e2ee(&state, &the_peer, message_type, payload).await {
+        Ok(Some(Some(response))) => {
+            // Direct response (LAN path)
+            (StatusCode::OK, Json(response.payload)).into_response()
+        }
+        Ok(Some(None)) => {
+            // Sent via relay (no immediate response)
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "status": "relay_pending",
+                    "message": "Request sent via relay. Use poll_now to check for response.",
+                })),
+            )
+                .into_response()
+        }
+        Ok(None) => {
+            // E2EE not available - no plaintext fallback for library sync
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "E2EE not available for this peer" })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// Wait for a pending relay response by correlation_id.
+///
+/// POST /api/peers/relay/await_response
+/// Body: { "correlation_id": "uuid", "timeout_ms": 5000 }
+#[derive(Deserialize)]
+pub struct AwaitRelayResponse {
+    pub correlation_id: String,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_timeout_ms() -> u64 {
+    5000
+}
+
+pub async fn await_relay_response(
+    State(state): State<crate::infrastructure::AppState>,
+    Json(req): Json<AwaitRelayResponse>,
+) -> impl IntoResponse {
+    let timeout = std::time::Duration::from_millis(req.timeout_ms.min(30_000));
+
+    // Register a new listener (or check if one already exists)
+    let rx = state.register_relay_request(req.correlation_id.clone());
+
+    // Wait for the response with timeout
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(payload)) => (StatusCode::OK, Json(payload)).into_response(),
+        Ok(Err(_)) => {
+            // Sender dropped (cancelled)
+            (
+                StatusCode::GONE,
+                Json(json!({ "error": "Request was cancelled" })),
+            )
+                .into_response()
+        }
+        Err(_) => {
+            // Timeout - clean up
+            state.cancel_relay_request(&req.correlation_id);
+            (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(json!({ "status": "timeout", "message": "No response yet" })),
+            )
+                .into_response()
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct ConnectRequest {
     name: String,
     url: String,
     public_key: Option<String>,
-    /// Ed25519 public key (hex) from the remote peer — for E2EE
+    /// Ed25519 public key (hex) from the remote peer - for E2EE
     #[serde(default)]
     ed25519_public_key: Option<String>,
     /// X25519 public key (hex) from the remote peer — for E2EE
@@ -490,7 +814,7 @@ pub async fn connect(
         relay_write_token: Option<String>,
     }
 
-    let remote_data = match client.get(&config_url).send().await {
+    let (remote_data, remote_reachable) = match client.get(&config_url).send().await {
         Ok(res) => {
             if res.status().is_success() {
                 match res.json::<crate::api::setup::ConfigResponse>().await {
@@ -500,18 +824,37 @@ pub async fn connect(
                         } else {
                             (None, None)
                         };
-                        RemoteConfigData {
-                            latitude: lat,
-                            longitude: long,
-                            remote_name: Some(config.library_name),
-                            ed25519_public_key: config.ed25519_public_key,
-                            x25519_public_key: config.x25519_public_key,
-                            relay_url: config.relay_url,
-                            mailbox_id: config.mailbox_id,
-                            relay_write_token: config.relay_write_token,
-                        }
+                        (
+                            RemoteConfigData {
+                                latitude: lat,
+                                longitude: long,
+                                remote_name: Some(config.library_name),
+                                ed25519_public_key: config.ed25519_public_key,
+                                x25519_public_key: config.x25519_public_key,
+                                relay_url: config.relay_url,
+                                mailbox_id: config.mailbox_id,
+                                relay_write_token: config.relay_write_token,
+                            },
+                            true,
+                        )
                     }
-                    _ => RemoteConfigData {
+                    _ => (
+                        RemoteConfigData {
+                            latitude: None,
+                            longitude: None,
+                            remote_name: None,
+                            ed25519_public_key: None,
+                            x25519_public_key: None,
+                            relay_url: None,
+                            mailbox_id: None,
+                            relay_write_token: None,
+                        },
+                        false,
+                    ),
+                }
+            } else {
+                (
+                    RemoteConfigData {
                         latitude: None,
                         longitude: None,
                         remote_name: None,
@@ -521,30 +864,23 @@ pub async fn connect(
                         mailbox_id: None,
                         relay_write_token: None,
                     },
-                }
-            } else {
-                RemoteConfigData {
-                    latitude: None,
-                    longitude: None,
-                    remote_name: None,
-                    ed25519_public_key: None,
-                    x25519_public_key: None,
-                    relay_url: None,
-                    mailbox_id: None,
-                    relay_write_token: None,
-                }
+                    false,
+                )
             }
         }
-        Err(_) => RemoteConfigData {
-            latitude: None,
-            longitude: None,
-            remote_name: None,
-            ed25519_public_key: None,
-            x25519_public_key: None,
-            relay_url: None,
-            mailbox_id: None,
-            relay_write_token: None,
-        },
+        Err(_) => (
+            RemoteConfigData {
+                latitude: None,
+                longitude: None,
+                remote_name: None,
+                ed25519_public_key: None,
+                x25519_public_key: None,
+                relay_url: None,
+                mailbox_id: None,
+                relay_write_token: None,
+            },
+            false,
+        ),
     };
 
     // Use provided name or fallback to remote name or "Unknown"
@@ -581,6 +917,11 @@ pub async fn connect(
     let relay_url = payload.relay_url.or(remote_data.relay_url);
     let mailbox_id = payload.mailbox_id.or(remote_data.mailbox_id);
     let relay_write_token = payload.relay_write_token.or(remote_data.relay_write_token);
+
+    // Clone for relay handshake (values will be moved into ActiveModel below)
+    let relay_url_for_handshake = relay_url.clone();
+    let mailbox_id_for_handshake = mailbox_id.clone();
+    let relay_write_token_for_handshake = relay_write_token.clone();
 
     let peer_id = match existing {
         Ok(Some(existing_peer)) => {
@@ -659,7 +1000,131 @@ pub async fn connect(
         }
     });
 
+    // If the remote peer was unreachable (no WiFi) but we have their relay
+    // credentials, send a connection request via relay so the remote peer
+    // learns about us and can accept future E2EE messages.
+    if !remote_reachable
+        && let (Some(peer_relay_url), Some(peer_mailbox), Some(peer_write_token)) = (
+            relay_url_for_handshake,
+            mailbox_id_for_handshake,
+            relay_write_token_for_handshake,
+        )
+    {
+        let db_for_relay = db.clone();
+        tokio::spawn(async move {
+            if let Err(e) = send_relay_connection_request(
+                &db_for_relay,
+                &peer_relay_url,
+                &peer_mailbox,
+                &peer_write_token,
+            )
+            .await
+            {
+                tracing::warn!("Relay handshake failed: {e}");
+            }
+        });
+    }
+
     (StatusCode::CREATED, Json(json!({ "id": peer_id }))).into_response()
+}
+
+/// Send a connection request via relay when direct HTTP handshake is not possible.
+///
+/// Reads our own config (name, URL, E2EE keys, relay credentials) and deposits
+/// a JSON `connection_request` message in the remote peer's relay mailbox.
+/// The remote's poller will pick it up and create us as a peer.
+async fn send_relay_connection_request(
+    db: &DatabaseConnection,
+    peer_relay_url: &str,
+    peer_mailbox: &str,
+    peer_write_token: &str,
+) -> Result<(), String> {
+    use sea_orm::ConnectionTrait;
+
+    // Load our own relay config
+    let my_config = crate::api::relay::get_my_relay_config(db).await;
+
+    // Load our library name from setup table
+    let my_name = {
+        let row = db
+            .query_one(sea_orm::Statement::from_string(
+                db.get_database_backend(),
+                "SELECT name FROM setup LIMIT 1".to_owned(),
+            ))
+            .await
+            .ok()
+            .flatten();
+        match row {
+            Some(r) => {
+                use sea_orm::TryGetable;
+                String::try_get(&r, "", "name").unwrap_or_else(|_| "BiblioGenius User".to_string())
+            }
+            None => return Err("No setup config found".to_string()),
+        }
+    };
+
+    // Load E2EE public keys from crypto_keys table
+    let (my_ed25519, my_x25519) = crate::api::setup::load_public_keys_from_db(db).await;
+
+    // No reliable URL without network - peer will update on first direct sync
+    let my_url = String::new();
+
+    // Build the connection request payload
+    let mut payload = serde_json::json!({
+        "type": "connection_request",
+        "name": my_name,
+        "url": my_url,
+    });
+
+    if let Some(ref key) = my_ed25519 {
+        payload["ed25519_public_key"] = serde_json::Value::String(key.clone());
+    }
+    if let Some(ref key) = my_x25519 {
+        payload["x25519_public_key"] = serde_json::Value::String(key.clone());
+    }
+
+    // Include our relay credentials so the remote peer can write to our mailbox
+    if let Some(ref config) = my_config {
+        payload["relay_url"] = serde_json::Value::String(config.relay_url.clone());
+        payload["mailbox_id"] = serde_json::Value::String(config.mailbox_uuid.clone());
+        payload["relay_write_token"] = serde_json::Value::String(config.write_token.clone());
+    }
+
+    let blob = serde_json::to_vec(&payload)
+        .map_err(|e| format!("Failed to serialize connection request: {e}"))?;
+
+    // Deposit in the remote peer's mailbox
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    let url = format!(
+        "{}/api/relay/mailbox/{}/messages",
+        peer_relay_url.trim_end_matches('/'),
+        peer_mailbox
+    );
+
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {peer_write_token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(blob)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to deposit connection request: {e}"))?;
+
+    let status = response.status().as_u16();
+    if status >= 400 {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "Relay rejected connection request ({status}): {body}"
+        ));
+    }
+
+    tracing::info!("Relay: Deposited connection_request in peer mailbox {peer_mailbox}");
+    Ok(())
 }
 
 /// Internal sync function for background sync after connect
@@ -1894,6 +2359,39 @@ pub async fn sync_peer_by_url(
         .as_ref()
         .filter(|c| c.library_name != peer.name)
         .map(|c| c.library_name.clone());
+
+    // Refresh relay credentials from peer config if they changed
+    if let Some(ref config) = peer_config {
+        let new_relay = (
+            config.relay_url.as_deref(),
+            config.mailbox_id.as_deref(),
+            config.relay_write_token.as_deref(),
+        );
+        let old_relay = (
+            peer.relay_url.as_deref(),
+            peer.mailbox_id.as_deref(),
+            peer.relay_write_token.as_deref(),
+        );
+        if new_relay != old_relay
+            && let (Some(r_url), Some(m_id), Some(w_tok)) = new_relay
+            && !r_url.is_empty()
+            && !m_id.is_empty()
+            && !w_tok.is_empty()
+            && let Ok(Some(existing)) = peer::Entity::find_by_id(peer.id).one(&db).await
+        {
+            let mut active: peer::ActiveModel = existing.into();
+            active.relay_url = Set(Some(r_url.to_string()));
+            active.mailbox_id = Set(Some(m_id.to_string()));
+            active.relay_write_token = Set(Some(w_tok.to_string()));
+            active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+            let _ = active.update(&db).await;
+            tracing::info!(
+                "Sync: Updated relay credentials for peer {} (mailbox: {})",
+                peer.name,
+                m_id
+            );
+        }
+    }
 
     if !allows_caching {
         // Peer doesn't allow caching - still sync gamification stats

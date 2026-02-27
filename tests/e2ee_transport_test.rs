@@ -72,6 +72,9 @@ async fn seal_open_loan_request_roundtrip() {
         }),
         timestamp: chrono::Utc::now().timestamp(),
         message_id: uuid::Uuid::new_v4().to_string(),
+        correlation_id: None,
+        reply_to_mailbox: None,
+        reply_to_write_token: None,
     };
 
     let envelope = alice_service
@@ -101,6 +104,9 @@ async fn envelope_serializes_as_json() {
         payload: serde_json::json!({}),
         timestamp: chrono::Utc::now().timestamp(),
         message_id: "test-id".to_string(),
+        correlation_id: None,
+        reply_to_mailbox: None,
+        reply_to_write_token: None,
     };
 
     let envelope = svc
@@ -129,6 +135,9 @@ async fn replay_protection_rejects_duplicate() {
         payload: serde_json::json!({"book_isbn": "123"}),
         timestamp: chrono::Utc::now().timestamp(),
         message_id: uuid::Uuid::new_v4().to_string(),
+        correlation_id: None,
+        reply_to_mailbox: None,
+        reply_to_write_token: None,
     };
 
     let envelope = alice_svc
@@ -159,6 +168,9 @@ async fn unknown_sender_rejected() {
         payload: serde_json::json!({}),
         timestamp: chrono::Utc::now().timestamp(),
         message_id: "test".to_string(),
+        correlation_id: None,
+        reply_to_mailbox: None,
+        reply_to_write_token: None,
     };
 
     let envelope = alice_svc

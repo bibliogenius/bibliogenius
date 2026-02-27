@@ -237,6 +237,9 @@ mod tests {
             }),
             timestamp: chrono::Utc::now().timestamp(),
             message_id: uuid::Uuid::new_v4().to_string(),
+            correlation_id: None,
+            reply_to_mailbox: None,
+            reply_to_write_token: None,
         }
     }
 

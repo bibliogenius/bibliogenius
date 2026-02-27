@@ -1319,7 +1319,13 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                     .allow_methods(Any)
                     .allow_headers(Any);
 
-                let app = axum::Router::new().nest("/api", api).layer(cors);
+                let app = axum::Router::new()
+                    .route(
+                        "/invite",
+                        axum::routing::get(crate::api::invite_page::invite_page),
+                    )
+                    .nest("/api", api)
+                    .layer(cors);
 
                 // Spawn server in background with panic catching
                 let server_port = actual_port;

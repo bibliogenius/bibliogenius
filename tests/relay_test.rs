@@ -384,6 +384,9 @@ async fn relay_e2ee_seal_deposit_collect_open_roundtrip() {
         }),
         timestamp: chrono::Utc::now().timestamp(),
         message_id: uuid::Uuid::new_v4().to_string(),
+        correlation_id: None,
+        reply_to_mailbox: None,
+        reply_to_write_token: None,
     };
 
     let envelope = alice_crypto
@@ -440,6 +443,9 @@ async fn relay_e2ee_multiple_messages_all_decryptable() {
             payload: serde_json::json!({"type": msg_type}),
             timestamp: chrono::Utc::now().timestamp(),
             message_id: uuid::Uuid::new_v4().to_string(),
+            correlation_id: None,
+            reply_to_mailbox: None,
+            reply_to_write_token: None,
         };
 
         let envelope = alice_crypto
@@ -487,6 +493,9 @@ async fn relay_tampered_blob_fails_decryption() {
         payload: serde_json::json!({}),
         timestamp: chrono::Utc::now().timestamp(),
         message_id: uuid::Uuid::new_v4().to_string(),
+        correlation_id: None,
+        reply_to_mailbox: None,
+        reply_to_write_token: None,
     };
 
     let envelope = alice_crypto
