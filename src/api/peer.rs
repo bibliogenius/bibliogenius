@@ -4436,3 +4436,76 @@ pub async fn receive_loan_confirmation(
         }
     }
 }
+
+/// Save pre-fetched books to the local peer_books cache.
+///
+/// Called by Flutter after loading books via relay or live WiFi fetch,
+/// so the Rust backend does not need to re-fetch from the remote peer.
+/// Input: { "books": [{ "id": 5, "title": "...", ... }, ...] }
+pub async fn cache_books_by_id(
+    State(db): State<DatabaseConnection>,
+    Path(peer_id): Path<i32>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use crate::models::peer_book;
+
+    // 1. Validate peer exists
+    let peer = match peer::Entity::find_by_id(peer_id).one(&db).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("Peer not found: {}", peer_id) })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("DB error: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Parse books array from payload
+    let books: Vec<crate::models::Book> = match payload.get("books") {
+        Some(books_val) => serde_json::from_value(books_val.clone()).unwrap_or_default(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Missing 'books' field" })),
+            )
+                .into_response();
+        }
+    };
+
+    // 3. Delete old peer_books for this peer
+    let _ = peer_book::Entity::delete_many()
+        .filter(peer_book::Column::PeerId.eq(peer.id))
+        .exec(&db)
+        .await;
+
+    // 4. Insert new books with synced_at = now()
+    let count = books.len();
+    for book in books {
+        let cache = peer_book::ActiveModel {
+            peer_id: Set(peer.id),
+            remote_book_id: Set(book.id.unwrap_or(0)),
+            title: Set(book.title),
+            isbn: Set(book.isbn),
+            author: Set(book.author),
+            cover_url: Set(book.cover_url),
+            summary: Set(book.summary),
+            synced_at: Set(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+        let _ = peer_book::Entity::insert(cache).exec(&db).await;
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({ "count": count, "peer_id": peer_id })),
+    )
+        .into_response()
+}

@@ -147,6 +147,7 @@ fn build_routes() -> Router<AppState> {
         .route("/peers/pull", get(peer::pull_operations))
         .route("/peers/:id/sync", post(peer::sync_peer)) // Sync remote books by ID
         .route("/peers/sync_by_url", post(peer::sync_peer_by_url)) // Sync by URL (solves Hub ID mismatch)
+        .route("/peers/:id/cache_books", post(peer::cache_books_by_id)) // Save pre-fetched books to cache
         .route("/peers/:id/books", get(peer::list_peer_books))
         .route("/peers/books_by_url", post(peer::list_peer_books_by_url)) // Get books by URL
         .route(
