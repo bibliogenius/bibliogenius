@@ -334,10 +334,11 @@ async fn try_send_e2ee(
 
                     // Await the relay response with periodic polling instead
                     // of returning 202 and relying on Flutter adaptive polling.
+                    // 65s covers one full remote poller cycle (60s + jitter).
                     if let Some(corr_id) = correlation_id_for_await {
                         let mut rx = state.register_relay_request(corr_id.clone());
                         let start = std::time::Instant::now();
-                        let overall_timeout = std::time::Duration::from_secs(25);
+                        let overall_timeout = std::time::Duration::from_secs(65);
 
                         // Trigger immediate poll (don't wait for 60s background cycle)
                         let _ = crate::services::relay_poller::poll_once(state).await;
@@ -1001,130 +1002,26 @@ pub async fn connect(
     });
 
     // If the remote peer was unreachable (no WiFi) but we have their relay
-    // credentials, send a connection request via relay so the remote peer
-    // learns about us and can accept future E2EE messages.
+    // credentials, tell Flutter to deposit the connection_request via native
+    // HTTP (Dio). reqwest+rustls fails on iOS FFI, so the deposit is handled
+    // by the Flutter caller using the native HTTP stack.
     if !remote_reachable
-        && let (Some(peer_relay_url), Some(peer_mailbox), Some(peer_write_token)) = (
-            relay_url_for_handshake,
-            mailbox_id_for_handshake,
-            relay_write_token_for_handshake,
-        )
+        && relay_url_for_handshake.is_some()
+        && mailbox_id_for_handshake.is_some()
+        && relay_write_token_for_handshake.is_some()
     {
-        let db_for_relay = db.clone();
-        tokio::spawn(async move {
-            if let Err(e) = send_relay_connection_request(
-                &db_for_relay,
-                &peer_relay_url,
-                &peer_mailbox,
-                &peer_write_token,
-            )
-            .await
-            {
-                tracing::warn!("Relay handshake failed: {e}");
-            }
-        });
+        tracing::info!("Relay: Peer unreachable, relay_deposit_needed=true (Flutter will deposit)");
+        return (
+            StatusCode::CREATED,
+            Json(json!({
+                "id": peer_id,
+                "relay_deposit_needed": true
+            })),
+        )
+            .into_response();
     }
 
     (StatusCode::CREATED, Json(json!({ "id": peer_id }))).into_response()
-}
-
-/// Send a connection request via relay when direct HTTP handshake is not possible.
-///
-/// Reads our own config (name, URL, E2EE keys, relay credentials) and deposits
-/// a JSON `connection_request` message in the remote peer's relay mailbox.
-/// The remote's poller will pick it up and create us as a peer.
-async fn send_relay_connection_request(
-    db: &DatabaseConnection,
-    peer_relay_url: &str,
-    peer_mailbox: &str,
-    peer_write_token: &str,
-) -> Result<(), String> {
-    use sea_orm::ConnectionTrait;
-
-    // Load our own relay config
-    let my_config = crate::api::relay::get_my_relay_config(db).await;
-
-    // Load our library name from setup table
-    let my_name = {
-        let row = db
-            .query_one(sea_orm::Statement::from_string(
-                db.get_database_backend(),
-                "SELECT name FROM setup LIMIT 1".to_owned(),
-            ))
-            .await
-            .ok()
-            .flatten();
-        match row {
-            Some(r) => {
-                use sea_orm::TryGetable;
-                String::try_get(&r, "", "name").unwrap_or_else(|_| "BiblioGenius User".to_string())
-            }
-            None => return Err("No setup config found".to_string()),
-        }
-    };
-
-    // Load E2EE public keys from crypto_keys table
-    let (my_ed25519, my_x25519) = crate::api::setup::load_public_keys_from_db(db).await;
-
-    // No reliable URL without network - peer will update on first direct sync
-    let my_url = String::new();
-
-    // Build the connection request payload
-    let mut payload = serde_json::json!({
-        "type": "connection_request",
-        "name": my_name,
-        "url": my_url,
-    });
-
-    if let Some(ref key) = my_ed25519 {
-        payload["ed25519_public_key"] = serde_json::Value::String(key.clone());
-    }
-    if let Some(ref key) = my_x25519 {
-        payload["x25519_public_key"] = serde_json::Value::String(key.clone());
-    }
-
-    // Include our relay credentials so the remote peer can write to our mailbox
-    if let Some(ref config) = my_config {
-        payload["relay_url"] = serde_json::Value::String(config.relay_url.clone());
-        payload["mailbox_id"] = serde_json::Value::String(config.mailbox_uuid.clone());
-        payload["relay_write_token"] = serde_json::Value::String(config.write_token.clone());
-    }
-
-    let blob = serde_json::to_vec(&payload)
-        .map_err(|e| format!("Failed to serialize connection request: {e}"))?;
-
-    // Deposit in the remote peer's mailbox
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-
-    let url = format!(
-        "{}/api/relay/mailbox/{}/messages",
-        peer_relay_url.trim_end_matches('/'),
-        peer_mailbox
-    );
-
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {peer_write_token}"))
-        .header("Content-Type", "application/octet-stream")
-        .body(blob)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to deposit connection request: {e}"))?;
-
-    let status = response.status().as_u16();
-    if status >= 400 {
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "Relay rejected connection request ({status}): {body}"
-        ));
-    }
-
-    tracing::info!("Relay: Deposited connection_request in peer mailbox {peer_mailbox}");
-    Ok(())
 }
 
 /// Internal sync function for background sync after connect

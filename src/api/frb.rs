@@ -9,6 +9,7 @@ use sea_orm::DatabaseConnection;
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;
 use tower_http::cors::{Any, CorsLayer};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // Global database connection (initialized once on app start)
 static DB: OnceLock<DatabaseConnection> = OnceLock::new();
@@ -144,6 +145,19 @@ impl From<crate::models::Book> for FrbBook {
 pub async fn init_backend(db_path: String) -> Result<String, String> {
     // Install panic hook first thing to catch any panics
     install_panic_hook();
+
+    // Initialize tracing for FFI mode (makes Rust logs visible in stderr).
+    // Only runs once - subsequent calls are no-ops.
+    static TRACING_INIT: std::sync::Once = std::sync::Once::new();
+    TRACING_INIT.call_once(|| {
+        let _ = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "bibliogenius=info".into()),
+            )
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .try_init();
+    });
 
     if DB.get().is_some() {
         return Ok("Already initialized".to_string());

@@ -287,6 +287,7 @@ fn build_routes() -> Router<AppState> {
         )
         // Relay hub endpoints (any instance can serve as a relay)
         .route("/relay/poll_now", post(relay::poll_now))
+        .route("/relay/status", get(relay::relay_status))
         .route("/relay/mailbox", post(relay::create_mailbox))
         .route(
             "/relay/mailbox/:uuid/messages",

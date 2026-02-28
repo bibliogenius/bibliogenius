@@ -454,6 +454,67 @@ pub async fn poll_now(State(state): State<crate::infrastructure::AppState>) -> i
     }
 }
 
+/// GET /api/relay/status - Diagnostic endpoint for relay connectivity.
+///
+/// Returns the local relay configuration and polls the mailbox to report
+/// how many messages are waiting. Useful for debugging relay issues.
+pub async fn relay_status(
+    State(state): State<crate::infrastructure::AppState>,
+) -> impl IntoResponse {
+    let db = state.db();
+
+    // 1. Check relay config
+    let config = match get_my_relay_config(db).await {
+        Some(c) => c,
+        None => {
+            return Json(json!({
+                "configured": false,
+                "error": "No relay config found"
+            }))
+            .into_response();
+        }
+    };
+
+    // 2. Check crypto service
+    let has_crypto = state.crypto_service().is_some();
+
+    // 3. Try polling the mailbox to count messages
+    let mut message_count = 0i64;
+    let mut poll_error: Option<String> = None;
+    if has_crypto {
+        let crypto_service = state.crypto_service().unwrap().clone();
+        let relay = crate::services::relay_transport::RelayTransport::new(crypto_service);
+        match relay
+            .poll(&config.relay_url, &config.mailbox_uuid, &config.read_token)
+            .await
+        {
+            Ok((envelopes, raw_blobs)) => {
+                message_count = (envelopes.len() + raw_blobs.len()) as i64;
+            }
+            Err(e) => {
+                poll_error = Some(format!("{e:?}"));
+            }
+        }
+    }
+
+    // 4. Count known peers
+    let peer_count = crate::models::peer::Entity::find()
+        .count(db)
+        .await
+        .unwrap_or(0);
+
+    Json(json!({
+        "configured": true,
+        "relay_url": config.relay_url,
+        "mailbox_uuid": config.mailbox_uuid,
+        "has_crypto": has_crypto,
+        "pending_messages": message_count,
+        "poll_error": poll_error,
+        "peer_count": peer_count
+    }))
+    .into_response()
+}
+
 // ── Client-side helpers (used by peer.rs setup_relay) ────────────────
 
 /// Get the local relay config (singleton row from my_relay_config).

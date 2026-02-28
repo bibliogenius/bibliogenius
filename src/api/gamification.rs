@@ -103,56 +103,74 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
 
     let client = crate::api::peer::get_safe_client();
 
-    for p in &peers {
-        let config_url = format!("{}/api/config", p.url);
-        match client.get(&config_url).send().await {
-            Ok(res) if res.status().is_success() => {
-                let config = match res.json::<crate::api::setup::ConfigResponse>().await {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-
-                // Update peer name and corresponding contact if it changed
-                if config.library_name != p.name
-                    && let Ok(Some(peer_model)) = peer::Entity::find_by_id(p.id).one(db).await
-                {
-                    let old_name = peer_model.name.clone();
-                    let mut active: peer::ActiveModel = peer_model.into();
-                    active.name = Set(config.library_name.clone());
-                    active.updated_at = Set(chrono::Utc::now().to_rfc3339());
-                    let _ = active.update(db).await;
-
-                    if let Ok(Some(contact_model)) = contact::Entity::find()
-                        .filter(contact::Column::Name.eq(&old_name))
-                        .filter(contact::Column::Type.eq("Library"))
-                        .one(db)
-                        .await
-                    {
-                        let mut contact_active: contact::ActiveModel = contact_model.into();
-                        contact_active.name = Set(config.library_name.clone());
-                        contact_active.updated_at = Set(chrono::Utc::now().to_rfc3339());
-                        let _ = contact_active.update(db).await;
+    // Sync all peers in parallel to avoid sequential timeouts
+    let sync_futures: Vec<_> = peers
+        .iter()
+        .map(|p| {
+            let client = client.clone();
+            let peer_url = p.url.clone();
+            let peer_name = p.name.clone();
+            let peer_id = p.id;
+            async move {
+                let config_url = format!("{}/api/config", peer_url);
+                match client.get(&config_url).send().await {
+                    Ok(res) if res.status().is_success() => {
+                        let config = match res.json::<crate::api::setup::ConfigResponse>().await {
+                            Ok(c) => c,
+                            Err(_) => return (peer_id, peer_url, peer_name, None),
+                        };
+                        (peer_id, peer_url, peer_name, Some(config))
+                    }
+                    _ => {
+                        tracing::debug!(
+                            "Peer {} unreachable during leaderboard refresh, keeping cached stats",
+                            peer_url
+                        );
+                        (peer_id, peer_url, peer_name, None)
                     }
                 }
-
-                // Sync peer gamification stats (unchanged TNR-safe function)
-                crate::api::peer::sync_peer_gamification_stats(
-                    db,
-                    p.id,
-                    &p.url,
-                    &client,
-                    Some(config.share_gamification_stats),
-                )
-                .await;
             }
-            _ => {
-                tracing::debug!(
-                    "Peer {} unreachable during leaderboard refresh, keeping cached stats",
-                    p.url
-                );
-                continue;
+        })
+        .collect();
+
+    let results = futures::future::join_all(sync_futures).await;
+
+    // Process results sequentially (DB writes are fast, no network)
+    for (peer_id, peer_url, peer_name, config) in results {
+        let Some(config) = config else { continue };
+
+        // Update peer name and corresponding contact if it changed
+        if config.library_name != peer_name
+            && let Ok(Some(peer_model)) = peer::Entity::find_by_id(peer_id).one(db).await
+        {
+            let old_name = peer_model.name.clone();
+            let mut active: peer::ActiveModel = peer_model.into();
+            active.name = Set(config.library_name.clone());
+            active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+            let _ = active.update(db).await;
+
+            if let Ok(Some(contact_model)) = contact::Entity::find()
+                .filter(contact::Column::Name.eq(&old_name))
+                .filter(contact::Column::Type.eq("Library"))
+                .one(db)
+                .await
+            {
+                let mut contact_active: contact::ActiveModel = contact_model.into();
+                contact_active.name = Set(config.library_name.clone());
+                contact_active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+                let _ = contact_active.update(db).await;
             }
         }
+
+        // Sync peer gamification stats
+        crate::api::peer::sync_peer_gamification_stats(
+            db,
+            peer_id,
+            &peer_url,
+            &client,
+            Some(config.share_gamification_stats),
+        )
+        .await;
     }
 
     // Return the leaderboard via service

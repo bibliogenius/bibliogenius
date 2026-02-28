@@ -101,9 +101,9 @@ const INVITE_HTML: &str = r##"<!DOCTYPE html>
             <p class="label">Invitation de</p>
             <p class="name" id="lib-name"></p>
             <p class="text">souhaite se connecter avec vous sur BiblioGenius pour partager des livres.</p>
-            <button class="btn" id="open-btn" aria-label="Ouvrir dans l'application">
+            <a class="btn" id="open-btn" href="#" aria-label="Ouvrir dans l'application">
                 &#128279; Ouvrir dans l'application
-            </button>
+            </a>
             <div class="fallback" id="fallback">
                 <p><strong>L'application ne s'est pas ouverte ?</strong></p>
                 <ol class="step-list">
@@ -181,10 +181,19 @@ const INVITE_HTML: &str = r##"<!DOCTYPE html>
     // Build the custom-scheme deep link (always use ?d= for v4 compat)
     var deepLink = 'bibliogenius://invite?d=' + encoded;
 
-    openBtn.addEventListener('click', function() {
-        window.location.href = deepLink;
-        // If the app opened, this page is now in the background.
-        // If not, show fallback after a delay.
+    // Set the href on the <a> tag so iOS handles the custom scheme natively
+    openBtn.href = deepLink;
+
+    openBtn.addEventListener('click', function(e) {
+        // Also try iframe approach as backup (works on some iOS browsers
+        // where <a href> to custom schemes is blocked)
+        var iframe = document.createElement('iframe');
+        iframe.style.display = 'none';
+        iframe.src = deepLink;
+        document.body.appendChild(iframe);
+        setTimeout(function() { document.body.removeChild(iframe); }, 100);
+
+        // Show fallback if app did not open
         setTimeout(function() {
             fallback.classList.add('visible');
         }, 2500);

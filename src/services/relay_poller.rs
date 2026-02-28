@@ -24,6 +24,8 @@ use crate::services::relay_transport::{RelayBlob, RelayTransport};
 pub async fn start_relay_polling(state: AppState, interval: Duration) {
     use rand::Rng;
 
+    tracing::info!("Relay poller: started (interval: {}s)", interval.as_secs());
+
     // First poll immediately at startup (auto-heal stale mailboxes without waiting 60s)
     if let Err(e) = poll_once(&state).await {
         tracing::warn!("Relay poller: {e}");
@@ -47,13 +49,19 @@ pub async fn poll_once(state: &AppState) -> Result<(), String> {
     // 1. Load my relay config
     let config = match get_my_relay_config(db).await {
         Some(c) => c,
-        None => return Ok(()), // No relay configured, nothing to do
+        None => {
+            tracing::debug!("Relay poller: No relay config, skipping");
+            return Ok(());
+        }
     };
 
     // 2. Get crypto service
     let crypto_service = match state.crypto_service() {
         Some(svc) => svc.clone(),
-        None => return Ok(()), // Identity not ready yet
+        None => {
+            tracing::debug!("Relay poller: Crypto service not ready, skipping");
+            return Ok(());
+        }
     };
 
     // 3. Poll relay for pending messages
@@ -86,6 +94,10 @@ pub async fn poll_once(state: &AppState) -> Result<(), String> {
     };
 
     if envelopes.is_empty() && raw_blobs.is_empty() {
+        tracing::debug!(
+            "Relay poller: No messages in mailbox {}",
+            config.mailbox_uuid
+        );
         return Ok(());
     }
 
@@ -102,23 +114,21 @@ pub async fn poll_once(state: &AppState) -> Result<(), String> {
         let RelayBlob::Raw(msg_id, bytes) = blob else {
             continue;
         };
-        match handle_raw_relay_message(db, bytes).await {
-            Ok(()) => {
-                if let Err(e) = relay
-                    .ack(
-                        &config.relay_url,
-                        &config.mailbox_uuid,
-                        &config.read_token,
-                        *msg_id,
-                    )
-                    .await
-                {
-                    tracing::warn!("Relay poller: Failed to ack raw message {msg_id}: {e}");
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Relay poller: Failed to process raw message {msg_id}: {e}");
-            }
+        if let Err(e) = handle_raw_relay_message(db, bytes).await {
+            tracing::warn!("Relay poller: Failed to process raw message {msg_id}: {e}");
+        }
+        // Always ACK raw messages to prevent mailbox bloat.
+        // Failed messages are not retryable (malformed data won't fix itself).
+        if let Err(e) = relay
+            .ack(
+                &config.relay_url,
+                &config.mailbox_uuid,
+                &config.read_token,
+                *msg_id,
+            )
+            .await
+        {
+            tracing::warn!("Relay poller: Failed to ack raw message {msg_id}: {e}");
         }
     }
 
@@ -147,24 +157,23 @@ pub async fn poll_once(state: &AppState) -> Result<(), String> {
         )
         .await
         {
-            Ok(()) => {
-                // Acknowledge the message
-                if let Err(e) = relay
-                    .ack(
-                        &config.relay_url,
-                        &config.mailbox_uuid,
-                        &config.read_token,
-                        *message_id,
-                    )
-                    .await
-                {
-                    tracing::warn!("Relay poller: Failed to ack message {message_id}: {e}");
-                }
-            }
+            Ok(()) => {}
             Err(e) => {
                 tracing::warn!("Relay poller: Failed to process message {message_id}: {e}");
-                // Don't ack - message will be retried on next poll
             }
+        }
+        // Always ACK to prevent mailbox bloat. E2EE messages that fail to
+        // decrypt (wrong key, unknown sender) won't succeed on retry.
+        if let Err(e) = relay
+            .ack(
+                &config.relay_url,
+                &config.mailbox_uuid,
+                &config.read_token,
+                *message_id,
+            )
+            .await
+        {
+            tracing::warn!("Relay poller: Failed to ack message {message_id}: {e}");
         }
     }
 
@@ -581,27 +590,29 @@ async fn handle_connection_request(
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    if url.is_empty() {
-        return Err("connection_request: missing url".to_string());
-    }
+    // URL may be empty when the sender has no WiFi (relay-only connection).
+    // Use a unique placeholder to satisfy the NOT NULL UNIQUE constraint on peers.url.
+    // It will be replaced with the real URL on the first direct WiFi sync.
+    let peer_url = if url.is_empty() {
+        let unique_part = ed25519_key
+            .as_deref()
+            .map(String::from)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        format!("relay://{unique_part}")
+    } else {
+        url.to_string()
+    };
 
     let key_exchange_done = ed25519_key.is_some() && x25519_key.is_some();
 
     tracing::info!(
         "Relay poller: Received connection_request from '{}' (url: {}, e2ee: {})",
         name,
-        url,
+        peer_url,
         key_exchange_done
     );
 
-    // Check if peer already exists (by URL or by ed25519 key)
-    let existing_by_url = peer::Entity::find()
-        .filter(peer::Column::Url.eq(url))
-        .one(db)
-        .await
-        .ok()
-        .flatten();
-
+    // Check if peer already exists (by ed25519 key first, then by URL if non-empty)
     let existing_by_key = if let Some(ref key) = ed25519_key {
         peer::Entity::find()
             .filter(peer::Column::PublicKey.eq(key.as_str()))
@@ -613,7 +624,18 @@ async fn handle_connection_request(
         None
     };
 
-    let existing = existing_by_url.or(existing_by_key);
+    let existing_by_url = if existing_by_key.is_none() && !peer_url.starts_with("relay://") {
+        peer::Entity::find()
+            .filter(peer::Column::Url.eq(&peer_url))
+            .one(db)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
+    let existing = existing_by_key.or(existing_by_url);
 
     if let Some(existing_peer) = existing {
         // Update existing peer with new keys/credentials
@@ -652,7 +674,7 @@ async fn handle_connection_request(
         // Insert new peer
         let new_peer = peer::ActiveModel {
             name: Set(name.to_string()),
-            url: Set(url.to_string()),
+            url: Set(peer_url),
             public_key: Set(ed25519_key),
             x25519_public_key: Set(x25519_key),
             key_exchange_done: Set(key_exchange_done),
