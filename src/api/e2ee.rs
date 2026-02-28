@@ -743,10 +743,36 @@ pub async fn handle_library_manifest_request(db: &DatabaseConnection) -> serde_j
         .unwrap_or("")
         .to_string();
 
+    // Preview: up to 8 books with covers (shown before pages arrive)
+    let preview_books: Vec<serde_json::Value> = {
+        use sea_orm::QueryOrder;
+        let with_covers = book::Entity::find()
+            .filter(book::Column::CoverUrl.is_not_null())
+            .order_by_desc(book::Column::UpdatedAt)
+            .all(db)
+            .await
+            .unwrap_or_default();
+        let preview: Vec<_> = with_covers.into_iter().take(8).collect();
+        let preview_dtos = crate::models::Book::populate_authors(db, preview).await;
+        preview_dtos
+            .iter()
+            .map(|b| {
+                json!({
+                    "id": b.id,
+                    "title": b.title,
+                    "author": b.author,
+                    "isbn": b.isbn,
+                    "cover_url": b.cover_url,
+                })
+            })
+            .collect()
+    };
+
     json!({
         "total_books": total_books,
         "catalog_hash": hash,
         "last_updated": last_updated,
+        "preview_books": preview_books,
     })
 }
 
