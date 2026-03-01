@@ -2924,9 +2924,7 @@ pub async fn delete_collection(id: String) -> Result<(), String> {
 }
 
 /// Returns all books belonging to a collection.
-pub async fn get_collection_books(
-    collection_id: String,
-) -> Result<Vec<FrbCollectionBook>, String> {
+pub async fn get_collection_books(collection_id: String) -> Result<Vec<FrbCollectionBook>, String> {
     use crate::domain::collection_repository::CollectionRepository;
     let db = db().ok_or("Database not initialized")?;
     let repo = collection_repo!(db);
@@ -2937,10 +2935,7 @@ pub async fn get_collection_books(
 }
 
 /// Adds a book to a collection (idempotent).
-pub async fn add_book_to_collection(
-    collection_id: String,
-    book_id: i32,
-) -> Result<(), String> {
+pub async fn add_book_to_collection(collection_id: String, book_id: i32) -> Result<(), String> {
     use crate::domain::collection_repository::CollectionRepository;
     let db = db().ok_or("Database not initialized")?;
     let repo = collection_repo!(db);
