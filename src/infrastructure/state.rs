@@ -17,6 +17,7 @@ use crate::services::IdentityService;
 use crate::services::crypto_service::CryptoService;
 use crate::services::device_pairing_service::DevicePairingService;
 use crate::services::device_sync_service::DeviceSyncService;
+use crate::services::hub_directory_service::HubDirectoryService;
 
 /// Pending relay request-response entry (ADR-012).
 /// When a relay request is sent with a `correlation_id`, a oneshot sender is stored here.
@@ -51,6 +52,8 @@ pub struct AppState {
     pub device_sync: Arc<DeviceSyncService>,
     /// Pending relay request-response correlation map (ADR-012).
     pending_relay_requests: PendingRelayRequests,
+    /// Hub directory service — manages public directory and follow relationships (ADR-015).
+    pub hub_directory: Arc<HubDirectoryService>,
 }
 
 impl AppState {
@@ -96,6 +99,7 @@ impl AppState {
             device_pairing,
             device_sync,
             pending_relay_requests: Arc::new(dashmap::DashMap::new()),
+            hub_directory: Arc::new(HubDirectoryService::new()),
         }
     }
 

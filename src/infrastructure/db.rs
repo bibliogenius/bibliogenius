@@ -1204,6 +1204,24 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 051: Hub directory config — stores local settings for the public directory feature (ADR-015)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE TABLE IF NOT EXISTS hub_directory_config (
+                id               INTEGER PRIMARY KEY DEFAULT 1,
+                node_id          TEXT NOT NULL,
+                write_token      TEXT NOT NULL,
+                is_listed        INTEGER NOT NULL DEFAULT 0,
+                requires_approval INTEGER NOT NULL DEFAULT 1,
+                accept_from      TEXT NOT NULL DEFAULT 'everyone',
+                created_at       TEXT NOT NULL,
+                updated_at       TEXT NOT NULL
+            )"
+            .to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

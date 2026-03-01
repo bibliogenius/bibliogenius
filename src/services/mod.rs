@@ -10,6 +10,7 @@ pub mod device_pairing_service;
 pub mod device_sync_service;
 pub mod e2ee_transport;
 pub mod gamification_service;
+pub mod hub_directory_service;
 pub mod identity_service;
 pub mod loan_service;
 pub mod lookup_service;

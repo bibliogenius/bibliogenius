@@ -2561,3 +2561,427 @@ pub async fn device_sync_reject_all() -> Result<u32, String> {
         .await
         .map_err(|e| e.to_string())
 }
+
+// =============================================================================
+// Hub Directory (ADR-015)
+// =============================================================================
+
+use crate::services::hub_directory_service::{
+    DirectoryConfig, HubDirectoryService, HubFollow, HubProfile, RegisterParams,
+};
+
+static HUB_DIRECTORY_SVC: OnceLock<HubDirectoryService> = OnceLock::new();
+
+fn hub_directory_svc() -> &'static HubDirectoryService {
+    HUB_DIRECTORY_SVC.get_or_init(HubDirectoryService::new)
+}
+
+fn hub_db() -> Result<&'static sea_orm::DatabaseConnection, String> {
+    db().ok_or_else(|| "Database not initialized".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// FFI structs
+// ---------------------------------------------------------------------------
+
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbDirectoryConfig {
+    pub node_id: String,
+    pub is_listed: bool,
+    pub requires_approval: bool,
+    pub accept_from: String,
+}
+
+impl From<DirectoryConfig> for FrbDirectoryConfig {
+    fn from(c: DirectoryConfig) -> Self {
+        Self {
+            node_id: c.node_id,
+            is_listed: c.is_listed,
+            requires_approval: c.requires_approval,
+            accept_from: c.accept_from,
+        }
+    }
+}
+
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbHubProfile {
+    pub node_id: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub book_count: i32,
+    pub location_country: Option<String>,
+    pub requires_approval: bool,
+    pub last_seen_at: Option<String>,
+}
+
+impl From<HubProfile> for FrbHubProfile {
+    fn from(p: HubProfile) -> Self {
+        Self {
+            node_id: p.node_id,
+            display_name: p.display_name,
+            description: p.description,
+            book_count: p.book_count,
+            location_country: p.location_country,
+            requires_approval: p.requires_approval,
+            last_seen_at: p.last_seen_at,
+        }
+    }
+}
+
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbRegisterParams {
+    pub node_id: String,
+    pub display_name: String,
+    pub book_count: i32,
+    pub is_listed: bool,
+    pub requires_approval: bool,
+    pub accept_from: String,
+    pub description: Option<String>,
+    pub location_country: Option<String>,
+}
+
+impl From<FrbRegisterParams> for RegisterParams {
+    fn from(p: FrbRegisterParams) -> Self {
+        Self {
+            node_id: p.node_id,
+            display_name: p.display_name,
+            book_count: p.book_count,
+            is_listed: p.is_listed,
+            requires_approval: p.requires_approval,
+            accept_from: p.accept_from,
+            description: p.description,
+            location_country: p.location_country,
+        }
+    }
+}
+
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbHubFollow {
+    pub id: i64,
+    pub follower_node_id: String,
+    pub followed_node_id: String,
+    pub status: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}
+
+impl From<HubFollow> for FrbHubFollow {
+    fn from(f: HubFollow) -> Self {
+        Self {
+            id: f.id,
+            follower_node_id: f.follower_node_id,
+            followed_node_id: f.followed_node_id,
+            status: f.status,
+            created_at: f.created_at,
+            resolved_at: f.resolved_at,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FFI functions
+// ---------------------------------------------------------------------------
+
+/// Returns the local hub directory settings, or None if not yet registered.
+pub async fn hub_directory_get_config() -> Result<Option<FrbDirectoryConfig>, String> {
+    let db = hub_db()?;
+    HubDirectoryService::get_config(db)
+        .await
+        .map(|opt| opt.map(FrbDirectoryConfig::from))
+        .map_err(|e| e.to_string())
+}
+
+/// Registers with the hub directory (first call) or updates the profile.
+/// On first registration, the write_token is persisted automatically.
+pub async fn hub_directory_register(
+    params: FrbRegisterParams,
+) -> Result<FrbDirectoryConfig, String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .register_or_update(db, params.into())
+        .await
+        .map(FrbDirectoryConfig::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Pushes the local ISBN list to the hub catalog cache.
+pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .push_catalog(db, &isbn_list)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Browses the hub public directory.
+pub async fn hub_directory_list(
+    limit: i64,
+    offset: i64,
+    country: Option<String>,
+) -> Result<Vec<FrbHubProfile>, String> {
+    hub_directory_svc()
+        .list_directory(limit, offset, country.as_deref())
+        .await
+        .map(|v| v.into_iter().map(FrbHubProfile::from).collect())
+        .map_err(|e| e.to_string())
+}
+
+/// Gets a specific library profile from the hub directory.
+pub async fn hub_directory_get_profile(node_id: String) -> Result<FrbHubProfile, String> {
+    hub_directory_svc()
+        .get_profile(&node_id)
+        .await
+        .map(FrbHubProfile::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Gets the ISBN catalog of a library (public or approved follow).
+pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<String>, String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .get_catalog(db, &node_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Sends a follow request to a library.
+pub async fn hub_directory_follow(node_id: String) -> Result<FrbHubFollow, String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .follow(db, &node_id)
+        .await
+        .map(FrbHubFollow::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Lists incoming follow requests pending approval.
+pub async fn hub_directory_pending_requests() -> Result<Vec<FrbHubFollow>, String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .pending_requests(db)
+        .await
+        .map(|v| v.into_iter().map(FrbHubFollow::from).collect())
+        .map_err(|e| e.to_string())
+}
+
+/// Resolves a pending follow request. resolution: "approve" | "reject" | "block"
+pub async fn hub_directory_resolve_follow(
+    follow_id: i64,
+    resolution: String,
+) -> Result<FrbHubFollow, String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .resolve_follow(db, follow_id, &resolution)
+        .await
+        .map(FrbHubFollow::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Lists libraries the local library is following (active follows).
+pub async fn hub_directory_list_following() -> Result<Vec<FrbHubFollow>, String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .list_following(db)
+        .await
+        .map(|v| v.into_iter().map(FrbHubFollow::from).collect())
+        .map_err(|e| e.to_string())
+}
+
+/// Lists libraries that follow the local library (active followers).
+pub async fn hub_directory_list_followers() -> Result<Vec<FrbHubFollow>, String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .list_followers(db)
+        .await
+        .map(|v| v.into_iter().map(FrbHubFollow::from).collect())
+        .map_err(|e| e.to_string())
+}
+
+/// Unfollows a library.
+pub async fn hub_directory_unfollow(node_id: String) -> Result<(), String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .unfollow(db, &node_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Collections FFI
+// ---------------------------------------------------------------------------
+
+/// Collection data exposed to Flutter.
+pub struct FrbCollection {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub source: String,
+    pub total_books: i64,
+    pub owned_books: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<crate::domain::collection_repository::Collection> for FrbCollection {
+    fn from(c: crate::domain::collection_repository::Collection) -> Self {
+        FrbCollection {
+            id: c.id,
+            name: c.name,
+            description: c.description,
+            source: c.source,
+            total_books: c.total_books,
+            owned_books: c.owned_books,
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+        }
+    }
+}
+
+/// A book entry within a collection, exposed to Flutter.
+pub struct FrbCollectionBook {
+    pub book_id: i32,
+    pub title: String,
+    pub author: Option<String>,
+    pub cover_url: Option<String>,
+    pub publisher: Option<String>,
+    pub publication_year: Option<i32>,
+    pub added_at: String,
+    pub is_owned: bool,
+    pub digital_formats: Option<Vec<String>>,
+}
+
+impl From<crate::domain::collection_repository::CollectionBook> for FrbCollectionBook {
+    fn from(cb: crate::domain::collection_repository::CollectionBook) -> Self {
+        FrbCollectionBook {
+            book_id: cb.book_id,
+            title: cb.title,
+            author: cb.author,
+            cover_url: cb.cover_url,
+            publisher: cb.publisher,
+            publication_year: cb.publication_year,
+            added_at: cb.added_at,
+            is_owned: cb.is_owned,
+            digital_formats: cb.digital_formats,
+        }
+    }
+}
+
+// Helper macro to reduce boilerplate when constructing the collection repo.
+macro_rules! collection_repo {
+    ($db:expr) => {{
+        use crate::infrastructure::repositories::collection_repository::SeaOrmCollectionRepository;
+        SeaOrmCollectionRepository::new($db.clone())
+    }};
+}
+
+/// Returns all collections with their book counts.
+pub async fn get_all_collections() -> Result<Vec<FrbCollection>, String> {
+    use crate::domain::collection_repository::CollectionRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = collection_repo!(db);
+    repo.find_all()
+        .await
+        .map(|cs| cs.into_iter().map(FrbCollection::from).collect())
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Returns a single collection by ID, or None if not found.
+pub async fn get_collection(id: String) -> Result<Option<FrbCollection>, String> {
+    use crate::domain::collection_repository::CollectionRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = collection_repo!(db);
+    repo.find_by_id(&id)
+        .await
+        .map(|opt| opt.map(FrbCollection::from))
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Creates a new collection. Returns the created collection.
+pub async fn create_collection(
+    name: String,
+    description: Option<String>,
+) -> Result<FrbCollection, String> {
+    use crate::domain::collection_repository::{CollectionRepository, CreateCollectionInput};
+    let db = db().ok_or("Database not initialized")?;
+    let repo = collection_repo!(db);
+    let input = CreateCollectionInput {
+        name,
+        description,
+        source: Some("manual".to_string()),
+    };
+    repo.create(input)
+        .await
+        .map(FrbCollection::from)
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Deletes a collection by ID.
+pub async fn delete_collection(id: String) -> Result<(), String> {
+    use crate::domain::collection_repository::CollectionRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = collection_repo!(db);
+    repo.delete(&id).await.map_err(|e| format!("{e:?}"))
+}
+
+/// Returns all books belonging to a collection.
+pub async fn get_collection_books(
+    collection_id: String,
+) -> Result<Vec<FrbCollectionBook>, String> {
+    use crate::domain::collection_repository::CollectionRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = collection_repo!(db);
+    repo.get_books(&collection_id)
+        .await
+        .map(|bs| bs.into_iter().map(FrbCollectionBook::from).collect())
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Adds a book to a collection (idempotent).
+pub async fn add_book_to_collection(
+    collection_id: String,
+    book_id: i32,
+) -> Result<(), String> {
+    use crate::domain::collection_repository::CollectionRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = collection_repo!(db);
+    repo.add_book(&collection_id, book_id)
+        .await
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Removes a book from a collection.
+pub async fn remove_book_from_collection(
+    collection_id: String,
+    book_id: i32,
+) -> Result<(), String> {
+    use crate::domain::collection_repository::CollectionRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = collection_repo!(db);
+    repo.remove_book(&collection_id, book_id)
+        .await
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Returns all collections a book belongs to.
+pub async fn get_book_collections(book_id: i32) -> Result<Vec<FrbCollection>, String> {
+    use crate::domain::collection_repository::CollectionRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = collection_repo!(db);
+    repo.get_book_collections(book_id)
+        .await
+        .map(|cs| cs.into_iter().map(FrbCollection::from).collect())
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Replaces the set of collections a book belongs to.
+pub async fn update_book_collections(
+    book_id: i32,
+    collection_ids: Vec<String>,
+) -> Result<(), String> {
+    use crate::domain::collection_repository::CollectionRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = collection_repo!(db);
+    repo.update_book_collections(book_id, collection_ids)
+        .await
+        .map_err(|e| format!("{e:?}"))
+}

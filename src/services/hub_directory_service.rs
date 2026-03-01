@@ -1,0 +1,586 @@
+//! Hub Directory Service
+//!
+//! Manages outbound communication with the hub's public library directory (ADR-015).
+//! Responsibilities:
+//!   - Registering and updating the library's public profile
+//!   - Pushing the local ISBN catalog to the hub cache
+//!   - Browsing the hub directory
+//!   - Managing follow relationships (send, approve, reject, unfollow)
+//!   - Retrieving followed libraries' catalogs
+//!   - Persisting local directory settings (node_id, write_token, visibility)
+
+use reqwest::Client;
+use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub enum HubDirectoryError {
+    /// Network or transport failure
+    Network(String),
+    /// Hub returned a non-2xx status
+    Hub(u16, String),
+    /// Library is not yet registered with the hub directory
+    NotRegistered,
+    /// Local configuration or environment issue
+    Config(String),
+}
+
+impl std::fmt::Display for HubDirectoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Network(e) => write!(f, "Network error: {e}"),
+            Self::Hub(code, msg) => write!(f, "Hub error {code}: {msg}"),
+            Self::NotRegistered => write!(f, "Not registered with hub directory"),
+            Self::Config(e) => write!(f, "Configuration error: {e}"),
+        }
+    }
+}
+
+impl From<reqwest::Error> for HubDirectoryError {
+    fn from(e: reqwest::Error) -> Self {
+        Self::Network(e.to_string())
+    }
+}
+
+impl From<sea_orm::DbErr> for HubDirectoryError {
+    fn from(e: sea_orm::DbErr) -> Self {
+        Self::Config(e.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Data transfer objects (hub API contract)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct HubProfile {
+    pub node_id: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub book_count: i32,
+    pub location_country: Option<String>,
+    pub requires_approval: bool,
+    pub last_seen_at: Option<String>,
+    /// Returned once on first registration — must be stored locally.
+    pub write_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct HubFollow {
+    pub id: i64,
+    pub follower_node_id: String,
+    pub followed_node_id: String,
+    pub status: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct HubCatalog {
+    pub node_id: String,
+    pub isbn_payload: String,
+    pub updated_at: String,
+    pub expires_at: String,
+}
+
+// ---------------------------------------------------------------------------
+// Register / update params
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+pub struct RegisterParams {
+    pub node_id: String,
+    pub display_name: String,
+    pub book_count: i32,
+    pub is_listed: bool,
+    pub requires_approval: bool,
+    pub accept_from: String,
+    pub description: Option<String>,
+    pub location_country: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Local config (stored in hub_directory_config, singleton row)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct DirectoryConfig {
+    pub node_id: String,
+    pub write_token: String,
+    pub is_listed: bool,
+    pub requires_approval: bool,
+    pub accept_from: String,
+}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+pub struct HubDirectoryService {
+    http_client: Client,
+}
+
+impl HubDirectoryService {
+    pub fn new() -> Self {
+        let http_client = Client::builder()
+            .user_agent("BiblioGenius/1.0")
+            .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_default();
+        Self { http_client }
+    }
+
+    // -----------------------------------------------------------------------
+    // Hub URL (single source of truth via env var — CLAUDE.md Hub URL Policy)
+    // -----------------------------------------------------------------------
+
+    fn hub_base_url() -> Result<String, HubDirectoryError> {
+        std::env::var("HUB_URL")
+            .map(|u| u.trim_end_matches('/').to_string())
+            .map_err(|_| {
+                HubDirectoryError::Config("HUB_URL environment variable not set".to_string())
+            })
+    }
+
+    // -----------------------------------------------------------------------
+    // Local config persistence
+    // -----------------------------------------------------------------------
+
+    pub async fn get_config(
+        db: &DatabaseConnection,
+    ) -> Result<Option<DirectoryConfig>, HubDirectoryError> {
+        let backend = db.get_database_backend();
+        let result = db
+            .query_one(Statement::from_string(
+                backend,
+                "SELECT node_id, write_token, is_listed, requires_approval, accept_from
+                 FROM hub_directory_config WHERE id = 1"
+                    .to_owned(),
+            ))
+            .await?;
+
+        let Some(row) = result else {
+            return Ok(None);
+        };
+
+        Ok(Some(DirectoryConfig {
+            node_id: row.try_get("", "node_id")?,
+            write_token: row.try_get("", "write_token")?,
+            is_listed: row.try_get::<i32>("", "is_listed")? != 0,
+            requires_approval: row.try_get::<i32>("", "requires_approval")? != 0,
+            accept_from: row.try_get("", "accept_from")?,
+        }))
+    }
+
+    async fn save_config(
+        db: &DatabaseConnection,
+        config: &DirectoryConfig,
+    ) -> Result<(), HubDirectoryError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let backend = db.get_database_backend();
+        db.execute(Statement::from_string(
+            backend,
+            format!(
+                "INSERT INTO hub_directory_config
+                     (id, node_id, write_token, is_listed, requires_approval, accept_from, created_at, updated_at)
+                 VALUES (1, '{node_id}', '{write_token}', {is_listed}, {requires_approval}, '{accept_from}', '{now}', '{now}')
+                 ON CONFLICT(id) DO UPDATE SET
+                     node_id           = excluded.node_id,
+                     write_token       = excluded.write_token,
+                     is_listed         = excluded.is_listed,
+                     requires_approval = excluded.requires_approval,
+                     accept_from       = excluded.accept_from,
+                     updated_at        = excluded.updated_at",
+                node_id          = config.node_id.replace('\'', "''"),
+                write_token      = config.write_token.replace('\'', "''"),
+                is_listed        = if config.is_listed { 1 } else { 0 },
+                requires_approval = if config.requires_approval { 1 } else { 0 },
+                accept_from      = config.accept_from.replace('\'', "''"),
+                now              = now,
+            ),
+        ))
+        .await?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Profile
+    // -----------------------------------------------------------------------
+
+    /// Registers the library with the hub directory (first call) or updates its profile.
+    /// On first registration, the hub returns a write_token that is persisted locally.
+    pub async fn register_or_update(
+        &self,
+        db: &DatabaseConnection,
+        params: RegisterParams,
+    ) -> Result<DirectoryConfig, HubDirectoryError> {
+        let hub_url = Self::hub_base_url()?;
+        let existing = Self::get_config(db).await?;
+
+        let mut body = serde_json::json!({
+            "node_id":           params.node_id,
+            "display_name":      params.display_name,
+            "book_count":        params.book_count,
+            "is_listed":         params.is_listed,
+            "requires_approval": params.requires_approval,
+            "accept_from":       params.accept_from,
+        });
+
+        if let Some(ref desc) = params.description {
+            body["description"] = serde_json::Value::String(desc.clone());
+        }
+        if let Some(ref country) = params.location_country {
+            body["location_country"] = serde_json::Value::String(country.clone());
+        }
+
+        let mut req = self
+            .http_client
+            .post(format!("{hub_url}/api/directory/profile"));
+        if let Some(ref cfg) = existing {
+            req = req.header("Authorization", format!("Bearer {}", cfg.write_token));
+        }
+
+        let response = req.json(&body).send().await?;
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        let profile: HubProfile = response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
+
+        let write_token = profile
+            .write_token
+            .or_else(|| existing.as_ref().map(|c| c.write_token.clone()))
+            .ok_or_else(|| {
+                HubDirectoryError::Config("Hub did not return write_token".to_string())
+            })?;
+
+        let config = DirectoryConfig {
+            node_id: params.node_id,
+            write_token,
+            is_listed: params.is_listed,
+            requires_approval: params.requires_approval,
+            accept_from: params.accept_from,
+        };
+
+        Self::save_config(db, &config).await?;
+        Ok(config)
+    }
+
+    // -----------------------------------------------------------------------
+    // Catalog cache
+    // -----------------------------------------------------------------------
+
+    /// Pushes the local ISBN list to the hub cache.
+    /// Only meaningful for open libraries (requires_approval=false).
+    pub async fn push_catalog(
+        &self,
+        db: &DatabaseConnection,
+        isbn_list: &[String],
+    ) -> Result<(), HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let isbn_payload = serde_json::to_string(isbn_list)
+            .map_err(|e| HubDirectoryError::Config(e.to_string()))?;
+
+        let response = self
+            .http_client
+            .post(format!("{hub_url}/api/directory/catalog"))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .json(&serde_json::json!({ "isbn_payload": isbn_payload }))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+        Ok(())
+    }
+
+    /// Fetches the catalog of a public or approved library from the hub.
+    pub async fn get_catalog(
+        &self,
+        db: &DatabaseConnection,
+        node_id: &str,
+    ) -> Result<Vec<String>, HubDirectoryError> {
+        let hub_url = Self::hub_base_url()?;
+        let cfg = Self::get_config(db).await?;
+
+        let mut req = self
+            .http_client
+            .get(format!("{hub_url}/api/directory/{node_id}/catalog"));
+        if let Some(ref c) = cfg {
+            req = req.header("Authorization", format!("Bearer {}", c.write_token));
+        }
+
+        let response = req.send().await?;
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        let catalog: HubCatalog = response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
+
+        let isbns: Vec<String> = serde_json::from_str(&catalog.isbn_payload)
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
+
+        Ok(isbns)
+    }
+
+    // -----------------------------------------------------------------------
+    // Directory listing
+    // -----------------------------------------------------------------------
+
+    pub async fn list_directory(
+        &self,
+        limit: i64,
+        offset: i64,
+        country: Option<&str>,
+    ) -> Result<Vec<HubProfile>, HubDirectoryError> {
+        let hub_url = Self::hub_base_url()?;
+        let mut url = format!("{hub_url}/api/directory?limit={limit}&offset={offset}");
+        if let Some(c) = country {
+            url.push_str(&format!("&country={c}"));
+        }
+
+        let response = self.http_client.get(&url).send().await?;
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        #[derive(Deserialize)]
+        struct DirectoryPage {
+            items: Vec<HubProfile>,
+        }
+
+        let page: DirectoryPage = response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
+
+        Ok(page.items)
+    }
+
+    pub async fn get_profile(&self, node_id: &str) -> Result<HubProfile, HubDirectoryError> {
+        let hub_url = Self::hub_base_url()?;
+        let response = self
+            .http_client
+            .get(format!("{hub_url}/api/directory/{node_id}"))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))
+    }
+
+    // -----------------------------------------------------------------------
+    // Follow lifecycle
+    // -----------------------------------------------------------------------
+
+    pub async fn follow(
+        &self,
+        db: &DatabaseConnection,
+        node_id: &str,
+    ) -> Result<HubFollow, HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let response = self
+            .http_client
+            .post(format!("{hub_url}/api/directory/follow/{node_id}"))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))
+    }
+
+    pub async fn pending_requests(
+        &self,
+        db: &DatabaseConnection,
+    ) -> Result<Vec<HubFollow>, HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let response = self
+            .http_client
+            .get(format!("{hub_url}/api/directory/follows/pending"))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        #[derive(Deserialize)]
+        struct PendingPage {
+            items: Vec<HubFollow>,
+        }
+        let page: PendingPage = response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
+        Ok(page.items)
+    }
+
+    /// resolution: "approve" | "reject" | "block"
+    pub async fn resolve_follow(
+        &self,
+        db: &DatabaseConnection,
+        follow_id: i64,
+        resolution: &str,
+    ) -> Result<HubFollow, HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let response = self
+            .http_client
+            .patch(format!("{hub_url}/api/directory/follows/{follow_id}"))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .json(&serde_json::json!({ "resolution": resolution }))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))
+    }
+
+    pub async fn list_following(
+        &self,
+        db: &DatabaseConnection,
+    ) -> Result<Vec<HubFollow>, HubDirectoryError> {
+        self.fetch_follows(db, "following").await
+    }
+
+    pub async fn list_followers(
+        &self,
+        db: &DatabaseConnection,
+    ) -> Result<Vec<HubFollow>, HubDirectoryError> {
+        self.fetch_follows(db, "followers").await
+    }
+
+    pub async fn unfollow(
+        &self,
+        db: &DatabaseConnection,
+        node_id: &str,
+    ) -> Result<(), HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let response = self
+            .http_client
+            .delete(format!("{hub_url}/api/directory/follows/{node_id}"))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Private helpers
+    // -----------------------------------------------------------------------
+
+    async fn fetch_follows(
+        &self,
+        db: &DatabaseConnection,
+        direction: &str,
+    ) -> Result<Vec<HubFollow>, HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let response = self
+            .http_client
+            .get(format!(
+                "{hub_url}/api/directory/follows?direction={direction}"
+            ))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        #[derive(Deserialize)]
+        struct FollowPage {
+            items: Vec<HubFollow>,
+        }
+        let page: FollowPage = response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
+        Ok(page.items)
+    }
+}
+
+impl Default for HubDirectoryService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
