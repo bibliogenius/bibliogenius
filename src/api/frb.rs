@@ -2578,7 +2578,7 @@ pub async fn device_sync_reject_all() -> Result<u32, String> {
 // =============================================================================
 
 use crate::services::hub_directory_service::{
-    DirectoryConfig, HubDirectoryService, HubFollow, HubProfile, RegisterParams,
+    CatalogEntry, DirectoryConfig, HubDirectoryService, HubFollow, HubProfile, RegisterParams,
 };
 
 static HUB_DIRECTORY_SVC: OnceLock<HubDirectoryService> = OnceLock::new();
@@ -2691,6 +2691,23 @@ impl From<HubFollow> for FrbHubFollow {
     }
 }
 
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbCatalogEntry {
+    pub isbn: String,
+    pub title: String,
+    pub author: Option<String>,
+}
+
+impl From<CatalogEntry> for FrbCatalogEntry {
+    fn from(e: CatalogEntry) -> Self {
+        Self {
+            isbn: e.isbn,
+            title: e.title,
+            author: e.author,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // FFI functions
 // ---------------------------------------------------------------------------
@@ -2717,19 +2734,31 @@ pub async fn hub_directory_register(
         .map_err(|e| e.to_string())
 }
 
-/// Pushes the local ISBN list to the hub catalog cache.
+/// Pushes the local ISBN list to the hub catalog cache (legacy, ISBN-only).
 pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), String> {
+    use crate::services::hub_directory_service::CatalogEntry;
     let db = hub_db()?;
+    let entries: Vec<CatalogEntry> = isbn_list
+        .into_iter()
+        .map(|isbn| CatalogEntry {
+            isbn,
+            title: String::new(),
+            author: None,
+        })
+        .collect();
     hub_directory_svc()
-        .push_catalog(db, &isbn_list)
+        .push_catalog(db, &entries)
         .await
         .map_err(|e| e.to_string())
 }
 
-/// Reads all non-null ISBNs from the local books table, checks that the
-/// library is registered in the directory, and pushes the catalog to the hub.
-/// Returns the number of ISBNs pushed.
+/// Reads all books with ISBNs from the local database, collects title and
+/// first author, and pushes the enriched catalog to the hub.
+/// Returns the number of entries pushed.
 pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
+    use crate::models::book::{Column as BookColumn, Entity as BookEntity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
     let db = hub_db()?;
 
     // Verify the library is registered before doing any work.
@@ -2738,30 +2767,48 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Not registered in directory".to_string())?;
 
-    // Collect all non-null ISBNs from the books table.
-    use crate::models::book::{Column as BookColumn, Entity as BookEntity};
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
-    let rows = BookEntity::find()
+    // Collect books with their authors (2 queries via find_with_related).
+    let books_with_authors: Vec<(
+        crate::models::book::Model,
+        Vec<crate::models::author::Model>,
+    )> = BookEntity::find()
         .filter(BookColumn::Isbn.is_not_null())
+        .find_with_related(crate::models::author::Entity)
         .all(db)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-    let isbn_list: Vec<String> = rows
+    let entries: Vec<CatalogEntry> = books_with_authors
         .into_iter()
-        .filter_map(|m| m.isbn)
-        .filter(|s| !s.is_empty())
+        .filter_map(|(book, authors)| {
+            let isbn = book.isbn.filter(|s| !s.is_empty())?;
+            let author = if authors.is_empty() {
+                None
+            } else {
+                Some(
+                    authors
+                        .into_iter()
+                        .map(|a| a.name)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )
+            };
+            Some(CatalogEntry {
+                isbn,
+                title: book.title,
+                author,
+            })
+        })
         .collect();
 
-    if isbn_list.is_empty() {
+    if entries.is_empty() {
         return Ok(0);
     }
 
-    let count = isbn_list.len() as i32;
+    let count = entries.len() as i32;
 
     hub_directory_svc()
-        .push_catalog(db, &isbn_list)
+        .push_catalog(db, &entries)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -2790,12 +2837,14 @@ pub async fn hub_directory_get_profile(node_id: String) -> Result<FrbHubProfile,
         .map_err(|e| e.to_string())
 }
 
-/// Gets the ISBN catalog of a library (public or approved follow).
-pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<String>, String> {
+/// Gets the catalog of a library (public or approved follow).
+/// Returns enriched entries (ISBN + title + author) when available.
+pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalogEntry>, String> {
     let db = hub_db()?;
     hub_directory_svc()
         .get_catalog(db, &node_id)
         .await
+        .map(|entries| entries.into_iter().map(FrbCatalogEntry::from).collect())
         .map_err(|e| e.to_string())
 }
 

@@ -86,8 +86,19 @@ pub struct HubFollow {
 pub struct HubCatalog {
     pub node_id: String,
     pub isbn_payload: String,
+    /// Enriched catalog: JSON array of CatalogEntry objects. Absent for legacy pushes.
+    #[serde(default)]
+    pub catalog_payload: Option<String>,
     pub updated_at: String,
     pub expires_at: String,
+}
+
+/// A single entry in the enriched catalog (ISBN + title + author).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CatalogEntry {
+    pub isbn: String,
+    pub title: String,
+    pub author: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -283,26 +294,37 @@ impl HubDirectoryService {
     // Catalog cache
     // -----------------------------------------------------------------------
 
-    /// Pushes the local ISBN list to the hub cache.
+    /// Pushes the local catalog to the hub cache.
+    ///
+    /// Sends both the legacy ISBN list and enriched catalog entries (ISBN + title + author).
     /// Only meaningful for open libraries (requires_approval=false).
     pub async fn push_catalog(
         &self,
         db: &DatabaseConnection,
-        isbn_list: &[String],
+        entries: &[CatalogEntry],
     ) -> Result<(), HubDirectoryError> {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
         let hub_url = Self::hub_base_url()?;
 
-        let isbn_payload = serde_json::to_string(isbn_list)
+        // Legacy field: plain ISBN list for backward-compatible hubs
+        let isbn_list: Vec<&str> = entries.iter().map(|e| e.isbn.as_str()).collect();
+        let isbn_payload = serde_json::to_string(&isbn_list)
             .map_err(|e| HubDirectoryError::Config(e.to_string()))?;
+
+        // Enriched field: full catalog entries
+        let catalog_payload =
+            serde_json::to_string(entries).map_err(|e| HubDirectoryError::Config(e.to_string()))?;
 
         let response = self
             .http_client
             .post(format!("{hub_url}/api/directory/catalog"))
             .header("Authorization", format!("Bearer {}", cfg.write_token))
-            .json(&serde_json::json!({ "isbn_payload": isbn_payload }))
+            .json(&serde_json::json!({
+                "isbn_payload": isbn_payload,
+                "catalog_payload": catalog_payload,
+            }))
             .send()
             .await?;
 
@@ -315,11 +337,13 @@ impl HubDirectoryService {
     }
 
     /// Fetches the catalog of a public or approved library from the hub.
+    ///
+    /// Returns enriched entries if available, otherwise falls back to ISBN-only entries.
     pub async fn get_catalog(
         &self,
         db: &DatabaseConnection,
         node_id: &str,
-    ) -> Result<Vec<String>, HubDirectoryError> {
+    ) -> Result<Vec<CatalogEntry>, HubDirectoryError> {
         let hub_url = Self::hub_base_url()?;
         let cfg = Self::get_config(db).await?;
 
@@ -342,10 +366,25 @@ impl HubDirectoryService {
             .await
             .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
 
+        // Prefer enriched catalog_payload if present
+        if let Some(ref cp) = catalog.catalog_payload
+            && let Ok(entries) = serde_json::from_str::<Vec<CatalogEntry>>(cp)
+        {
+            return Ok(entries);
+        }
+
+        // Fallback: legacy ISBN-only list
         let isbns: Vec<String> = serde_json::from_str(&catalog.isbn_payload)
             .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
 
-        Ok(isbns)
+        Ok(isbns
+            .into_iter()
+            .map(|isbn| CatalogEntry {
+                isbn,
+                title: String::new(),
+                author: None,
+            })
+            .collect())
     }
 
     // -----------------------------------------------------------------------

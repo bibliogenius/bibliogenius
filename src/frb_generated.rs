@@ -2374,8 +2374,7 @@ fn wire__crate__api__frb__hub_directory_sync_catalog_impl(
             move |context| async move {
                 transform_result_sse::<_, String>(
                     (move || async move {
-                        let output_ok =
-                            crate::api::frb::hub_directory_sync_catalog().await?;
+                        let output_ok = crate::api::frb::hub_directory_sync_catalog().await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -4180,6 +4179,20 @@ impl SseDecode for crate::api::frb::FrbGamificationStatus {
     }
 }
 
+impl SseDecode for crate::api::frb::FrbCatalogEntry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_isbn = <String>::sse_decode(deserializer);
+        let mut var_title = <String>::sse_decode(deserializer);
+        let mut var_author = <Option<String>>::sse_decode(deserializer);
+        return crate::api::frb::FrbCatalogEntry {
+            isbn: var_isbn,
+            title: var_title,
+            author: var_author,
+        };
+    }
+}
+
 impl SseDecode for crate::api::frb::FrbHubFollow {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4719,6 +4732,18 @@ impl SseDecode for Vec<crate::api::frb::FrbDiscoveredPeer> {
             ans_.push(<crate::api::frb::FrbDiscoveredPeer>::sse_decode(
                 deserializer,
             ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::frb::FrbCatalogEntry> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::frb::FrbCatalogEntry>::sse_decode(deserializer));
         }
         return ans_;
     }
@@ -5597,6 +5622,29 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbGamificationStatus>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbCatalogEntry {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.isbn.into_into_dart().into_dart(),
+            self.title.into_into_dart().into_dart(),
+            self.author.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbCatalogEntry
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbCatalogEntry>
+    for crate::api::frb::FrbCatalogEntry
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbCatalogEntry {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbHubFollow {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -6311,6 +6359,15 @@ impl SseEncode for crate::api::frb::FrbGamificationStatus {
     }
 }
 
+impl SseEncode for crate::api::frb::FrbCatalogEntry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.isbn, serializer);
+        <String>::sse_encode(self.title, serializer);
+        <Option<String>>::sse_encode(self.author, serializer);
+    }
+}
+
 impl SseEncode for crate::api::frb::FrbHubFollow {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -6654,6 +6711,16 @@ impl SseEncode for Vec<crate::api::frb::FrbDiscoveredPeer> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::frb::FrbDiscoveredPeer>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::frb::FrbCatalogEntry> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::frb::FrbCatalogEntry>::sse_encode(item, serializer);
         }
     }
 }
