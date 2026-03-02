@@ -77,6 +77,9 @@ pub struct HubFollow {
     pub status: String,
     pub created_at: String,
     pub resolved_at: Option<String>,
+    /// Display name of the follower (enriched by the hub for pending requests).
+    #[serde(default)]
+    pub follower_display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

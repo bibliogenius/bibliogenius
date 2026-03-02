@@ -1547,6 +1547,7 @@ pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoRespon
                 "name": p.name,
                 "url": p.url,
                 "public_key": p.public_key,
+                "library_uuid": p.library_uuid,
                 "latitude": p.latitude,
                 "longitude": p.longitude,
                 "auto_approve": p.auto_approve,

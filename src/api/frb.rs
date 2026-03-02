@@ -180,6 +180,17 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
     }
 }
 
+// ============ Hub URL ============
+
+/// Pass the hub URL from Flutter to the Rust process environment.
+/// Must be called once after init_backend, before any hub_directory calls.
+/// Rust reads HUB_URL via std::env::var — it cannot see Flutter's dotenv map.
+pub async fn set_hub_url_ffi(hub_url: String) -> Result<(), String> {
+    // SAFETY: single-threaded init path, same pattern as DATABASE_URL above.
+    unsafe { std::env::set_var("HUB_URL", hub_url) };
+    Ok(())
+}
+
 // ============ Health Check ============
 
 /// Check if the FFI backend is healthy
@@ -2663,6 +2674,7 @@ pub struct FrbHubFollow {
     pub status: String,
     pub created_at: String,
     pub resolved_at: Option<String>,
+    pub follower_display_name: Option<String>,
 }
 
 impl From<HubFollow> for FrbHubFollow {
@@ -2674,6 +2686,7 @@ impl From<HubFollow> for FrbHubFollow {
             status: f.status,
             created_at: f.created_at,
             resolved_at: f.resolved_at,
+            follower_display_name: f.follower_display_name,
         }
     }
 }
@@ -2711,6 +2724,48 @@ pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), St
         .push_catalog(db, &isbn_list)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Reads all non-null ISBNs from the local books table, checks that the
+/// library is registered in the directory, and pushes the catalog to the hub.
+/// Returns the number of ISBNs pushed.
+pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
+    let db = hub_db()?;
+
+    // Verify the library is registered before doing any work.
+    let _cfg = crate::services::hub_directory_service::HubDirectoryService::get_config(db)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Not registered in directory".to_string())?;
+
+    // Collect all non-null ISBNs from the books table.
+    use crate::models::book::{Column as BookColumn, Entity as BookEntity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let rows = BookEntity::find()
+        .filter(BookColumn::Isbn.is_not_null())
+        .all(db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    let isbn_list: Vec<String> = rows
+        .into_iter()
+        .filter_map(|m| m.isbn)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if isbn_list.is_empty() {
+        return Ok(0);
+    }
+
+    let count = isbn_list.len() as i32;
+
+    hub_directory_svc()
+        .push_catalog(db, &isbn_list)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(count)
 }
 
 /// Browses the hub public directory.

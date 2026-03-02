@@ -1222,6 +1222,24 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 052: Remove legacy library-type contacts.
+    // The "library" contact type is superseded by hub follows (directory) and
+    // direct peers (P2P). Loans referencing these contacts are also removed -
+    // SQLite does not enforce FK constraints by default, so we clean up explicitly.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM loans WHERE contact_id IN (SELECT id FROM contacts WHERE type = 'library')"
+                .to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM contacts WHERE type = 'library'".to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;
