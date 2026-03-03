@@ -252,11 +252,12 @@ pub async fn dispatch_clear_message(
 // ── Dispatch handlers ──────────────────────────────────────────────────
 
 /// Handle an encrypted loan request (same logic as `receive_loan_request` in peer.rs).
-async fn handle_loan_request(
+/// Core loan request logic: validates, saves, returns request_id or error.
+async fn save_loan_request(
     db: &DatabaseConnection,
     sender_peer: &peer::Model,
     msg: &ClearMessage,
-) -> axum::response::Response {
+) -> Result<String, String> {
     use crate::models::p2p_request;
 
     let book_isbn = msg
@@ -271,11 +272,7 @@ async fn handle_loan_request(
         .unwrap_or("");
 
     if book_isbn.is_empty() && book_title.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "Missing book_isbn or book_title" })),
-        )
-            .into_response();
+        return Err("Missing book_isbn or book_title".to_string());
     }
 
     let requester_request_id = msg
@@ -298,24 +295,47 @@ async fn handle_loan_request(
         requester_request_id: Set(requester_request_id),
     };
 
-    match new_request.insert(db).await {
-        Ok(_) => {
-            tracing::info!(
-                "E2EE: Loan request created: {} for '{}'",
-                request_id,
-                book_title
-            );
-            (
-                StatusCode::OK,
-                Json(json!({ "message": "Loan request received", "request_id": request_id })),
-            )
-                .into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("Failed to save request: {e}") })),
+    new_request
+        .insert(db)
+        .await
+        .map_err(|e| format!("Failed to save request: {e}"))?;
+
+    tracing::info!(
+        "E2EE: Loan request created: {} for '{}'",
+        request_id,
+        book_title
+    );
+    Ok(request_id)
+}
+
+async fn handle_loan_request(
+    db: &DatabaseConnection,
+    sender_peer: &peer::Model,
+    msg: &ClearMessage,
+) -> axum::response::Response {
+    match save_loan_request(db, sender_peer, msg).await {
+        Ok(request_id) => (
+            StatusCode::OK,
+            Json(json!({ "message": "Loan request received", "request_id": request_id })),
         )
             .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// Relay variant: saves loan request and returns JSON payload for deposit.
+pub async fn handle_loan_request_for_relay(
+    db: &DatabaseConnection,
+    sender_peer: &peer::Model,
+    msg: &ClearMessage,
+) -> serde_json::Value {
+    match save_loan_request(db, sender_peer, msg).await {
+        Ok(request_id) => json!({ "status": "received", "request_id": request_id }),
+        Err(e) => json!({ "error": e }),
     }
 }
 
@@ -432,6 +452,7 @@ async fn handle_loan_confirmation(
         notes: Set(Some(format!(
             "Emprunté de {lender_name} jusqu'au {due_date}"
         ))),
+        acquisition_date: Set(Some(now.clone())),
         created_at: Set(now.clone()),
         updated_at: Set(now),
         ..Default::default()
@@ -457,14 +478,15 @@ async fn handle_loan_confirmation(
                 {
                     let mut active: p2p_outgoing_request::ActiveModel = outgoing.into();
                     active.lender_request_id = Set(Some(lender_req_id.clone()));
+                    active.status = Set("accepted".to_string());
                     active.updated_at = Set(chrono::Utc::now().to_rfc3339());
                     if let Err(e) = active.update(db).await {
                         tracing::warn!(
-                            "E2EE: Failed to store lender_request_id on outgoing request: {e}"
+                            "E2EE: Failed to update outgoing request with lender_request_id: {e}"
                         );
                     } else {
                         tracing::info!(
-                            "E2EE: Stored lender_request_id={} on outgoing request",
+                            "E2EE: Outgoing request accepted, lender_request_id={}",
                             lender_req_id
                         );
                     }

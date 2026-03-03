@@ -239,12 +239,29 @@ async fn try_send_e2ee(
                 // so the responder can deposit the answer in our mailbox.
                 let mut relay_message = message.clone();
                 let mut correlation_id_for_await: Option<String> = None;
+
+                // Only await relay responses for request-response types.
+                // Fire-and-forget types (loan_confirmation, status_update, etc.)
+                // are deposited in the peer's mailbox but we don't block waiting.
+                const RELAY_AWAIT_RESPONSE: &[&str] = &[
+                    "loan_request",
+                    "book_sync_request",
+                    "search_request",
+                    "device_sync_request",
+                    "library_manifest_request",
+                    "library_page_request",
+                    "library_search_request",
+                ];
+                let needs_response = RELAY_AWAIT_RESPONSE.contains(&message_type);
+
                 if let Some(my_config) = crate::api::relay::get_my_relay_config(state.db()).await {
                     let correlation_id = uuid::Uuid::new_v4().to_string();
                     relay_message.correlation_id = Some(correlation_id.clone());
                     relay_message.reply_to_mailbox = Some(my_config.mailbox_uuid.clone());
                     relay_message.reply_to_write_token = Some(my_config.write_token.clone());
-                    correlation_id_for_await = Some(correlation_id);
+                    if needs_response {
+                        correlation_id_for_await = Some(correlation_id);
+                    }
                 }
 
                 let relay =
@@ -3114,14 +3131,9 @@ pub async fn request_book(
     }
 
     // 3. Send request to peer
-    if let Err(e) = validate_url(&peer.url) {
-        tracing::error!("❌ Invalid peer URL for request: {} ({})", peer.url, e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
-        )
-            .into_response();
-    }
+    // Note: validate_url is deferred to the plaintext fallback path below.
+    // Relay-only peers have a relay:// URL that is valid for E2EE but not for
+    // direct HTTP, so SSRF validation must not block the E2EE path.
 
     // Try E2EE path first
     let my_config = match crate::models::library_config::Entity::find().one(db).await {
@@ -3169,6 +3181,13 @@ pub async fn request_book(
     }
 
     // Legacy plaintext path (only reached if E2EE returned Ok(None))
+    if let Err(e) = validate_url(&peer.url) {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("Cannot reach peer: {}", e) })),
+        )
+            .into_response();
+    }
     let client = get_safe_client();
     let url = format!("{}/api/peers/request", peer.url);
 
@@ -3301,13 +3320,9 @@ pub async fn request_book_by_url(
     }
 
     // 3. Send request to peer
-    if let Err(e) = validate_url(&peer.url) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
-        )
-            .into_response();
-    }
+    // Note: validate_url is deferred to the plaintext fallback path below.
+    // Relay-only peers have a relay:// URL that is valid for E2EE but not for
+    // direct HTTP, so SSRF validation must not block the E2EE path.
 
     // Get my config to identify myself
     let my_config = match crate::models::library_config::Entity::find().one(db).await {
@@ -3351,6 +3366,15 @@ pub async fn request_book_by_url(
     }
 
     // Legacy plaintext path (only reached if E2EE returned Ok(None))
+    // SSRF validation: only needed here for direct HTTP to peer URL.
+    // Relay-only peers (relay://) never reach this point because E2EE handles them.
+    if let Err(e) = validate_url(&peer.url) {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("Cannot reach peer: {}", e) })),
+        )
+            .into_response();
+    }
     let client = get_safe_client();
     let url = format!("{}/api/peers/request", peer.url);
 
@@ -4973,6 +4997,7 @@ pub async fn receive_loan_confirmation(
             "Emprunté de {} jusqu'au {}",
             payload.lender_name, payload.due_date
         ))),
+        acquisition_date: Set(Some(now.clone())),
         created_at: Set(now.clone()),
         updated_at: Set(now),
         ..Default::default()
@@ -4997,15 +5022,16 @@ pub async fn receive_loan_confirmation(
                 {
                     let mut active: p2p_outgoing_request::ActiveModel = outgoing.into();
                     active.lender_request_id = Set(Some(lender_req_id.clone()));
+                    active.status = Set("accepted".to_string());
                     active.updated_at = Set(Utc::now().to_rfc3339());
                     if let Err(e) = active.update(&db).await {
                         tracing::warn!(
-                            "Failed to store lender_request_id on outgoing request: {}",
+                            "Failed to update outgoing request with lender_request_id: {}",
                             e
                         );
                     } else {
                         tracing::info!(
-                            "✅ Stored lender_request_id={} on outgoing request",
+                            "✅ Outgoing request accepted, lender_request_id={}",
                             lender_req_id
                         );
                     }

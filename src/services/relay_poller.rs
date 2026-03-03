@@ -192,6 +192,7 @@ const REQUEST_RESPONSE_TYPES: &[&str] = &[
     "library_manifest_request",
     "library_page_request",
     "library_search_request",
+    "loan_request",
 ];
 
 /// Response message types (correlation targets, ADR-012).
@@ -345,6 +346,10 @@ async fn handle_relay_request_response(
         "search_request" => (
             "search_response",
             crate::api::e2ee::handle_search_request(db, clear_message).await,
+        ),
+        "loan_request" => (
+            "loan_request_response",
+            crate::api::e2ee::handle_loan_request_for_relay(db, sender_peer, clear_message).await,
         ),
         _ => {
             // For other request-response types, fall back to standard dispatch
