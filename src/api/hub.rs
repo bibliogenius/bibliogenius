@@ -1,9 +1,9 @@
 use axum::{Json, extract::State, http::StatusCode};
-use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::api::peer::{get_safe_client, validate_url};
+use crate::infrastructure::AppState;
 use crate::models::LibraryConfig;
 use crate::models::library_config::Entity as LibraryConfigEntity;
 use sea_orm::EntityTrait;
@@ -22,12 +22,14 @@ pub struct HubRegistration {
 }
 
 pub async fn register_with_hub(
-    State(db): State<DatabaseConnection>,
+    State(state): State<AppState>,
     Json(req): Json<RegistrationRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    let db = state.db();
+
     // Get library config
     let config = LibraryConfigEntity::find()
-        .one(&db)
+        .one(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -46,7 +48,7 @@ pub async fn register_with_hub(
     // Prepare registration data
     let registration = HubRegistration {
         library_name: library_config.name,
-        url: crate::utils::net::get_public_url(8000),
+        url: state.our_public_url(),
         tags: library_config.tags,
         description: library_config.description,
     };
@@ -77,9 +79,11 @@ pub async fn register_with_hub(
 }
 
 pub async fn discover_peers(
-    State(_db): State<DatabaseConnection>,
+    State(state): State<AppState>,
     Json(req): Json<RegistrationRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    let _db = state.db();
+
     // Validate hub URL to prevent SSRF (OWASP A10)
     let hub_url = validate_url(&req.hub_url).map_err(|_| StatusCode::BAD_REQUEST)?;
 

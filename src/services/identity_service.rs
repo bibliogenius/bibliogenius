@@ -20,6 +20,8 @@ use crate::crypto::identity::NodeIdentity;
 pub struct IdentityService {
     db: DatabaseConnection,
     identity: Arc<OnceCell<NodeIdentity>>,
+    /// The library UUID used to initialize the identity (stable P2P identifier).
+    uuid: Arc<OnceCell<String>>,
 }
 
 impl IdentityService {
@@ -27,6 +29,7 @@ impl IdentityService {
         Self {
             db,
             identity: Arc::new(OnceCell::new()),
+            uuid: Arc::new(OnceCell::new()),
         }
     }
 
@@ -39,6 +42,9 @@ impl IdentityService {
     pub async fn init(&self, library_uuid: &str) -> Result<(), String> {
         let db = &self.db;
         let uuid = library_uuid.to_string();
+
+        // Store the library UUID for later retrieval by handlers
+        let _ = self.uuid.set(uuid.clone());
 
         self.identity
             .get_or_try_init(|| async {
@@ -53,6 +59,19 @@ impl IdentityService {
                         let identity = NodeIdentity::generate();
                         store_identity_to_db(db, &identity, &uuid).await?;
                         tracing::info!("Generated and stored new node identity");
+                        Ok(identity)
+                    }
+                    Err(e) if e.contains("Decryption failed") || e.contains("not 32 bytes") => {
+                        // UUID mismatch after app reset: the stored keys were
+                        // encrypted with a different library_uuid that no longer
+                        // exists (SharedPreferences cleared). The old keys are
+                        // unrecoverable - delete them and generate fresh ones.
+                        // Peers will need to re-pair (expected after a reset).
+                        tracing::warn!("Stored identity undecryptable ({e}), regenerating");
+                        delete_identity_from_db(db).await?;
+                        let identity = NodeIdentity::generate();
+                        store_identity_to_db(db, &identity, &uuid).await?;
+                        tracing::info!("Regenerated node identity after decryption failure");
                         Ok(identity)
                     }
                     Err(e) => Err(e),
@@ -81,6 +100,12 @@ impl IdentityService {
         self.identity
             .get()
             .ok_or_else(|| "Identity not initialized".to_string())
+    }
+
+    /// Returns the library UUID used to initialize this identity.
+    /// Available after `init()` has been called.
+    pub fn library_uuid(&self) -> Option<&str> {
+        self.uuid.get().map(|s| s.as_str())
     }
 }
 
@@ -206,6 +231,18 @@ async fn store_identity_to_db(
     Ok(())
 }
 
+/// Delete all identity keys from crypto_keys (used before regeneration).
+async fn delete_identity_from_db(db: &DatabaseConnection) -> Result<(), String> {
+    db.execute(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "DELETE FROM crypto_keys WHERE user_id = 0",
+        [],
+    ))
+    .await
+    .map_err(|e| format!("Failed to delete old crypto_keys: {e}"))?;
+    Ok(())
+}
+
 /// Derive Argon2 key from library_uuid + salt.
 fn derive_argon2_key(library_uuid: &str, salt: &[u8]) -> Result<[u8; 32], String> {
     let salt_array: [u8; 32] = salt
@@ -274,19 +311,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrong_uuid_fails_to_decrypt() {
+    async fn wrong_uuid_regenerates_identity() {
         let db = setup_test_db().await;
 
         // Store with one UUID
         let svc1 = IdentityService::new(db.clone());
         svc1.init("correct-uuid").await.unwrap();
+        let (ed1, x1) = svc1.get_public_keys_hex().unwrap();
 
-        // Try to load with wrong UUID → should fail
+        // Init with different UUID: old keys can't be decrypted,
+        // so a fresh identity is generated (reset/reinstall scenario).
         let svc2 = IdentityService::new(db.clone());
-        let result = svc2.init("wrong-uuid").await;
-        assert!(
-            result.is_err(),
-            "Wrong UUID should fail to decrypt identity"
+        svc2.init("wrong-uuid").await.unwrap();
+        let (ed2, x2) = svc2.get_public_keys_hex().unwrap();
+
+        assert_ne!(
+            ed1, ed2,
+            "Regenerated identity should have different Ed25519 key"
+        );
+        assert_ne!(
+            x1, x2,
+            "Regenerated identity should have different X25519 key"
         );
     }
 

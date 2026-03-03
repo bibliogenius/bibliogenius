@@ -39,6 +39,14 @@ impl SlidingPuzzleRepository for SeaOrmPuzzleRepository {
 
         Ok(books
             .into_iter()
+            .filter(|b| {
+                // Only keep books with real cover images (network URLs or local files)
+                // Exclude empty strings, /api/ relative paths, and other non-image values
+                b.cover_url
+                    .as_ref()
+                    .map(|url| url.starts_with("http") || url.starts_with("/"))
+                    .unwrap_or(false)
+            })
             .map(|b| PuzzleBook {
                 book_id: b.id,
                 title: b.title,

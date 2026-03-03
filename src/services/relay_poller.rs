@@ -55,16 +55,10 @@ pub async fn poll_once(state: &AppState) -> Result<(), String> {
         }
     };
 
-    // 2. Get crypto service
-    let crypto_service = match state.crypto_service() {
-        Some(svc) => svc.clone(),
-        None => {
-            tracing::debug!("Relay poller: Crypto service not ready, skipping");
-            return Ok(());
-        }
-    };
+    // 2. Get crypto service (optional - only needed for encrypted messages)
+    let crypto_service = state.crypto_service().cloned();
 
-    // 3. Poll relay for pending messages
+    // 3. Poll relay for pending messages (does not require crypto)
     let relay = RelayTransport::new(crypto_service.clone());
     let (envelopes, raw_blobs) = match relay
         .poll(&config.relay_url, &config.mailbox_uuid, &config.read_token)
@@ -80,8 +74,7 @@ pub async fn poll_once(state: &AppState) -> Result<(), String> {
             match recreate_mailbox(db, &config.relay_url).await {
                 Ok(new_uuid) => {
                     tracing::info!("Relay poller: New mailbox created: {new_uuid}");
-                    // Notify all E2EE peers of our new relay credentials.
-                    // If a peer's mailbox is also expired, the notification silently fails.
+                    // Notify peers of new credentials (requires crypto, handled internally)
                     notify_peers_of_new_credentials(state, &config.relay_url, &new_uuid).await;
                 }
                 Err(e) => {
@@ -108,8 +101,7 @@ pub async fn poll_once(state: &AppState) -> Result<(), String> {
     );
 
     // 4a. Process raw messages first (e.g., connection requests from new peers).
-    // These must be handled before E2EE messages because they may add new peers
-    // that are needed to decrypt subsequent E2EE envelopes.
+    // These do NOT require crypto and must always be processed.
     for blob in &raw_blobs {
         let RelayBlob::Raw(msg_id, bytes) = blob else {
             continue;
@@ -132,7 +124,19 @@ pub async fn poll_once(state: &AppState) -> Result<(), String> {
         }
     }
 
-    // 4b. Load all E2EE-capable peers (reload after raw processing, new peers may exist)
+    // 4b. Encrypted messages require the crypto service.
+    // If crypto is not ready, leave encrypted messages in the mailbox for next cycle.
+    let Some(crypto_svc) = crypto_service else {
+        if !envelopes.is_empty() {
+            tracing::warn!(
+                "Relay poller: {} encrypted message(s) pending but crypto not ready - will retry next cycle",
+                envelopes.len()
+            );
+        }
+        return Ok(());
+    };
+
+    // 4c. Load all E2EE-capable peers (reload after raw processing, new peers may exist)
     let peers = peer::Entity::find()
         .filter(peer::Column::KeyExchangeDone.eq(true))
         .all(db)
@@ -150,7 +154,7 @@ pub async fn poll_once(state: &AppState) -> Result<(), String> {
         match process_relay_message(
             state,
             &config.relay_url,
-            &crypto_service,
+            &crypto_svc,
             envelope,
             &known_peers,
             &peer_models,
@@ -275,6 +279,7 @@ async fn process_relay_message(
     }
 
     // Standard dispatch (fire-and-forget messages, or request-response without reply_to)
+    let our_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
     let response = dispatch_clear_message(
         db,
         crypto_service,
@@ -282,6 +287,7 @@ async fn process_relay_message(
         known_peers,
         peer_index,
         sender_peer,
+        our_uuid.as_deref(),
     )
     .await;
 
@@ -342,6 +348,7 @@ async fn handle_relay_request_response(
         ),
         _ => {
             // For other request-response types, fall back to standard dispatch
+            let our_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
             let response = dispatch_clear_message(
                 db,
                 crypto_service,
@@ -349,6 +356,7 @@ async fn handle_relay_request_response(
                 known_peers,
                 peer_index,
                 sender_peer,
+                our_uuid.as_deref(),
             )
             .await;
             if response.status().is_server_error() {
@@ -375,7 +383,7 @@ async fn handle_relay_request_response(
     };
 
     // Deposit encrypted response in requester's mailbox
-    let relay = RelayTransport::new(crypto_service.clone());
+    let relay = RelayTransport::new(Some(crypto_service.clone()));
     relay
         .deposit_response(
             relay_url,
@@ -747,7 +755,7 @@ async fn notify_peers_of_new_credentials(state: &AppState, relay_url: &str, new_
         reply_to_write_token: None,
     };
 
-    let relay = RelayTransport::new(crypto_service);
+    let relay = RelayTransport::new(Some(crypto_service));
 
     for p in &peers {
         let (Some(peer_relay_url), Some(peer_mailbox), Some(peer_write_token)) =

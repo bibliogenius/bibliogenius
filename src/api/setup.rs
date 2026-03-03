@@ -266,6 +266,9 @@ pub struct ConfigResponse {
     /// Whether this library shares gamification stats with peers
     #[serde(default)]
     pub share_gamification_stats: bool,
+    /// Stable library UUID for P2P peer deduplication (survives IP/port changes)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_uuid: Option<String>,
     /// Ed25519 public key (hex-encoded) for E2EE signature verification
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ed25519_public_key: Option<String>,
@@ -283,33 +286,33 @@ pub struct ConfigResponse {
     pub relay_write_token: Option<String>,
 }
 
-pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+pub async fn get_config(State(state): State<crate::infrastructure::AppState>) -> impl IntoResponse {
     use crate::models::{installation_profile, library_config};
 
-    let config = match library_config::Entity::find_by_id(1).one(&db).await {
-        Ok(Some(c)) => c,
-        _ => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Config not found"})),
-            )
-                .into_response();
-        }
-    };
+    let db = state.db();
+    let config = library_config::Entity::find_by_id(1)
+        .one(db)
+        .await
+        .ok()
+        .flatten();
 
-    let profile = match installation_profile::Entity::find_by_id(1).one(&db).await {
-        Ok(Some(p)) => p,
-        _ => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Profile not found"})),
-            )
-                .into_response();
-        }
-    };
+    let profile = installation_profile::Entity::find_by_id(1)
+        .one(db)
+        .await
+        .ok()
+        .flatten();
 
-    let enabled_modules: Vec<String> =
-        serde_json::from_str(&profile.enabled_modules).unwrap_or_default();
+    let (profile_type, enabled_modules, theme) = match &profile {
+        Some(p) => {
+            let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
+            (
+                p.profile_type.clone(),
+                modules,
+                p.theme.clone().unwrap_or_else(|| "default".to_string()),
+            )
+        }
+        None => ("individual".to_string(), vec![], "default".to_string()),
+    };
 
     // Check if library owner allows caching (opt-in, default false for privacy)
     let allow_library_caching = enabled_modules.contains(&"allow_library_caching".to_string());
@@ -317,34 +320,59 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> impl IntoRespon
         enabled_modules.contains(&"share_gamification_stats".to_string());
 
     // Load E2EE public keys from crypto_keys table (if identity has been initialized)
-    let (ed25519_public_key, x25519_public_key) = load_public_keys_from_db(&db).await;
+    let (ed25519_public_key, x25519_public_key) = load_public_keys_from_db(db).await;
 
     // Load relay config (if configured)
-    let relay_config = crate::api::relay::get_my_relay_config(&db).await;
+    let relay_config = crate::api::relay::get_my_relay_config(db).await;
+
+    // Get our library UUID from the identity service (stable P2P identifier)
+    let library_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
+
+    let (
+        id,
+        library_name,
+        library_description,
+        latitude,
+        longitude,
+        share_location,
+        show_borrowed_books,
+    ) = match &config {
+        Some(c) => (
+            c.id,
+            c.name.clone(),
+            c.description.clone(),
+            if profile_type == "individual" {
+                c.latitude.map(|l| (l * 100.0).round() / 100.0)
+            } else {
+                c.latitude
+            },
+            if profile_type == "individual" {
+                c.longitude.map(|l| (l * 100.0).round() / 100.0)
+            } else {
+                c.longitude
+            },
+            c.share_location.unwrap_or(false),
+            c.show_borrowed_books.unwrap_or(false),
+        ),
+        None => (0, "My Library".to_string(), None, None, None, false, false),
+    };
 
     (
         StatusCode::OK,
         Json(ConfigResponse {
-            id: config.id,
-            library_name: config.name,
-            library_description: config.description,
-            profile_type: profile.profile_type.clone(),
+            id,
+            library_name,
+            library_description,
+            profile_type,
             enabled_modules,
-            theme: profile.theme.unwrap_or_else(|| "default".to_string()),
-            latitude: if profile.profile_type == "individual" {
-                config.latitude.map(|l| (l * 100.0).round() / 100.0) // Round to 2 decimal places (~1.1km)
-            } else {
-                config.latitude
-            },
-            longitude: if profile.profile_type == "individual" {
-                config.longitude.map(|l| (l * 100.0).round() / 100.0)
-            } else {
-                config.longitude
-            },
-            share_location: config.share_location.unwrap_or(false),
-            show_borrowed_books: config.show_borrowed_books.unwrap_or(false),
+            theme,
+            latitude,
+            longitude,
+            share_location,
+            show_borrowed_books,
             allow_library_caching,
             share_gamification_stats,
+            library_uuid,
             ed25519_public_key,
             x25519_public_key,
             relay_url: relay_config.as_ref().map(|r| r.relay_url.clone()),

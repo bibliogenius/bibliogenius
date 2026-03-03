@@ -502,6 +502,48 @@ impl From<FrbBook> for crate::models::Book {
     }
 }
 
+// ============ Library Name ============
+
+/// Update only the library name in the database (library_config + libraries tables).
+/// This is the FFI-direct path used by the flash editor on the home screen.
+/// Only touches the `name` and `updated_at` fields - no other settings are overwritten.
+pub async fn update_library_name_ffi(name: String) -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+
+    use crate::models::library_config;
+    use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel, Set};
+
+    // Update library_config.name (id=1)
+    let config = library_config::Entity::find_by_id(1)
+        .one(db)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(c) = config {
+        let mut active = c.into_active_model();
+        active.name = Set(name.clone());
+        active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        active.update(db).await.map_err(|e| e.to_string())?;
+    }
+
+    // Also update libraries.name (id=1) for consistency
+    use crate::models::library;
+
+    let lib = library::Entity::find_by_id(1)
+        .one(db)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(l) = lib {
+        let mut active = l.into_active_model();
+        active.name = Set(name);
+        active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        active.update(db).await.map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
 // ============ Books API ============
 
 /// Create a new book
@@ -1248,12 +1290,22 @@ pub async fn return_loan(id: i32) -> Result<String, String> {
 pub async fn reset_app() -> Result<String, String> {
     let db = db().ok_or("Database not initialized")?;
 
+    // Unregister from hub directory BEFORE deleting local data (needs write_token).
+    // Fire-and-forget: failure should not block local reset.
+    {
+        let hub_svc = crate::services::hub_directory_service::HubDirectoryService::new();
+        match hub_svc.delete_profile(db).await {
+            Ok(()) => tracing::info!("Hub directory profile deleted during reset"),
+            Err(e) => tracing::warn!("Hub directory deregistration failed (non-fatal): {e}"),
+        }
+    }
+
     use crate::models::{
         author, book, book_authors, book_tags, collection, collection_book, contact, copy,
         installation_profile, library, library_config, loan, operation_log, p2p_outgoing_request,
         p2p_request, peer, peer_book, tag, user,
     };
-    use sea_orm::EntityTrait;
+    use sea_orm::{ConnectionTrait, EntityTrait};
 
     // Helper macro to delete all from a table
     macro_rules! delete_all {
@@ -1290,6 +1342,18 @@ pub async fn reset_app() -> Result<String, String> {
     // Delete users too for complete reset
     delete_all!(user);
 
+    // Clean hub directory config (raw SQL - no SeaORM entity)
+    if let Err(e) = db
+        .execute(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM hub_directory_config".to_owned(),
+        ))
+        .await
+    {
+        tracing::warn!("Failed to delete hub_directory_config: {}", e);
+        // Non-fatal: table may not exist on older installs
+    }
+
     Ok("App reset successfully - all data cleared".to_string())
 }
 
@@ -1320,12 +1384,41 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                 // OnceLock so that init_identity_ffi() (called later by Flutter)
                 // initializes the SAME instance. IdentityService uses Arc<OnceCell>
                 // internally, so clones share the same identity state.
+                // Safety: if no user exists (stale DB after macOS reinstall),
+                // turn off hub directory listing to protect user privacy.
+                // Application Support persists across macOS uninstall/reinstall.
+                {
+                    use sea_orm::{ConnectionTrait, Statement};
+                    let be = db.get_database_backend();
+                    let no_user = db
+                        .query_one(Statement::from_string(
+                            be,
+                            "SELECT COUNT(*) AS cnt FROM users".to_owned(),
+                        ))
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|r| r.try_get::<i32>("", "cnt").ok())
+                        .unwrap_or(0)
+                        == 0;
+                    if no_user {
+                        let _ = db
+                            .execute(Statement::from_string(
+                                be,
+                                "UPDATE hub_directory_config SET is_listed = 0 WHERE is_listed = 1"
+                                    .to_owned(),
+                            ))
+                            .await;
+                    }
+                }
+
                 let shared_id_svc = IDENTITY_SERVICE
                     .get_or_init(|| crate::services::IdentityService::new(db.clone()));
                 let state = crate::infrastructure::AppState::with_identity_service(
                     db,
                     std::sync::Arc::new(shared_id_svc.clone()),
                 );
+                state.set_server_port(actual_port);
 
                 // Spawn relay poller (checks relay hub for incoming messages)
                 let poller_state = state.clone();
@@ -3060,6 +3153,17 @@ pub async fn remove_book_from_collection(
         .await
         .map_err(|e| format!("{e:?}"))
 }
+
+// ============ View Stats (FFI) ============
+
+/// Get library view statistics (peer and follower views).
+/// Returns a JSON string with total_peer, total_follower, total, and daily breakdown.
+pub async fn get_library_view_stats() -> Result<String, String> {
+    let db = db().ok_or("Database not initialized")?;
+    crate::api::view_counter::get_view_stats(db).await
+}
+
+// ============ Collections (FFI) ============
 
 /// Returns all collections a book belongs to.
 pub async fn get_book_collections(book_id: i32) -> Result<Vec<FrbCollection>, String> {

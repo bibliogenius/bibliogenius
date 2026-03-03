@@ -1240,6 +1240,37 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 053: Add display_name to peers table for user-defined labels.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peers ADD COLUMN display_name TEXT".to_owned(),
+        ))
+        .await;
+
+    // Migration 054: Library view stats - tracks peer and follower catalog views per day.
+    // Bounded to 365 days x 2 sources = max 730 rows.
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"CREATE TABLE IF NOT EXISTS library_view_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(date, source)
+        )"#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Prune old view stats beyond 365 days
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM library_view_stats WHERE date < date('now', '-365 days')".to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1635732197;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1945409330;
 
 // Section: executor
 
@@ -1834,6 +1834,41 @@ fn wire__crate__api__frb__get_contact_by_id_impl(
         },
     )
 }
+fn wire__crate__api__frb__get_library_view_stats_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "get_library_view_stats",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::get_library_view_stats().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__frb__get_local_peers_ffi_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2348,41 +2383,6 @@ fn wire__crate__api__frb__hub_directory_push_catalog_impl(
         },
     )
 }
-fn wire__crate__api__frb__hub_directory_sync_catalog_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "hub_directory_sync_catalog",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            deserializer.end();
-            move |context| async move {
-                transform_result_sse::<_, String>(
-                    (move || async move {
-                        let output_ok = crate::api::frb::hub_directory_sync_catalog().await?;
-                        Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
-        },
-    )
-}
 fn wire__crate__api__frb__hub_directory_register_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2452,6 +2452,41 @@ fn wire__crate__api__frb__hub_directory_resolve_follow_impl(
                             api_resolution,
                         )
                         .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__hub_directory_sync_catalog_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "hub_directory_sync_catalog",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::hub_directory_sync_catalog().await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -3848,6 +3883,42 @@ fn wire__crate__api__frb__update_contact_impl(
         },
     )
 }
+fn wire__crate__api__frb__update_library_name_ffi_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "update_library_name_ffi",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_name = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::update_library_name_ffi(api_name).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__frb__update_tag_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -3983,6 +4054,20 @@ impl SseDecode for crate::api::frb::FrbBookMetadata {
             publication_year: var_publicationYear,
             cover_url: var_coverUrl,
             summary: var_summary,
+        };
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbCatalogEntry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_isbn = <String>::sse_decode(deserializer);
+        let mut var_title = <String>::sse_decode(deserializer);
+        let mut var_author = <Option<String>>::sse_decode(deserializer);
+        return crate::api::frb::FrbCatalogEntry {
+            isbn: var_isbn,
+            title: var_title,
+            author: var_author,
         };
     }
 }
@@ -4175,20 +4260,6 @@ impl SseDecode for crate::api::frb::FrbGamificationStatus {
             edits_count: var_editsCount,
             next_level_progress: var_nextLevelProgress,
             badge_url: var_badgeUrl,
-        };
-    }
-}
-
-impl SseDecode for crate::api::frb::FrbCatalogEntry {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_isbn = <String>::sse_decode(deserializer);
-        let mut var_title = <String>::sse_decode(deserializer);
-        let mut var_author = <Option<String>>::sse_decode(deserializer);
-        return crate::api::frb::FrbCatalogEntry {
-            isbn: var_isbn,
-            title: var_title,
-            author: var_author,
         };
     }
 }
@@ -4671,6 +4742,18 @@ impl SseDecode for Vec<crate::api::frb::FrbBook> {
     }
 }
 
+impl SseDecode for Vec<crate::api::frb::FrbCatalogEntry> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::frb::FrbCatalogEntry>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::frb::FrbCollection> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4732,18 +4815,6 @@ impl SseDecode for Vec<crate::api::frb::FrbDiscoveredPeer> {
             ans_.push(<crate::api::frb::FrbDiscoveredPeer>::sse_decode(
                 deserializer,
             ));
-        }
-        return ans_;
-    }
-}
-
-impl SseDecode for Vec<crate::api::frb::FrbCatalogEntry> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut len_ = <i32>::sse_decode(deserializer);
-        let mut ans_ = vec![];
-        for idx_ in 0..len_ {
-            ans_.push(<crate::api::frb::FrbCatalogEntry>::sse_decode(deserializer));
         }
         return ans_;
     }
@@ -5193,139 +5264,143 @@ fn pde_ffi_dispatcher_primary_impl(
         46 => wire__crate__api__frb__get_collection_impl(port, ptr, rust_vec_len, data_len),
         47 => wire__crate__api__frb__get_collection_books_impl(port, ptr, rust_vec_len, data_len),
         48 => wire__crate__api__frb__get_contact_by_id_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__frb__get_local_peers_ffi_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__frb__get_public_keys_ffi_impl(port, ptr, rust_vec_len, data_len),
-        55 => wire__crate__api__frb__hub_directory_follow_impl(port, ptr, rust_vec_len, data_len),
-        56 => {
+        49 => wire__crate__api__frb__get_library_view_stats_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__frb__get_local_peers_ffi_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__frb__get_public_keys_ffi_impl(port, ptr, rust_vec_len, data_len),
+        56 => wire__crate__api__frb__hub_directory_follow_impl(port, ptr, rust_vec_len, data_len),
+        57 => {
             wire__crate__api__frb__hub_directory_get_catalog_impl(port, ptr, rust_vec_len, data_len)
         }
-        57 => {
+        58 => {
             wire__crate__api__frb__hub_directory_get_config_impl(port, ptr, rust_vec_len, data_len)
         }
-        58 => {
+        59 => {
             wire__crate__api__frb__hub_directory_get_profile_impl(port, ptr, rust_vec_len, data_len)
         }
-        59 => wire__crate__api__frb__hub_directory_list_impl(port, ptr, rust_vec_len, data_len),
-        60 => wire__crate__api__frb__hub_directory_list_followers_impl(
+        60 => wire__crate__api__frb__hub_directory_list_impl(port, ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__frb__hub_directory_list_followers_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        61 => wire__crate__api__frb__hub_directory_list_following_impl(
+        62 => wire__crate__api__frb__hub_directory_list_following_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        62 => wire__crate__api__frb__hub_directory_pending_requests_impl(
+        63 => wire__crate__api__frb__hub_directory_pending_requests_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        63 => wire__crate__api__frb__hub_directory_push_catalog_impl(
+        64 => wire__crate__api__frb__hub_directory_push_catalog_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        64 => wire__crate__api__frb__hub_directory_register_impl(port, ptr, rust_vec_len, data_len),
-        65 => wire__crate__api__frb__hub_directory_resolve_follow_impl(
+        65 => wire__crate__api__frb__hub_directory_register_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__frb__hub_directory_resolve_follow_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        66 => wire__crate__api__frb__hub_directory_unfollow_impl(port, ptr, rust_vec_len, data_len),
-        67 => wire__crate__api__frb__init_backend_impl(port, ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__frb__init_identity_ffi_impl(port, ptr, rust_vec_len, data_len),
-        69 => wire__crate__api__frb__init_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
-        71 => wire__crate__api__frb__lookup_book_metadata_impl(port, ptr, rust_vec_len, data_len),
-        72 => wire__crate__api__frb__memory_game_available_difficulties_impl(
+        67 => wire__crate__api__frb__hub_directory_sync_catalog_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        73 => wire__crate__api__frb__memory_game_finish_impl(port, ptr, rust_vec_len, data_len),
-        74 => {
+        68 => wire__crate__api__frb__hub_directory_unfollow_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__frb__init_backend_impl(port, ptr, rust_vec_len, data_len),
+        70 => wire__crate__api__frb__init_identity_ffi_impl(port, ptr, rust_vec_len, data_len),
+        71 => wire__crate__api__frb__init_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
+        73 => wire__crate__api__frb__lookup_book_metadata_impl(port, ptr, rust_vec_len, data_len),
+        74 => wire__crate__api__frb__memory_game_available_difficulties_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        75 => wire__crate__api__frb__memory_game_finish_impl(port, ptr, rust_vec_len, data_len),
+        76 => {
             wire__crate__api__frb__memory_game_leaderboard_impl(port, ptr, rust_vec_len, data_len)
         }
-        75 => wire__crate__api__frb__memory_game_refresh_leaderboard_impl(
+        77 => wire__crate__api__frb__memory_game_refresh_leaderboard_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        76 => wire__crate__api__frb__memory_game_setup_impl(port, ptr, rust_vec_len, data_len),
-        77 => wire__crate__api__frb__memory_game_top_scores_impl(port, ptr, rust_vec_len, data_len),
-        78 => wire__crate__api__frb__operation_log_entity_types_impl(
+        78 => wire__crate__api__frb__memory_game_setup_impl(port, ptr, rust_vec_len, data_len),
+        79 => wire__crate__api__frb__memory_game_top_scores_impl(port, ptr, rust_vec_len, data_len),
+        80 => wire__crate__api__frb__operation_log_entity_types_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        79 => wire__crate__api__frb__operation_log_list_impl(port, ptr, rust_vec_len, data_len),
-        80 => wire__crate__api__frb__operation_log_stats_impl(port, ptr, rust_vec_len, data_len),
-        81 => wire__crate__api__frb__parse_invite_link_ffi_impl(port, ptr, rust_vec_len, data_len),
-        82 => wire__crate__api__frb__parse_qr_payload_ffi_impl(port, ptr, rust_vec_len, data_len),
-        83 => wire__crate__api__frb__puzzle_available_difficulties_impl(
+        81 => wire__crate__api__frb__operation_log_list_impl(port, ptr, rust_vec_len, data_len),
+        82 => wire__crate__api__frb__operation_log_stats_impl(port, ptr, rust_vec_len, data_len),
+        83 => wire__crate__api__frb__parse_invite_link_ffi_impl(port, ptr, rust_vec_len, data_len),
+        84 => wire__crate__api__frb__parse_qr_payload_ffi_impl(port, ptr, rust_vec_len, data_len),
+        85 => wire__crate__api__frb__puzzle_available_difficulties_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        84 => wire__crate__api__frb__puzzle_finish_impl(port, ptr, rust_vec_len, data_len),
-        85 => {
+        86 => wire__crate__api__frb__puzzle_finish_impl(port, ptr, rust_vec_len, data_len),
+        87 => {
             wire__crate__api__frb__puzzle_game_leaderboard_impl(port, ptr, rust_vec_len, data_len)
         }
-        86 => wire__crate__api__frb__puzzle_game_refresh_leaderboard_impl(
+        88 => wire__crate__api__frb__puzzle_game_refresh_leaderboard_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        87 => wire__crate__api__frb__puzzle_setup_impl(port, ptr, rust_vec_len, data_len),
-        88 => wire__crate__api__frb__puzzle_top_scores_impl(port, ptr, rust_vec_len, data_len),
-        89 => wire__crate__api__frb__remove_book_from_collection_impl(
+        89 => wire__crate__api__frb__puzzle_setup_impl(port, ptr, rust_vec_len, data_len),
+        90 => wire__crate__api__frb__puzzle_top_scores_impl(port, ptr, rust_vec_len, data_len),
+        91 => wire__crate__api__frb__remove_book_from_collection_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        90 => wire__crate__api__frb__reorder_books_impl(port, ptr, rust_vec_len, data_len),
-        91 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
-        92 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
-        93 => wire__crate__api__frb__search_all_covers_by_title_impl(
+        92 => wire__crate__api__frb__reorder_books_impl(port, ptr, rust_vec_len, data_len),
+        93 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
+        94 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
+        95 => wire__crate__api__frb__search_all_covers_by_title_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        94 => wire__crate__api__frb__search_all_covers_for_book_impl(
+        96 => wire__crate__api__frb__search_all_covers_for_book_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        95 => wire__crate__api__frb__search_cover_by_title_impl(port, ptr, rust_vec_len, data_len),
-        96 => wire__crate__api__frb__search_cover_for_book_impl(port, ptr, rust_vec_len, data_len),
-        97 => wire__crate__api__frb__set_hub_url_ffi_impl(port, ptr, rust_vec_len, data_len),
-        98 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
-        99 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
-        100 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
-        101 => {
+        97 => wire__crate__api__frb__search_cover_by_title_impl(port, ptr, rust_vec_len, data_len),
+        98 => wire__crate__api__frb__search_cover_for_book_impl(port, ptr, rust_vec_len, data_len),
+        99 => wire__crate__api__frb__set_hub_url_ffi_impl(port, ptr, rust_vec_len, data_len),
+        100 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
+        101 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
+        102 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
+        103 => {
             wire__crate__api__frb__update_book_collections_impl(port, ptr, rust_vec_len, data_len)
         }
-        102 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
-        103 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
-        104 => wire__crate__api__frb__hub_directory_sync_catalog_impl(
-            port,
-            ptr,
-            rust_vec_len,
-            data_len,
-        ),
+        104 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
+        105 => {
+            wire__crate__api__frb__update_library_name_ffi_impl(port, ptr, rust_vec_len, data_len)
+        }
+        106 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -5338,11 +5413,11 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        50 => wire__crate__api__frb__get_mdns_service_type_impl(ptr, rust_vec_len, data_len),
-        52 => wire__crate__api__frb__get_version_impl(ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__frb__greet_impl(ptr, rust_vec_len, data_len),
-        54 => wire__crate__api__frb__health_check_impl(ptr, rust_vec_len, data_len),
-        70 => wire__crate__api__frb__is_mdns_available_impl(ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__frb__get_mdns_service_type_impl(ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__frb__get_version_impl(ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__frb__greet_impl(ptr, rust_vec_len, data_len),
+        55 => wire__crate__api__frb__health_check_impl(ptr, rust_vec_len, data_len),
+        72 => wire__crate__api__frb__is_mdns_available_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -5405,6 +5480,28 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbBookMetadata>
     for crate::api::frb::FrbBookMetadata
 {
     fn into_into_dart(self) -> crate::api::frb::FrbBookMetadata {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbCatalogEntry {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.isbn.into_into_dart().into_dart(),
+            self.title.into_into_dart().into_dart(),
+            self.author.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbCatalogEntry
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbCatalogEntry>
+    for crate::api::frb::FrbCatalogEntry
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbCatalogEntry {
         self
     }
 }
@@ -5618,29 +5715,6 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbGamificationStatus>
     for crate::api::frb::FrbGamificationStatus
 {
     fn into_into_dart(self) -> crate::api::frb::FrbGamificationStatus {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbCatalogEntry {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.isbn.into_into_dart().into_dart(),
-            self.title.into_into_dart().into_dart(),
-            self.author.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::frb::FrbCatalogEntry
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbCatalogEntry>
-    for crate::api::frb::FrbCatalogEntry
-{
-    fn into_into_dart(self) -> crate::api::frb::FrbCatalogEntry {
         self
     }
 }
@@ -6247,6 +6321,15 @@ impl SseEncode for crate::api::frb::FrbBookMetadata {
     }
 }
 
+impl SseEncode for crate::api::frb::FrbCatalogEntry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.isbn, serializer);
+        <String>::sse_encode(self.title, serializer);
+        <Option<String>>::sse_encode(self.author, serializer);
+    }
+}
+
 impl SseEncode for crate::api::frb::FrbCollection {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -6356,15 +6439,6 @@ impl SseEncode for crate::api::frb::FrbGamificationStatus {
         <i64>::sse_encode(self.edits_count, serializer);
         <f32>::sse_encode(self.next_level_progress, serializer);
         <String>::sse_encode(self.badge_url, serializer);
-    }
-}
-
-impl SseEncode for crate::api::frb::FrbCatalogEntry {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <String>::sse_encode(self.isbn, serializer);
-        <String>::sse_encode(self.title, serializer);
-        <Option<String>>::sse_encode(self.author, serializer);
     }
 }
 
@@ -6665,6 +6739,16 @@ impl SseEncode for Vec<crate::api::frb::FrbBook> {
     }
 }
 
+impl SseEncode for Vec<crate::api::frb::FrbCatalogEntry> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::frb::FrbCatalogEntry>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::frb::FrbCollection> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -6711,16 +6795,6 @@ impl SseEncode for Vec<crate::api::frb::FrbDiscoveredPeer> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::frb::FrbDiscoveredPeer>::sse_encode(item, serializer);
-        }
-    }
-}
-
-impl SseEncode for Vec<crate::api::frb::FrbCatalogEntry> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(self.len() as _, serializer);
-        for item in self {
-            <crate::api::frb::FrbCatalogEntry>::sse_encode(item, serializer);
         }
     }
 }

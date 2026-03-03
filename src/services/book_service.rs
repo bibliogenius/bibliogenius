@@ -50,6 +50,17 @@ impl From<sea_orm::DbErr> for ServiceError {
     }
 }
 
+/// Strip formatting from ISBN (hyphens, spaces). Keeps digits and X.
+fn normalize_isbn(isbn: Option<String>) -> Option<String> {
+    isbn.map(|s| {
+        let cleaned: String = s
+            .chars()
+            .filter(|c| c.is_ascii_digit() || *c == 'X' || *c == 'x')
+            .collect();
+        if cleaned.is_empty() { s } else { cleaned }
+    })
+}
+
 /// List all books with optional filters
 pub async fn list_books(
     db: &DatabaseConnection,
@@ -191,7 +202,7 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
 
     let new_book = BookActiveModel {
         title: Set(book.title.clone()),
-        isbn: Set(book.isbn.clone()),
+        isbn: Set(normalize_isbn(book.isbn.clone())),
         summary: Set(book.summary.clone()),
         publisher: Set(book.publisher.clone()),
         publication_year: Set(book.publication_year),
@@ -290,7 +301,7 @@ pub async fn update_book(
     let mut book: BookActiveModel = book_model.into();
 
     book.title = Set(book_data.title);
-    book.isbn = Set(book_data.isbn);
+    book.isbn = Set(normalize_isbn(book_data.isbn));
     book.summary = Set(book_data.summary);
     book.publisher = Set(book_data.publisher);
     book.publication_year = Set(book_data.publication_year);

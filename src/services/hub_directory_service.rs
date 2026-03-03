@@ -580,6 +580,29 @@ impl HubDirectoryService {
         Ok(())
     }
 
+    /// Completely removes the library profile from the hub directory.
+    /// Deletes the profile, all follows (as follower and followed), and cached catalogs.
+    pub async fn delete_profile(&self, db: &DatabaseConnection) -> Result<(), HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let response = self
+            .http_client
+            .delete(format!("{hub_url}/api/directory/profile"))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------

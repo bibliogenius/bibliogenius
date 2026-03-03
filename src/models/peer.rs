@@ -7,6 +7,8 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     pub name: String,
+    /// User-defined display name (overrides `name` in the UI)
+    pub display_name: Option<String>,
     #[sea_orm(unique)]
     pub url: String,
     /// Stable UUID for P2P deduplication (survives IP changes)

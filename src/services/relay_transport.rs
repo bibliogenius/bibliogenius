@@ -23,14 +23,19 @@ pub enum RelayBlob {
     Raw(i64, Vec<u8>),
 }
 
-/// Relay transport for sending encrypted messages via a hub mailbox.
+/// Relay transport for sending/receiving messages via a hub mailbox.
+///
+/// The crypto service is optional: `poll()`, `ack()` and `deposit_raw()` work
+/// without it (pure HTTP). Only `send()` and `deposit_response()` require crypto
+/// for E2EE sealing. This allows the relay poller to process raw messages
+/// (e.g. connection requests) even before the E2EE identity is initialized.
 pub struct RelayTransport {
-    crypto_service: Arc<CryptoService<SqliteNonceStore>>,
+    crypto_service: Option<Arc<CryptoService<SqliteNonceStore>>>,
     http_client: reqwest::Client,
 }
 
 impl RelayTransport {
-    pub fn new(crypto_service: Arc<CryptoService<SqliteNonceStore>>) -> Self {
+    pub fn new(crypto_service: Option<Arc<CryptoService<SqliteNonceStore>>>) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .redirect(reqwest::redirect::Policy::none())
@@ -48,6 +53,8 @@ impl RelayTransport {
     /// 1. Seal the message (same as DirectTransport)
     /// 2. Serialize envelope to bytes
     /// 3. POST to relay: {relay_url}/api/relay/mailbox/{uuid}/messages
+    ///
+    /// Returns `Err(Crypto)` if the crypto service is not available.
     pub async fn send(
         &self,
         relay_url: &str,
@@ -57,8 +64,11 @@ impl RelayTransport {
         message: &ClearMessage,
     ) -> Result<(), E2eeTransportError> {
         // 1. Seal the message
-        let envelope = self
+        let crypto = self
             .crypto_service
+            .as_ref()
+            .ok_or_else(|| E2eeTransportError::Crypto("CryptoService not available".to_string()))?;
+        let envelope = crypto
             .seal(peer_x25519_public, message)
             .map_err(|e| E2eeTransportError::Crypto(e.to_string()))?;
 
@@ -241,6 +251,8 @@ impl RelayTransport {
     /// Used when the relay poller processes a request that has `reply_to_mailbox`
     /// and `reply_to_write_token` fields. The response is encrypted and deposited
     /// directly into the requester's mailbox so they can pick it up on their next poll.
+    ///
+    /// Returns `Err(Crypto)` if the crypto service is not available.
     pub async fn deposit_response(
         &self,
         relay_url: &str,
@@ -250,8 +262,11 @@ impl RelayTransport {
         response_message: &ClearMessage,
     ) -> Result<(), E2eeTransportError> {
         // 1. Seal the response
-        let envelope = self
+        let crypto = self
             .crypto_service
+            .as_ref()
+            .ok_or_else(|| E2eeTransportError::Crypto("CryptoService not available".to_string()))?;
+        let envelope = crypto
             .seal(peer_x25519_public, response_message)
             .map_err(|e| E2eeTransportError::Crypto(e.to_string()))?;
 
@@ -294,7 +309,8 @@ impl RelayTransport {
     }
 
     /// Access the underlying crypto service (for opening received messages).
-    pub fn crypto_service(&self) -> &Arc<CryptoService<SqliteNonceStore>> {
-        &self.crypto_service
+    /// Returns None if the transport was created without crypto.
+    pub fn crypto_service(&self) -> Option<&Arc<CryptoService<SqliteNonceStore>>> {
+        self.crypto_service.as_ref()
     }
 }

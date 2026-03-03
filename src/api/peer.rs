@@ -247,7 +247,8 @@ async fn try_send_e2ee(
                     correlation_id_for_await = Some(correlation_id);
                 }
 
-                let relay = crate::services::relay_transport::RelayTransport::new(crypto_service);
+                let relay =
+                    crate::services::relay_transport::RelayTransport::new(Some(crypto_service));
 
                 // Try relay send, with automatic retry on 404 (expired mailbox)
                 let relay_send_ok = match relay
@@ -338,7 +339,7 @@ async fn try_send_e2ee(
                     if let Some(corr_id) = correlation_id_for_await {
                         let mut rx = state.register_relay_request(corr_id.clone());
                         let start = std::time::Instant::now();
-                        let overall_timeout = std::time::Duration::from_secs(65);
+                        let overall_timeout = std::time::Duration::from_secs(90);
 
                         // Trigger immediate poll (don't wait for 60s background cycle)
                         let _ = crate::services::relay_poller::poll_once(state).await;
@@ -618,6 +619,33 @@ pub async fn get_relay_config_endpoint(
     }
 }
 
+/// DELETE /api/peers/relay/config - Remove relay config (disconnect from hub).
+pub async fn delete_relay_config_endpoint(
+    State(state): State<crate::infrastructure::AppState>,
+) -> impl IntoResponse {
+    let db = state.db();
+
+    use sea_orm::ConnectionTrait;
+    match db
+        .execute(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM my_relay_config".to_owned(),
+        ))
+        .await
+    {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({ "message": "Relay config removed" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to remove relay config: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
 // ── Relay library sync endpoints (ADR-012) ──────────────────────────
 
 /// Send a library sync request to a peer via E2EE (relay or direct).
@@ -773,10 +801,13 @@ pub struct ConnectRequest {
     name: String,
     url: String,
     public_key: Option<String>,
+    /// Stable library UUID for P2P peer deduplication
+    #[serde(default)]
+    library_uuid: Option<String>,
     /// Ed25519 public key (hex) from the remote peer - for E2EE
     #[serde(default)]
     ed25519_public_key: Option<String>,
-    /// X25519 public key (hex) from the remote peer — for E2EE
+    /// X25519 public key (hex) from the remote peer - for E2EE
     #[serde(default)]
     x25519_public_key: Option<String>,
     /// Peer's relay hub URL
@@ -808,6 +839,7 @@ pub async fn connect(
         latitude: Option<f64>,
         longitude: Option<f64>,
         remote_name: Option<String>,
+        library_uuid: Option<String>,
         ed25519_public_key: Option<String>,
         x25519_public_key: Option<String>,
         relay_url: Option<String>,
@@ -830,6 +862,7 @@ pub async fn connect(
                                 latitude: lat,
                                 longitude: long,
                                 remote_name: Some(config.library_name),
+                                library_uuid: config.library_uuid,
                                 ed25519_public_key: config.ed25519_public_key,
                                 x25519_public_key: config.x25519_public_key,
                                 relay_url: config.relay_url,
@@ -844,6 +877,7 @@ pub async fn connect(
                             latitude: None,
                             longitude: None,
                             remote_name: None,
+                            library_uuid: None,
                             ed25519_public_key: None,
                             x25519_public_key: None,
                             relay_url: None,
@@ -859,6 +893,7 @@ pub async fn connect(
                         latitude: None,
                         longitude: None,
                         remote_name: None,
+                        library_uuid: None,
                         ed25519_public_key: None,
                         x25519_public_key: None,
                         relay_url: None,
@@ -874,6 +909,7 @@ pub async fn connect(
                 latitude: None,
                 longitude: None,
                 remote_name: None,
+                library_uuid: None,
                 ed25519_public_key: None,
                 x25519_public_key: None,
                 relay_url: None,
@@ -914,6 +950,9 @@ pub async fn connect(
         .one(&db)
         .await;
 
+    // Library UUID: prefer payload (QR/invite), fall back to remote config
+    let peer_library_uuid = payload.library_uuid.or(remote_data.library_uuid);
+
     // Relay info: prefer payload, fall back to remote config
     let relay_url = payload.relay_url.or(remote_data.relay_url);
     let mailbox_id = payload.mailbox_id.or(remote_data.mailbox_id);
@@ -930,6 +969,7 @@ pub async fn connect(
             let peer_id = existing_peer.id;
             let mut active: peer::ActiveModel = existing_peer.into();
             active.name = Set(name);
+            active.library_uuid = Set(peer_library_uuid.clone());
             active.public_key = Set(ed25519_key.clone());
             active.x25519_public_key = Set(x25519_key);
             active.key_exchange_done = Set(key_exchange_done);
@@ -965,6 +1005,7 @@ pub async fn connect(
             let peer = peer::ActiveModel {
                 name: Set(name),
                 url: Set(docker_url),
+                library_uuid: Set(peer_library_uuid),
                 public_key: Set(ed25519_key.clone()),
                 x25519_public_key: Set(x25519_key),
                 key_exchange_done: Set(key_exchange_done),
@@ -1319,10 +1360,13 @@ pub(crate) async fn sync_peer_gamification_stats(
 pub struct IncomingConnectionRequest {
     name: String,
     url: String,
-    /// Ed25519 public key (hex) from the requesting peer — for E2EE
+    /// Stable library UUID for P2P peer deduplication
+    #[serde(default)]
+    library_uuid: Option<String>,
+    /// Ed25519 public key (hex) from the requesting peer - for E2EE
     #[serde(default)]
     ed25519_public_key: Option<String>,
-    /// X25519 public key (hex) from the requesting peer — for E2EE
+    /// X25519 public key (hex) from the requesting peer - for E2EE
     #[serde(default)]
     x25519_public_key: Option<String>,
     /// Peer's relay hub URL
@@ -1337,38 +1381,29 @@ pub struct IncomingConnectionRequest {
 }
 
 /// Receive an incoming connection request from a remote peer.
-/// Tries to forward to the local Hub first; falls back to local storage
-/// if the Hub is unreachable or rejects the request (P2P/FFI mode).
+/// Always creates/updates the peer in local SQLite and returns our E2EE keys.
+/// Also forwards to the Hub (fire-and-forget) for the central directory.
 pub async fn receive_connection_request(
     State(db): State<DatabaseConnection>,
     Json(payload): Json<IncomingConnectionRequest>,
 ) -> impl IntoResponse {
-    // Try forwarding to local Hub
-    let hub_url = std::env::var("HUB_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
-    let endpoint = format!("{}/api/peers/receive_connection", hub_url);
-
-    let client = get_safe_client();
-    let hub_result = client
-        .post(&endpoint)
-        .json(&serde_json::json!({
-            "name": payload.name,
-            "url": payload.url,
-        }))
-        .send()
-        .await;
-
-    // If Hub handled it successfully, we're done
-    if let Ok(ref res) = hub_result
-        && res.status().is_success()
-    {
-        return (
-            StatusCode::OK,
-            Json(json!({ "message": "Connection request received and forwarded to Hub" })),
-        )
-            .into_response();
+    // Try forwarding to Hub (fire-and-forget for central directory).
+    // Always continue to local handling regardless of hub result,
+    // so the peer is created in our local SQLite and we return our E2EE keys.
+    if let Ok(hub_url) = std::env::var("HUB_URL") {
+        let endpoint = format!("{}/api/peers/receive_connection", hub_url);
+        let client = get_safe_client();
+        let _ = client
+            .post(&endpoint)
+            .json(&serde_json::json!({
+                "name": payload.name,
+                "url": payload.url,
+            }))
+            .send()
+            .await;
     }
 
-    // Hub unreachable or rejected — handle locally (P2P/FFI mode)
+    // Always handle locally: create/update peer in SQLite + return our E2EE keys
     let existing = peer::Entity::find()
         .filter(peer::Column::Url.eq(&payload.url))
         .one(&db)
@@ -1383,9 +1418,12 @@ pub async fn receive_connection_request(
 
     match existing {
         Ok(Some(existing_peer)) => {
-            // Peer already exists — update keys and relay info if provided
+            // Peer already exists - update keys, relay info, and library_uuid if provided
             if key_exchange_done && !existing_peer.key_exchange_done {
                 let mut active: peer::ActiveModel = existing_peer.into();
+                if payload.library_uuid.is_some() {
+                    active.library_uuid = Set(payload.library_uuid);
+                }
                 active.public_key = Set(payload.ed25519_public_key);
                 active.x25519_public_key = Set(payload.x25519_public_key);
                 active.key_exchange_done = Set(true);
@@ -1429,6 +1467,7 @@ pub async fn receive_connection_request(
             let new_peer = peer::ActiveModel {
                 name: Set(payload.name),
                 url: Set(payload.url),
+                library_uuid: Set(payload.library_uuid),
                 public_key: Set(payload.ed25519_public_key),
                 x25519_public_key: Set(payload.x25519_public_key),
                 key_exchange_done: Set(key_exchange_done),
@@ -1754,12 +1793,41 @@ pub async fn update_peer_url(
 }
 
 pub async fn delete_peer(
-    State(db): State<DatabaseConnection>,
+    State(state): State<crate::infrastructure::AppState>,
     Path(peer_id): Path<i32>,
 ) -> impl IntoResponse {
-    match peer::Entity::delete_by_id(peer_id).exec(&db).await {
+    let db = state.db();
+
+    // 1. Load peer before deletion so we can notify the remote side
+    let peer_model = match peer::Entity::find_by_id(peer_id).one(db).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "Peer not found" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Database error: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Notify remote peer (fire-and-forget, never blocks local deletion)
+    let state_clone = state.clone();
+    let peer_clone = peer_model.clone();
+    tokio::spawn(async move {
+        notify_peer_of_disconnect(&state_clone, &peer_clone).await;
+    });
+
+    // 3. Delete locally
+    match peer::Entity::delete_by_id(peer_id).exec(db).await {
         Ok(_) => {
-            tracing::info!("🗑️ Peer {} deleted", peer_id);
+            tracing::info!("🗑️ Peer {} ({}) deleted", peer_id, peer_model.name);
             (StatusCode::OK, Json(json!({ "message": "Peer deleted" }))).into_response()
         }
         Err(e) => (
@@ -1767,6 +1835,473 @@ pub async fn delete_peer(
             Json(json!({ "error": format!("Failed to delete peer: {}", e) })),
         )
             .into_response(),
+    }
+}
+
+/// Notify a remote peer that we are disconnecting.
+///
+/// Tries E2EE first (encrypted, with relay fallback for offline peers),
+/// then falls back to a plaintext HTTP POST for peers without E2EE keys.
+/// Errors are logged but never propagated - disconnection is always local-first.
+async fn notify_peer_of_disconnect(
+    state: &crate::infrastructure::AppState,
+    peer_model: &peer::Model,
+) {
+    // Send OUR library_uuid (stable identifier) + URL as fallback.
+    // The remote peer will search by library_uuid first, then by URL.
+    let our_library_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
+    let our_url = state.our_public_url();
+
+    let payload = json!({
+        "peer_url": our_url,
+        "library_uuid": our_library_uuid,
+        "timestamp": Utc::now().to_rfc3339(),
+    });
+
+    // Try E2EE notification (handles relay fallback internally)
+    match try_send_e2ee(state, peer_model, "peer_disconnect", payload).await {
+        Ok(Some(_)) => {
+            info!(
+                "Disconnect notification sent (E2EE) to peer {} ({})",
+                peer_model.name, peer_model.id
+            );
+            return;
+        }
+        Ok(None) => {
+            // E2EE not available for this peer, fall through to plaintext
+        }
+        Err(e) => {
+            info!(
+                "E2EE disconnect notification failed for peer {}: {}, trying plaintext",
+                peer_model.name, e
+            );
+        }
+    }
+
+    // HMAC-authenticated fallback: POST /api/peers/notify-disconnect
+    // Requires key_exchange_done + x25519_public_key (shared secret for HMAC).
+    // If keys are not available, we skip entirely (no unauthenticated fallback).
+    let our_uuid = match &our_library_uuid {
+        Some(uuid) => uuid.clone(),
+        None => {
+            info!(
+                "Disconnect: no library_uuid, skipping plaintext fallback for peer {}",
+                peer_model.name
+            );
+            return;
+        }
+    };
+
+    if !peer_model.key_exchange_done {
+        info!(
+            "Disconnect: key_exchange not done, skipping plaintext fallback for peer {}",
+            peer_model.name
+        );
+        return;
+    }
+
+    let peer_x25519_hex = match &peer_model.x25519_public_key {
+        Some(hex) => hex.clone(),
+        None => {
+            info!(
+                "Disconnect: no x25519_public_key, skipping plaintext fallback for peer {}",
+                peer_model.name
+            );
+            return;
+        }
+    };
+
+    let crypto_service = match state.crypto_service() {
+        Some(svc) => svc.clone(),
+        None => {
+            info!(
+                "Disconnect: CryptoService not initialized, skipping plaintext fallback for peer {}",
+                peer_model.name
+            );
+            return;
+        }
+    };
+
+    // Compute HMAC
+    let timestamp = Utc::now().to_rfc3339();
+    let peer_x25519_bytes = match hex::decode(&peer_x25519_hex) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => {
+            info!(
+                "Disconnect: invalid x25519_public_key hex for peer {}",
+                peer_model.name
+            );
+            return;
+        }
+    };
+    let peer_pub = x25519_dalek::PublicKey::from(peer_x25519_bytes);
+    let hmac = crate::crypto::key_exchange::compute_disconnect_hmac(
+        crypto_service.identity().x25519_static_secret(),
+        &peer_pub,
+        &our_uuid,
+        &timestamp,
+    );
+
+    let client = get_safe_client();
+    let url = format!("{}/api/peers/notify-disconnect", peer_model.url);
+    match client
+        .post(&url)
+        .json(&json!({
+            "peer_url": our_url,
+            "library_uuid": our_uuid,
+            "timestamp": timestamp,
+            "hmac": hex::encode(hmac),
+        }))
+        .send()
+        .await
+    {
+        Ok(res) => {
+            info!(
+                "Disconnect notification sent (HMAC, status={}) to peer {} ({})",
+                res.status(),
+                peer_model.name,
+                peer_model.id
+            );
+        }
+        Err(e) => {
+            info!(
+                "HMAC disconnect notification failed for peer {}: {} (peer may be offline)",
+                peer_model.name, e
+            );
+        }
+    }
+}
+
+/// Receive an HMAC-authenticated disconnect notification from a remote peer.
+///
+/// Defense layers:
+/// 1. Requires library_uuid, timestamp, and HMAC (all mandatory)
+/// 2. Validates timestamp within +/-5 minutes (replay window)
+/// 3. Verifies HMAC using X25519 static shared secret
+/// 4. Re-handshake: asks the sender to confirm the disconnect
+pub async fn receive_disconnect_notification(
+    State(state): State<crate::infrastructure::AppState>,
+    Json(payload): Json<DisconnectNotification>,
+) -> impl IntoResponse {
+    let db = state.db();
+
+    // 1. Require all authentication fields
+    let library_uuid = match &payload.library_uuid {
+        Some(uuid) if !uuid.trim().is_empty() => uuid.trim().to_string(),
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Missing library_uuid" })),
+            )
+                .into_response();
+        }
+    };
+    let timestamp = match &payload.timestamp {
+        Some(ts) if !ts.trim().is_empty() => ts.trim().to_string(),
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Missing timestamp" })),
+            )
+                .into_response();
+        }
+    };
+    let hmac_hex = match &payload.hmac {
+        Some(h) if !h.trim().is_empty() => h.trim().to_string(),
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Missing HMAC" })),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Validate timestamp (must be within +/-5 minutes)
+    let parsed_ts = match chrono::DateTime::parse_from_rfc3339(&timestamp) {
+        Ok(ts) => ts.with_timezone(&Utc),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Invalid timestamp format (expected RFC3339)" })),
+            )
+                .into_response();
+        }
+    };
+    let now = Utc::now();
+    let drift = (now - parsed_ts).abs();
+    if drift > chrono::Duration::minutes(5) {
+        return (
+            StatusCode::GONE,
+            Json(json!({ "error": "Timestamp outside acceptable window" })),
+        )
+            .into_response();
+    }
+
+    // 3. Decode HMAC hex
+    let hmac_bytes = match hex::decode(&hmac_hex) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Invalid HMAC format" })),
+            )
+                .into_response();
+        }
+    };
+
+    // 4. Find peer by library_uuid first, then URL fallback
+    let peer_url = payload.peer_url.trim();
+    let found_peer = match peer::Entity::find()
+        .filter(peer::Column::LibraryUuid.eq(library_uuid.as_str()))
+        .one(db)
+        .await
+    {
+        Ok(Some(p)) => Some(p),
+        Ok(None) => {
+            if !peer_url.is_empty() {
+                peer::Entity::find()
+                    .filter(peer::Column::Url.eq(peer_url))
+                    .one(db)
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            }
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Database error: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    let peer_model = match found_peer {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::OK,
+                Json(json!({ "message": "Peer not found, already disconnected" })),
+            )
+                .into_response();
+        }
+    };
+
+    // 5. Verify HMAC - requires key_exchange_done + x25519_public_key
+    if !peer_model.key_exchange_done {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Key exchange not completed with this peer" })),
+        )
+            .into_response();
+    }
+
+    let peer_x25519_bytes = match &peer_model.x25519_public_key {
+        Some(hex_str) => match hex::decode(hex_str) {
+            Ok(b) if b.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&b);
+                arr
+            }
+            _ => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({ "error": "Invalid peer x25519 key" })),
+                )
+                    .into_response();
+            }
+        },
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Peer missing x25519_public_key" })),
+            )
+                .into_response();
+        }
+    };
+
+    let crypto_service = match state.crypto_service() {
+        Some(svc) => svc.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "Crypto service not initialized" })),
+            )
+                .into_response();
+        }
+    };
+
+    let peer_pub = x25519_dalek::PublicKey::from(peer_x25519_bytes);
+    let valid = crate::crypto::key_exchange::verify_disconnect_hmac(
+        crypto_service.identity().x25519_static_secret(),
+        &peer_pub,
+        &library_uuid,
+        &timestamp,
+        &hmac_bytes,
+    );
+
+    if !valid {
+        tracing::warn!(
+            "Disconnect HMAC verification failed for library_uuid={}",
+            library_uuid
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "HMAC verification failed" })),
+        )
+            .into_response();
+    }
+
+    // 6. Re-handshake: confirm with the sender that they really disconnected
+    let our_library_uuid = state
+        .identity_service
+        .library_uuid()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+
+    match verify_disconnect_with_peer(&peer_model.url, &our_library_uuid).await {
+        Some(false) => {
+            tracing::warn!(
+                "Re-handshake: peer {} denied disconnect (spoofed notification)",
+                peer_model.name
+            );
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "Peer denied the disconnect" })),
+            )
+                .into_response();
+        }
+        Some(true) | None => {
+            // Confirmed or unreachable (timeout) - proceed with deletion
+        }
+    }
+
+    // 7. Delete the peer
+    let peer_name = peer_model.name.clone();
+    let peer_id = peer_model.id;
+    match peer::Entity::delete_by_id(peer_id).exec(db).await {
+        Ok(_) => {
+            info!(
+                "Peer {} ({}) removed via authenticated disconnect (uuid={})",
+                peer_name, peer_id, library_uuid
+            );
+            (
+                StatusCode::OK,
+                Json(json!({ "message": "Disconnect acknowledged" })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to delete peer: {}", e) })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DisconnectNotification {
+    pub peer_url: String,
+    /// Stable library UUID - used as primary lookup for peer identification.
+    pub library_uuid: Option<String>,
+    /// RFC3339 timestamp of the disconnect event (required for HMAC verification).
+    pub timestamp: Option<String>,
+    /// Hex-encoded 32-byte HMAC (required for authentication).
+    pub hmac: Option<String>,
+}
+
+/// Request body for the re-handshake confirmation endpoint.
+#[derive(Debug, Deserialize)]
+pub struct VerifyDisconnectRequest {
+    /// The library_uuid of the peer asking for confirmation.
+    pub library_uuid: String,
+}
+
+/// Re-handshake endpoint: a peer asks us "did you really disconnect from me?"
+///
+/// Returns `confirmed: true` if we no longer have this peer in our database
+/// (meaning we did initiate a disconnect). Returns `confirmed: false` if the
+/// peer still exists (the disconnect was likely spoofed).
+pub async fn verify_disconnect(
+    State(state): State<crate::infrastructure::AppState>,
+    Json(req): Json<VerifyDisconnectRequest>,
+) -> impl IntoResponse {
+    let db = state.db();
+    let uuid = req.library_uuid.trim();
+    if uuid.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing library_uuid" })),
+        )
+            .into_response();
+    }
+
+    // If the peer is NOT in our database, we confirm the disconnect
+    let still_exists = peer::Entity::find()
+        .filter(peer::Column::LibraryUuid.eq(uuid))
+        .count(db)
+        .await
+        .unwrap_or(0)
+        > 0;
+
+    let confirmed = !still_exists;
+    (StatusCode::OK, Json(json!({ "confirmed": confirmed }))).into_response()
+}
+
+/// Ask a remote peer to confirm that they really initiated a disconnect.
+///
+/// Returns:
+/// - `Some(true)`: peer confirms (they no longer have us)
+/// - `Some(false)`: peer denies (they still have us - disconnect was spoofed)
+/// - `None`: peer unreachable (timeout, network error)
+pub(crate) async fn verify_disconnect_with_peer(
+    peer_url: &str,
+    our_library_uuid: &str,
+) -> Option<bool> {
+    if let Err(e) = validate_url(peer_url) {
+        tracing::warn!("verify_disconnect: invalid peer URL {}: {}", peer_url, e);
+        return None;
+    }
+
+    let client = get_safe_client();
+    let url = format!("{}/api/peers/verify-disconnect", peer_url);
+
+    match client
+        .post(&url)
+        .json(&json!({ "library_uuid": our_library_uuid }))
+        .send()
+        .await
+    {
+        Ok(res) if res.status().is_success() => {
+            if let Ok(body) = res.json::<serde_json::Value>().await {
+                body.get("confirmed").and_then(|v| v.as_bool())
+            } else {
+                None
+            }
+        }
+        Ok(res) => {
+            tracing::info!(
+                "verify_disconnect: peer {} returned status {}",
+                peer_url,
+                res.status()
+            );
+            None
+        }
+        Err(e) => {
+            tracing::info!("verify_disconnect: peer {} unreachable: {}", peer_url, e);
+            None
+        }
     }
 }
 
@@ -1844,6 +2379,49 @@ pub struct ProxySearchRequest {
     query: String,
 }
 
+/// Plaintext HTTP proxy: fetch books from a peer URL directly.
+async fn plaintext_proxy_search(peer_url: &str, query: &str) -> axum::response::Response {
+    let client = get_safe_client();
+    let res = if query.is_empty() {
+        let url = format!("{}/api/books", peer_url);
+        client.get(&url).send().await
+    } else {
+        let url = format!("{}/api/peers/search", peer_url);
+        client
+            .post(&url)
+            .json(&json!({ "query": query }))
+            .send()
+            .await
+    };
+
+    match res {
+        Ok(response) => {
+            if response.status().is_success() {
+                // /api/books returns {"books": [...], "total": N}
+                // /api/peers/search returns [...]
+                let body: serde_json::Value = response.json().await.unwrap_or(json!([]));
+                let books: Vec<crate::models::Book> = if let Some(arr) = body.get("books") {
+                    serde_json::from_value(arr.clone()).unwrap_or_default()
+                } else {
+                    serde_json::from_value(body).unwrap_or_default()
+                };
+                (StatusCode::OK, Json(books)).into_response()
+            } else {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": "Peer returned an error" })),
+                )
+                    .into_response()
+            }
+        }
+        Err(_) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "Failed to contact peer" })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn proxy_search(
     State(state): State<crate::infrastructure::AppState>,
     Json(payload): Json<ProxySearchRequest>,
@@ -1909,42 +2487,19 @@ pub async fn proxy_search(
         }
 
         // 2. Legacy plaintext fallback
-        let client = get_safe_client();
-        let res = if payload.query.is_empty() {
-            // Empty query = fetch all books
-            let url = format!("{}/api/books", peer.url);
-            client.get(&url).send().await
-        } else {
-            let url = format!("{}/api/peers/search", peer.url);
-            client
-                .post(&url)
-                .json(&json!({ "query": payload.query }))
-                .send()
-                .await
-        };
+        return plaintext_proxy_search(&peer.url, &payload.query).await;
+    }
 
-        match res {
-            Ok(response) => {
-                if response.status().is_success() {
-                    // /api/books returns {"books": [...], "total": N}
-                    // /api/peers/search returns [...]
-                    let body: serde_json::Value = response.json().await.unwrap_or(json!([]));
-                    let books: Vec<crate::models::Book> = if let Some(arr) = body.get("books") {
-                        serde_json::from_value(arr.clone()).unwrap_or_default()
-                    } else {
-                        serde_json::from_value(body).unwrap_or_default()
-                    };
-                    return (StatusCode::OK, Json(books)).into_response();
-                }
-            }
-            Err(_) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": "Failed to contact peer" })),
-                )
-                    .into_response();
-            }
+    // Peer not in DB but URL provided (e.g. unsaved mDNS peer): direct plaintext fetch
+    if let Some(ref url) = payload.peer_url {
+        if let Err(e) = validate_url(url) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
+            )
+                .into_response();
         }
+        return plaintext_proxy_search(url, &payload.query).await;
     }
 
     (
@@ -2582,7 +3137,7 @@ pub async fn request_book(
     };
 
     let e2ee_payload = json!({
-        "from_peer_url": crate::utils::net::get_public_url(8000),
+        "from_peer_url": state.our_public_url(),
         "from_peer_name": my_config.name,
         "book_isbn": payload.book_isbn,
         "book_title": payload.book_title,
@@ -2655,20 +3210,13 @@ pub async fn request_book_by_url(
     // Translate localhost URL to Docker service name if needed
     let docker_url = translate_url_for_docker(&payload.peer_url);
 
-    // 1. Find peer by URL
+    // 1. Find peer by URL (may be None for unsaved mDNS peers)
     let peer = match peer::Entity::find()
         .filter(peer::Column::Url.eq(&docker_url))
         .one(db)
         .await
     {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": format!("Peer not found with URL: {}", docker_url) })),
-            )
-                .into_response();
-        }
+        Ok(p) => p,
         Err(_) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2677,6 +3225,56 @@ pub async fn request_book_by_url(
                 .into_response();
         }
     };
+
+    // Unsaved mDNS peer: skip outgoing request tracking, send plaintext directly
+    if peer.is_none() {
+        if let Err(e) = validate_url(&docker_url) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
+            )
+                .into_response();
+        }
+
+        let my_config = match crate::models::library_config::Entity::find().one(db).await {
+            Ok(Some(config)) => config,
+            _ => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "Library config not found" })),
+                )
+                    .into_response();
+            }
+        };
+
+        let request_payload = json!({
+            "from_peer_url": state.our_public_url(),
+            "from_peer_name": my_config.name,
+            "book_isbn": payload.book_isbn,
+            "book_title": payload.book_title,
+            "requester_request_id": uuid::Uuid::new_v4().to_string()
+        });
+
+        let client = get_safe_client();
+        let url = format!("{}/api/peers/request", docker_url);
+        return match client.post(&url).json(&request_payload).send().await {
+            Ok(response) if response.status().is_success() => {
+                (StatusCode::OK, Json(json!({ "message": "Request sent" }))).into_response()
+            }
+            Ok(_) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "Peer rejected request" })),
+            )
+                .into_response(),
+            Err(_) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "Failed to contact peer" })),
+            )
+                .into_response(),
+        };
+    }
+
+    let peer = peer.unwrap();
 
     // 2. Save Outgoing Request
     let outgoing_id = uuid::Uuid::new_v4().to_string();
@@ -2724,7 +3322,7 @@ pub async fn request_book_by_url(
     };
 
     let e2ee_payload = json!({
-        "from_peer_url": crate::utils::net::get_public_url(8000),
+        "from_peer_url": state.our_public_url(),
         "from_peer_name": my_config.name,
         "book_isbn": payload.book_isbn,
         "book_title": payload.book_title,
@@ -2745,13 +3343,10 @@ pub async fn request_book_by_url(
         }
         Err(e) => {
             // E2EE transport error - both direct and relay failed.
-            // Do NOT fall back to plaintext to avoid duplicate requests.
-            tracing::warn!("E2EE loan_request error (no plaintext fallback): {e}");
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": "Failed to deliver request to peer" })),
-            )
-                .into_response();
+            // Fall through to plaintext: if E2EE could not deliver at all
+            // (peer unreachable or decryption failed on their side),
+            // there is no duplicate risk.
+            tracing::warn!("E2EE loan_request error, falling back to plaintext: {e}");
         }
     }
 
@@ -4509,4 +5104,60 @@ pub async fn cache_books_by_id(
         Json(json!({ "count": count, "peer_id": peer_id })),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Update peer display name
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct UpdatePeerDisplayNameRequest {
+    pub display_name: String,
+}
+
+/// Update a peer's user-defined display name.
+pub async fn update_peer_display_name(
+    State(db): State<DatabaseConnection>,
+    Path(peer_id): Path<i32>,
+    Json(payload): Json<UpdatePeerDisplayNameRequest>,
+) -> impl IntoResponse {
+    let peer_opt = match peer::Entity::find_by_id(peer_id).one(&db).await {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Database error: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    let peer_model = match peer_opt {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "Peer not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    let display_name = payload.display_name.trim().to_string();
+    let mut active: peer::ActiveModel = peer_model.into();
+    active.display_name = Set(if display_name.is_empty() {
+        None
+    } else {
+        Some(display_name)
+    });
+    active.updated_at = Set(Utc::now().to_rfc3339());
+
+    match active.update(&db).await {
+        Ok(updated) => (StatusCode::OK, Json(json!({ "peer": updated }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to update display name: {}", e) })),
+        )
+            .into_response(),
+    }
 }

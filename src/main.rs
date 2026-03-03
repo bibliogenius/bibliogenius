@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use sea_orm::EntityTrait;
+
 use rust_lib_app::{api, config, db, seed};
 
 /// Find an available port starting from the preferred port
@@ -195,10 +197,16 @@ async fn main() {
     // Initialize mDNS for local network discovery (if enabled)
     let mdns_enabled = std::env::var("MDNS_ENABLED")
         .map(|v| v != "false" && v != "0")
-        .unwrap_or(true); // Enabled by default
+        .unwrap_or(false); // Disabled by default (opt-in)
 
     if mdns_enabled {
-        let library_name = "BiblioGenius Library".to_string();
+        let library_name = rust_lib_app::models::library_config::Entity::find_by_id(1)
+            .one(state.db())
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.name)
+            .unwrap_or_else(|| "BiblioGenius Library".to_string());
 
         match rust_lib_app::services::init_mdns(&library_name, port, None, None, None) {
             Ok(()) => {
@@ -223,7 +231,10 @@ async fn main() {
         .await
         .expect("Failed to bind to address");
 
-    axum::serve(listener, app)
-        .await
-        .expect("Failed to start server");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("Failed to start server");
 }

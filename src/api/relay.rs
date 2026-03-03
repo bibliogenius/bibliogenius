@@ -483,7 +483,7 @@ pub async fn relay_status(
     let mut poll_error: Option<String> = None;
     if has_crypto {
         let crypto_service = state.crypto_service().unwrap().clone();
-        let relay = crate::services::relay_transport::RelayTransport::new(crypto_service);
+        let relay = crate::services::relay_transport::RelayTransport::new(Some(crypto_service));
         match relay
             .poll(&config.relay_url, &config.mailbox_uuid, &config.read_token)
             .await

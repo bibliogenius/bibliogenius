@@ -30,6 +30,7 @@ pub mod search;
 pub mod setup;
 pub mod tag;
 pub mod user;
+pub mod view_counter;
 
 #[cfg(feature = "mcp")]
 pub mod mcp;
@@ -42,9 +43,22 @@ use sea_orm::DatabaseConnection;
 
 use crate::infrastructure::AppState;
 
-/// Create API router with a pre-built AppState (returns Router with state applied)
+/// Create API router with a pre-built AppState (returns Router with state applied).
+/// Layers the view counter middleware to track peer library consultations.
 pub fn api_router_with_state(state: AppState) -> Router {
-    build_routes().with_state(state)
+    let tracker = view_counter::ViewCooldownTracker::new();
+    let db_for_views = state.db().clone();
+
+    build_routes()
+        .with_state(state)
+        // Layer order matters: outermost layer runs first.
+        // 1. Extension layers add data to request extensions
+        // 2. Middleware reads from extensions and counts views
+        .layer(axum::middleware::from_fn(
+            view_counter::view_counter_middleware,
+        ))
+        .layer(axum::Extension(tracker))
+        .layer(axum::Extension(db_for_views))
 }
 
 /// Create API router from DatabaseConnection (convenience wrapper)
@@ -137,6 +151,15 @@ fn build_routes() -> Router<AppState> {
         .route("/peers/:id", axum::routing::delete(peer::delete_peer)) // Delete peer
         .route("/peers/:id/status", put(peer::update_peer_status)) // Accept/reject peer
         .route("/peers/:id/url", put(peer::update_peer_url)) // Update peer URL (mDNS IP changes)
+        .route(
+            "/peers/:id/display-name",
+            axum::routing::patch(peer::update_peer_display_name),
+        )
+        .route(
+            "/peers/notify-disconnect",
+            post(peer::receive_disconnect_notification),
+        )
+        .route("/peers/verify-disconnect", post(peer::verify_disconnect))
         .route("/peers/connect", post(peer::connect))
         .route(
             "/peers/auto_approve_all",
@@ -276,7 +299,10 @@ fn build_routes() -> Router<AppState> {
         .merge(crate::modules::operation_log_viewer::routes())
         // Peer relay setup
         .route("/peers/relay/setup", post(peer::setup_relay))
-        .route("/peers/relay/config", get(peer::get_relay_config_endpoint))
+        .route(
+            "/peers/relay/config",
+            get(peer::get_relay_config_endpoint).delete(peer::delete_relay_config_endpoint),
+        )
         // Peer relay library sync (ADR-012)
         .route(
             "/peers/relay/library_request",
@@ -300,6 +326,8 @@ fn build_routes() -> Router<AppState> {
         )
         // E2EE encrypted peer messages
         .route("/e2ee/message", post(e2ee::receive_encrypted_message))
+        // View stats
+        .route("/stats/views", get(view_counter::get_view_stats_handler))
         // Export/Import
         .route("/export", get(export::export_data))
         .route("/import", post(export::import_data))

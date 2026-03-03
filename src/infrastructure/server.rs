@@ -87,7 +87,12 @@ pub async fn start_server(db: DatabaseConnection, preferred_port: u16) -> Result
 
     // Spawn server on background task (won't block FFI)
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
+        if let Err(e) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        {
             tracing::error!("HTTP server error: {}", e);
         }
         SERVER_RUNNING.store(false, Ordering::SeqCst);

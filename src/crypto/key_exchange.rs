@@ -72,6 +72,55 @@ pub fn verify_sender_hint(
     constant_time_eq(&computed, received_hint)
 }
 
+/// Compute a full 32-byte HMAC for disconnect authentication.
+///
+/// Uses the static DH shared secret between two peers with the label "disconnect:"
+/// (domain-separated from "sender-hint"). Includes library_uuid and timestamp
+/// to bind the HMAC to a specific disconnect event.
+///
+/// The DH is commutative: Alice(secret) x Bob(public) = Bob(secret) x Alice(public),
+/// so either side can compute and verify.
+pub fn compute_disconnect_hmac(
+    my_static_secret: &StaticSecret,
+    peer_static_public: &X25519PublicKey,
+    library_uuid: &str,
+    timestamp: &str,
+) -> [u8; 32] {
+    let static_shared = my_static_secret.diffie_hellman(peer_static_public);
+
+    let mut mac =
+        HmacSha256::new_from_slice(static_shared.as_bytes()).expect("HMAC accepts any key size");
+    mac.update(b"disconnect:");
+    mac.update(library_uuid.as_bytes());
+    mac.update(b":");
+    mac.update(timestamp.as_bytes());
+    let result = mac.finalize().into_bytes();
+
+    let mut hmac_bytes = [0u8; 32];
+    hmac_bytes.copy_from_slice(&result);
+    hmac_bytes
+}
+
+/// Verify a received disconnect HMAC against the expected value.
+///
+/// Recomputes the HMAC using the local static secret and the peer's public key,
+/// then compares in constant time.
+pub fn verify_disconnect_hmac(
+    my_static_secret: &StaticSecret,
+    peer_static_public: &X25519PublicKey,
+    library_uuid: &str,
+    timestamp: &str,
+    received: &[u8; 32],
+) -> bool {
+    let computed = compute_disconnect_hmac(
+        my_static_secret,
+        peer_static_public,
+        library_uuid,
+        timestamp,
+    );
+    constant_time_eq(&computed, received)
+}
+
 /// Constant-time byte comparison.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -160,5 +209,75 @@ mod tests {
         assert!(constant_time_eq(b"abcdefgh", b"abcdefgh"));
         assert!(!constant_time_eq(b"abcdefgh", b"abcdefgX"));
         assert!(!constant_time_eq(b"short", b"longer__"));
+    }
+
+    #[test]
+    fn disconnect_hmac_roundtrip() {
+        let alice_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let alice_public = X25519PublicKey::from(&alice_secret);
+
+        let bob_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let bob_public = X25519PublicKey::from(&bob_secret);
+
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let timestamp = "2026-03-03T12:00:00Z";
+
+        // Alice computes HMAC for Bob
+        let hmac = compute_disconnect_hmac(&alice_secret, &bob_public, uuid, timestamp);
+
+        // Bob verifies (commutative DH)
+        assert!(verify_disconnect_hmac(
+            &bob_secret,
+            &alice_public,
+            uuid,
+            timestamp,
+            &hmac
+        ));
+    }
+
+    #[test]
+    fn disconnect_hmac_rejects_wrong_uuid() {
+        let alice_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let bob_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let bob_public = X25519PublicKey::from(&bob_secret);
+        let alice_public = X25519PublicKey::from(&alice_secret);
+
+        let timestamp = "2026-03-03T12:00:00Z";
+
+        let hmac = compute_disconnect_hmac(&alice_secret, &bob_public, "original-uuid", timestamp);
+
+        // Tampered uuid must fail
+        assert!(!verify_disconnect_hmac(
+            &bob_secret,
+            &alice_public,
+            "tampered-uuid",
+            timestamp,
+            &hmac
+        ));
+    }
+
+    #[test]
+    fn disconnect_hmac_rejects_wrong_peer() {
+        let alice_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let bob_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let bob_public = X25519PublicKey::from(&bob_secret);
+
+        let eve_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let eve_public = X25519PublicKey::from(&eve_secret);
+
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let timestamp = "2026-03-03T12:00:00Z";
+
+        // Alice computes HMAC for Bob
+        let hmac = compute_disconnect_hmac(&alice_secret, &bob_public, uuid, timestamp);
+
+        // Eve cannot verify (different shared secret)
+        assert!(!verify_disconnect_hmac(
+            &eve_secret,
+            &eve_public,
+            uuid,
+            timestamp,
+            &hmac
+        ));
     }
 }

@@ -92,6 +92,7 @@ pub async fn receive_encrypted_message(
     );
 
     // 5. Dispatch by message_type
+    let our_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
     dispatch_clear_message(
         db,
         &crypto_service,
@@ -99,6 +100,7 @@ pub async fn receive_encrypted_message(
         &known_peers,
         peer_index,
         sender_peer,
+        our_uuid.as_deref(),
     )
     .await
 }
@@ -145,6 +147,7 @@ pub async fn dispatch_clear_message(
     known_peers: &[PeerInfo],
     peer_index: usize,
     sender_peer: &peer::Model,
+    our_library_uuid: Option<&str>,
 ) -> axum::response::Response {
     match clear_message.message_type.as_str() {
         "loan_request" => handle_loan_request(db, sender_peer, clear_message).await,
@@ -184,6 +187,8 @@ pub async fn dispatch_clear_message(
         }
 
         "device_sync_push" => handle_device_sync_push(db, clear_message).await,
+
+        "peer_disconnect" => handle_peer_disconnect(db, sender_peer, our_library_uuid).await,
 
         // ── Library sync via relay (ADR-012) ─────────────────────────
         "library_manifest_request" => {
@@ -710,6 +715,70 @@ async fn handle_status_update(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+// ── Peer disconnect handler ────────────────────────────────────────────
+
+/// Handle a disconnect notification from a remote peer (E2EE path).
+///
+/// The E2EE envelope already authenticates the sender. As an additional defense,
+/// we perform a re-handshake to confirm the sender really initiated the disconnect.
+/// For relay-only peers the re-handshake will timeout, which is acceptable since
+/// E2EE authentication is already sufficient.
+async fn handle_peer_disconnect(
+    db: &DatabaseConnection,
+    sender_peer: &peer::Model,
+    our_library_uuid: Option<&str>,
+) -> axum::response::Response {
+    let peer_name = sender_peer.name.clone();
+    let peer_id = sender_peer.id;
+
+    // Re-handshake: confirm with the sender
+    if let Some(uuid) = our_library_uuid {
+        match crate::api::peer::verify_disconnect_with_peer(&sender_peer.url, uuid).await {
+            Some(false) => {
+                tracing::warn!(
+                    "E2EE: Re-handshake failed - peer {} denied disconnect",
+                    peer_name
+                );
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "Peer denied the disconnect" })),
+                )
+                    .into_response();
+            }
+            Some(true) | None => {
+                // Confirmed or unreachable (relay-only peer) - proceed
+            }
+        }
+    }
+
+    match peer::Entity::delete_by_id(peer_id).exec(db).await {
+        Ok(_) => {
+            tracing::info!(
+                "E2EE: Peer {} ({}) removed via disconnect notification",
+                peer_name,
+                peer_id
+            );
+            (
+                StatusCode::OK,
+                Json(json!({ "message": "Disconnect acknowledged" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(
+                "E2EE: Failed to delete peer {} after disconnect notification: {}",
+                peer_id,
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Failed to remove peer: {}", e) })),
+            )
+                .into_response()
+        }
     }
 }
 

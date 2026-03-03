@@ -30,6 +30,8 @@ type PendingRelayRequests =
 pub struct AppState {
     /// Database connection (for backward compatibility)
     db: DatabaseConnection,
+    /// Actual HTTP server port (may differ from 8000 if occupied)
+    server_port: Arc<std::sync::atomic::AtomicU16>,
     /// Book repository
     pub book_repo: Arc<dyn BookRepository>,
     /// Author repository
@@ -88,6 +90,7 @@ impl AppState {
 
         Self {
             db,
+            server_port: Arc::new(std::sync::atomic::AtomicU16::new(8000)),
             book_repo,
             author_repo,
             copy_repo,
@@ -153,6 +156,22 @@ impl AppState {
     /// Clean up a pending relay request (e.g. on timeout).
     pub fn cancel_relay_request(&self, correlation_id: &str) {
         self.pending_relay_requests.remove(correlation_id);
+    }
+
+    /// Get the actual HTTP server port.
+    pub fn server_port(&self) -> u16 {
+        self.server_port.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Set the actual HTTP server port (called after binding).
+    pub fn set_server_port(&self, port: u16) {
+        self.server_port
+            .store(port, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Get our public URL using the actual server port.
+    pub fn our_public_url(&self) -> String {
+        crate::utils::net::get_public_url(self.server_port())
     }
 
     /// Get the database connection (for backward compatibility during migration)
