@@ -1425,7 +1425,7 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                 tokio::spawn(async move {
                     crate::services::relay_poller::start_relay_polling(
                         poller_state,
-                        std::time::Duration::from_secs(60),
+                        std::time::Duration::from_secs(20),
                     )
                     .await;
                 });
@@ -2671,7 +2671,8 @@ pub async fn device_sync_reject_all() -> Result<u32, String> {
 // =============================================================================
 
 use crate::services::hub_directory_service::{
-    CatalogEntry, DirectoryConfig, HubDirectoryService, HubFollow, HubProfile, RegisterParams,
+    CatalogEntry, DirectoryConfig, HubBorrowRequest, HubDirectoryService, HubFollow, HubProfile,
+    RegisterParams,
 };
 
 static HUB_DIRECTORY_SVC: OnceLock<HubDirectoryService> = OnceLock::new();
@@ -2694,6 +2695,7 @@ pub struct FrbDirectoryConfig {
     pub is_listed: bool,
     pub requires_approval: bool,
     pub accept_from: String,
+    pub allow_borrowing: bool,
 }
 
 impl From<DirectoryConfig> for FrbDirectoryConfig {
@@ -2703,6 +2705,7 @@ impl From<DirectoryConfig> for FrbDirectoryConfig {
             is_listed: c.is_listed,
             requires_approval: c.requires_approval,
             accept_from: c.accept_from,
+            allow_borrowing: c.allow_borrowing,
         }
     }
 }
@@ -2715,7 +2718,10 @@ pub struct FrbHubProfile {
     pub book_count: i32,
     pub location_country: Option<String>,
     pub requires_approval: bool,
+    pub allow_borrowing: Option<bool>,
     pub last_seen_at: Option<String>,
+    pub x25519_public_key: Option<String>,
+    pub website: Option<String>,
 }
 
 impl From<HubProfile> for FrbHubProfile {
@@ -2727,7 +2733,10 @@ impl From<HubProfile> for FrbHubProfile {
             book_count: p.book_count,
             location_country: p.location_country,
             requires_approval: p.requires_approval,
+            allow_borrowing: p.allow_borrowing,
             last_seen_at: p.last_seen_at,
+            x25519_public_key: p.x25519_public_key,
+            website: p.website,
         }
     }
 }
@@ -2742,6 +2751,9 @@ pub struct FrbRegisterParams {
     pub accept_from: String,
     pub description: Option<String>,
     pub location_country: Option<String>,
+    pub allow_borrowing: bool,
+    pub x25519_public_key: Option<String>,
+    pub website: Option<String>,
 }
 
 impl From<FrbRegisterParams> for RegisterParams {
@@ -2755,6 +2767,9 @@ impl From<FrbRegisterParams> for RegisterParams {
             accept_from: p.accept_from,
             description: p.description,
             location_country: p.location_country,
+            allow_borrowing: p.allow_borrowing,
+            x25519_public_key: p.x25519_public_key,
+            website: p.website,
         }
     }
 }
@@ -2768,6 +2783,8 @@ pub struct FrbHubFollow {
     pub created_at: String,
     pub resolved_at: Option<String>,
     pub follower_display_name: Option<String>,
+    pub encrypted_contact: Option<String>,
+    pub follower_x25519_public_key: Option<String>,
 }
 
 impl From<HubFollow> for FrbHubFollow {
@@ -2780,6 +2797,8 @@ impl From<HubFollow> for FrbHubFollow {
             created_at: f.created_at,
             resolved_at: f.resolved_at,
             follower_display_name: f.follower_display_name,
+            encrypted_contact: f.encrypted_contact,
+            follower_x25519_public_key: f.follower_x25519_public_key,
         }
     }
 }
@@ -2797,6 +2816,37 @@ impl From<CatalogEntry> for FrbCatalogEntry {
             isbn: e.isbn,
             title: e.title,
             author: e.author,
+        }
+    }
+}
+
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbHubBorrowRequest {
+    pub id: i64,
+    pub requester_node_id: String,
+    pub lender_node_id: String,
+    pub isbn: String,
+    pub book_title: String,
+    pub status: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+    pub requester_display_name: Option<String>,
+    pub lender_display_name: Option<String>,
+}
+
+impl From<HubBorrowRequest> for FrbHubBorrowRequest {
+    fn from(r: HubBorrowRequest) -> Self {
+        Self {
+            id: r.id,
+            requester_node_id: r.requester_node_id,
+            lender_node_id: r.lender_node_id,
+            isbn: r.isbn,
+            book_title: r.book_title,
+            status: r.status,
+            created_at: r.created_at,
+            resolved_at: r.resolved_at,
+            requester_display_name: r.requester_display_name,
+            lender_display_name: r.lender_display_name,
         }
     }
 }
@@ -2913,9 +2963,10 @@ pub async fn hub_directory_list(
     limit: i64,
     offset: i64,
     country: Option<String>,
+    search: Option<String>,
 ) -> Result<Vec<FrbHubProfile>, String> {
     hub_directory_svc()
-        .list_directory(limit, offset, country.as_deref())
+        .list_directory(limit, offset, country.as_deref(), search.as_deref())
         .await
         .map(|v| v.into_iter().map(FrbHubProfile::from).collect())
         .map_err(|e| e.to_string())
@@ -2944,8 +2995,28 @@ pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalog
 /// Sends a follow request to a library.
 pub async fn hub_directory_follow(node_id: String) -> Result<FrbHubFollow, String> {
     let db = hub_db()?;
+
+    // Send local X25519 public key so the followed library can encrypt contact for us
+    let x25519_key: Option<String> = {
+        use sea_orm::ConnectionTrait;
+        let row = db
+            .query_one(sea_orm::Statement::from_string(
+                db.get_database_backend(),
+                "SELECT public_key FROM crypto_keys WHERE key_type = 'x25519' LIMIT 1".to_owned(),
+            ))
+            .await
+            .ok()
+            .flatten();
+        row.map(|r| {
+            let bytes: Vec<u8> =
+                sea_orm::TryGetable::try_get(&r, "", "public_key").unwrap_or_default();
+            hex::encode(bytes)
+        })
+        .filter(|s| !s.is_empty())
+    };
+
     hub_directory_svc()
-        .follow(db, &node_id)
+        .follow(db, &node_id, x25519_key.as_deref())
         .await
         .map(FrbHubFollow::from)
         .map_err(|e| e.to_string())
@@ -2962,13 +3033,15 @@ pub async fn hub_directory_pending_requests() -> Result<Vec<FrbHubFollow>, Strin
 }
 
 /// Resolves a pending follow request. resolution: "approve" | "reject" | "block"
+/// When approving, encrypted_contact is an optional sealed blob of the owner's contact info.
 pub async fn hub_directory_resolve_follow(
     follow_id: i64,
     resolution: String,
+    encrypted_contact: Option<String>,
 ) -> Result<FrbHubFollow, String> {
     let db = hub_db()?;
     hub_directory_svc()
-        .resolve_follow(db, follow_id, &resolution)
+        .resolve_follow(db, follow_id, &resolution, encrypted_contact.as_deref())
         .await
         .map(FrbHubFollow::from)
         .map_err(|e| e.to_string())
@@ -3001,6 +3074,128 @@ pub async fn hub_directory_unfollow(node_id: String) -> Result<(), String> {
         .unfollow(db, &node_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Hub Borrow Requests FFI (ADR-018)
+// ---------------------------------------------------------------------------
+
+/// Creates a hub-mediated borrow request for a book from a followed library.
+pub async fn hub_directory_create_borrow_request(
+    lender_node_id: String,
+    isbn: String,
+    book_title: String,
+) -> Result<FrbHubBorrowRequest, String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .create_borrow_request(db, &lender_node_id, &isbn, &book_title)
+        .await
+        .map(FrbHubBorrowRequest::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Fetches incoming borrow requests (pending) for the local library as lender.
+pub async fn hub_directory_incoming_borrow_requests() -> Result<Vec<FrbHubBorrowRequest>, String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .incoming_borrow_requests(db)
+        .await
+        .map(|v| v.into_iter().map(FrbHubBorrowRequest::from).collect())
+        .map_err(|e| e.to_string())
+}
+
+/// Fetches outgoing borrow requests sent by the local library as requester.
+pub async fn hub_directory_outgoing_borrow_requests() -> Result<Vec<FrbHubBorrowRequest>, String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .outgoing_borrow_requests(db)
+        .await
+        .map(|v| v.into_iter().map(FrbHubBorrowRequest::from).collect())
+        .map_err(|e| e.to_string())
+}
+
+/// Resolves a borrow request. resolution: "accept" | "reject"
+pub async fn hub_directory_resolve_borrow_request(
+    request_id: i64,
+    resolution: String,
+) -> Result<FrbHubBorrowRequest, String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .resolve_borrow_request(db, request_id, &resolution)
+        .await
+        .map(FrbHubBorrowRequest::from)
+        .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// E2EE Sealed Blob FFI
+// ---------------------------------------------------------------------------
+
+/// Encrypts plaintext for a recipient identified by their X25519 public key (hex-encoded).
+/// Returns a base64-encoded sealed blob suitable for hub storage.
+pub fn seal_blob(recipient_x25519_hex: String, plaintext: String) -> Result<String, String> {
+    let key_bytes =
+        hex::decode(&recipient_x25519_hex).map_err(|e| format!("Invalid hex key: {e}"))?;
+    let key: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| "X25519 key must be 32 bytes (64 hex chars)".to_string())?;
+    crate::crypto::sealed_blob::seal(&key, plaintext.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Decrypts a base64-encoded sealed blob using the local node identity's X25519 secret key.
+/// Returns the plaintext string.
+pub async fn open_blob(sealed_base64: String) -> Result<String, String> {
+    let svc = IDENTITY_SERVICE
+        .get()
+        .ok_or("Identity not initialized - call init_identity_ffi first")?;
+    let identity = svc.identity()?;
+    let static_secret = identity.x25519_static_secret();
+
+    let plaintext_bytes = crate::crypto::sealed_blob::open(static_secret, &sealed_base64)
+        .map_err(|e| e.to_string())?;
+
+    String::from_utf8(plaintext_bytes).map_err(|e| format!("UTF-8 decode: {e}"))
+}
+
+/// Batch-updates encrypted contact blobs for all active followers.
+/// contacts: list of (follow_id, encrypted_contact_base64) pairs.
+pub async fn hub_directory_sync_contacts(
+    follow_ids: Vec<i64>,
+    encrypted_contacts: Vec<String>,
+) -> Result<i32, String> {
+    if follow_ids.len() != encrypted_contacts.len() {
+        return Err("follow_ids and encrypted_contacts must have the same length".to_string());
+    }
+    let db = hub_db()?;
+    let pairs: Vec<(i64, String)> = follow_ids.into_iter().zip(encrypted_contacts).collect();
+    hub_directory_svc()
+        .sync_follow_contacts(db, &pairs)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Returns the local X25519 public key as hex string, or None if no identity exists.
+pub async fn get_local_x25519_public_key() -> Result<Option<String>, String> {
+    use sea_orm::ConnectionTrait;
+    let db = hub_db()?;
+    let backend = db.get_database_backend();
+    let row = db
+        .query_one(sea_orm::Statement::from_string(
+            backend,
+            "SELECT public_key FROM crypto_keys WHERE key_type = 'x25519' LIMIT 1".to_owned(),
+        ))
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    match row {
+        Some(r) => {
+            let bytes: Vec<u8> = r
+                .try_get("", "public_key")
+                .map_err(|e| format!("Failed to read public_key: {e}"))?;
+            Ok(Some(hex::encode(bytes)))
+        }
+        None => Ok(None),
+    }
 }
 
 // ---------------------------------------------------------------------------

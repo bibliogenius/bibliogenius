@@ -2584,6 +2584,28 @@ pub async fn sync_peer(
         .map(|c| c.library_name.clone())
         .unwrap_or_else(|| peer.name.clone());
 
+    // Backfill library_uuid if the local peer record is missing it.
+    // Validates UUID format to prevent a malicious peer from injecting arbitrary strings.
+    if peer.library_uuid.is_none()
+        && let Some(remote_uuid) = peer_config.as_ref().and_then(|c| c.library_uuid.clone())
+    {
+        if uuid::Uuid::parse_str(&remote_uuid).is_ok() {
+            let mut active: peer::ActiveModel = peer.clone().into();
+            active.library_uuid = Set(Some(remote_uuid.clone()));
+            if let Err(e) = active.update(&db).await {
+                tracing::warn!(
+                    "Failed to backfill library_uuid for peer {}: {}",
+                    peer_id,
+                    e
+                );
+            } else {
+                tracing::info!("Backfilled library_uuid for peer {}", peer_id);
+            }
+        } else {
+            tracing::warn!("Peer {} sent invalid library_uuid, ignoring", peer_id);
+        }
+    }
+
     let url = format!("{}/api/books", peer.url);
 
     let res = client.get(&url).send().await;

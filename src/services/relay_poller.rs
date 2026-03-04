@@ -3,12 +3,82 @@
 //! See SECURITY_GUIDELINES.md §B10 for polling jitter requirements.
 //! ADR-012: Added reply-to deposit logic and correlation matching for relay request-response.
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
 
+use tokio::sync::RwLock;
+
 use crate::api::e2ee::{build_known_peers, dispatch_clear_message};
+
+/// Cooldown tracker for relay-based peer views (keyed by peer ID).
+/// 15-minute cooldown per peer, same as the HTTP middleware.
+static RELAY_VIEW_COOLDOWN: std::sync::LazyLock<RwLock<HashMap<i32, Instant>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Count a relay-based library view from a peer, with 15-min cooldown per peer ID.
+async fn count_relay_view(db: &sea_orm::DatabaseConnection, peer_id: i32) {
+    tracing::debug!("View counter: counting relay view for peer {peer_id}");
+    let cooldown = Duration::from_secs(900);
+    let now = Instant::now();
+
+    // Fast path: read-only check
+    {
+        let map = RELAY_VIEW_COOLDOWN.read().await;
+        if let Some(&last) = map.get(&peer_id)
+            && now.duration_since(last) < cooldown
+        {
+            tracing::debug!("View counter: peer {peer_id} in cooldown, skipping");
+            return;
+        }
+    }
+
+    // Slow path: write lock
+    let mut map = RELAY_VIEW_COOLDOWN.write().await;
+    if let Some(&last) = map.get(&peer_id)
+        && now.duration_since(last) < cooldown
+    {
+        return;
+    }
+    map.insert(peer_id, now);
+    if map.len() > 100 {
+        map.retain(|_, last| now.duration_since(*last) < cooldown);
+    }
+    drop(map);
+
+    tracing::debug!("View counter: recording peer view in DB");
+    crate::api::view_counter::record_peer_view(db).await;
+}
+
+/// Fetch follower view count from the hub and sync it to local SQLite.
+/// Called periodically (~every 30 min) from the polling loop.
+async fn sync_follower_views(db: &sea_orm::DatabaseConnection) {
+    use crate::services::hub_directory_service::HubDirectoryService;
+
+    // 1. Get our hub directory config (contains our node_id)
+    let config = match HubDirectoryService::get_config(db).await {
+        Ok(Some(c)) => c,
+        _ => return, // Not registered on hub, nothing to sync
+    };
+
+    // 2. Fetch our own profile from the hub (includes view_count)
+    let svc = HubDirectoryService::new();
+    match svc.get_profile(&config.node_id).await {
+        Ok(profile) => {
+            if let Some(count) = profile.view_count
+                && let Err(e) = crate::api::view_counter::record_follower_views(db, count).await
+            {
+                tracing::warn!("Failed to record follower views: {e}");
+            }
+        }
+        Err(e) => {
+            tracing::debug!("Follower views sync skipped: {e:?}");
+        }
+    }
+}
+
 use crate::api::relay::get_my_relay_config;
 use crate::crypto::envelope::ClearMessage;
 use crate::infrastructure::AppState;
@@ -31,6 +101,8 @@ pub async fn start_relay_polling(state: AppState, interval: Duration) {
         tracing::warn!("Relay poller: {e}");
     }
 
+    let mut poll_count: u32 = 0;
+
     loop {
         // Jitter: 0-10 seconds (B10: prevent timing correlation)
         let jitter_ms = rand::thread_rng().gen_range(0..10_000);
@@ -38,6 +110,12 @@ pub async fn start_relay_polling(state: AppState, interval: Duration) {
 
         if let Err(e) = poll_once(&state).await {
             tracing::warn!("Relay poller: {e}");
+        }
+
+        // Sync follower views from hub every ~30 polls (~30 min at 60s interval)
+        poll_count += 1;
+        if poll_count.is_multiple_of(30) {
+            sync_follower_views(state.db()).await;
         }
     }
 }
@@ -375,6 +453,14 @@ async fn handle_relay_request_response(
             return Ok(());
         }
     };
+
+    // Count relay-based library views (browsing/search) with per-peer cooldown
+    if matches!(
+        clear_message.message_type.as_str(),
+        "library_manifest_request" | "library_page_request" | "library_search_request"
+    ) {
+        count_relay_view(db, sender_peer.id).await;
+    }
 
     // Build response ClearMessage with correlation_id from the original request
     let response_msg = ClearMessage {

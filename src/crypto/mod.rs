@@ -12,3 +12,4 @@ pub mod envelope;
 pub mod errors;
 pub mod identity;
 pub mod key_exchange;
+pub mod sealed_blob;

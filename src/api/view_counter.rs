@@ -122,7 +122,7 @@ pub async fn view_counter_middleware(request: Request<Body>, next: Next) -> Resp
 }
 
 /// Upsert a peer view count for today.
-async fn record_peer_view(db: &DatabaseConnection) {
+pub async fn record_peer_view(db: &DatabaseConnection) {
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let sql = r#"INSERT INTO library_view_stats (date, source, count)
                  VALUES (?1, 'peer', 1)

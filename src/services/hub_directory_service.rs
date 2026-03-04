@@ -7,11 +7,16 @@
 //!   - Browsing the hub directory
 //!   - Managing follow relationships (send, approve, reject, unfollow)
 //!   - Retrieving followed libraries' catalogs
+//!   - Hub-mediated borrow requests (ADR-018)
 //!   - Persisting local directory settings (node_id, write_token, visibility)
 
 use reqwest::Client;
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
+
+fn default_true() -> Option<bool> {
+    Some(true)
+}
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -64,9 +69,21 @@ pub struct HubProfile {
     pub book_count: i32,
     pub location_country: Option<String>,
     pub requires_approval: bool,
+    /// Whether this library accepts borrow requests from followers.
+    #[serde(default = "default_true")]
+    pub allow_borrowing: Option<bool>,
     pub last_seen_at: Option<String>,
-    /// Returned once on first registration — must be stored locally.
+    /// Returned once on first registration - must be stored locally.
     pub write_token: Option<String>,
+    /// Total catalog views from followers (incremented by hub with cooldown).
+    #[serde(default)]
+    pub view_count: Option<i64>,
+    /// X25519 public key (hex-encoded, 64 chars) for E2EE contact encryption.
+    #[serde(default)]
+    pub x25519_public_key: Option<String>,
+    /// Public website URL (visible to all directory visitors).
+    #[serde(default)]
+    pub website: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -80,6 +97,12 @@ pub struct HubFollow {
     /// Display name of the follower (enriched by the hub for pending requests).
     #[serde(default)]
     pub follower_display_name: Option<String>,
+    /// E2EE sealed blob: followed library's contact info, encrypted for this follower.
+    #[serde(default)]
+    pub encrypted_contact: Option<String>,
+    /// X25519 public key of the follower (returned in pending/followers lists for encryption).
+    #[serde(default)]
+    pub follower_x25519_public_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -101,6 +124,23 @@ pub struct CatalogEntry {
     pub author: Option<String>,
 }
 
+/// A hub-mediated borrow request (ADR-018).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct HubBorrowRequest {
+    pub id: i64,
+    pub requester_node_id: String,
+    pub lender_node_id: String,
+    pub isbn: String,
+    pub book_title: String,
+    pub status: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+    #[serde(default)]
+    pub requester_display_name: Option<String>,
+    #[serde(default)]
+    pub lender_display_name: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Register / update params
 // ---------------------------------------------------------------------------
@@ -115,6 +155,9 @@ pub struct RegisterParams {
     pub accept_from: String,
     pub description: Option<String>,
     pub location_country: Option<String>,
+    pub allow_borrowing: bool,
+    pub x25519_public_key: Option<String>,
+    pub website: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +171,7 @@ pub struct DirectoryConfig {
     pub is_listed: bool,
     pub requires_approval: bool,
     pub accept_from: String,
+    pub allow_borrowing: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -172,7 +216,7 @@ impl HubDirectoryService {
         let result = db
             .query_one(Statement::from_string(
                 backend,
-                "SELECT node_id, write_token, is_listed, requires_approval, accept_from
+                "SELECT node_id, write_token, is_listed, requires_approval, accept_from, allow_borrowing
                  FROM hub_directory_config WHERE id = 1"
                     .to_owned(),
             ))
@@ -188,6 +232,7 @@ impl HubDirectoryService {
             is_listed: row.try_get::<i32>("", "is_listed")? != 0,
             requires_approval: row.try_get::<i32>("", "requires_approval")? != 0,
             accept_from: row.try_get("", "accept_from")?,
+            allow_borrowing: row.try_get::<i32>("", "allow_borrowing").unwrap_or(1) != 0,
         }))
     }
 
@@ -201,20 +246,22 @@ impl HubDirectoryService {
             backend,
             format!(
                 "INSERT INTO hub_directory_config
-                     (id, node_id, write_token, is_listed, requires_approval, accept_from, created_at, updated_at)
-                 VALUES (1, '{node_id}', '{write_token}', {is_listed}, {requires_approval}, '{accept_from}', '{now}', '{now}')
+                     (id, node_id, write_token, is_listed, requires_approval, accept_from, allow_borrowing, created_at, updated_at)
+                 VALUES (1, '{node_id}', '{write_token}', {is_listed}, {requires_approval}, '{accept_from}', {allow_borrowing}, '{now}', '{now}')
                  ON CONFLICT(id) DO UPDATE SET
                      node_id           = excluded.node_id,
                      write_token       = excluded.write_token,
                      is_listed         = excluded.is_listed,
                      requires_approval = excluded.requires_approval,
                      accept_from       = excluded.accept_from,
+                     allow_borrowing   = excluded.allow_borrowing,
                      updated_at        = excluded.updated_at",
                 node_id          = config.node_id.replace('\'', "''"),
                 write_token      = config.write_token.replace('\'', "''"),
                 is_listed        = if config.is_listed { 1 } else { 0 },
                 requires_approval = if config.requires_approval { 1 } else { 0 },
                 accept_from      = config.accept_from.replace('\'', "''"),
+                allow_borrowing  = if config.allow_borrowing { 1 } else { 0 },
                 now              = now,
             ),
         ))
@@ -243,6 +290,7 @@ impl HubDirectoryService {
             "is_listed":         params.is_listed,
             "requires_approval": params.requires_approval,
             "accept_from":       params.accept_from,
+            "allow_borrowing":   params.allow_borrowing,
         });
 
         if let Some(ref desc) = params.description {
@@ -250,6 +298,12 @@ impl HubDirectoryService {
         }
         if let Some(ref country) = params.location_country {
             body["location_country"] = serde_json::Value::String(country.clone());
+        }
+        if let Some(ref key) = params.x25519_public_key {
+            body["x25519_public_key"] = serde_json::Value::String(key.clone());
+        }
+        if let Some(ref url) = params.website {
+            body["website"] = serde_json::Value::String(url.clone());
         }
 
         let mut req = self
@@ -284,6 +338,7 @@ impl HubDirectoryService {
             is_listed: params.is_listed,
             requires_approval: params.requires_approval,
             accept_from: params.accept_from,
+            allow_borrowing: params.allow_borrowing,
         };
 
         Self::save_config(db, &config).await?;
@@ -396,11 +451,15 @@ impl HubDirectoryService {
         limit: i64,
         offset: i64,
         country: Option<&str>,
+        search: Option<&str>,
     ) -> Result<Vec<HubProfile>, HubDirectoryError> {
         let hub_url = Self::hub_base_url()?;
         let mut url = format!("{hub_url}/api/directory?limit={limit}&offset={offset}");
         if let Some(c) = country {
             url.push_str(&format!("&country={c}"));
+        }
+        if let Some(s) = search {
+            url.push_str(&format!("&search={}", urlencoding::encode(s)));
         }
 
         let response = self.http_client.get(&url).send().await?;
@@ -451,16 +510,26 @@ impl HubDirectoryService {
         &self,
         db: &DatabaseConnection,
         node_id: &str,
+        x25519_public_key: Option<&str>,
     ) -> Result<HubFollow, HubDirectoryError> {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
         let hub_url = Self::hub_base_url()?;
 
+        let mut body = serde_json::Map::new();
+        if let Some(key) = x25519_public_key {
+            body.insert(
+                "x25519_public_key".to_string(),
+                serde_json::Value::String(key.to_string()),
+            );
+        }
+
         let response = self
             .http_client
             .post(format!("{hub_url}/api/directory/follow/{node_id}"))
             .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .json(&body)
             .send()
             .await?;
 
@@ -510,22 +579,29 @@ impl HubDirectoryService {
     }
 
     /// resolution: "approve" | "reject" | "block"
+    /// encrypted_contact: optional sealed blob to attach when approving
     pub async fn resolve_follow(
         &self,
         db: &DatabaseConnection,
         follow_id: i64,
         resolution: &str,
+        encrypted_contact: Option<&str>,
     ) -> Result<HubFollow, HubDirectoryError> {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
         let hub_url = Self::hub_base_url()?;
 
+        let mut body = serde_json::json!({ "resolution": resolution });
+        if let Some(blob) = encrypted_contact {
+            body["encrypted_contact"] = serde_json::Value::String(blob.to_string());
+        }
+
         let response = self
             .http_client
             .patch(format!("{hub_url}/api/directory/follows/{follow_id}"))
             .header("Authorization", format!("Bearer {}", cfg.write_token))
-            .json(&serde_json::json!({ "resolution": resolution }))
+            .json(&body)
             .send()
             .await?;
 
@@ -580,6 +656,53 @@ impl HubDirectoryService {
         Ok(())
     }
 
+    /// Batch-updates encrypted contact blobs for all active followers.
+    /// Called when the library owner changes their contact info.
+    pub async fn sync_follow_contacts(
+        &self,
+        db: &DatabaseConnection,
+        contacts: &[(i64, String)], // (follow_id, encrypted_contact_base64)
+    ) -> Result<i32, HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let payload: Vec<serde_json::Value> = contacts
+            .iter()
+            .map(|(id, blob)| {
+                serde_json::json!({
+                    "follow_id": id,
+                    "encrypted_contact": blob,
+                })
+            })
+            .collect();
+
+        let response = self
+            .http_client
+            .post(format!("{hub_url}/api/directory/contacts/sync"))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .json(&serde_json::json!({ "contacts": payload }))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        #[derive(Deserialize)]
+        struct SyncResult {
+            updated: i32,
+        }
+        let result: SyncResult = response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
+        Ok(result.updated)
+    }
+
     /// Completely removes the library profile from the hub directory.
     /// Deletes the profile, all follows (as follower and followed), and cached catalogs.
     pub async fn delete_profile(&self, db: &DatabaseConnection) -> Result<(), HubDirectoryError> {
@@ -601,6 +724,147 @@ impl HubDirectoryService {
             return Err(HubDirectoryError::Hub(status, msg));
         }
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Borrow requests (ADR-018)
+    // -----------------------------------------------------------------------
+
+    /// Creates a hub-mediated borrow request.
+    pub async fn create_borrow_request(
+        &self,
+        db: &DatabaseConnection,
+        lender_node_id: &str,
+        isbn: &str,
+        book_title: &str,
+    ) -> Result<HubBorrowRequest, HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let response = self
+            .http_client
+            .post(format!("{hub_url}/api/directory/borrow"))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .json(&serde_json::json!({
+                "lender_node_id": lender_node_id,
+                "isbn": isbn,
+                "book_title": book_title,
+            }))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))
+    }
+
+    /// Fetches incoming (pending) borrow requests for the local library as lender.
+    pub async fn incoming_borrow_requests(
+        &self,
+        db: &DatabaseConnection,
+    ) -> Result<Vec<HubBorrowRequest>, HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let response = self
+            .http_client
+            .get(format!("{hub_url}/api/directory/borrow/incoming"))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        #[derive(Deserialize)]
+        struct BorrowPage {
+            items: Vec<HubBorrowRequest>,
+        }
+        let page: BorrowPage = response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
+        Ok(page.items)
+    }
+
+    /// Fetches outgoing borrow requests sent by the local library as requester.
+    pub async fn outgoing_borrow_requests(
+        &self,
+        db: &DatabaseConnection,
+    ) -> Result<Vec<HubBorrowRequest>, HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let response = self
+            .http_client
+            .get(format!("{hub_url}/api/directory/borrow/outgoing"))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        #[derive(Deserialize)]
+        struct BorrowPage {
+            items: Vec<HubBorrowRequest>,
+        }
+        let page: BorrowPage = response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
+        Ok(page.items)
+    }
+
+    /// Resolves a borrow request (accept or reject). Only the lender can resolve.
+    pub async fn resolve_borrow_request(
+        &self,
+        db: &DatabaseConnection,
+        request_id: i64,
+        resolution: &str,
+    ) -> Result<HubBorrowRequest, HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let response = self
+            .http_client
+            .patch(format!("{hub_url}/api/directory/borrow/{request_id}"))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .json(&serde_json::json!({ "resolution": resolution }))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))
     }
 
     // -----------------------------------------------------------------------

@@ -1271,6 +1271,15 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 055: Add allow_borrowing to hub_directory_config (defaults to enabled).
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE hub_directory_config ADD COLUMN allow_borrowing INTEGER NOT NULL DEFAULT 1"
+                .to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

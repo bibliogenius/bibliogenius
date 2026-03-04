@@ -319,11 +319,7 @@ async fn handle_loan_request(
             Json(json!({ "message": "Loan request received", "request_id": request_id })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e })),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
 }
 

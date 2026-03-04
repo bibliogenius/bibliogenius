@@ -140,7 +140,7 @@ async fn main() {
         tokio::spawn(async move {
             rust_lib_app::services::relay_poller::start_relay_polling(
                 poller_state,
-                std::time::Duration::from_secs(60),
+                std::time::Duration::from_secs(20),
             )
             .await;
         });
