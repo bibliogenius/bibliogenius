@@ -15,6 +15,7 @@ pub mod library;
 pub mod library_config;
 pub mod linked_device;
 pub mod loan;
+pub mod notification;
 pub mod operation_log;
 pub mod p2p_outgoing_request;
 pub mod p2p_request;

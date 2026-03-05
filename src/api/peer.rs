@@ -1,5 +1,5 @@
 #![allow(clippy::needless_update)] // SeaORM ActiveModels require ..Default::default()
-use crate::models::{operation_log, peer, peer_gamification_stats};
+use crate::models::{operation_log, peer, peer_book, peer_gamification_stats};
 use axum::{
     extract::{Json, Path, State},
     http::StatusCode,
@@ -1082,14 +1082,121 @@ pub async fn connect(
     (StatusCode::CREATED, Json(json!({ "id": peer_id }))).into_response()
 }
 
+/// Upsert peer books cache: preserves `first_seen_at` for existing entries,
+/// sets it to now for new entries, removes books no longer in the fresh list.
+/// Returns the number of books in the fresh list.
+async fn upsert_peer_books_cache(
+    db: &DatabaseConnection,
+    peer_id: i32,
+    node_id: Option<&str>,
+    books: Vec<crate::models::Book>,
+) -> usize {
+    let now = chrono::Utc::now().to_rfc3339();
+    let count = books.len();
+
+    // 1. Load existing cached books for this peer
+    let existing = peer_book::Entity::find()
+        .filter(peer_book::Column::PeerId.eq(peer_id))
+        .all(db)
+        .await
+        .unwrap_or_default();
+
+    let existing_map: std::collections::HashMap<i32, peer_book::Model> = existing
+        .into_iter()
+        .map(|e| (e.remote_book_id, e))
+        .collect();
+
+    let mut fresh_ids = std::collections::HashSet::new();
+    let mut new_isbns: Vec<(String, String)> = Vec::new(); // (isbn, title) of newly inserted books
+
+    // 2. Upsert each book
+    for book in books {
+        let remote_id = book.id.unwrap_or(0);
+        fresh_ids.insert(remote_id);
+
+        if let Some(existing_entry) = existing_map.get(&remote_id) {
+            // UPDATE: preserve first_seen_at, refresh other fields
+            let mut active: peer_book::ActiveModel = existing_entry.clone().into();
+            active.title = Set(book.title);
+            active.isbn = Set(book.isbn);
+            active.author = Set(book.author);
+            active.cover_url = Set(book.cover_url);
+            active.summary = Set(book.summary);
+            active.synced_at = Set(now.clone());
+            if let Some(nid) = node_id {
+                active.node_id = Set(Some(nid.to_string()));
+            }
+            // first_seen_at stays unchanged
+            let _ = active.update(db).await;
+        } else {
+            // INSERT: new book - track ISBN for wishlist check
+            if let Some(ref isbn) = book.isbn {
+                new_isbns.push((isbn.clone(), book.title.clone()));
+            }
+            let cache = peer_book::ActiveModel {
+                peer_id: Set(peer_id),
+                remote_book_id: Set(remote_id),
+                title: Set(book.title),
+                isbn: Set(book.isbn),
+                author: Set(book.author),
+                cover_url: Set(book.cover_url),
+                summary: Set(book.summary),
+                synced_at: Set(now.clone()),
+                node_id: Set(node_id.map(|s| s.to_string())),
+                first_seen_at: Set(Some(now.clone())),
+                ..Default::default()
+            };
+            let _ = peer_book::Entity::insert(cache).exec(db).await;
+        }
+    }
+
+    // 3. Delete books no longer in the fresh list
+    for (remote_id, entry) in &existing_map {
+        if !fresh_ids.contains(remote_id) {
+            let _ = peer_book::Entity::delete_by_id(entry.id).exec(db).await;
+        }
+    }
+
+    // 4. Check new books against wishlist + emit "new_books" notification
+    if !new_isbns.is_empty() {
+        let peer_name = peer::Entity::find_by_id(peer_id)
+            .one(db)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| p.name)
+            .unwrap_or_default();
+        let ref_id = peer_id.to_string();
+
+        // Wishlist matches
+        crate::services::notification_service::check_wishlist_matches(
+            db, &new_isbns, &peer_name, "peer", &ref_id,
+        )
+        .await;
+
+        // Grouped "new books" notification
+        crate::services::notification_service::emit_unique(
+            db,
+            crate::domain::CreateNotification {
+                event_type: crate::domain::NotificationEventType::NewBooks,
+                title: format!("{} : {} nouveaux livres", peer_name, new_isbns.len()),
+                body: None,
+                ref_type: Some("peer".to_string()),
+                ref_id: Some(ref_id),
+            },
+        )
+        .await;
+    }
+
+    count
+}
+
 /// Internal sync function for background sync after connect
 async fn sync_peer_internal(
     db: &DatabaseConnection,
     peer_id: i32,
     peer_url: &str,
 ) -> Result<usize, String> {
-    use crate::models::peer_book;
-
     // Validate URL
     validate_url(peer_url).map_err(|e| format!("Invalid peer URL: {}", e))?;
 
@@ -1202,29 +1309,8 @@ async fn sync_peer_internal(
         .await
         .map_err(|_| "Invalid response format".to_string())?;
 
-    // Clear old cache
-    let _ = peer_book::Entity::delete_many()
-        .filter(peer_book::Column::PeerId.eq(peer_id))
-        .exec(db)
-        .await;
-
-    let count = data.books.len();
-
-    // Insert new cache
-    for book in data.books {
-        let cache = peer_book::ActiveModel {
-            peer_id: Set(peer_id),
-            remote_book_id: Set(book.id.unwrap_or(0)),
-            title: Set(book.title),
-            isbn: Set(book.isbn),
-            author: Set(book.author),
-            cover_url: Set(book.cover_url),
-            summary: Set(book.summary),
-            synced_at: Set(chrono::Utc::now().to_rfc3339()),
-            ..Default::default()
-        };
-        let _ = peer_book::Entity::insert(cache).exec(db).await;
-    }
+    // Upsert books cache (preserves first_seen_at for existing entries)
+    let count = upsert_peer_books_cache(db, peer_id, None, data.books).await;
 
     // Sync gamification stats if both sides have the module enabled
     sync_peer_gamification_stats(db, peer_id, peer_url, &client, shares_gamification).await;
@@ -1481,6 +1567,7 @@ pub async fn receive_connection_request(
                 "accepted"
             };
 
+            let peer_name_for_notif = payload.name.clone();
             let new_peer = peer::ActiveModel {
                 name: Set(payload.name),
                 url: Set(payload.url),
@@ -1502,19 +1589,34 @@ pub async fn receive_connection_request(
             let my_relay = crate::api::relay::get_my_relay_config(&db).await;
 
             match new_peer.insert(&db).await {
-                Ok(_) => (
-                    StatusCode::OK,
-                    Json(json!({
-                        "message": "Connection request saved locally",
-                        "connection_status": connection_status,
-                        "ed25519_public_key": my_ed25519,
-                        "x25519_public_key": my_x25519,
-                        "relay_url": my_relay.as_ref().map(|r| &r.relay_url),
-                        "mailbox_id": my_relay.as_ref().map(|r| &r.mailbox_uuid),
-                        "relay_write_token": my_relay.as_ref().map(|r| &r.write_token),
-                    })),
-                )
-                    .into_response(),
+                Ok(_) => {
+                    // Emit connection_request notification
+                    crate::services::notification_service::emit(
+                        &db,
+                        crate::domain::CreateNotification {
+                            event_type: crate::domain::NotificationEventType::ConnectionRequest,
+                            title: peer_name_for_notif.clone(),
+                            body: None,
+                            ref_type: Some("peer".to_string()),
+                            ref_id: Some(peer_name_for_notif),
+                        },
+                    )
+                    .await;
+
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "message": "Connection request saved locally",
+                            "connection_status": connection_status,
+                            "ed25519_public_key": my_ed25519,
+                            "x25519_public_key": my_x25519,
+                            "relay_url": my_relay.as_ref().map(|r| &r.relay_url),
+                            "mailbox_id": my_relay.as_ref().map(|r| &r.mailbox_uuid),
+                            "relay_write_token": my_relay.as_ref().map(|r| &r.write_token),
+                        })),
+                    )
+                        .into_response()
+                }
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": format!("Failed to save peer locally: {}", e) })),
@@ -1694,11 +1796,23 @@ pub async fn update_peer_status(
 
     match active_model.update(&db).await {
         Ok(updated) => {
-            tracing::info!(
-                "✅ Peer {} accepted, auto_approve={}",
-                peer_id,
-                auto_approve
-            );
+            tracing::info!("Peer {} accepted, auto_approve={}", peer_id, auto_approve);
+
+            // Emit connection_accepted notification
+            if auto_approve {
+                crate::services::notification_service::emit(
+                    &db,
+                    crate::domain::CreateNotification {
+                        event_type: crate::domain::NotificationEventType::ConnectionAccepted,
+                        title: updated.name.clone(),
+                        body: None,
+                        ref_type: Some("peer".to_string()),
+                        ref_id: Some(peer_id.to_string()),
+                    },
+                )
+                .await;
+            }
+
             (
                 StatusCode::OK,
                 Json(json!({
@@ -2530,8 +2644,6 @@ pub async fn sync_peer(
     State(db): State<DatabaseConnection>,
     Path(peer_id): Path<i32>,
 ) -> impl IntoResponse {
-    use crate::models::peer_book;
-
     // 1. Find peer
     let peer = match peer::Entity::find_by_id(peer_id).one(&db).await {
         Ok(Some(p)) => p,
@@ -2621,29 +2733,8 @@ pub async fn sync_peer(
 
                 match response.json::<BooksResponse>().await {
                     Ok(data) => {
-                        // 3. Clear old cache for this peer
-                        let _ = peer_book::Entity::delete_many()
-                            .filter(peer_book::Column::PeerId.eq(peer.id))
-                            .exec(&db)
-                            .await;
-
-                        let count = data.books.len();
-
-                        // 4. Insert new cache
-                        for book in data.books {
-                            let cache = peer_book::ActiveModel {
-                                peer_id: Set(peer.id),
-                                remote_book_id: Set(book.id.unwrap_or(0)),
-                                title: Set(book.title),
-                                isbn: Set(book.isbn),
-                                author: Set(book.author),
-                                cover_url: Set(book.cover_url),
-                                summary: Set(book.summary),
-                                synced_at: Set(chrono::Utc::now().to_rfc3339()),
-                                ..Default::default()
-                            };
-                            let _ = peer_book::Entity::insert(cache).exec(&db).await;
-                        }
+                        // Upsert books cache (preserves first_seen_at)
+                        let count = upsert_peer_books_cache(&db, peer.id, None, data.books).await;
 
                         // Sync gamification stats
                         sync_peer_gamification_stats(
@@ -2710,7 +2801,6 @@ pub async fn sync_peer_by_url(
     State(state): State<crate::infrastructure::AppState>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    use crate::models::peer_book;
     let db = state.db().clone();
 
     // Extract URL from payload
@@ -2982,28 +3072,8 @@ pub async fn sync_peer_by_url(
             }
         };
 
-    // 5. Clear old cache and insert new books
-    let _ = peer_book::Entity::delete_many()
-        .filter(peer_book::Column::PeerId.eq(peer.id))
-        .exec(&db)
-        .await;
-
-    let count = books.len();
-
-    for book in books {
-        let cache = peer_book::ActiveModel {
-            peer_id: Set(peer.id),
-            remote_book_id: Set(book.id.unwrap_or(0)),
-            title: Set(book.title),
-            isbn: Set(book.isbn),
-            author: Set(book.author),
-            cover_url: Set(book.cover_url),
-            summary: Set(book.summary),
-            synced_at: Set(chrono::Utc::now().to_rfc3339()),
-            ..Default::default()
-        };
-        let _ = peer_book::Entity::insert(cache).exec(&db).await;
-    }
+    // 5. Upsert books cache (preserves first_seen_at)
+    let count = upsert_peer_books_cache(&db, peer.id, None, books).await;
 
     // 6. Sync gamification stats
     sync_peer_gamification_stats(&db, peer.id, &peer.url, &client, shares_gamification).await;
@@ -3518,6 +3588,19 @@ pub async fn receive_request(
         .await
     {
         Ok(_) => {
+            // Emit borrow_request notification
+            crate::services::notification_service::emit(
+                &db,
+                crate::domain::CreateNotification {
+                    event_type: crate::domain::NotificationEventType::BorrowRequest,
+                    title: payload.book_title.clone(),
+                    body: Some(peer.name.clone()),
+                    ref_type: Some("peer".to_string()),
+                    ref_id: Some(request_id.clone()),
+                },
+            )
+            .await;
+
             // If auto-approve is enabled, immediately accept the request
             if auto_approve {
                 tracing::info!(
@@ -5033,6 +5116,19 @@ pub async fn receive_loan_confirmation(
                 book_id
             );
 
+            // Emit borrow_accepted notification
+            crate::services::notification_service::emit(
+                &db,
+                crate::domain::CreateNotification {
+                    event_type: crate::domain::NotificationEventType::BorrowAccepted,
+                    title: payload.title.clone(),
+                    body: Some(payload.lender_name.clone()),
+                    ref_type: Some("peer".to_string()),
+                    ref_id: Some(c.id.to_string()),
+                },
+            )
+            .await;
+
             // Store lender_request_id on the matching outgoing request
             if let Some(ref lender_req_id) = payload.request_id {
                 let isbn_filter = payload.isbn.clone().unwrap_or_default();
@@ -5091,8 +5187,6 @@ pub async fn cache_books_by_id(
     Path(peer_id): Path<i32>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    use crate::models::peer_book;
-
     // 1. Validate peer exists
     let peer = match peer::Entity::find_by_id(peer_id).one(&db).await {
         Ok(Some(p)) => p,
@@ -5124,28 +5218,8 @@ pub async fn cache_books_by_id(
         }
     };
 
-    // 3. Delete old peer_books for this peer
-    let _ = peer_book::Entity::delete_many()
-        .filter(peer_book::Column::PeerId.eq(peer.id))
-        .exec(&db)
-        .await;
-
-    // 4. Insert new books with synced_at = now()
-    let count = books.len();
-    for book in books {
-        let cache = peer_book::ActiveModel {
-            peer_id: Set(peer.id),
-            remote_book_id: Set(book.id.unwrap_or(0)),
-            title: Set(book.title),
-            isbn: Set(book.isbn),
-            author: Set(book.author),
-            cover_url: Set(book.cover_url),
-            summary: Set(book.summary),
-            synced_at: Set(chrono::Utc::now().to_rfc3339()),
-            ..Default::default()
-        };
-        let _ = peer_book::Entity::insert(cache).exec(&db).await;
-    }
+    // 3-4. Upsert books cache (preserves first_seen_at)
+    let count = upsert_peer_books_cache(&db, peer.id, None, books).await;
 
     (
         StatusCode::OK,

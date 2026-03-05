@@ -14,6 +14,8 @@ pub struct Model {
     pub cover_url: Option<String>,
     pub summary: Option<String>,
     pub synced_at: String,
+    pub node_id: Option<String>,
+    pub first_seen_at: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

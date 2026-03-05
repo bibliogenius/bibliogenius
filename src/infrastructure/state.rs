@@ -6,12 +6,12 @@ use tokio::sync::OnceCell;
 
 use crate::domain::{
     AuthorRepository, BookRepository, CollectionRepository, CopyRepository, GamificationRepository,
-    LinkedDeviceRepository,
+    LinkedDeviceRepository, NotificationRepository,
 };
 use crate::infrastructure::nonce_store::SqliteNonceStore;
 use crate::infrastructure::{
     SeaOrmAuthorRepository, SeaOrmBookRepository, SeaOrmCollectionRepository, SeaOrmCopyRepository,
-    SeaOrmGamificationRepository, SeaOrmLinkedDeviceRepository,
+    SeaOrmGamificationRepository, SeaOrmLinkedDeviceRepository, SeaOrmNotificationRepository,
 };
 use crate::services::IdentityService;
 use crate::services::crypto_service::CryptoService;
@@ -44,6 +44,8 @@ pub struct AppState {
     pub gamification_repo: Arc<dyn GamificationRepository>,
     /// Linked device repository (multi-device sync)
     pub linked_device_repo: Arc<dyn LinkedDeviceRepository>,
+    /// Notification repository (activity feed)
+    pub notification_repo: Arc<dyn NotificationRepository>,
     /// Identity service for E2EE key management
     pub identity_service: Arc<IdentityService>,
     /// Crypto service for E2EE seal/open (lazily initialized after identity is ready)
@@ -77,6 +79,7 @@ impl AppState {
         let collection_repo = Arc::new(SeaOrmCollectionRepository::new(db.clone()));
         let gamification_repo = Arc::new(SeaOrmGamificationRepository::new(db.clone()));
         let linked_device_repo = Arc::new(SeaOrmLinkedDeviceRepository::new(db.clone()));
+        let notification_repo = Arc::new(SeaOrmNotificationRepository::new(db.clone()));
 
         let device_pairing = Arc::new(DevicePairingService::new(
             identity_service.clone(),
@@ -97,6 +100,7 @@ impl AppState {
             collection_repo,
             gamification_repo,
             linked_device_repo,
+            notification_repo,
             identity_service,
             crypto_service: Arc::new(OnceCell::new()),
             device_pairing,

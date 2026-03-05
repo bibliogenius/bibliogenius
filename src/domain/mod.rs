@@ -11,6 +11,7 @@ pub mod collection_repository;
 pub mod copy_repository;
 pub mod gamification_repository;
 pub mod linked_device_repository;
+pub mod notification_repository;
 
 pub use errors::DomainError;
 
@@ -20,3 +21,4 @@ pub use collection_repository::*;
 pub use copy_repository::*;
 pub use gamification_repository::*;
 pub use linked_device_repository::*;
+pub use notification_repository::*;

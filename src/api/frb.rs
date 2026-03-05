@@ -5,7 +5,7 @@
 // Web uses WASM (future). All native platforms use FFI for local-first operation.
 
 use flutter_rust_bridge::frb;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ActiveModelTrait, DatabaseConnection};
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;
 use tower_http::cors::{Any, CorsLayer};
@@ -2808,6 +2808,8 @@ pub struct FrbCatalogEntry {
     pub isbn: String,
     pub title: String,
     pub author: Option<String>,
+    /// When this entry was first seen locally (ISO 8601). Used for "new" badge.
+    pub first_seen_at: Option<String>,
 }
 
 impl From<CatalogEntry> for FrbCatalogEntry {
@@ -2816,6 +2818,7 @@ impl From<CatalogEntry> for FrbCatalogEntry {
             isbn: e.isbn,
             title: e.title,
             author: e.author,
+            first_seen_at: None,
         }
     }
 }
@@ -2982,14 +2985,180 @@ pub async fn hub_directory_get_profile(node_id: String) -> Result<FrbHubProfile,
 }
 
 /// Gets the catalog of a library (public or approved follow).
-/// Returns enriched entries (ISBN + title + author) when available.
+/// Fetches from hub, upserts into local cache, and returns entries with first_seen_at.
+/// If the hub fetch fails, returns the cached entries (offline-first).
 pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalogEntry>, String> {
+    use crate::models::peer_book;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
     let db = hub_db()?;
-    hub_directory_svc()
-        .get_catalog(db, &node_id)
+
+    // Try to fetch fresh catalog from hub
+    let hub_result = hub_directory_svc().get_catalog(db, &node_id).await;
+
+    match hub_result {
+        Ok(entries) => {
+            tracing::debug!(
+                "hub_directory_get_catalog: fetched {} entries, upserting cache",
+                entries.len()
+            );
+            // Upsert into local cache and return with first_seen_at
+            let result = upsert_directory_catalog_cache(db, &node_id, &entries).await;
+            Ok(result)
+        }
+        Err(ref e) => {
+            tracing::warn!(
+                "hub_directory_get_catalog: hub fetch failed ({}), using cache",
+                e
+            );
+            // Offline fallback: return cached entries
+            let cached = peer_book::Entity::find()
+                .filter(peer_book::Column::NodeId.eq(&node_id))
+                .filter(peer_book::Column::PeerId.eq(0))
+                .all(db)
+                .await
+                .unwrap_or_default();
+
+            Ok(cached
+                .into_iter()
+                .filter_map(|pb| {
+                    pb.isbn.map(|isbn| FrbCatalogEntry {
+                        isbn,
+                        title: pb.title,
+                        author: pb.author,
+                        first_seen_at: pb.first_seen_at,
+                    })
+                })
+                .collect())
+        }
+    }
+}
+
+/// Upserts directory catalog entries into peer_books cache (peer_id = 0 sentinel).
+/// Returns entries enriched with first_seen_at from the local cache.
+async fn upsert_directory_catalog_cache(
+    db: &DatabaseConnection,
+    node_id: &str,
+    entries: &[CatalogEntry],
+) -> Vec<FrbCatalogEntry> {
+    use crate::models::peer_book;
+    use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, Statement};
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Temporarily disable FK checks: directory entries use peer_id = 0 (sentinel,
+    // no matching peer row). sqlx enables PRAGMA foreign_keys by default.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "PRAGMA foreign_keys = OFF".to_owned(),
+        ))
+        .await;
+
+    // Load existing cached entries for this directory library
+    let existing = peer_book::Entity::find()
+        .filter(peer_book::Column::NodeId.eq(node_id))
+        .filter(peer_book::Column::PeerId.eq(0))
+        .all(db)
         .await
-        .map(|entries| entries.into_iter().map(FrbCatalogEntry::from).collect())
-        .map_err(|e| e.to_string())
+        .unwrap_or_default();
+
+    let existing_map: std::collections::HashMap<String, peer_book::Model> = existing
+        .into_iter()
+        .filter_map(|e| e.isbn.clone().map(|isbn| (isbn, e)))
+        .collect();
+
+    let mut fresh_isbns = std::collections::HashSet::new();
+    let mut new_isbns: Vec<(String, String)> = Vec::new(); // (isbn, title)
+    let mut result = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        fresh_isbns.insert(entry.isbn.clone());
+
+        if let Some(existing_entry) = existing_map.get(&entry.isbn) {
+            // UPDATE: preserve first_seen_at, refresh metadata
+            let mut active: peer_book::ActiveModel = existing_entry.clone().into();
+            active.title = Set(entry.title.clone());
+            active.author = Set(entry.author.clone());
+            active.synced_at = Set(now.clone());
+            let _ = active.update(db).await;
+
+            result.push(FrbCatalogEntry {
+                isbn: entry.isbn.clone(),
+                title: entry.title.clone(),
+                author: entry.author.clone(),
+                first_seen_at: existing_entry.first_seen_at.clone(),
+            });
+        } else {
+            // INSERT: new entry - track for wishlist check
+            new_isbns.push((entry.isbn.clone(), entry.title.clone()));
+            let cache = peer_book::ActiveModel {
+                peer_id: Set(0), // sentinel for directory entries
+                remote_book_id: Set(0),
+                title: Set(entry.title.clone()),
+                isbn: Set(Some(entry.isbn.clone())),
+                author: Set(entry.author.clone()),
+                cover_url: Set(None),
+                summary: Set(None),
+                synced_at: Set(now.clone()),
+                node_id: Set(Some(node_id.to_string())),
+                first_seen_at: Set(Some(now.clone())),
+                ..Default::default()
+            };
+            match peer_book::Entity::insert(cache).exec(db).await {
+                Ok(_) => {}
+                Err(e) => tracing::warn!("catalog cache insert failed for {}: {}", entry.isbn, e),
+            }
+
+            result.push(FrbCatalogEntry {
+                isbn: entry.isbn.clone(),
+                title: entry.title.clone(),
+                author: entry.author.clone(),
+                first_seen_at: Some(now.clone()),
+            });
+        }
+    }
+
+    // Delete entries no longer in the catalog
+    for (isbn, entry) in &existing_map {
+        if !fresh_isbns.contains(isbn) {
+            let _ = peer_book::Entity::delete_by_id(entry.id).exec(db).await;
+        }
+    }
+
+    // Wishlist matches + grouped "new books" notification
+    if !new_isbns.is_empty() {
+        crate::services::notification_service::check_wishlist_matches(
+            db,
+            &new_isbns,
+            node_id, // library name = node_id (best we have here)
+            "directory",
+            node_id,
+        )
+        .await;
+
+        crate::services::notification_service::emit_unique(
+            db,
+            crate::domain::CreateNotification {
+                event_type: crate::domain::NotificationEventType::NewBooks,
+                title: format!("{} nouveaux livres", new_isbns.len()),
+                body: Some(node_id.to_string()),
+                ref_type: Some("directory".to_string()),
+                ref_id: Some(node_id.to_string()),
+            },
+        )
+        .await;
+    }
+
+    // Re-enable FK checks
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "PRAGMA foreign_keys = ON".to_owned(),
+        ))
+        .await;
+
+    result
 }
 
 /// Sends a follow request to a library.
@@ -3381,5 +3550,107 @@ pub async fn update_book_collections(
     let repo = collection_repo!(db);
     repo.update_book_collections(book_id, collection_ids)
         .await
+        .map_err(|e| format!("{e:?}"))
+}
+
+// ── Activity Feed (Notifications) ─────────────────────────────────────
+
+#[flutter_rust_bridge::frb]
+pub struct FrbNotification {
+    pub id: i32,
+    pub event_type: String,
+    pub category: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub ref_type: Option<String>,
+    pub ref_id: Option<String>,
+    pub read_at: Option<String>,
+    pub created_at: String,
+}
+
+impl From<crate::domain::NotificationRow> for FrbNotification {
+    fn from(n: crate::domain::NotificationRow) -> Self {
+        Self {
+            id: n.id,
+            event_type: n.event_type,
+            category: n.category,
+            title: n.title,
+            body: n.body,
+            ref_type: n.ref_type,
+            ref_id: n.ref_id,
+            read_at: n.read_at,
+            created_at: n.created_at,
+        }
+    }
+}
+
+/// List notifications, optionally filtered by category.
+#[flutter_rust_bridge::frb]
+pub async fn notifications_list(
+    category: Option<String>,
+    offset: u64,
+    limit: u64,
+) -> Result<Vec<FrbNotification>, String> {
+    use crate::domain::NotificationRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::infrastructure::SeaOrmNotificationRepository::new(db.clone());
+    let rows = repo
+        .list(category.as_deref(), offset, limit)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    Ok(rows.into_iter().map(FrbNotification::from).collect())
+}
+
+/// Get unread notification count (optionally by category).
+#[flutter_rust_bridge::frb]
+pub async fn notifications_unread_count(category: Option<String>) -> Result<i32, String> {
+    use crate::domain::NotificationRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::infrastructure::SeaOrmNotificationRepository::new(db.clone());
+    repo.unread_count(category.as_deref())
+        .await
+        .map(|c| c as i32)
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Mark a single notification as read.
+#[flutter_rust_bridge::frb]
+pub async fn notifications_mark_read(id: i32) -> Result<bool, String> {
+    use crate::domain::NotificationRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::infrastructure::SeaOrmNotificationRepository::new(db.clone());
+    repo.mark_read(id).await.map_err(|e| format!("{e:?}"))
+}
+
+/// Mark all notifications as read.
+#[flutter_rust_bridge::frb]
+pub async fn notifications_mark_all_read() -> Result<i32, String> {
+    use crate::domain::NotificationRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::infrastructure::SeaOrmNotificationRepository::new(db.clone());
+    repo.mark_all_read()
+        .await
+        .map(|c| c as i32)
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Dismiss (hard delete) a single notification.
+#[flutter_rust_bridge::frb]
+pub async fn notifications_dismiss(id: i32) -> Result<bool, String> {
+    use crate::domain::NotificationRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::infrastructure::SeaOrmNotificationRepository::new(db.clone());
+    repo.dismiss(id).await.map_err(|e| format!("{e:?}"))
+}
+
+/// Run pruning (TTL + cap). Call on app startup.
+#[flutter_rust_bridge::frb]
+pub async fn notifications_prune() -> Result<i32, String> {
+    use crate::domain::NotificationRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::infrastructure::SeaOrmNotificationRepository::new(db.clone());
+    repo.prune()
+        .await
+        .map(|c| c as i32)
         .map_err(|e| format!("{e:?}"))
 }

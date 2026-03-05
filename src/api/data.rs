@@ -5,7 +5,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 
 pub async fn import_file(
     State(db): State<DatabaseConnection>,
@@ -20,6 +20,21 @@ pub async fn import_file(
                     let mut errors = Vec::new();
                     for req in books {
                         let now = chrono::Utc::now();
+                        // Check for existing book by ISBN
+                        let existing = if let Some(ref isbn) = req.isbn {
+                            book::Entity::find()
+                                .filter(book::Column::Isbn.eq(isbn))
+                                .one(&db)
+                                .await
+                                .ok()
+                                .flatten()
+                        } else {
+                            None
+                        };
+                        if existing.is_some() {
+                            count += 1; // Already exists, skip
+                            continue;
+                        }
                         let new_book = book::ActiveModel {
                             title: Set(req.title.clone()),
                             isbn: Set(req.isbn),

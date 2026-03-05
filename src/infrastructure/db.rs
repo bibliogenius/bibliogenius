@@ -1280,6 +1280,226 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 056: Add node_id and first_seen_at to peer_books for dedup
+    // and "new" badge support. node_id links peer books to hub directory entries
+    // so the same library is not cached twice. first_seen_at tracks when a book
+    // was first discovered (survives upsert syncs).
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peer_books ADD COLUMN node_id TEXT".to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peer_books ADD COLUMN first_seen_at TEXT".to_owned(),
+        ))
+        .await;
+    // Backfill: existing entries get first_seen_at = synced_at (best approximation)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "UPDATE peer_books SET first_seen_at = synced_at WHERE first_seen_at IS NULL"
+                .to_owned(),
+        ))
+        .await;
+
+    // Migration 057: Deduplicate books with the same ISBN.
+    // Keeps the oldest entry (lowest id) per ISBN. Reassigns all FK references
+    // (copies, collection_books, book_authors, book_tags) to the kept entry,
+    // then deletes the duplicate rows.
+    //
+    // The subquery pattern:
+    //   "duplicate ids" = books whose isbn appears more than once AND whose id
+    //   is NOT the MIN(id) for that isbn.
+
+    // Reassign copies to the kept book
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"
+            UPDATE copies SET book_id = (
+                SELECT MIN(b2.id) FROM books b2
+                WHERE b2.isbn = (SELECT isbn FROM books WHERE id = copies.book_id)
+                  AND b2.isbn IS NOT NULL
+            )
+            WHERE book_id IN (
+                SELECT id FROM books WHERE isbn IN (
+                    SELECT isbn FROM books WHERE isbn IS NOT NULL
+                    GROUP BY isbn HAVING COUNT(*) > 1
+                ) AND id NOT IN (
+                    SELECT MIN(id) FROM books WHERE isbn IS NOT NULL GROUP BY isbn
+                )
+            )
+            "#
+            .to_owned(),
+        ))
+        .await;
+
+    // Reassign collection_books to the kept book
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"
+            UPDATE collection_books SET book_id = (
+                SELECT MIN(b2.id) FROM books b2
+                WHERE b2.isbn = (SELECT isbn FROM books WHERE id = collection_books.book_id)
+                  AND b2.isbn IS NOT NULL
+            )
+            WHERE book_id IN (
+                SELECT id FROM books WHERE isbn IN (
+                    SELECT isbn FROM books WHERE isbn IS NOT NULL
+                    GROUP BY isbn HAVING COUNT(*) > 1
+                ) AND id NOT IN (
+                    SELECT MIN(id) FROM books WHERE isbn IS NOT NULL GROUP BY isbn
+                )
+            )
+            "#
+            .to_owned(),
+        ))
+        .await;
+
+    // Reassign book_authors to the kept book (ignore conflicts - junction table PK)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"
+            INSERT OR IGNORE INTO book_authors (book_id, author_id)
+            SELECT (SELECT MIN(b2.id) FROM books b2
+                    WHERE b2.isbn = (SELECT isbn FROM books WHERE id = book_authors.book_id)
+                      AND b2.isbn IS NOT NULL),
+                   author_id
+            FROM book_authors
+            WHERE book_id IN (
+                SELECT id FROM books WHERE isbn IN (
+                    SELECT isbn FROM books WHERE isbn IS NOT NULL
+                    GROUP BY isbn HAVING COUNT(*) > 1
+                ) AND id NOT IN (
+                    SELECT MIN(id) FROM books WHERE isbn IS NOT NULL GROUP BY isbn
+                )
+            )
+            "#
+            .to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"
+            DELETE FROM book_authors WHERE book_id IN (
+                SELECT id FROM books WHERE isbn IN (
+                    SELECT isbn FROM books WHERE isbn IS NOT NULL
+                    GROUP BY isbn HAVING COUNT(*) > 1
+                ) AND id NOT IN (
+                    SELECT MIN(id) FROM books WHERE isbn IS NOT NULL GROUP BY isbn
+                )
+            )
+            "#
+            .to_owned(),
+        ))
+        .await;
+
+    // Reassign book_tags to the kept book (ignore conflicts - junction table PK)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"
+            INSERT OR IGNORE INTO book_tags (book_id, tag_id)
+            SELECT (SELECT MIN(b2.id) FROM books b2
+                    WHERE b2.isbn = (SELECT isbn FROM books WHERE id = book_tags.book_id)
+                      AND b2.isbn IS NOT NULL),
+                   tag_id
+            FROM book_tags
+            WHERE book_id IN (
+                SELECT id FROM books WHERE isbn IN (
+                    SELECT isbn FROM books WHERE isbn IS NOT NULL
+                    GROUP BY isbn HAVING COUNT(*) > 1
+                ) AND id NOT IN (
+                    SELECT MIN(id) FROM books WHERE isbn IS NOT NULL GROUP BY isbn
+                )
+            )
+            "#
+            .to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"
+            DELETE FROM book_tags WHERE book_id IN (
+                SELECT id FROM books WHERE isbn IN (
+                    SELECT isbn FROM books WHERE isbn IS NOT NULL
+                    GROUP BY isbn HAVING COUNT(*) > 1
+                ) AND id NOT IN (
+                    SELECT MIN(id) FROM books WHERE isbn IS NOT NULL GROUP BY isbn
+                )
+            )
+            "#
+            .to_owned(),
+        ))
+        .await;
+
+    // Remove duplicate collection_books links (same collection + book_id after reassign)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"
+            DELETE FROM collection_books WHERE rowid NOT IN (
+                SELECT MIN(rowid) FROM collection_books GROUP BY collection_id, book_id
+            )
+            "#
+            .to_owned(),
+        ))
+        .await;
+
+    // Delete the duplicate book rows (keep oldest per ISBN)
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"
+            DELETE FROM books WHERE isbn IS NOT NULL AND id NOT IN (
+                SELECT MIN(id) FROM books GROUP BY isbn
+            )
+            "#
+            .to_owned(),
+        ))
+        .await;
+
+    // Migration 058: Activity feed notifications table (ADR-020)
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            category TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT,
+            ref_type TEXT,
+            ref_id TEXT,
+            read_at TEXT,
+            created_at TEXT NOT NULL
+        )
+        "#
+        .to_owned(),
+    ))
+    .await?;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE INDEX IF NOT EXISTS idx_notifications_category ON notifications(category)"
+                .to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at)"
+                .to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

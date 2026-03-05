@@ -15,6 +15,7 @@ pub mod identity_service;
 pub mod loan_service;
 pub mod lookup_service;
 pub mod mdns;
+pub mod notification_service;
 pub mod relay_poller;
 pub mod relay_transport;
 pub mod sale_service; // Service de vente pour profil Libraire

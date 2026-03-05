@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use sea_orm::{ActiveModelTrait, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, QueryFilter, Set};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -245,6 +245,7 @@ pub async fn import_collection(
 ) -> impl IntoResponse {
     use crate::import;
     use crate::models::{book, copy};
+    use sea_orm::EntityTrait;
 
     let db = state.db();
     let import_as_owned = query.owned.unwrap_or(false);
@@ -274,19 +275,41 @@ pub async fn import_collection(
                     let mut errors = Vec::new();
                     for req in books {
                         let now = chrono::Utc::now();
-                        // 1. Create Book
-                        let new_book = book::ActiveModel {
-                            title: Set(req.title.clone()),
-                            isbn: Set(req.isbn),
-                            summary: Set(None),
-                            publisher: Set(req.publisher),
-                            publication_year: Set(req.publication_year),
-                            created_at: Set(now.to_rfc3339()),
-                            updated_at: Set(now.to_rfc3339()),
-                            owned: Set(import_as_owned),
-                            ..Default::default()
+                        // 1. Find existing book by ISBN, or create
+                        let existing = if let Some(ref isbn) = req.isbn {
+                            book::Entity::find()
+                                .filter(book::Column::Isbn.eq(isbn))
+                                .one(db)
+                                .await
+                                .ok()
+                                .flatten()
+                        } else {
+                            None
                         };
-                        match new_book.insert(db).await {
+                        let book_result = if let Some(existing_book) = existing {
+                            // Book already exists - reuse it
+                            if import_as_owned && !existing_book.owned {
+                                let mut active: book::ActiveModel = existing_book.clone().into();
+                                active.owned = Set(true);
+                                active.updated_at = Set(now.to_rfc3339());
+                                let _ = active.update(db).await;
+                            }
+                            Ok(existing_book)
+                        } else {
+                            let new_book = book::ActiveModel {
+                                title: Set(req.title.clone()),
+                                isbn: Set(req.isbn),
+                                summary: Set(None),
+                                publisher: Set(req.publisher),
+                                publication_year: Set(req.publication_year),
+                                created_at: Set(now.to_rfc3339()),
+                                updated_at: Set(now.to_rfc3339()),
+                                owned: Set(import_as_owned),
+                                ..Default::default()
+                            };
+                            new_book.insert(db).await
+                        };
+                        match book_result {
                             Ok(created_book) => {
                                 let _ = crate::sync::log_operation(
                                     db,
