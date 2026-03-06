@@ -3564,6 +3564,7 @@ pub async fn list_outgoing_requests(State(db): State<DatabaseConnection>) -> imp
                 "book_isbn": req.book_isbn,
                 "status": req.status,
                 "created_at": req.created_at,
+                "updated_at": req.updated_at,
                 "peer_id": peer.as_ref().map(|p| p.id),
                 "peer_name": peer.as_ref().map(|p| p.name.clone()).unwrap_or("Unknown".to_string()),
                 "peer_url": peer.map(|p| p.url)
@@ -3797,6 +3798,7 @@ pub async fn list_requests(State(db): State<DatabaseConnection>) -> impl IntoRes
                 "book_isbn": req.book_isbn,
                 "status": req.status,
                 "created_at": req.created_at,
+                "updated_at": req.updated_at,
                 "peer_id": peer.as_ref().map(|p| p.id),
                 "peer_name": peer.as_ref().map(|p| p.name.clone()).unwrap_or("Unknown".to_string()),
                 "peer_url": peer.map(|p| p.url)
@@ -4782,8 +4784,9 @@ pub async fn return_borrowed_book(
                 "No accepted outgoing request found for ISBN: '{}'. Falling back to local cleanup.",
                 book_isbn
             );
-            // Fallback: just delete the local copy
+            // Fallback: delete the local copy + clean up orphaned book
             let _ = copy::Entity::delete_by_id(payload.copy_id).exec(&db).await;
+            cleanup_orphaned_book(&db, the_copy.book_id).await;
             return (
                 StatusCode::OK,
                 Json(json!({ "message": "Copy deleted (no outgoing request found)" })),
@@ -4793,6 +4796,7 @@ pub async fn return_borrowed_book(
         Err(e) => {
             tracing::error!("DB error finding outgoing request: {}", e);
             let _ = copy::Entity::delete_by_id(payload.copy_id).exec(&db).await;
+            cleanup_orphaned_book(&db, the_copy.book_id).await;
             return (
                 StatusCode::OK,
                 Json(json!({ "message": "Copy deleted (db error on request lookup)" })),
@@ -4811,6 +4815,7 @@ pub async fn return_borrowed_book(
             tracing::warn!("Peer not found for outgoing request");
             // Still clean up locally
             let _ = copy::Entity::delete_by_id(payload.copy_id).exec(&db).await;
+            cleanup_orphaned_book(&db, the_copy.book_id).await;
             let mut active: p2p_outgoing_request::ActiveModel = outgoing_req.into();
             active.status = Set("returned".to_string());
             active.updated_at = Set(chrono::Utc::now().to_rfc3339());
@@ -4894,27 +4899,33 @@ pub async fn return_borrowed_book(
     }
 
     // 6. Clean up book if no longer needed
-    if let Ok(Some(bk)) = book::Entity::find_by_id(the_copy.book_id).one(&db).await {
-        let should_delete = !bk.owned
-            && bk.reading_status != "wanting"
-            && copy::Entity::find()
-                .filter(copy::Column::BookId.eq(bk.id))
-                .count(&db)
-                .await
-                .unwrap_or(1)
-                == 0;
-
-        if should_delete {
-            let _ = book::Entity::delete_by_id(bk.id).exec(&db).await;
-            tracing::info!("Deleted book {} after loan return", bk.id);
-        }
-    }
+    cleanup_orphaned_book(&db, the_copy.book_id).await;
 
     (
         StatusCode::OK,
         Json(json!({ "message": "Book returned successfully" })),
     )
         .into_response()
+}
+
+/// Delete a book if it has no remaining copies, is not owned, and is not in the wishlist.
+async fn cleanup_orphaned_book(db: &DatabaseConnection, book_id: i32) {
+    use crate::models::{book, copy};
+    if let Ok(Some(bk)) = book::Entity::find_by_id(book_id).one(db).await {
+        let should_delete = !bk.owned
+            && bk.reading_status != "wanting"
+            && copy::Entity::find()
+                .filter(copy::Column::BookId.eq(bk.id))
+                .count(db)
+                .await
+                .unwrap_or(1)
+                == 0;
+
+        if should_delete {
+            let _ = book::Entity::delete_by_id(bk.id).exec(db).await;
+            tracing::info!("Deleted orphaned book {} after loan return", bk.id);
+        }
+    }
 }
 
 #[derive(Deserialize)]

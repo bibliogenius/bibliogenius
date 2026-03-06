@@ -122,6 +122,8 @@ pub struct Book {
     pub language: Option<String>, // Language code (e.g., "fr", "en", "fre", "eng")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub digital_formats: Option<Vec<String>>, // ["ebook", "audiobook"]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_copies: Option<i32>, // Number of copies with status "available"
 }
 
 impl From<Model> for Book {
@@ -174,18 +176,38 @@ impl From<Model> for Book {
             price: model.price,
             language,
             digital_formats,
+            available_copies: None, // Populated separately
         }
     }
 }
 
 impl Book {
-    /// Convert book models to DTOs with author names populated from the book_authors table.
+    /// Convert book models to DTOs with author names and available copy counts populated.
     pub async fn populate_authors(
         db: &sea_orm::DatabaseConnection,
         models: Vec<Model>,
     ) -> Vec<Book> {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        use std::collections::HashMap;
+
+        // Batch-fetch available copy counts for all book IDs
+        let book_ids: Vec<i32> = models.iter().map(|m| m.id).collect();
+        let mut available_map: HashMap<i32, i32> = HashMap::new();
+        if !book_ids.is_empty()
+            && let Ok(copies) = super::copy::Entity::find()
+                .filter(super::copy::Column::BookId.is_in(book_ids))
+                .filter(super::copy::Column::Status.eq("available"))
+                .all(db)
+                .await
+        {
+            for c in copies {
+                *available_map.entry(c.book_id).or_insert(0) += 1;
+            }
+        }
+
         let mut dtos = Vec::with_capacity(models.len());
         for model in models {
+            let book_id = model.id;
             let mut dto = Book::from(model.clone());
             if let Ok(authors) = model.find_related(super::author::Entity).all(db).await
                 && !authors.is_empty()
@@ -194,6 +216,7 @@ impl Book {
                 dto.author = Some(names.join(", "));
                 dto.authors = Some(names);
             }
+            dto.available_copies = Some(*available_map.get(&book_id).unwrap_or(&0));
             dtos.push(dto);
         }
         dtos

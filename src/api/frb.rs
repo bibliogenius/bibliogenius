@@ -498,6 +498,7 @@ impl From<FrbBook> for crate::models::Book {
             price: frb_book.price, // Price now exposed in FFI layer
             language: None,
             digital_formats: frb_book.digital_formats,
+            available_copies: None,
         }
     }
 }

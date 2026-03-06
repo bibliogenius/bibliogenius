@@ -678,6 +678,7 @@ pub async fn search_unified(
                 price: None,
                 language: item.language.clone(), // Language from Wikidata
                 digital_formats: None,
+                available_copies: None,
             };
             results.push(book);
         }
@@ -722,6 +723,7 @@ pub async fn search_unified(
                     price: None,
                     language: Some("fr".to_string()), // BNF is French National Library
                     digital_formats: None,
+                    available_copies: None,
                 };
                 results.push(book);
             }
@@ -807,6 +809,7 @@ pub async fn search_unified(
                     price: None,
                     language: Some("fr".to_string()),
                     digital_formats: None,
+                    available_copies: None,
                 };
                 results.push(book);
             }
