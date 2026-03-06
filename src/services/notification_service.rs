@@ -60,12 +60,12 @@ pub async fn check_wishlist_matches(
         return;
     }
 
-    // Load wishlist ISBNs (books not owned, with ISBN)
+    // Load wishlist ISBNs (books with reading_status='wanting' and an ISBN)
     use crate::models::book;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
     let wishlist: Vec<String> = match book::Entity::find()
-        .filter(book::Column::Owned.eq(false))
+        .filter(book::Column::ReadingStatus.eq("wanting"))
         .filter(book::Column::Isbn.is_not_null())
         .all(db)
         .await
