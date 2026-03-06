@@ -16,6 +16,7 @@ pub struct Model {
     pub synced_at: String,
     pub node_id: Option<String>,
     pub first_seen_at: Option<String>,
+    pub notified_at: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -3069,14 +3069,13 @@ async fn upsert_directory_catalog_cache(
         .collect();
 
     let mut fresh_isbns = std::collections::HashSet::new();
-    let mut new_isbns: Vec<(String, String)> = Vec::new(); // (isbn, title)
     let mut result = Vec::with_capacity(entries.len());
 
     for entry in entries {
         fresh_isbns.insert(entry.isbn.clone());
 
         if let Some(existing_entry) = existing_map.get(&entry.isbn) {
-            // UPDATE: preserve first_seen_at, refresh metadata
+            // UPDATE: preserve first_seen_at and notified_at, refresh metadata
             let mut active: peer_book::ActiveModel = existing_entry.clone().into();
             active.title = Set(entry.title.clone());
             active.author = Set(entry.author.clone());
@@ -3090,8 +3089,7 @@ async fn upsert_directory_catalog_cache(
                 first_seen_at: existing_entry.first_seen_at.clone(),
             });
         } else {
-            // INSERT: new entry - track for wishlist check
-            new_isbns.push((entry.isbn.clone(), entry.title.clone()));
+            // INSERT: new entry (notified_at = NULL - not yet notified)
             let cache = peer_book::ActiveModel {
                 peer_id: Set(0), // sentinel for directory entries
                 remote_book_id: Set(0),
@@ -3103,6 +3101,7 @@ async fn upsert_directory_catalog_cache(
                 synced_at: Set(now.clone()),
                 node_id: Set(Some(node_id.to_string())),
                 first_seen_at: Set(Some(now.clone())),
+                notified_at: Set(None),
                 ..Default::default()
             };
             match peer_book::Entity::insert(cache).exec(db).await {
@@ -3126,28 +3125,56 @@ async fn upsert_directory_catalog_cache(
         }
     }
 
-    // Wishlist matches + grouped "new books" notification
-    if !new_isbns.is_empty() {
-        crate::services::notification_service::check_wishlist_matches(
-            db,
-            &new_isbns,
-            node_id, // library name = node_id (best we have here)
-            "directory",
-            node_id,
-        )
-        .await;
+    // Check un-notified entries for wishlist matches + emit "new_books" notification.
+    // Uses notified_at IS NULL instead of tracking inserts in memory, so that
+    // notification dedup survives notification pruning (TTL/cap).
+    let unnotified = peer_book::Entity::find()
+        .filter(peer_book::Column::NodeId.eq(node_id))
+        .filter(peer_book::Column::PeerId.eq(0))
+        .filter(peer_book::Column::NotifiedAt.is_null())
+        .all(db)
+        .await
+        .unwrap_or_default();
 
-        crate::services::notification_service::emit_unique(
+    if !unnotified.is_empty() {
+        let new_isbns: Vec<(String, String)> = unnotified
+            .iter()
+            .filter_map(|pb| {
+                pb.isbn
+                    .as_ref()
+                    .map(|isbn| (isbn.clone(), pb.title.clone()))
+            })
+            .collect();
+
+        if !new_isbns.is_empty() {
+            crate::services::notification_service::check_wishlist_matches(
+                db,
+                &new_isbns,
+                node_id,
+                "directory",
+                node_id,
+            )
+            .await;
+        }
+
+        crate::services::notification_service::emit(
             db,
             crate::domain::CreateNotification {
                 event_type: crate::domain::NotificationEventType::NewBooks,
-                title: format!("{} nouveaux livres", new_isbns.len()),
+                title: format!("{} nouveaux livres", unnotified.len()),
                 body: Some(node_id.to_string()),
                 ref_type: Some("directory".to_string()),
                 ref_id: Some(node_id.to_string()),
             },
         )
         .await;
+
+        // Mark all un-notified entries as notified
+        for pb in unnotified {
+            let mut active: peer_book::ActiveModel = pb.into();
+            active.notified_at = Set(Some(now.clone()));
+            let _ = active.update(db).await;
+        }
     }
 
     // Re-enable FK checks
@@ -3293,6 +3320,16 @@ pub async fn hub_directory_resolve_borrow_request(
         .resolve_borrow_request(db, request_id, &resolution)
         .await
         .map(FrbHubBorrowRequest::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Cancels a borrow request (requester only).
+#[flutter_rust_bridge::frb]
+pub async fn hub_directory_cancel_borrow_request(request_id: i64) -> Result<(), String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .cancel_borrow_request(db, request_id)
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -3641,6 +3678,18 @@ pub async fn notifications_dismiss(id: i32) -> Result<bool, String> {
     let db = db().ok_or("Database not initialized")?;
     let repo = crate::infrastructure::SeaOrmNotificationRepository::new(db.clone());
     repo.dismiss(id).await.map_err(|e| format!("{e:?}"))
+}
+
+/// Dismiss (hard delete) all notifications. Returns count of deleted rows.
+#[flutter_rust_bridge::frb]
+pub async fn notifications_dismiss_all() -> Result<i32, String> {
+    use crate::domain::NotificationRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::infrastructure::SeaOrmNotificationRepository::new(db.clone());
+    repo.dismiss_all()
+        .await
+        .map(|c| c as i32)
+        .map_err(|e| format!("{e:?}"))
 }
 
 /// Run pruning (TTL + cap). Call on app startup.

@@ -867,6 +867,33 @@ impl HubDirectoryService {
             .map_err(|e| HubDirectoryError::Network(e.to_string()))
     }
 
+    /// Cancels a borrow request. Only the requester can cancel.
+    pub async fn cancel_borrow_request(
+        &self,
+        db: &DatabaseConnection,
+        request_id: i64,
+    ) -> Result<(), HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let response = self
+            .http_client
+            .delete(format!("{hub_url}/api/directory/borrow/{request_id}"))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------

@@ -198,9 +198,17 @@ fn build_routes() -> Router<AppState> {
             get(peer::list_outgoing_requests).post(peer::create_outgoing_request),
         ) // List/Create outgoing requests
         .route(
+            "/peers/requests/outgoing/clear",
+            axum::routing::delete(peer::clear_outgoing_requests),
+        ) // Clear non-pending outgoing requests
+        .route(
             "/peers/requests/outgoing/:id",
             axum::routing::delete(peer::delete_outgoing_request),
         )
+        .route(
+            "/peers/requests/clear",
+            axum::routing::delete(peer::clear_incoming_requests),
+        ) // Clear non-pending incoming requests
         .route("/peers/requests/:id", put(peer::update_request_status)) // Update status
         .route(
             "/peers/requests/:id",

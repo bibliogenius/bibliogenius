@@ -359,6 +359,16 @@ All three must pass before considering work complete. Clippy warnings should be 
 
 ## Code Style
 
+### Prefer Established Crates Over Custom Code
+
+Before writing custom logic, check whether a well-established crate already solves the problem. Evaluate based on: download count (crates.io), maintenance activity, API fit, and dependency footprint. Only write custom code when no suitable crate exists, when the crate would be overkill for the need, or when it would introduce a heavy/unnecessary dependency tree.
+
+### Single Responsibility & File Size
+
+- **Files over 500 lines**: Extract reusable logic into dedicated modules in `src/utils/` or `src/services/`.
+- **Handlers should delegate**: API handlers in `src/api/` must stay thin. Business logic, network utilities, and data transformations belong in separate modules.
+- **One concern per module**: `peer.rs` (3000+ lines) is legacy debt. When adding new logic that touches it, prefer extracting into a focused utility (e.g., `utils/peer_discovery.rs`) rather than growing the file further.
+
 ### Naming
 
 - Structs: `PascalCase` (e.g., `BookService`, `InventaireResponse`)

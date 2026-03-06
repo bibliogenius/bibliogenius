@@ -129,6 +129,17 @@ impl NotificationRepository for SeaOrmNotificationRepository {
         Ok(result.rows_affected > 0)
     }
 
+    async fn dismiss_all(&self) -> Result<i64, DomainError> {
+        let result = self
+            .db
+            .execute(Statement::from_string(
+                self.db.get_database_backend(),
+                "DELETE FROM notifications".to_owned(),
+            ))
+            .await?;
+        Ok(result.rows_affected() as i64)
+    }
+
     async fn prune(&self) -> Result<i64, DomainError> {
         let mut total_deleted: u64 = 0;
 

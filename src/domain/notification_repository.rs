@@ -153,6 +153,9 @@ pub trait NotificationRepository: Send + Sync {
     /// Dismiss (hard delete) a single notification. Returns true if found.
     async fn dismiss(&self, id: i32) -> Result<bool, DomainError>;
 
+    /// Dismiss (hard delete) all notifications. Returns count of deleted rows.
+    async fn dismiss_all(&self) -> Result<i64, DomainError>;
+
     /// Run TTL + cap pruning. Returns count of deleted rows.
     async fn prune(&self) -> Result<i64, DomainError>;
 

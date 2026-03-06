@@ -1107,7 +1107,6 @@ async fn upsert_peer_books_cache(
         .collect();
 
     let mut fresh_ids = std::collections::HashSet::new();
-    let mut new_isbns: Vec<(String, String)> = Vec::new(); // (isbn, title) of newly inserted books
 
     // 2. Upsert each book
     for book in books {
@@ -1115,7 +1114,7 @@ async fn upsert_peer_books_cache(
         fresh_ids.insert(remote_id);
 
         if let Some(existing_entry) = existing_map.get(&remote_id) {
-            // UPDATE: preserve first_seen_at, refresh other fields
+            // UPDATE: preserve first_seen_at and notified_at, refresh other fields
             let mut active: peer_book::ActiveModel = existing_entry.clone().into();
             active.title = Set(book.title);
             active.isbn = Set(book.isbn);
@@ -1126,13 +1125,10 @@ async fn upsert_peer_books_cache(
             if let Some(nid) = node_id {
                 active.node_id = Set(Some(nid.to_string()));
             }
-            // first_seen_at stays unchanged
+            // first_seen_at and notified_at stay unchanged
             let _ = active.update(db).await;
         } else {
-            // INSERT: new book - track ISBN for wishlist check
-            if let Some(ref isbn) = book.isbn {
-                new_isbns.push((isbn.clone(), book.title.clone()));
-            }
+            // INSERT: new book (notified_at = NULL - not yet notified)
             let cache = peer_book::ActiveModel {
                 peer_id: Set(peer_id),
                 remote_book_id: Set(remote_id),
@@ -1144,6 +1140,7 @@ async fn upsert_peer_books_cache(
                 synced_at: Set(now.clone()),
                 node_id: Set(node_id.map(|s| s.to_string())),
                 first_seen_at: Set(Some(now.clone())),
+                notified_at: Set(None),
                 ..Default::default()
             };
             let _ = peer_book::Entity::insert(cache).exec(db).await;
@@ -1157,8 +1154,26 @@ async fn upsert_peer_books_cache(
         }
     }
 
-    // 4. Check new books against wishlist + emit "new_books" notification
-    if !new_isbns.is_empty() {
+    // 4. Check un-notified books against wishlist + emit "new_books" notification.
+    // Uses notified_at IS NULL instead of tracking inserts in memory, so that
+    // notification dedup survives notification pruning (TTL/cap).
+    let unnotified = peer_book::Entity::find()
+        .filter(peer_book::Column::PeerId.eq(peer_id))
+        .filter(peer_book::Column::NotifiedAt.is_null())
+        .all(db)
+        .await
+        .unwrap_or_default();
+
+    if !unnotified.is_empty() {
+        let new_isbns: Vec<(String, String)> = unnotified
+            .iter()
+            .filter_map(|pb| {
+                pb.isbn
+                    .as_ref()
+                    .map(|isbn| (isbn.clone(), pb.title.clone()))
+            })
+            .collect();
+
         let peer_name = peer::Entity::find_by_id(peer_id)
             .one(db)
             .await
@@ -1169,23 +1184,32 @@ async fn upsert_peer_books_cache(
         let ref_id = peer_id.to_string();
 
         // Wishlist matches
-        crate::services::notification_service::check_wishlist_matches(
-            db, &new_isbns, &peer_name, "peer", &ref_id,
-        )
-        .await;
+        if !new_isbns.is_empty() {
+            crate::services::notification_service::check_wishlist_matches(
+                db, &new_isbns, &peer_name, "peer", &ref_id,
+            )
+            .await;
+        }
 
         // Grouped "new books" notification
-        crate::services::notification_service::emit_unique(
+        crate::services::notification_service::emit(
             db,
             crate::domain::CreateNotification {
                 event_type: crate::domain::NotificationEventType::NewBooks,
-                title: format!("{} : {} nouveaux livres", peer_name, new_isbns.len()),
+                title: format!("{} : {} nouveaux livres", peer_name, unnotified.len()),
                 body: None,
                 ref_type: Some("peer".to_string()),
                 ref_id: Some(ref_id),
             },
         )
         .await;
+
+        // Mark all un-notified books as notified so they won't trigger again
+        for pb in unnotified {
+            let mut active: peer_book::ActiveModel = pb.into();
+            active.notified_at = Set(Some(now.clone()));
+            let _ = active.update(db).await;
+        }
     }
 
     count
@@ -2914,11 +2938,32 @@ pub async fn sync_peer_by_url(
 
     // 4. Check peer's config for privacy consent flags
     let config_url = format!("{}/api/config", peer.url);
-    let peer_config = match client.get(&config_url).send().await {
+    let mut peer_config = match client.get(&config_url).send().await {
         Ok(res) if res.status().is_success() => {
             res.json::<crate::api::setup::ConfigResponse>().await.ok()
         }
         _ => None,
+    };
+
+    // 4b. If config fetch failed, the peer may have restarted on a different port.
+    // Try scanning ports 8000-8010 on the same host.
+    let effective_url = if peer_config.is_none() {
+        match crate::utils::peer_discovery::try_discover_peer_port(&peer.url, &client).await {
+            Some(new_url) => {
+                // Retry config fetch with discovered URL
+                let retry_url = format!("{}/api/config", new_url);
+                peer_config = match client.get(&retry_url).send().await {
+                    Ok(res) if res.status().is_success() => {
+                        res.json::<crate::api::setup::ConfigResponse>().await.ok()
+                    }
+                    _ => None,
+                };
+                new_url
+            }
+            None => peer.url.clone(),
+        }
+    } else {
+        peer.url.clone()
     };
 
     let allows_caching = peer_config
@@ -2977,12 +3022,13 @@ pub async fn sync_peer_by_url(
 
     if !allows_caching {
         // Peer doesn't allow caching - still sync gamification stats
-        sync_peer_gamification_stats(&db, peer.id, &peer.url, &client, shares_gamification).await;
+        sync_peer_gamification_stats(&db, peer.id, &effective_url, &client, shares_gamification)
+            .await;
         // Still sync memory game scores
         crate::modules::memory_game::handlers::sync_peer_memory_scores(
             &db,
             peer.id,
-            &peer.url,
+            &effective_url,
             &peer_display_name_url,
             &client,
             peer_has_memory_game_url,
@@ -2992,7 +3038,7 @@ pub async fn sync_peer_by_url(
         crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
             &db,
             peer.id,
-            &peer.url,
+            &effective_url,
             &peer_display_name_url,
             &client,
             peer_has_sliding_puzzle_url,
@@ -3000,7 +3046,12 @@ pub async fn sync_peer_by_url(
         .await;
 
         let peer_id = peer.id;
+        let url_changed = effective_url != peer.url;
         let mut active_peer: peer::ActiveModel = peer.into();
+        if url_changed {
+            active_peer.url = Set(effective_url);
+            tracing::info!("Port discovery: persisted new URL for peer {}", peer_id);
+        }
         if let Some(ref new_name) = updated_name {
             active_peer.name = Set(new_name.clone());
             tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
@@ -3041,7 +3092,7 @@ pub async fn sync_peer_by_url(
             }
             Ok(None) | Err(_) => {
                 // Fallback to plaintext
-                let url = format!("{}/api/books", peer.url);
+                let url = format!("{}/api/books", effective_url);
                 match client.get(&url).send().await {
                     Ok(response) if response.status().is_success() => {
                         #[derive(Deserialize)]
@@ -3076,13 +3127,13 @@ pub async fn sync_peer_by_url(
     let count = upsert_peer_books_cache(&db, peer.id, None, books).await;
 
     // 6. Sync gamification stats
-    sync_peer_gamification_stats(&db, peer.id, &peer.url, &client, shares_gamification).await;
+    sync_peer_gamification_stats(&db, peer.id, &effective_url, &client, shares_gamification).await;
 
     // 6b. Sync memory game scores
     crate::modules::memory_game::handlers::sync_peer_memory_scores(
         &db,
         peer.id,
-        &peer.url,
+        &effective_url,
         &peer_display_name_url,
         &client,
         peer_has_memory_game_url,
@@ -3093,16 +3144,21 @@ pub async fn sync_peer_by_url(
     crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
         &db,
         peer.id,
-        &peer.url,
+        &effective_url,
         &peer_display_name_url,
         &client,
         peer_has_sliding_puzzle_url,
     )
     .await;
 
-    // 7. Update peer's last_seen (and name if changed)
+    // 7. Update peer's last_seen (and name/URL if changed)
     let peer_id = peer.id;
+    let url_changed = effective_url != peer.url;
     let mut active_peer: peer::ActiveModel = peer.into();
+    if url_changed {
+        active_peer.url = Set(effective_url);
+        tracing::info!("Port discovery: persisted new URL for peer {}", peer_id);
+    }
     if let Some(ref new_name) = updated_name {
         active_peer.name = Set(new_name.clone());
         tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
@@ -3508,12 +3564,62 @@ pub async fn list_outgoing_requests(State(db): State<DatabaseConnection>) -> imp
                 "book_isbn": req.book_isbn,
                 "status": req.status,
                 "created_at": req.created_at,
-                "peer_name": peer.map(|p| p.name).unwrap_or("Unknown".to_string())
+                "peer_id": peer.as_ref().map(|p| p.id),
+                "peer_name": peer.as_ref().map(|p| p.name.clone()).unwrap_or("Unknown".to_string()),
+                "peer_url": peer.map(|p| p.url)
             })
         })
         .collect();
 
     (StatusCode::OK, Json(dtos)).into_response()
+}
+
+/// Delete all non-pending outgoing requests (cleanup).
+pub async fn clear_outgoing_requests(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    use sea_orm::ConnectionTrait;
+    let result = db
+        .execute(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM p2p_outgoing_requests WHERE status != 'pending'".to_owned(),
+        ))
+        .await;
+
+    match result {
+        Ok(r) => (
+            StatusCode::OK,
+            Json(json!({ "deleted": r.rows_affected() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Delete all non-pending incoming requests (cleanup).
+pub async fn clear_incoming_requests(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    use sea_orm::ConnectionTrait;
+    let result = db
+        .execute(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM p2p_requests WHERE status != 'pending'".to_owned(),
+        ))
+        .await;
+
+    match result {
+        Ok(r) => (
+            StatusCode::OK,
+            Json(json!({ "deleted": r.rows_affected() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -3566,18 +3672,49 @@ pub async fn receive_request(
         }
     };
 
-    // 2. Check if auto-approve should be used
+    // 2. Check copy availability before creating the request
+    let has_available_copy = {
+        use crate::models::book;
+        use crate::models::copy;
+
+        let book_found = book::Entity::find()
+            .filter(book::Column::Isbn.eq(&payload.book_isbn))
+            .one(&db)
+            .await
+            .unwrap_or(None);
+
+        if let Some(b) = book_found {
+            copy::Entity::find()
+                .filter(copy::Column::BookId.eq(b.id))
+                .filter(copy::Column::Status.eq("available"))
+                .one(&db)
+                .await
+                .unwrap_or(None)
+                .is_some()
+        } else {
+            false
+        }
+    };
+
+    // 3. Check if auto-approve should be used
     let auto_approve =
         is_auto_approve_loans_enabled(&db).await && peer.connection_status == "accepted";
 
-    // 3. Create Request Record — always as "pending" initially
+    // Determine initial status: auto-reject if no copy available
+    let initial_status = if !has_available_copy {
+        "rejected"
+    } else {
+        "pending"
+    };
+
+    // 4. Create Request Record
     let request_id = uuid::Uuid::new_v4().to_string();
     let request = crate::models::p2p_request::ActiveModel {
         id: Set(request_id.clone()),
         from_peer_id: Set(peer.id),
         book_isbn: Set(payload.book_isbn.clone()),
         book_title: Set(payload.book_title.clone()),
-        status: Set("pending".to_string()),
+        status: Set(initial_status.to_string()),
         created_at: Set(chrono::Utc::now().to_rfc3339()),
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
         requester_request_id: Set(payload.requester_request_id),
@@ -3588,6 +3725,20 @@ pub async fn receive_request(
         .await
     {
         Ok(_) => {
+            // Auto-rejected: no available copy
+            if !has_available_copy {
+                tracing::info!(
+                    "Auto-rejected loan request {} for '{}' - no available copy",
+                    request_id,
+                    payload.book_title
+                );
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "success": false, "status": "rejected", "reason": "no_available_copy" })),
+                )
+                    .into_response();
+            }
+
             // Emit borrow_request notification
             crate::services::notification_service::emit(
                 &db,
@@ -3646,7 +3797,9 @@ pub async fn list_requests(State(db): State<DatabaseConnection>) -> impl IntoRes
                 "book_isbn": req.book_isbn,
                 "status": req.status,
                 "created_at": req.created_at,
-                "peer_name": peer.map(|p| p.name).unwrap_or("Unknown".to_string())
+                "peer_id": peer.as_ref().map(|p| p.id),
+                "peer_name": peer.as_ref().map(|p| p.name.clone()).unwrap_or("Unknown".to_string()),
+                "peer_url": peer.map(|p| p.url)
             })
         })
         .collect();

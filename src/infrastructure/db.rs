@@ -1500,6 +1500,24 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 059: Add notified_at to peer_books for notification dedup.
+    // Tracks whether the user has already been notified about a book from a peer.
+    // Prevents re-emission of "new_books" and "wishlist_match" notifications
+    // after the original notification is pruned by TTL/cap.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peer_books ADD COLUMN notified_at TEXT".to_owned(),
+        ))
+        .await;
+    // Backfill: mark all existing entries as already notified
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "UPDATE peer_books SET notified_at = synced_at WHERE notified_at IS NULL".to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

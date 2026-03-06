@@ -281,6 +281,35 @@ async fn save_loan_request(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    // Check copy availability before creating the request
+    let has_available_copy = {
+        use crate::models::{book, copy};
+
+        let book_found = book::Entity::find()
+            .filter(book::Column::Isbn.eq(book_isbn))
+            .one(db)
+            .await
+            .unwrap_or(None);
+
+        if let Some(b) = book_found {
+            copy::Entity::find()
+                .filter(copy::Column::BookId.eq(b.id))
+                .filter(copy::Column::Status.eq("available"))
+                .one(db)
+                .await
+                .unwrap_or(None)
+                .is_some()
+        } else {
+            false
+        }
+    };
+
+    let initial_status = if has_available_copy {
+        "pending"
+    } else {
+        "rejected"
+    };
+
     let request_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -289,7 +318,7 @@ async fn save_loan_request(
         from_peer_id: Set(sender_peer.id),
         book_isbn: Set(book_isbn.to_string()),
         book_title: Set(book_title.to_string()),
-        status: Set("pending".to_owned()),
+        status: Set(initial_status.to_owned()),
         created_at: Set(now.clone()),
         updated_at: Set(now),
         requester_request_id: Set(requester_request_id),
@@ -300,11 +329,19 @@ async fn save_loan_request(
         .await
         .map_err(|e| format!("Failed to save request: {e}"))?;
 
-    tracing::info!(
-        "E2EE: Loan request created: {} for '{}'",
-        request_id,
-        book_title
-    );
+    if !has_available_copy {
+        tracing::info!(
+            "E2EE: Loan request auto-rejected: {} for '{}' - no available copy",
+            request_id,
+            book_title
+        );
+    } else {
+        tracing::info!(
+            "E2EE: Loan request created: {} for '{}'",
+            request_id,
+            book_title
+        );
+    }
     Ok(request_id)
 }
 
