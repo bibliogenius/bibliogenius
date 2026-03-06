@@ -32,7 +32,7 @@ pub async fn list_copies(State(state): State<AppState>) -> impl IntoResponse {
 #[derive(Debug, Deserialize)]
 pub struct CreateCopyRequest {
     pub book_id: i32,
-    pub library_id: i32,
+    pub library_id: Option<i32>,
     pub acquisition_date: Option<String>,
     pub notes: Option<String>,
     pub status: String,
@@ -45,9 +45,22 @@ pub async fn create_copy(
     State(state): State<AppState>,
     Json(payload): Json<CreateCopyRequest>,
 ) -> impl IntoResponse {
+    let library_id = match payload.library_id {
+        Some(id) => id,
+        None => match crate::utils::library_helpers::resolve_library_id(state.db()).await {
+            Ok(id) => id,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("Failed to resolve library: {}", e) })),
+                )
+                    .into_response();
+            }
+        },
+    };
     let input = CreateCopyInput {
         book_id: payload.book_id,
-        library_id: payload.library_id,
+        library_id,
         acquisition_date: payload.acquisition_date,
         notes: payload.notes,
         status: payload.status,

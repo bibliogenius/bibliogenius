@@ -118,6 +118,14 @@ pub async fn create_contact(
         None
     };
 
+    // Resolve library_owner_id: FK references libraries(id)
+    let library_owner_id = match dto.library_owner_id {
+        Some(id) => id,
+        None => crate::utils::library_helpers::resolve_library_id(db)
+            .await
+            .map_err(|e| ServiceError::Database(e.to_string()))?,
+    };
+
     let new_contact = contact_model::ActiveModel {
         r#type: Set(dto.contact_type),
         name: Set(dto.name),
@@ -133,7 +141,7 @@ pub async fn create_contact(
         longitude: Set(dto.longitude),
         notes: Set(dto.notes),
         user_id: Set(user_id),
-        library_owner_id: Set(dto.library_owner_id.unwrap_or(1)),
+        library_owner_id: Set(library_owner_id),
         is_active: Set(dto.is_active),
         created_at: Set(now.clone()),
         updated_at: Set(now),

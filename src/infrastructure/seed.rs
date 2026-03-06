@@ -47,7 +47,7 @@ pub async fn seed_demo_data(db: &DatabaseConnection) -> Result<(), DbErr> {
     let default_library = library::ActiveModel {
         name: Set("My Library".to_owned()),
         description: Set(Some("Default personal library".to_owned())),
-        owner_id: Set(1), // admin user
+        owner_id: Set(1), // admin user (seed only - production uses resolve_library_id)
         created_at: Set(chrono::Utc::now().to_rfc3339()),
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
         ..Default::default()

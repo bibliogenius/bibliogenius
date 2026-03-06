@@ -1067,7 +1067,7 @@ pub async fn create_contact(contact: FrbContact) -> Result<FrbContact, String> {
         longitude: contact.longitude,
         notes: contact.notes,
         user_id: contact.user_id,
-        library_owner_id: contact.library_owner_id.or(Some(1)), // Fallback to 1 if not provided
+        library_owner_id: contact.library_owner_id, // Let service layer resolve dynamically if None
         is_active: contact.is_active,
     };
 
@@ -1098,7 +1098,7 @@ pub async fn update_contact(contact: FrbContact) -> Result<FrbContact, String> {
         longitude: contact.longitude,
         notes: contact.notes,
         user_id: contact.user_id,
-        library_owner_id: contact.library_owner_id.or(Some(1)),
+        library_owner_id: contact.library_owner_id, // Let service layer handle if None
         is_active: contact.is_active,
     };
 
@@ -1194,11 +1194,20 @@ pub async fn create_loan(
 ) -> Result<i32, String> {
     let db = db().ok_or("Database not initialized")?;
 
+    // Resolve library_id if 0 (sentinel for "not provided"): FK references libraries(id)
+    let resolved_library_id = if library_id > 0 {
+        library_id
+    } else {
+        crate::utils::library_helpers::resolve_library_id(db)
+            .await
+            .map_err(|e| format!("No library found: {e}"))?
+    };
+
     let dto = crate::models::loan::LoanDto {
         id: None,
         copy_id,
         contact_id,
-        library_id,
+        library_id: resolved_library_id,
         loan_date,
         due_date,
         return_date: None,

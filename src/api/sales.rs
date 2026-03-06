@@ -53,7 +53,19 @@ pub async fn create_sale(
         id: None,
         copy_id: payload.copy_id,
         contact_id: payload.contact_id,
-        library_id: payload.library_id.unwrap_or(1),
+        library_id: match payload.library_id {
+            Some(id) => id,
+            None => match crate::utils::library_helpers::resolve_library_id(&db).await {
+                Ok(id) => id,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("No library found: {}", e)})),
+                    )
+                        .into_response();
+                }
+            },
+        },
         sale_date: payload.sale_date.unwrap_or(now),
         sale_price: payload.sale_price,
         status: None,

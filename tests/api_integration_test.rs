@@ -487,6 +487,93 @@ async fn test_copy_creation_requires_valid_library() {
 }
 
 #[tokio::test]
+async fn test_resolve_library_id_finds_existing() {
+    // When a library exists, resolve_library_id returns its ID
+    let db = setup_test_db().await;
+    let admin_id = create_test_admin(&db).await;
+    let lib_id = create_test_library(&db, admin_id, "Existing Library").await;
+
+    let resolved = rust_lib_app::utils::library_helpers::resolve_library_id(&db)
+        .await
+        .expect("Should resolve existing library");
+
+    assert_eq!(resolved, lib_id);
+}
+
+#[tokio::test]
+async fn test_resolve_library_id_creates_library_for_existing_user() {
+    // When no library exists but a user does, creates a library
+    let db = setup_test_db().await;
+    let admin_id = create_test_admin(&db).await;
+
+    // No library created yet
+    let resolved = rust_lib_app::utils::library_helpers::resolve_library_id(&db)
+        .await
+        .expect("Should auto-create library");
+
+    assert!(resolved > 0, "Library ID should be positive");
+
+    // Verify the library was created with correct owner
+    let lib = rust_lib_app::models::library::Entity::find_by_id(resolved)
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("Library should exist");
+    assert_eq!(lib.owner_id, admin_id);
+}
+
+#[tokio::test]
+async fn test_resolve_library_id_bootstraps_user_and_library() {
+    // When neither user nor library exists, creates both (fresh DB scenario)
+    let db = setup_test_db().await;
+    // No admin, no library
+
+    let resolved = rust_lib_app::utils::library_helpers::resolve_library_id(&db)
+        .await
+        .expect("Should bootstrap user + library");
+
+    assert!(resolved > 0, "Library ID should be positive");
+
+    // Verify both user and library were created
+    let user_count = rust_lib_app::models::user::Entity::find()
+        .count(&db)
+        .await
+        .unwrap();
+    assert_eq!(user_count, 1, "Exactly one user should exist");
+
+    let lib_count = rust_lib_app::models::library::Entity::find()
+        .count(&db)
+        .await
+        .unwrap();
+    assert_eq!(lib_count, 1, "Exactly one library should exist");
+}
+
+#[tokio::test]
+async fn test_resolve_library_id_is_idempotent() {
+    // Calling resolve_library_id multiple times returns the same ID
+    let db = setup_test_db().await;
+
+    let id1 = rust_lib_app::utils::library_helpers::resolve_library_id(&db)
+        .await
+        .expect("First resolve");
+    let id2 = rust_lib_app::utils::library_helpers::resolve_library_id(&db)
+        .await
+        .expect("Second resolve");
+
+    assert_eq!(
+        id1, id2,
+        "Should return the same library ID on subsequent calls"
+    );
+
+    // Verify only one library was created
+    let lib_count = rust_lib_app::models::library::Entity::find()
+        .count(&db)
+        .await
+        .unwrap();
+    assert_eq!(lib_count, 1, "Should not create duplicate libraries");
+}
+
+#[tokio::test]
 async fn test_sync_clears_old_peer_books() {
     // Tests that sync replaces old cache completely
     let db = setup_test_db().await;

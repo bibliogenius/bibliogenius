@@ -123,6 +123,21 @@ pub async fn create_contact(
 ) -> impl IntoResponse {
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Resolve library_owner_id: FK references libraries(id)
+    let library_owner_id = match contact_dto.library_owner_id {
+        Some(id) => id,
+        None => match crate::utils::library_helpers::resolve_library_id(&db).await {
+            Ok(id) => id,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("No library found: {}", e)})),
+                )
+                    .into_response();
+            }
+        },
+    };
+
     let new_contact = contact_model::ActiveModel {
         r#type: Set(contact_dto.r#type),
         name: Set(contact_dto.name),
@@ -138,7 +153,7 @@ pub async fn create_contact(
         longitude: Set(contact_dto.longitude),
         notes: Set(contact_dto.notes),
         user_id: Set(contact_dto.user_id),
-        library_owner_id: Set(contact_dto.library_owner_id.unwrap_or(1)),
+        library_owner_id: Set(library_owner_id),
         is_active: Set(contact_dto.is_active),
         created_at: Set(now.clone()),
         updated_at: Set(now),

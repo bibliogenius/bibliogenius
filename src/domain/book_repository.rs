@@ -16,6 +16,8 @@ pub struct BookFilter {
     pub sort: Option<String>,
     pub page: Option<u64>,
     pub limit: Option<u64>,
+    /// When true, only return books the user owns (excludes borrowed/wishlist).
+    pub owned_only: Option<bool>,
 }
 
 /// Paginated result with total count

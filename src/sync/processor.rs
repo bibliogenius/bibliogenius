@@ -220,7 +220,10 @@ async fn apply_copy_create(
 
     let new_copy = copy::ActiveModel {
         book_id: Set(payload["book_id"].as_i64().unwrap_or(0) as i32),
-        library_id: Set(payload["library_id"].as_i64().unwrap_or(1) as i32),
+        library_id: Set(match payload["library_id"].as_i64().map(|v| v as i32) {
+            Some(id) => id,
+            None => crate::utils::library_helpers::resolve_library_id(db).await?,
+        }),
         status: Set(payload["status"]
             .as_str()
             .unwrap_or("available")
@@ -271,7 +274,12 @@ async fn apply_contact_create(
         email: Set(payload["email"].as_str().map(|s| s.to_string())),
         phone: Set(payload["phone"].as_str().map(|s| s.to_string())),
         notes: Set(payload["notes"].as_str().map(|s| s.to_string())),
-        library_owner_id: Set(payload["library_owner_id"].as_i64().unwrap_or(1) as i32),
+        library_owner_id: Set(
+            match payload["library_owner_id"].as_i64().map(|v| v as i32) {
+                Some(id) => id,
+                None => crate::utils::library_helpers::resolve_library_id(db).await?,
+            },
+        ),
         created_at: Set(now.clone()),
         updated_at: Set(now),
         ..Default::default()
@@ -315,7 +323,10 @@ async fn apply_loan_create(
     let new_loan = loan::ActiveModel {
         copy_id: Set(payload["copy_id"].as_i64().unwrap_or(0) as i32),
         contact_id: Set(payload["contact_id"].as_i64().unwrap_or(0) as i32),
-        library_id: Set(payload["library_id"].as_i64().unwrap_or(1) as i32),
+        library_id: Set(match payload["library_id"].as_i64().map(|v| v as i32) {
+            Some(id) => id,
+            None => crate::utils::library_helpers::resolve_library_id(db).await?,
+        }),
         loan_date: Set(payload["loan_date"].as_str().unwrap_or(&now).to_string()),
         due_date: Set(payload["due_date"].as_str().unwrap_or(&now).to_string()),
         status: Set(payload["status"].as_str().unwrap_or("active").to_string()),

@@ -12,6 +12,7 @@ use serde_json::json;
 
 use crate::domain::{CreateCollectionInput, DomainError};
 use crate::infrastructure::AppState;
+use crate::utils::library_helpers::resolve_library_id;
 
 /// List all collections with book counts
 pub async fn list_collections(State(state): State<AppState>) -> impl IntoResponse {
@@ -338,10 +339,11 @@ pub async fn import_collection(
                                 count += 1;
 
                                 // 3. Create Copy if owned
-                                if import_as_owned {
+                                if import_as_owned && let Ok(lib_id) = resolve_library_id(db).await
+                                {
                                     let copy_model = copy::ActiveModel {
                                         book_id: Set(created_book.id),
-                                        library_id: Set(1), // Default library ID
+                                        library_id: Set(lib_id),
                                         status: Set("available".to_string()),
                                         is_temporary: Set(false),
                                         created_at: Set(now.to_rfc3339()),

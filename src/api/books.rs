@@ -20,6 +20,9 @@ pub struct BookFilter {
     pub sort: Option<String>,
     pub page: Option<u64>,
     pub limit: Option<u64>,
+    /// When true, only return books the user owns (excludes borrowed/wishlist).
+    /// Used by peers to avoid exposing non-owned books.
+    pub owned_only: Option<bool>,
 }
 
 #[utoipa::path(
@@ -60,6 +63,7 @@ pub async fn list_books(
         sort: filter.sort.clone(),
         page: filter.page,
         limit: filter.limit,
+        owned_only: filter.owned_only,
     };
 
     // Fetch via repository
@@ -176,10 +180,11 @@ pub async fn create_book(
             let _ = crate::sync::log_operation(db, "book", book_id, "INSERT", None).await;
 
             // Create default copy only if owned
-            if owned {
+            if owned && let Ok(lib_id) = crate::utils::library_helpers::resolve_library_id(db).await
+            {
                 let copy = crate::models::copy::ActiveModel {
                     book_id: Set(book_id),
-                    library_id: Set(1),
+                    library_id: Set(lib_id),
                     status: Set("available".to_string()),
                     is_temporary: Set(false),
                     created_at: Set(now.to_rfc3339()),
@@ -314,10 +319,13 @@ pub async fn update_book(
                         .filter(copy_model::Column::BookId.eq(id))
                         .one(db)
                         .await;
-                    if matches!(existing, Ok(None)) {
+                    if matches!(existing, Ok(None))
+                        && let Ok(lib_id) =
+                            crate::utils::library_helpers::resolve_library_id(db).await
+                    {
                         let copy = copy_model::ActiveModel {
                             book_id: Set(id),
-                            library_id: Set(1),
+                            library_id: Set(lib_id),
                             status: Set("available".to_string()),
                             is_temporary: Set(false),
                             created_at: Set(now.to_rfc3339()),

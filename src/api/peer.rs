@@ -984,6 +984,7 @@ pub async fn connect(
         Ok(Some(existing_peer)) => {
             // Update existing peer with new keys and info
             let peer_id = existing_peer.id;
+            let old_library_uuid = existing_peer.library_uuid.clone();
             let mut active: peer::ActiveModel = existing_peer.into();
             active.name = Set(name);
             active.library_uuid = Set(peer_library_uuid.clone());
@@ -1007,7 +1008,26 @@ pub async fn connect(
                 active.relay_write_token = Set(relay_write_token);
             }
             match active.update(&db).await {
-                Ok(_) => peer_id,
+                Ok(_) => {
+                    // If library_uuid changed (peer was reset/reinstalled),
+                    // clear cached books - the old library no longer exists.
+                    let uuid_changed = match (&old_library_uuid, &peer_library_uuid) {
+                        (Some(old), Some(new)) => old != new,
+                        (None, Some(_)) => false, // first time getting uuid, keep cache
+                        _ => false,
+                    };
+                    if uuid_changed {
+                        tracing::info!(
+                            "Peer {} library_uuid changed, clearing cached books",
+                            peer_id
+                        );
+                        let _ = peer_book::Entity::delete_many()
+                            .filter(peer_book::Column::PeerId.eq(peer_id))
+                            .exec(&db)
+                            .await;
+                    }
+                    peer_id
+                }
                 Err(e) => {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1235,9 +1255,12 @@ async fn sync_peer_internal(
         _ => None,
     };
 
+    // Distinguish "peer explicitly disallows caching" from "peer unreachable"
+    let peer_reachable = peer_config.is_some();
     let allows_caching = peer_config
         .as_ref()
-        .is_some_and(|c| c.allow_library_caching);
+        .map(|c| c.allow_library_caching)
+        .unwrap_or(true); // assume caching OK when unreachable - preserve cache
     let shares_gamification = peer_config.as_ref().map(|c| c.share_gamification_stats);
     let peer_has_memory_game = peer_config
         .as_ref()
@@ -1265,11 +1288,16 @@ async fn sync_peer_internal(
     // Resolve peer display name for memory score upsert
     let display_name = peer_library_name.as_deref().unwrap_or(peer_url);
 
-    if !allows_caching {
+    if peer_reachable && !allows_caching {
         tracing::info!(
-            "Peer {} does not allow library caching, skipping book sync",
+            "Peer {} explicitly disallows library caching, clearing cache",
             peer_url
         );
+        // Peer is reachable and explicitly disallows caching - clear cache
+        let _ = peer_book::Entity::delete_many()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .exec(db)
+            .await;
         // Still sync gamification stats if available
         sync_peer_gamification_stats(db, peer_id, peer_url, &client, shares_gamification).await;
         // Still sync memory game scores
@@ -1309,8 +1337,8 @@ async fn sync_peer_internal(
         return Ok(0); // Return 0 books cached
     }
 
-    // Fetch remote books
-    let url = format!("{}/api/books", peer_url);
+    // Fetch remote books (owned only - exclude books the peer borrowed from others)
+    let url = format!("{}/api/books?owned_only=true", peer_url);
 
     let response = client
         .get(&url)
@@ -1546,10 +1574,12 @@ pub async fn receive_connection_request(
     match existing {
         Ok(Some(existing_peer)) => {
             // Peer already exists - update keys, relay info, and library_uuid if provided
+            let old_uuid = existing_peer.library_uuid.clone();
+            let peer_id = existing_peer.id;
             if key_exchange_done && !existing_peer.key_exchange_done {
                 let mut active: peer::ActiveModel = existing_peer.into();
                 if payload.library_uuid.is_some() {
-                    active.library_uuid = Set(payload.library_uuid);
+                    active.library_uuid = Set(payload.library_uuid.clone());
                 }
                 active.public_key = Set(payload.ed25519_public_key);
                 active.x25519_public_key = Set(payload.x25519_public_key);
@@ -1565,6 +1595,31 @@ pub async fn receive_connection_request(
                 }
                 active.updated_at = Set(Utc::now().to_rfc3339());
                 let _ = active.update(&db).await;
+            }
+            // If library_uuid changed (peer was reset), update it and clear cached books
+            if let Some(new_uuid) = &payload.library_uuid
+                && old_uuid.as_deref() != Some(new_uuid.as_str())
+            {
+                // Update library_uuid on the peer record
+                let _ = peer::Entity::update_many()
+                    .filter(peer::Column::Id.eq(peer_id))
+                    .col_expr(
+                        peer::Column::LibraryUuid,
+                        sea_orm::sea_query::Expr::value(new_uuid.clone()),
+                    )
+                    .exec(&db)
+                    .await;
+                // Clear stale cached books if there was an old uuid
+                if old_uuid.is_some() {
+                    tracing::info!(
+                        "register_peer: peer {} library_uuid changed, clearing cached books",
+                        peer_id
+                    );
+                    let _ = peer_book::Entity::delete_many()
+                        .filter(peer_book::Column::PeerId.eq(peer_id))
+                        .exec(&db)
+                        .await;
+                }
             }
 
             // Load our relay config to include in response
@@ -2538,7 +2593,7 @@ pub struct ProxySearchRequest {
 async fn plaintext_proxy_search(peer_url: &str, query: &str) -> axum::response::Response {
     let client = get_safe_client();
     let res = if query.is_empty() {
-        let url = format!("{}/api/books", peer_url);
+        let url = format!("{}/api/books?owned_only=true", peer_url);
         client.get(&url).send().await
     } else {
         let url = format!("{}/api/peers/search", peer_url);
@@ -2720,29 +2775,41 @@ pub async fn sync_peer(
         .map(|c| c.library_name.clone())
         .unwrap_or_else(|| peer.name.clone());
 
-    // Backfill library_uuid if the local peer record is missing it.
+    // Update library_uuid: backfill if missing, or detect changes (peer reset).
     // Validates UUID format to prevent a malicious peer from injecting arbitrary strings.
-    if peer.library_uuid.is_none()
-        && let Some(remote_uuid) = peer_config.as_ref().and_then(|c| c.library_uuid.clone())
-    {
+    if let Some(remote_uuid) = peer_config.as_ref().and_then(|c| c.library_uuid.clone()) {
         if uuid::Uuid::parse_str(&remote_uuid).is_ok() {
-            let mut active: peer::ActiveModel = peer.clone().into();
-            active.library_uuid = Set(Some(remote_uuid.clone()));
-            if let Err(e) = active.update(&db).await {
-                tracing::warn!(
-                    "Failed to backfill library_uuid for peer {}: {}",
-                    peer_id,
-                    e
-                );
-            } else {
-                tracing::info!("Backfilled library_uuid for peer {}", peer_id);
+            let uuid_changed = peer
+                .library_uuid
+                .as_ref()
+                .is_some_and(|old| old != &remote_uuid);
+            let uuid_missing = peer.library_uuid.is_none();
+
+            if uuid_changed || uuid_missing {
+                let mut active: peer::ActiveModel = peer.clone().into();
+                active.library_uuid = Set(Some(remote_uuid.clone()));
+                if let Err(e) = active.update(&db).await {
+                    tracing::warn!("Failed to update library_uuid for peer {}: {}", peer_id, e);
+                } else if uuid_changed {
+                    // Peer was reset/reinstalled - clear stale cached books
+                    tracing::info!(
+                        "Peer {} library_uuid changed during sync, clearing cached books",
+                        peer_id
+                    );
+                    let _ = peer_book::Entity::delete_many()
+                        .filter(peer_book::Column::PeerId.eq(peer_id))
+                        .exec(&db)
+                        .await;
+                } else {
+                    tracing::info!("Backfilled library_uuid for peer {}", peer_id);
+                }
             }
         } else {
             tracing::warn!("Peer {} sent invalid library_uuid, ignoring", peer_id);
         }
     }
 
-    let url = format!("{}/api/books", peer.url);
+    let url = format!("{}/api/books?owned_only=true", peer.url);
 
     let res = client.get(&url).send().await;
 
@@ -2966,9 +3033,13 @@ pub async fn sync_peer_by_url(
         peer.url.clone()
     };
 
+    // Distinguish "peer explicitly disallows caching" from "peer unreachable"
+    // When peer_config is None (unreachable on 5G), preserve cache and try E2EE/relay
+    let peer_reachable = peer_config.is_some();
     let allows_caching = peer_config
         .as_ref()
-        .is_some_and(|c| c.allow_library_caching);
+        .map(|c| c.allow_library_caching)
+        .unwrap_or(true); // assume caching OK when unreachable - preserve cache
     let shares_gamification = peer_config.as_ref().map(|c| c.share_gamification_stats);
     let peer_has_memory_game_url = peer_config
         .as_ref()
@@ -3020,7 +3091,12 @@ pub async fn sync_peer_by_url(
         }
     }
 
-    if !allows_caching {
+    if peer_reachable && !allows_caching {
+        // Peer is reachable and explicitly disallows caching - clear cache
+        let _ = peer_book::Entity::delete_many()
+            .filter(peer_book::Column::PeerId.eq(peer.id))
+            .exec(&db)
+            .await;
         // Peer doesn't allow caching - still sync gamification stats
         sync_peer_gamification_stats(&db, peer.id, &effective_url, &client, shares_gamification)
             .await;
@@ -3092,7 +3168,7 @@ pub async fn sync_peer_by_url(
             }
             Ok(None) | Err(_) => {
                 // Fallback to plaintext
-                let url = format!("{}/api/books", effective_url);
+                let url = format!("{}/api/books?owned_only=true", effective_url);
                 match client.get(&url).send().await {
                     Ok(response) if response.status().is_success() => {
                         #[derive(Deserialize)]
@@ -3952,15 +4028,27 @@ pub async fn update_request_status(
             Ok(Some(c)) => c,
             Ok(None) => {
                 // Create new contact
-                let new_contact = contact::ActiveModel {
-                    r#type: Set("Library".to_string()),
-                    name: Set(peer.name.clone()),
-                    library_owner_id: Set(1), // Default owner
-                    is_active: Set(true),
-                    created_at: Set(chrono::Utc::now().to_rfc3339()),
-                    updated_at: Set(chrono::Utc::now().to_rfc3339()),
-                    ..Default::default()
-                };
+                let new_contact =
+                    contact::ActiveModel {
+                        r#type: Set("Library".to_string()),
+                        name: Set(peer.name.clone()),
+                        library_owner_id: Set(
+                            match crate::utils::library_helpers::resolve_library_id(&db).await {
+                                Ok(id) => id,
+                                Err(e) => {
+                                    return (
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        Json(json!({ "error": format!("No library: {}", e) })),
+                                    )
+                                        .into_response();
+                                }
+                            },
+                        ),
+                        is_active: Set(true),
+                        created_at: Set(chrono::Utc::now().to_rfc3339()),
+                        updated_at: Set(chrono::Utc::now().to_rfc3339()),
+                        ..Default::default()
+                    };
                 match new_contact.insert(&db).await {
                     Ok(c) => c,
                     Err(e) => {
@@ -3985,7 +4073,18 @@ pub async fn update_request_status(
         let loan = loan::ActiveModel {
             copy_id: Set(copy.id),
             contact_id: Set(contact.id),
-            library_id: Set(1), // Default library
+            library_id: Set(
+                match crate::utils::library_helpers::resolve_library_id(&db).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": format!("No library: {}", e) })),
+                        )
+                            .into_response();
+                    }
+                },
+            ),
             loan_date: Set(chrono::Utc::now().to_rfc3339()),
             due_date: Set((chrono::Utc::now() + chrono::Duration::days(14)).to_rfc3339()), // 2 weeks default
             status: Set("active".to_string()),
@@ -5259,7 +5358,18 @@ pub async fn receive_loan_confirmation(
     let now = Utc::now().to_rfc3339();
     let new_copy = copy::ActiveModel {
         book_id: Set(book_id),
-        library_id: Set(1), // Default library
+        library_id: Set(
+            match crate::utils::library_helpers::resolve_library_id(&db).await {
+                Ok(id) => id,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("No library: {}", e) })),
+                    )
+                        .into_response();
+                }
+            },
+        ),
         status: Set("borrowed".to_string()),
         is_temporary: Set(true),
         notes: Set(Some(format!(

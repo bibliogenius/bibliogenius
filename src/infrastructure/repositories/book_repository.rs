@@ -55,6 +55,11 @@ impl BookRepository for SeaOrmBookRepository {
             query = query.filter(cond);
         }
 
+        // Filter owned books only (used by peer sync to exclude borrowed books)
+        if filter.owned_only == Some(true) {
+            query = query.filter(Column::Owned.eq(true));
+        }
+
         // Apply sorting
         match filter.sort.as_deref() {
             Some("title_asc") => query = query.order_by_asc(Column::Title),

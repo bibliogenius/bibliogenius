@@ -477,9 +477,20 @@ async fn handle_loan_confirmation(
 
     // Create borrowed copy
     let now = chrono::Utc::now().to_rfc3339();
+    let lib_id = match crate::utils::library_helpers::resolve_library_id(db).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!("E2EE: Failed to resolve library_id: {}", e);
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": "Failed to resolve library" })),
+            )
+                .into_response();
+        }
+    };
     let new_copy = copy::ActiveModel {
         book_id: Set(book_id),
-        library_id: Set(1),
+        library_id: Set(lib_id),
         status: Set("borrowed".to_string()),
         is_temporary: Set(true),
         notes: Set(Some(format!(
