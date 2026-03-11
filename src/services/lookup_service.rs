@@ -260,9 +260,12 @@ async fn try_bnf_sru(
     match crate::modules::integrations::bnf::lookup_bnf_sru(clean_isbn).await {
         Ok(Some(bnf_book)) => {
             tracing::info!("BNF SRU found book for ISBN {}: {}", isbn, bnf_book.title);
+            // BNF SRU cover URLs (catalogue.bnf.fr/couverture?...) are speculative:
+            // they are generated from the ARK ID but often return a placeholder,
+            // not a real cover. Pass None so enrich_cover() can try OpenLibrary/Google.
             let cover_url = enrich_cover(
                 isbn,
-                bnf_book.cover_url,
+                None,
                 enable_openlibrary,
                 enable_google,
                 google_api_key,
