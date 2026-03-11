@@ -1,6 +1,6 @@
 # BiblioGenius - Rust Server
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Version](https://img.shields.io/badge/version-0.7.0--alpha-blue)](https://github.com/bibliogenius/bibliogenius/releases)
 
 **Autonomous library server with REST API, P2P synchronization, and local storage.**
@@ -75,4 +75,4 @@ cargo fmt && cargo clippy -- -D warnings && cargo test
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GNU Affero General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
