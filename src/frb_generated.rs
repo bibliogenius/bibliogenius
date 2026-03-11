@@ -5031,6 +5031,9 @@ impl SseDecode for crate::api::frb::FrbLoan {
         let mut var_notes = <Option<String>>::sse_decode(deserializer);
         let mut var_contactName = <String>::sse_decode(deserializer);
         let mut var_bookTitle = <String>::sse_decode(deserializer);
+        let mut var_bookId = <Option<i32>>::sse_decode(deserializer);
+        let mut var_coverUrl = <Option<String>>::sse_decode(deserializer);
+        let mut var_isbn = <Option<String>>::sse_decode(deserializer);
         return crate::api::frb::FrbLoan {
             id: var_id,
             copy_id: var_copyId,
@@ -5043,6 +5046,9 @@ impl SseDecode for crate::api::frb::FrbLoan {
             notes: var_notes,
             contact_name: var_contactName,
             book_title: var_bookTitle,
+            book_id: var_bookId,
+            cover_url: var_coverUrl,
+            isbn: var_isbn,
         };
     }
 }
@@ -6675,6 +6681,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbLoan {
             self.notes.into_into_dart().into_dart(),
             self.contact_name.into_into_dart().into_dart(),
             self.book_title.into_into_dart().into_dart(),
+            self.book_id.into_into_dart().into_dart(),
+            self.cover_url.into_into_dart().into_dart(),
+            self.isbn.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -7390,6 +7399,9 @@ impl SseEncode for crate::api::frb::FrbLoan {
         <Option<String>>::sse_encode(self.notes, serializer);
         <String>::sse_encode(self.contact_name, serializer);
         <String>::sse_encode(self.book_title, serializer);
+        <Option<i32>>::sse_encode(self.book_id, serializer);
+        <Option<String>>::sse_encode(self.cover_url, serializer);
+        <Option<String>>::sse_encode(self.isbn, serializer);
     }
 }
 

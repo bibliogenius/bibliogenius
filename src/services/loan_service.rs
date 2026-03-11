@@ -39,6 +39,9 @@ pub struct LoanWithDetails {
     pub notes: Option<String>,
     pub contact_name: String,
     pub book_title: String,
+    pub book_id: Option<i32>,
+    pub cover_url: Option<String>,
+    pub isbn: Option<String>,
 }
 
 /// Filter parameters for listing loans
@@ -78,8 +81,9 @@ pub async fn list_loans(
     // Collect copy IDs to fetch books
     let copy_ids: Vec<i32> = loans_with_contacts.iter().map(|(l, _)| l.copy_id).collect();
 
-    // Fetch copies with books
-    let mut copy_book_map: HashMap<i32, String> = HashMap::new();
+    // Fetch copies with books (title, id, cover_url, isbn)
+    let mut copy_book_map: HashMap<i32, (String, i32, Option<String>, Option<String>)> =
+        HashMap::new();
 
     if !copy_ids.is_empty() {
         let copies_with_books = Copy::find()
@@ -90,7 +94,7 @@ pub async fn list_loans(
 
         for (copy, book) in copies_with_books {
             if let Some(book) = book {
-                copy_book_map.insert(copy.id, book.title);
+                copy_book_map.insert(copy.id, (book.title, book.id, book.cover_url, book.isbn));
             }
         }
     }
@@ -102,10 +106,13 @@ pub async fn list_loans(
                 .as_ref()
                 .map(|c| c.name.clone())
                 .unwrap_or_else(|| "Unknown".to_string());
-            let book_title = copy_book_map
-                .get(&loan.copy_id)
-                .cloned()
+            let book_info = copy_book_map.get(&loan.copy_id);
+            let book_title = book_info
+                .map(|(title, _, _, _)| title.clone())
                 .unwrap_or_else(|| "Unknown".to_string());
+            let book_id = book_info.map(|(_, id, _, _)| *id);
+            let cover_url = book_info.and_then(|(_, _, url, _)| url.clone());
+            let isbn = book_info.and_then(|(_, _, _, isbn)| isbn.clone());
 
             LoanWithDetails {
                 id: loan.id,
@@ -119,6 +126,9 @@ pub async fn list_loans(
                 notes: loan.notes,
                 contact_name,
                 book_title,
+                book_id,
+                cover_url,
+                isbn,
             }
         })
         .collect();

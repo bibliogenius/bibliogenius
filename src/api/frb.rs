@@ -1133,6 +1133,9 @@ pub struct FrbLoan {
     pub notes: Option<String>,
     pub contact_name: String,
     pub book_title: String,
+    pub book_id: Option<i32>,
+    pub cover_url: Option<String>,
+    pub isbn: Option<String>,
 }
 
 impl From<crate::services::loan_service::LoanWithDetails> for FrbLoan {
@@ -1149,6 +1152,9 @@ impl From<crate::services::loan_service::LoanWithDetails> for FrbLoan {
             notes: l.notes,
             contact_name: l.contact_name,
             book_title: l.book_title,
+            book_id: l.book_id,
+            cover_url: l.cover_url,
+            isbn: l.isbn,
         }
     }
 }

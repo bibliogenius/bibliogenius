@@ -4027,13 +4027,13 @@ pub async fn list_requests(State(db): State<DatabaseConnection>) -> impl IntoRes
             .filter(book::Column::Isbn.is_in(isbns))
             .all(&db)
             .await
-        {
-            for b in books {
-                if let Some(isbn) = &b.isbn {
-                    isbn_book_map.insert(isbn.clone(), (b.id, b.cover_url.clone()));
-                }
+    {
+        for b in books {
+            if let Some(isbn) = &b.isbn {
+                isbn_book_map.insert(isbn.clone(), (b.id, b.cover_url.clone()));
             }
         }
+    }
 
     let dtos: Vec<serde_json::Value> = requests
         .into_iter()
