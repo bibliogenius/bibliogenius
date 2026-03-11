@@ -3046,6 +3046,8 @@ pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalog
 
 /// Upserts directory catalog entries into peer_books cache (peer_id = 0 sentinel).
 /// Returns entries enriched with first_seen_at from the local cache.
+/// On initial discovery (no existing entries for this node), first_seen_at is NULL
+/// to suppress the "new" badge when all entries arrive at once.
 async fn upsert_directory_catalog_cache(
     db: &DatabaseConnection,
     node_id: &str,
@@ -3081,6 +3083,9 @@ async fn upsert_directory_catalog_cache(
     let mut fresh_isbns = std::collections::HashSet::new();
     let mut result = Vec::with_capacity(entries.len());
 
+    // On initial discovery, suppress "new" badges (same rationale as peer books)
+    let is_initial_sync = existing_map.is_empty();
+
     for entry in entries {
         fresh_isbns.insert(entry.isbn.clone());
 
@@ -3099,6 +3104,12 @@ async fn upsert_directory_catalog_cache(
                 first_seen_at: existing_entry.first_seen_at.clone(),
             });
         } else {
+            let first_seen = if is_initial_sync {
+                None
+            } else {
+                Some(now.clone())
+            };
+
             // INSERT: new entry (notified_at = NULL - not yet notified)
             let cache = peer_book::ActiveModel {
                 peer_id: Set(0), // sentinel for directory entries
@@ -3110,7 +3121,7 @@ async fn upsert_directory_catalog_cache(
                 summary: Set(None),
                 synced_at: Set(now.clone()),
                 node_id: Set(Some(node_id.to_string())),
-                first_seen_at: Set(Some(now.clone())),
+                first_seen_at: Set(first_seen.clone()),
                 notified_at: Set(None),
                 ..Default::default()
             };
@@ -3123,7 +3134,7 @@ async fn upsert_directory_catalog_cache(
                 isbn: entry.isbn.clone(),
                 title: entry.title.clone(),
                 author: entry.author.clone(),
-                first_seen_at: Some(now.clone()),
+                first_seen_at: first_seen,
             });
         }
     }

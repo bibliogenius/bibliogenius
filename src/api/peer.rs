@@ -1103,7 +1103,9 @@ pub async fn connect(
 }
 
 /// Upsert peer books cache: preserves `first_seen_at` for existing entries,
-/// sets it to now for new entries, removes books no longer in the fresh list.
+/// sets it to now for new entries (or NULL on initial sync to suppress the
+/// "new" badge when all books are discovered at once).
+/// Removes books no longer in the fresh list.
 /// Returns the number of books in the fresh list.
 async fn upsert_peer_books_cache(
     db: &DatabaseConnection,
@@ -1127,6 +1129,11 @@ async fn upsert_peer_books_cache(
         .collect();
 
     let mut fresh_ids = std::collections::HashSet::new();
+
+    // On initial discovery (no existing books for this peer), all books arrive
+    // at once so marking them all as "new" is meaningless noise. Set first_seen_at
+    // to NULL so the badge only appears for books added after the first sync.
+    let is_initial_sync = existing_map.is_empty();
 
     // 2. Upsert each book
     for book in books {
@@ -1159,7 +1166,11 @@ async fn upsert_peer_books_cache(
                 summary: Set(book.summary),
                 synced_at: Set(now.clone()),
                 node_id: Set(node_id.map(|s| s.to_string())),
-                first_seen_at: Set(Some(now.clone())),
+                first_seen_at: Set(if is_initial_sync {
+                    None
+                } else {
+                    Some(now.clone())
+                }),
                 notified_at: Set(None),
                 ..Default::default()
             };
@@ -3381,11 +3392,41 @@ pub async fn request_book(
     });
 
     match try_send_e2ee(&state, &peer, "loan_request", e2ee_payload.clone()).await {
-        Ok(Some(_)) => {
-            // E2EE succeeded
+        Ok(Some(response)) => {
+            // Check if the lender auto-rejected (no available copy)
+            if let Some(ref clear_msg) = response {
+                let status = clear_msg
+                    .payload
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("pending");
+                if status == "rejected" {
+                    let _ = crate::models::p2p_outgoing_request::Entity::update_many()
+                        .col_expr(
+                            crate::models::p2p_outgoing_request::Column::Status,
+                            sea_orm::prelude::Expr::value("rejected"),
+                        )
+                        .col_expr(
+                            crate::models::p2p_outgoing_request::Column::UpdatedAt,
+                            sea_orm::prelude::Expr::value(chrono::Utc::now().to_rfc3339()),
+                        )
+                        .filter(crate::models::p2p_outgoing_request::Column::Id.eq(&outgoing_id))
+                        .exec(db)
+                        .await;
+                    tracing::info!(
+                        "Outgoing request {} auto-rejected by peer (E2EE)",
+                        outgoing_id
+                    );
+                    return (
+                        StatusCode::OK,
+                        Json(json!({ "status": "rejected", "reason": "no_available_copy" })),
+                    )
+                        .into_response();
+                }
+            }
             return (
                 StatusCode::OK,
-                Json(json!({ "message": "Request sent (encrypted)" })),
+                Json(json!({ "message": "Request sent (encrypted)", "status": "pending" })),
             )
                 .into_response();
         }
@@ -3420,8 +3461,44 @@ pub async fn request_book(
     match res {
         Ok(response) => {
             if response.status().is_success() {
-                (StatusCode::OK, Json(json!({ "message": "Request sent" }))).into_response()
+                (
+                    StatusCode::OK,
+                    Json(json!({ "message": "Request sent", "status": "pending" })),
+                )
+                    .into_response()
             } else {
+                // Parse lender response to check for auto-rejection
+                let body = response.text().await.unwrap_or_default();
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body)
+                    && parsed.get("status").and_then(|s| s.as_str()) == Some("rejected")
+                {
+                    let _ = crate::models::p2p_outgoing_request::Entity::update_many()
+                        .col_expr(
+                            crate::models::p2p_outgoing_request::Column::Status,
+                            sea_orm::prelude::Expr::value("rejected"),
+                        )
+                        .col_expr(
+                            crate::models::p2p_outgoing_request::Column::UpdatedAt,
+                            sea_orm::prelude::Expr::value(chrono::Utc::now().to_rfc3339()),
+                        )
+                        .filter(crate::models::p2p_outgoing_request::Column::Id.eq(&outgoing_id))
+                        .exec(db)
+                        .await;
+                    let reason = parsed
+                        .get("reason")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("unknown");
+                    tracing::info!(
+                        "Outgoing request {} auto-rejected by peer (plaintext): {}",
+                        outgoing_id,
+                        reason
+                    );
+                    return (
+                        StatusCode::OK,
+                        Json(json!({ "status": "rejected", "reason": reason })),
+                    )
+                        .into_response();
+                }
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(json!({ "error": "Peer rejected request" })),
@@ -3570,10 +3647,42 @@ pub async fn request_book_by_url(
 
     // Try E2EE path first
     match try_send_e2ee(&state, &peer, "loan_request", e2ee_payload.clone()).await {
-        Ok(Some(_)) => {
+        Ok(Some(response)) => {
+            // Check if the lender auto-rejected (no available copy)
+            if let Some(ref clear_msg) = response {
+                let status = clear_msg
+                    .payload
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("pending");
+                if status == "rejected" {
+                    // Update outgoing request to rejected
+                    let _ = crate::models::p2p_outgoing_request::Entity::update_many()
+                        .col_expr(
+                            crate::models::p2p_outgoing_request::Column::Status,
+                            sea_orm::prelude::Expr::value("rejected"),
+                        )
+                        .col_expr(
+                            crate::models::p2p_outgoing_request::Column::UpdatedAt,
+                            sea_orm::prelude::Expr::value(chrono::Utc::now().to_rfc3339()),
+                        )
+                        .filter(crate::models::p2p_outgoing_request::Column::Id.eq(&outgoing_id))
+                        .exec(db)
+                        .await;
+                    tracing::info!(
+                        "Outgoing request {} auto-rejected by peer (E2EE)",
+                        outgoing_id
+                    );
+                    return (
+                        StatusCode::OK,
+                        Json(json!({ "status": "rejected", "reason": "no_available_copy" })),
+                    )
+                        .into_response();
+                }
+            }
             return (
                 StatusCode::OK,
-                Json(json!({ "message": "Request sent (encrypted)" })),
+                Json(json!({ "message": "Request sent (encrypted)", "status": "pending" })),
             )
                 .into_response();
         }
@@ -3607,8 +3716,45 @@ pub async fn request_book_by_url(
     match res {
         Ok(response) => {
             if response.status().is_success() {
-                (StatusCode::OK, Json(json!({ "message": "Request sent" }))).into_response()
+                (
+                    StatusCode::OK,
+                    Json(json!({ "message": "Request sent", "status": "pending" })),
+                )
+                    .into_response()
             } else {
+                // Parse lender response to check for auto-rejection
+                let body = response.text().await.unwrap_or_default();
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body)
+                    && parsed.get("status").and_then(|s| s.as_str()) == Some("rejected")
+                {
+                    // Update outgoing request to rejected
+                    let _ = crate::models::p2p_outgoing_request::Entity::update_many()
+                        .col_expr(
+                            crate::models::p2p_outgoing_request::Column::Status,
+                            sea_orm::prelude::Expr::value("rejected"),
+                        )
+                        .col_expr(
+                            crate::models::p2p_outgoing_request::Column::UpdatedAt,
+                            sea_orm::prelude::Expr::value(chrono::Utc::now().to_rfc3339()),
+                        )
+                        .filter(crate::models::p2p_outgoing_request::Column::Id.eq(&outgoing_id))
+                        .exec(db)
+                        .await;
+                    let reason = parsed
+                        .get("reason")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("unknown");
+                    tracing::info!(
+                        "Outgoing request {} auto-rejected by peer (plaintext): {}",
+                        outgoing_id,
+                        reason
+                    );
+                    return (
+                        StatusCode::OK,
+                        Json(json!({ "status": "rejected", "reason": reason })),
+                    )
+                        .into_response();
+                }
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(json!({ "error": "Peer rejected request" })),
@@ -3859,19 +4005,46 @@ pub async fn receive_request(
 }
 
 pub async fn list_requests(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    use crate::models::book;
+
     let requests = crate::models::p2p_request::Entity::find()
         .find_also_related(peer::Entity)
         .all(&db)
         .await
         .unwrap_or(vec![]);
 
+    // Collect unique ISBNs to look up local books
+    let isbns: Vec<String> = requests
+        .iter()
+        .map(|(req, _)| req.book_isbn.clone())
+        .filter(|isbn| !isbn.is_empty())
+        .collect();
+
+    let mut isbn_book_map: std::collections::HashMap<String, (i32, Option<String>)> =
+        std::collections::HashMap::new();
+    if !isbns.is_empty()
+        && let Ok(books) = book::Entity::find()
+            .filter(book::Column::Isbn.is_in(isbns))
+            .all(&db)
+            .await
+        {
+            for b in books {
+                if let Some(isbn) = &b.isbn {
+                    isbn_book_map.insert(isbn.clone(), (b.id, b.cover_url.clone()));
+                }
+            }
+        }
+
     let dtos: Vec<serde_json::Value> = requests
         .into_iter()
         .map(|(req, peer)| {
+            let book_info = isbn_book_map.get(&req.book_isbn);
             json!({
                 "id": req.id,
                 "book_title": req.book_title,
                 "book_isbn": req.book_isbn,
+                "book_id": book_info.map(|(id, _)| *id),
+                "cover_url": book_info.and_then(|(_, url)| url.clone()),
                 "status": req.status,
                 "created_at": req.created_at,
                 "updated_at": req.updated_at,
@@ -4140,6 +4313,7 @@ pub async fn update_request_status(
             "lender_name": lender_name,
             "due_date": due_date,
             "request_id": req.id,
+            "requester_request_id": req.requester_request_id,
         });
 
         // Try E2EE path first
@@ -5011,18 +5185,27 @@ pub async fn return_borrowed_book(
 async fn cleanup_orphaned_book(db: &DatabaseConnection, book_id: i32) {
     use crate::models::{book, copy};
     if let Ok(Some(bk)) = book::Entity::find_by_id(book_id).one(db).await {
-        let should_delete = !bk.owned
-            && bk.reading_status != "wanting"
-            && copy::Entity::find()
-                .filter(copy::Column::BookId.eq(bk.id))
-                .count(db)
-                .await
-                .unwrap_or(1)
-                == 0;
+        let copy_count = copy::Entity::find()
+            .filter(copy::Column::BookId.eq(bk.id))
+            .count(db)
+            .await
+            .unwrap_or(1);
+
+        let should_delete = !bk.owned && bk.reading_status != "wanting" && copy_count == 0;
 
         if should_delete {
-            let _ = book::Entity::delete_by_id(bk.id).exec(db).await;
-            tracing::info!("Deleted orphaned book {} after loan return", bk.id);
+            match book::Entity::delete_by_id(bk.id).exec(db).await {
+                Ok(_) => tracing::info!("Deleted orphaned book {} after loan return", bk.id),
+                Err(e) => tracing::error!("Failed to delete orphaned book {}: {}", bk.id, e),
+            }
+        } else {
+            tracing::info!(
+                "Book {} kept after loan return (owned={}, reading_status='{}', copies={})",
+                bk.id,
+                bk.owned,
+                bk.reading_status,
+                copy_count
+            );
         }
     }
 }
@@ -5281,6 +5464,8 @@ pub struct LoanConfirmation {
     pub lender_name: String,
     pub due_date: String,
     pub request_id: Option<String>,
+    /// Borrower's outgoing request ID (for precise confirmation matching)
+    pub requester_request_id: Option<String>,
 }
 
 /// Receive loan confirmation from lender
@@ -5293,10 +5478,54 @@ pub async fn receive_loan_confirmation(
     use chrono::Utc;
 
     tracing::info!(
-        "📚 Received loan confirmation: '{}' from {}",
+        "📚 Received loan confirmation: '{}' from {} (requester_request_id={:?})",
         payload.title,
-        payload.lender_name
+        payload.lender_name,
+        payload.requester_request_id
     );
+
+    // Guard: verify a matching pending outgoing request exists.
+    // This prevents stale relay messages from creating orphan borrowed copies.
+    let has_matching_request = if let Some(ref rr_id) = payload.requester_request_id {
+        // Precise match by borrower's outgoing request ID
+        p2p_outgoing_request::Entity::find_by_id(rr_id)
+            .filter(p2p_outgoing_request::Column::Status.eq("pending"))
+            .one(&db)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    } else {
+        // Backward compat: old confirmations without requester_request_id - match by ISBN
+        let isbn_filter = payload.isbn.clone().unwrap_or_default();
+        if !isbn_filter.is_empty() {
+            p2p_outgoing_request::Entity::find()
+                .filter(p2p_outgoing_request::Column::BookIsbn.eq(&isbn_filter))
+                .filter(p2p_outgoing_request::Column::Status.eq("pending"))
+                .one(&db)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        } else {
+            // No ISBN, no requester_request_id - allow (best effort)
+            true
+        }
+    };
+
+    if !has_matching_request {
+        tracing::warn!(
+            "📚 No pending outgoing request for '{}' (requester_request_id={:?}, isbn={:?}), ignoring stale loan_confirmation",
+            payload.title,
+            payload.requester_request_id,
+            payload.isbn
+        );
+        return (
+            StatusCode::OK,
+            Json(json!({ "message": "No pending request for this confirmation, ignored" })),
+        )
+            .into_response();
+    }
 
     // 1. Find or create book
     let existing_book = if let Some(ref isbn) = payload.isbn {
@@ -5354,7 +5583,61 @@ pub async fn receive_loan_confirmation(
         }
     };
 
-    // 2. Create borrowed copy
+    // 2. Idempotency: skip if a borrowed temporary copy already exists for this book
+    let existing_borrowed = copy::Entity::find()
+        .filter(copy::Column::BookId.eq(book_id))
+        .filter(copy::Column::Status.eq("borrowed"))
+        .filter(copy::Column::IsTemporary.eq(true))
+        .one(&db)
+        .await
+        .ok()
+        .flatten();
+
+    if let Some(existing) = existing_borrowed {
+        tracing::info!(
+            "📚 Borrowed copy already exists (id={}) for book_id={}, skipping duplicate",
+            existing.id,
+            book_id
+        );
+        // Still update outgoing request if needed
+        if let Some(ref lender_req_id) = payload.request_id {
+            let outgoing = if let Some(ref rr_id) = payload.requester_request_id {
+                p2p_outgoing_request::Entity::find_by_id(rr_id)
+                    .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
+                    .one(&db)
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                let isbn_filter = payload.isbn.clone().unwrap_or_default();
+                p2p_outgoing_request::Entity::find()
+                    .filter(p2p_outgoing_request::Column::BookIsbn.eq(&isbn_filter))
+                    .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
+                    .one(&db)
+                    .await
+                    .ok()
+                    .flatten()
+            };
+            if let Some(outgoing) = outgoing {
+                let mut active: p2p_outgoing_request::ActiveModel = outgoing.into();
+                active.lender_request_id = Set(Some(lender_req_id.clone()));
+                active.status = Set("accepted".to_string());
+                active.updated_at = Set(Utc::now().to_rfc3339());
+                let _ = active.update(&db).await;
+            }
+        }
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "message": "Loan already confirmed",
+                "book_id": book_id,
+                "copy_id": existing.id
+            })),
+        )
+            .into_response();
+    }
+
+    // Create borrowed copy
     let now = Utc::now().to_rfc3339();
     let new_copy = copy::ActiveModel {
         book_id: Set(book_id),
@@ -5405,13 +5688,24 @@ pub async fn receive_loan_confirmation(
 
             // Store lender_request_id on the matching outgoing request
             if let Some(ref lender_req_id) = payload.request_id {
-                let isbn_filter = payload.isbn.clone().unwrap_or_default();
-                if let Ok(Some(outgoing)) = p2p_outgoing_request::Entity::find()
-                    .filter(p2p_outgoing_request::Column::BookIsbn.eq(&isbn_filter))
-                    .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
-                    .one(&db)
-                    .await
-                {
+                let outgoing = if let Some(ref rr_id) = payload.requester_request_id {
+                    p2p_outgoing_request::Entity::find_by_id(rr_id)
+                        .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
+                        .one(&db)
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    let isbn_filter = payload.isbn.clone().unwrap_or_default();
+                    p2p_outgoing_request::Entity::find()
+                        .filter(p2p_outgoing_request::Column::BookIsbn.eq(&isbn_filter))
+                        .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
+                        .one(&db)
+                        .await
+                        .ok()
+                        .flatten()
+                };
+                if let Some(outgoing) = outgoing {
                     let mut active: p2p_outgoing_request::ActiveModel = outgoing.into();
                     active.lender_request_id = Set(Some(lender_req_id.clone()));
                     active.status = Set("accepted".to_string());

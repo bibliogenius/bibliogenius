@@ -696,6 +696,19 @@ fn get_entity_image_url(entity: &InventaireEntity) -> Option<String> {
         })
 }
 
+/// Lightweight cover-only lookup: fetch the edition entity and extract its image URL.
+pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    let uri = format!("isbn:{}", isbn);
+    let entity = fetch_entity(&client, &uri).await.ok()?;
+    get_entity_image_url(&entity)
+}
+
 pub async fn fetch_entities_batch(
     client: &reqwest::Client,
     uris: &[String],

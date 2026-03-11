@@ -55,6 +55,7 @@ pub async fn lookup_metadata_by_isbn(
             isbn,
             enable_openlibrary,
             enable_google,
+            enable_inventaire,
             google_api_key.as_deref(),
         )
         .await
@@ -66,6 +67,7 @@ pub async fn lookup_metadata_by_isbn(
             isbn,
             enable_openlibrary,
             enable_google,
+            enable_inventaire,
             google_api_key.as_deref(),
         )
         .await
@@ -77,6 +79,7 @@ pub async fn lookup_metadata_by_isbn(
             isbn,
             enable_openlibrary,
             enable_google,
+            enable_inventaire,
             google_api_key.as_deref(),
         )
         .await
@@ -114,6 +117,7 @@ pub async fn lookup_metadata_by_isbn(
             isbn,
             enable_openlibrary,
             enable_google,
+            enable_inventaire,
             google_api_key.as_deref(),
         )
         .await
@@ -154,6 +158,7 @@ async fn enrich_cover(
     cover_url: Option<String>,
     enable_openlibrary: bool,
     enable_google: bool,
+    enable_inventaire: bool,
     google_api_key: Option<&str>,
 ) -> Option<String> {
     if cover_url.is_some() {
@@ -161,18 +166,30 @@ async fn enrich_cover(
     }
 
     // Try cover sources in parallel to maximize chances of finding one
-    match (enable_openlibrary, enable_google) {
-        (true, true) => {
-            let (ol_result, gb_result) = tokio::join!(
-                crate::openlibrary::fetch_cover_url(isbn),
-                crate::google_books::fetch_cover_url(isbn, google_api_key),
-            );
-            ol_result.or(gb_result)
+    let inv_fut = async {
+        if enable_inventaire {
+            crate::inventaire_client::fetch_cover_url(isbn).await
+        } else {
+            None
         }
-        (true, false) => crate::openlibrary::fetch_cover_url(isbn).await,
-        (false, true) => crate::google_books::fetch_cover_url(isbn, google_api_key).await,
-        (false, false) => None,
-    }
+    };
+    let ol_fut = async {
+        if enable_openlibrary {
+            crate::openlibrary::fetch_cover_url(isbn).await
+        } else {
+            None
+        }
+    };
+    let gb_fut = async {
+        if enable_google {
+            crate::google_books::fetch_cover_url(isbn, google_api_key).await
+        } else {
+            None
+        }
+    };
+
+    let (inv_result, ol_result, gb_result) = tokio::join!(inv_fut, ol_fut, gb_fut);
+    inv_result.or(ol_result).or(gb_result)
 }
 
 async fn try_bnf_sparql(
@@ -180,6 +197,7 @@ async fn try_bnf_sparql(
     isbn: &str,
     enable_openlibrary: bool,
     enable_google: bool,
+    enable_inventaire: bool,
     google_api_key: Option<&str>,
 ) -> Option<BookMetadata> {
     tracing::debug!("Trying BNF SPARQL for ISBN {}", isbn);
@@ -191,6 +209,7 @@ async fn try_bnf_sparql(
                 bnf_book.cover_url,
                 enable_openlibrary,
                 enable_google,
+                enable_inventaire,
                 google_api_key,
             )
             .await;
@@ -219,6 +238,7 @@ async fn try_sudoc(
     isbn: &str,
     enable_openlibrary: bool,
     enable_google: bool,
+    enable_inventaire: bool,
     google_api_key: Option<&str>,
 ) -> Option<BookMetadata> {
     tracing::debug!("Trying SUDOC for French ISBN {}", isbn);
@@ -230,6 +250,7 @@ async fn try_sudoc(
                 None,
                 enable_openlibrary,
                 enable_google,
+                enable_inventaire,
                 google_api_key,
             )
             .await;
@@ -254,6 +275,7 @@ async fn try_bnf_sru(
     isbn: &str,
     enable_openlibrary: bool,
     enable_google: bool,
+    enable_inventaire: bool,
     google_api_key: Option<&str>,
 ) -> Option<BookMetadata> {
     tracing::debug!("Trying BNF SRU for French ISBN {}", isbn);
@@ -262,12 +284,13 @@ async fn try_bnf_sru(
             tracing::info!("BNF SRU found book for ISBN {}: {}", isbn, bnf_book.title);
             // BNF SRU cover URLs (catalogue.bnf.fr/couverture?...) are speculative:
             // they are generated from the ARK ID but often return a placeholder,
-            // not a real cover. Pass None so enrich_cover() can try OpenLibrary/Google.
+            // not a real cover. Pass None so enrich_cover() can try Inventaire/OpenLibrary/Google.
             let cover_url = enrich_cover(
                 isbn,
                 None,
                 enable_openlibrary,
                 enable_google,
+                enable_inventaire,
                 google_api_key,
             )
             .await;
@@ -310,6 +333,7 @@ async fn try_inventaire(
                 inv_metadata.cover_url,
                 enable_openlibrary,
                 enable_google,
+                false, // Inventaire is the source, no need to re-query its cover
                 google_api_key,
             )
             .await;
@@ -347,6 +371,7 @@ async fn try_openlibrary(
                 metadata.cover_url,
                 false,
                 enable_google,
+                false, // Inventaire was already tried as metadata source
                 google_api_key,
             )
             .await;

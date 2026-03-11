@@ -25,6 +25,18 @@ impl SeaOrmCollectionRepository {
     pub fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
+
+    /// Count books in a collection that have `owned = true`.
+    async fn count_owned_books(&self, collection_id: &str) -> i64 {
+        use crate::models::book;
+        CollectionBookEntity::find()
+            .filter(collection_book::Column::CollectionId.eq(collection_id))
+            .join(JoinType::InnerJoin, collection_book::Relation::Book.def())
+            .filter(book::Column::Owned.eq(true))
+            .count(&self.db)
+            .await
+            .unwrap_or(0) as i64
+    }
 }
 
 #[async_trait]
@@ -44,6 +56,8 @@ impl CollectionRepository for SeaOrmCollectionRepository {
                 .await
                 .unwrap_or(0) as i64;
 
+            let owned = self.count_owned_books(&col.id).await;
+
             result.push(Collection {
                 id: col.id,
                 name: col.name,
@@ -52,7 +66,7 @@ impl CollectionRepository for SeaOrmCollectionRepository {
                 created_at: col.created_at,
                 updated_at: col.updated_at,
                 total_books: total,
-                owned_books: total, // For now, same as total
+                owned_books: owned,
             });
         }
 
@@ -70,6 +84,8 @@ impl CollectionRepository for SeaOrmCollectionRepository {
                     .await
                     .unwrap_or(0) as i64;
 
+                let owned = self.count_owned_books(&col.id).await;
+
                 Ok(Some(Collection {
                     id: col.id,
                     name: col.name,
@@ -78,7 +94,7 @@ impl CollectionRepository for SeaOrmCollectionRepository {
                     created_at: col.created_at,
                     updated_at: col.updated_at,
                     total_books: total,
-                    owned_books: total,
+                    owned_books: owned,
                 }))
             }
             None => Ok(None),

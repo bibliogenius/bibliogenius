@@ -81,6 +81,10 @@ pub async fn list_loans(
                 .map(|b| b.title.clone())
                 .unwrap_or("Unknown".to_string());
 
+            let book_id = book.as_ref().map(|b| b.id);
+            let cover_url = book.as_ref().and_then(|b| b.cover_url.clone());
+            let isbn = book.as_ref().and_then(|b| b.isbn.clone());
+
             json!({
                 "id": loan.id,
                 "copy_id": loan.copy_id,
@@ -93,6 +97,9 @@ pub async fn list_loans(
                 "notes": loan.notes,
                 "contact_name": contact_name,
                 "book_title": book_title,
+                "book_id": book_id,
+                "cover_url": cover_url,
+                "isbn": isbn,
                 "contact": contact.map(|c| json!({"name": c.name})),
                 "book": book.map(|b| json!({"title": b.title})),
             })
