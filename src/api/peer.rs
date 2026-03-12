@@ -3771,19 +3771,46 @@ pub async fn request_book_by_url(
 }
 
 pub async fn list_outgoing_requests(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    use crate::models::book;
+
     let requests = crate::models::p2p_outgoing_request::Entity::find()
         .find_also_related(peer::Entity)
         .all(&db)
         .await
         .unwrap_or(vec![]);
 
+    // Look up local books by ISBN so we can link to them (same pattern as list_requests)
+    let isbns: Vec<String> = requests
+        .iter()
+        .map(|(req, _)| req.book_isbn.clone())
+        .filter(|isbn| !isbn.is_empty())
+        .collect();
+
+    let mut isbn_book_map: std::collections::HashMap<String, (i32, Option<String>)> =
+        std::collections::HashMap::new();
+    if !isbns.is_empty()
+        && let Ok(books) = book::Entity::find()
+            .filter(book::Column::Isbn.is_in(isbns))
+            .all(&db)
+            .await
+    {
+        for b in books {
+            if let Some(isbn) = &b.isbn {
+                isbn_book_map.insert(isbn.clone(), (b.id, b.cover_url.clone()));
+            }
+        }
+    }
+
     let dtos: Vec<serde_json::Value> = requests
         .into_iter()
         .map(|(req, peer)| {
+            let book_info = isbn_book_map.get(&req.book_isbn);
             json!({
                 "id": req.id,
                 "book_title": req.book_title,
                 "book_isbn": req.book_isbn,
+                "book_id": book_info.map(|(id, _)| *id),
+                "cover_url": book_info.and_then(|(_, url)| url.clone()),
                 "status": req.status,
                 "created_at": req.created_at,
                 "updated_at": req.updated_at,
