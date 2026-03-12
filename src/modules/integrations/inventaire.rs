@@ -306,15 +306,24 @@ pub struct InventaireSearchResult {
 }
 
 pub async fn search_inventaire(query: &str) -> Result<Vec<InventaireSearchResult>, String> {
+    search_inventaire_with_lang(query, None).await
+}
+
+pub async fn search_inventaire_with_lang(
+    query: &str,
+    lang: Option<&str>,
+) -> Result<Vec<InventaireSearchResult>, String> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| format!("Failed to build client: {}", e))?;
 
+    let lang_param = lang.unwrap_or("fr");
     let url = format!(
-        "https://inventaire.io/api/search?types=works&search={}",
-        urlencoding::encode(query)
+        "https://inventaire.io/api/search?types=works&search={}&lang={}",
+        urlencoding::encode(query),
+        urlencoding::encode(lang_param)
     );
 
     let resp = client

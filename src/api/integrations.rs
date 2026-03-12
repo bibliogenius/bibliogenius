@@ -7,6 +7,8 @@ use axum::{
 use sea_orm::DatabaseConnection;
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::LazyLock;
+use strsim::jaro_winkler;
 
 use crate::models::book;
 use crate::modules::integrations::sudoc;
@@ -53,6 +55,7 @@ struct OpenLibraryDoc {
     cover_i: Option<i32>,
     language: Option<Vec<String>>,
     edition_key: Option<Vec<String>>, // For fetching ISBN from editions
+    edition_count: Option<i32>,       // Number of editions (popularity signal)
     key: String,                      // Work ID (e.g. "/works/OL12345W")
 }
 
@@ -125,12 +128,19 @@ fn normalize_string(s: &str) -> String {
     s.to_lowercase()
         .chars()
         .map(|c| match c {
+            'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' => 'a',
             'é' | 'è' | 'ê' | 'ë' => 'e',
-            'à' | 'â' | 'ä' => 'a',
-            'î' | 'ï' => 'i',
-            'ô' | 'ö' => 'o',
-            'û' | 'ù' | 'ü' => 'u',
+            'í' | 'î' | 'ï' => 'i',
+            'ó' | 'ô' | 'ö' | 'õ' => 'o',
+            'ú' | 'û' | 'ù' | 'ü' => 'u',
+            'ñ' => 'n',
             'ç' => 'c',
+            'ş' => 's',
+            'ğ' => 'g',
+            'ı' => 'i',
+            'ø' => 'o',
+            'æ' => 'a',
+            'ý' => 'y',
             _ => c,
         })
         .collect()
@@ -244,48 +254,39 @@ pub async fn search_external(
             .unwrap_or_else(|_| reqwest::Client::new());
 
         // Build Open Library Query
-        let mut q_parts = Vec::new();
+        // Always use `q=` (general search) for OpenLibrary because field-specific
+        // searches like `title:X` only match exact titles and miss translations
+        // (e.g. "Le tunnel" won't find "El túnel" by Sabato with title: but will with q=).
+        let mut q_terms = Vec::new();
 
-        // If we have a generic query 'q', use it directly
         if let Some(q) = &query.q {
-            q_parts.push(format!("q={}", urlencoding::encode(q)));
+            q_terms.push(q.clone());
         } else {
-            // Otherwise use specific fields
             if let Some(t) = &query.title {
-                q_parts.push(format!("title:{}", t));
+                q_terms.push(t.clone());
             }
             if let Some(a) = &query.author {
-                q_parts.push(format!("author:{}", a));
+                q_terms.push(a.clone());
             }
             if let Some(s) = &query.subjects {
-                q_parts.push(format!("subject:{}", s));
+                q_terms.push(s.clone());
             }
         }
 
-        if q_parts.is_empty() {
+        if q_terms.is_empty() {
             return books;
         }
 
-        let q_str = q_parts.join("&");
         let limit_val = if query.autocomplete.unwrap_or(false) {
             12 // More results for autocomplete to allow quality filtering
         } else {
             20
         };
-        let url = if query.q.is_some() {
-            format!(
-                "https://openlibrary.org/search.json?{}&limit={}",
-                q_str, limit_val
-            )
-        } else {
-            // Fallback for specific fields (legacy construction)
-            let q_str_legacy = q_parts.join(" AND ");
-            format!(
-                "https://openlibrary.org/search.json?q={}&limit={}",
-                urlencoding::encode(&q_str_legacy),
-                limit_val
-            )
-        };
+        let url = format!(
+            "https://openlibrary.org/search.json?q={}&limit={}",
+            urlencoding::encode(&q_terms.join(" ")),
+            limit_val
+        );
 
         if let Ok(res) = client.get(&url).send().await {
             match res.json::<OpenLibrarySearchResponse>().await {
@@ -301,6 +302,7 @@ pub async fn search_external(
                             "languages": doc.language.clone().unwrap_or_default(),
                             "isbns": doc.isbn.clone().unwrap_or_default(),
                             "edition_key": doc.edition_key.as_ref().and_then(|k| k.first()).cloned(),
+                            "edition_count": doc.edition_count,
                             "key": doc.key,
                             "publisher": doc.publisher.clone().unwrap_or_default()
                         });
@@ -499,6 +501,14 @@ pub async fn search_unified(
         inv_query
     };
 
+    // Extract primary user language for Inventaire (returns translated titles)
+    let inv_lang = params
+        .lang
+        .as_deref()
+        .and_then(|l| l.split(',').next())
+        .map(|l| l.split('-').next().unwrap_or(l).trim().to_string())
+        .filter(|l| !l.is_empty());
+
     // 3. Execute Searches in Parallel (Inventaire, BNF, OpenLibrary, BNF SRU)
     // We clone necessary data for each async task to avoid borrow checker issues with async blocks
     let inv_query_str = final_inv_query.clone();
@@ -549,7 +559,12 @@ pub async fn search_unified(
             if enable_inventaire && !inv_query_str.trim().is_empty() {
                 // Use tokio timeout to prevent Inventaire from blocking indefinitely
                 match tokio::time::timeout(std::time::Duration::from_secs(8), async {
-                    match crate::inventaire_client::search_inventaire(&inv_query_str).await {
+                    match crate::inventaire_client::search_inventaire_with_lang(
+                        &inv_query_str,
+                        inv_lang.as_deref(),
+                    )
+                    .await
+                    {
                         Ok(inv_results) => {
                             // Enrich results (also async)
                             match crate::inventaire_client::enrich_search_results(inv_results).await
@@ -1009,10 +1024,95 @@ pub async fn search_unified(
         has_isbn || has_cover || has_publisher || is_bnf
     });
 
+    // Cross-source notoriety propagation: copy edition_count from OpenLibrary
+    // results to BNF/Inventaire results that represent the same work.
+    // Uses fuzzy title matching on significant words + author surname to handle
+    // cross-language variants (e.g. "El túnel" -> "Le tunnel" by same author).
+    {
+        // Collect books that have edition_count (typically from OpenLibrary)
+        struct NotorietyEntry {
+            title_words: Vec<String>,
+            author_surname: String,
+            edition_count: i32,
+        }
+        let mut notoriety_sources: Vec<NotorietyEntry> = Vec::new();
+        for book in &results {
+            let ec = get_edition_count(book);
+            if ec > 0 {
+                notoriety_sources.push(NotorietyEntry {
+                    title_words: significant_words(&normalize_string(&book.title)),
+                    author_surname: normalize_string(book.author.as_deref().unwrap_or(""))
+                        .split_whitespace()
+                        .last()
+                        .unwrap_or("")
+                        .to_string(),
+                    edition_count: ec,
+                });
+            }
+        }
+        // Propagate to books without edition_count via fuzzy matching
+        for book in &mut results {
+            if get_edition_count(book) == 0 && !notoriety_sources.is_empty() {
+                let book_title_words = significant_words(&normalize_string(&book.title));
+                let book_surname = normalize_string(book.author.as_deref().unwrap_or(""))
+                    .split_whitespace()
+                    .last()
+                    .unwrap_or("")
+                    .to_string();
+
+                // Find best matching notoriety source
+                let mut best_ec = 0;
+                for src in &notoriety_sources {
+                    // Author surname must match (exact or fuzzy)
+                    let author_match = !src.author_surname.is_empty()
+                        && !book_surname.is_empty()
+                        && (src.author_surname == book_surname
+                            || jaro_winkler(&src.author_surname, &book_surname) >= 0.88);
+                    if !author_match {
+                        continue;
+                    }
+                    // Title significant words must fuzzy-match
+                    let title_match = !book_title_words.is_empty()
+                        && !src.title_words.is_empty()
+                        && book_title_words.iter().all(|bw| {
+                            src.title_words
+                                .iter()
+                                .any(|sw| sw == bw || jaro_winkler(sw, bw) >= 0.88)
+                        });
+                    if title_match && src.edition_count > best_ec {
+                        best_ec = src.edition_count;
+                    }
+                    // Fallback: if author matches and this is the ONLY notable work
+                    // by this author in the results, propagate even without title match.
+                    // Handles cross-language titles like "Words" -> "Les Mots" (Sartre)
+                    if !title_match && best_ec == 0 && src.edition_count > 20 {
+                        let same_author_count = notoriety_sources
+                            .iter()
+                            .filter(|s| {
+                                s.author_surname == src.author_surname
+                                    || jaro_winkler(&s.author_surname, &src.author_surname) >= 0.88
+                            })
+                            .count();
+                        if same_author_count == 1 {
+                            best_ec = src.edition_count;
+                        }
+                    }
+                }
+                if best_ec > 0
+                    && let Some(ref sd) = book.source_data
+                    && let Ok(mut json) = serde_json::from_str::<serde_json::Value>(sd)
+                {
+                    json["edition_count"] = serde_json::json!(best_ec);
+                    book.source_data = Some(json.to_string());
+                }
+            }
+        }
+    }
+
     let query_author = params.author.as_deref().unwrap_or("").to_lowercase();
     let query_title = params.title.as_deref().unwrap_or("").to_lowercase();
     let query_q = params.q.as_deref().unwrap_or("").to_lowercase();
-    // Parse multi-language param: "fr,en,es" → Vec<String>
+    // Parse multi-language param: "fr,en,es" -> Vec<String>
     let user_langs: Vec<String> = params
         .lang
         .as_deref()
@@ -1022,51 +1122,157 @@ pub async fn search_unified(
         .filter(|s| !s.is_empty())
         .collect();
 
-    // 4. Language handling: ORDER by preferred language instead of filtering
-    // This keeps all results but puts matching languages first
-    // The ordering is handled by calculate_relevance() which gives +100 points
-    // for language matches and -100 penalty for mismatches.
-    // No filtering here - all results are kept for maximum coverage.
+    // Relevance filter: discard results whose title shares no significant word
+    // with the query (after removing stop words). This eliminates noise from
+    // sources like Inventaire that match on articles ("Le", "Les", "The").
+    let raw_query = if !query_title.is_empty() {
+        &query_title
+    } else {
+        &query_q
+    };
+    if !raw_query.is_empty() {
+        let query_words = significant_words(raw_query);
+        if !query_words.is_empty() {
+            results.retain(|book| {
+                let title_words = significant_words(&normalize_string(&book.title));
+                // Keep if at least one significant word overlaps (exact or fuzzy)
+                query_words.iter().any(|qw| {
+                    title_words
+                        .iter()
+                        .any(|tw| tw == qw || jaro_winkler(tw, qw) >= 0.88)
+                })
+            });
+        }
+    }
 
-    // 5. Sort Results by Relevance
-    // Prioritize:
-    // 1. Language matches user preference
-    // 2. Title matches query title (if provided)
-    // 3. Author matches general query 'q'
-    results.sort_by(|a, b| {
-        let score_a = calculate_relevance(a, &query_author, &query_title, &query_q, &user_langs);
-        let score_b = calculate_relevance(b, &query_author, &query_title, &query_q, &user_langs);
+    // 5. Compute relevance scores and sort
+    let mut scored: Vec<(i32, book::Book)> = results
+        .into_iter()
+        .map(|b| {
+            let score = calculate_relevance(&b, &query_author, &query_title, &query_q, &user_langs);
+            (score, b)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
 
-        // Descending Match: highest scores first
-        score_b.cmp(&score_a)
-    });
-
-    for book in &results {
-        let score = calculate_relevance(book, &query_author, &query_title, &query_q, &user_langs);
+    for (score, book) in &scored {
         tracing::debug!(
-            "Final Result: {} ({}): Score {}",
+            "RELEVANCE: {} ({}): score={} editions={} lang={:?}",
             book.title,
-            book.publisher.as_deref().unwrap_or("N/A"),
-            score
+            book.source.as_deref().unwrap_or("?"),
+            score,
+            get_edition_count(book),
+            book.language
         );
     }
 
-    // Filter out self-publishing platforms (low-quality results)
-    let results: Vec<_> = results
+    // Filter out self-publishing platforms and serialize with relevance_score
+    let results: Vec<serde_json::Value> = scored
         .into_iter()
-        .filter(|book| {
-            if let Some(ref publisher) = book.publisher {
-                let pub_lower = publisher.to_lowercase();
-                !pub_lower.contains("createspace")
-                    && !pub_lower.contains("independently published")
-                    && !pub_lower.contains("independent publishing platform")
-            } else {
-                true // Keep books without publisher info
+        .filter(|(_, book)| {
+            book.publisher
+                .as_ref()
+                .map(|p| {
+                    let pl = p.to_lowercase();
+                    !pl.contains("createspace")
+                        && !pl.contains("independently published")
+                        && !pl.contains("independent publishing platform")
+                })
+                .unwrap_or(true)
+        })
+        .filter_map(|(score, book)| {
+            // Serialize the book and inject relevance_score for Flutter consumption
+            let mut val = serde_json::to_value(&book).ok()?;
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert("relevance_score".to_string(), json!(score));
             }
+            Some(val)
         })
         .collect();
 
     (StatusCode::OK, Json(results)).into_response()
+}
+
+/// Extract edition_count from a book's source_data JSON (OpenLibrary popularity signal).
+fn get_edition_count(book: &book::Book) -> i32 {
+    book.source_data
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|json| json.get("edition_count")?.as_i64())
+        .unwrap_or(0) as i32
+}
+
+/// Multilingual stop words set, built once from the `stop-words` crate.
+/// Covers all app languages (fr, en, es, de, it, pt, tr, bg) and more.
+static STOP_WORDS: LazyLock<std::collections::HashSet<String>> = LazyLock::new(|| {
+    use stop_words::LANGUAGE;
+    let langs = [
+        LANGUAGE::French,
+        LANGUAGE::English,
+        LANGUAGE::Spanish,
+        LANGUAGE::German,
+        LANGUAGE::Italian,
+        LANGUAGE::Portuguese,
+        LANGUAGE::Turkish,
+        LANGUAGE::Bulgarian,
+        LANGUAGE::Dutch,
+        LANGUAGE::Swedish,
+        LANGUAGE::Norwegian,
+        LANGUAGE::Danish,
+        LANGUAGE::Romanian,
+        LANGUAGE::Arabic,
+        LANGUAGE::Japanese,
+        LANGUAGE::Chinese,
+    ];
+    let mut set = std::collections::HashSet::new();
+    for lang in langs {
+        for w in stop_words::get(lang) {
+            set.insert(w.to_lowercase());
+        }
+    }
+    set
+});
+
+fn is_stop_word(word: &str) -> bool {
+    STOP_WORDS.contains(word)
+}
+
+/// Extract significant (non-stop) words from a normalized string.
+fn significant_words(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .map(|w| w.trim())
+        .filter(|w| w.len() > 1 && !is_stop_word(w))
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// Best fuzzy similarity between a query phrase and a title, using a sliding
+/// window of query-word-count over the title words. This handles titles like
+/// "Jack London - Martin Eden" matching query "Martin Eden".
+fn best_phrase_similarity(title: &str, query: &str) -> f64 {
+    let t_words = significant_words(title);
+    let q_words = significant_words(query);
+    if q_words.is_empty() || t_words.is_empty() {
+        return 0.0;
+    }
+    // Compare as full normalized phrases first
+    let t_joined: String = t_words.join(" ");
+    let q_joined: String = q_words.join(" ");
+    let full_sim = jaro_winkler(&t_joined, &q_joined);
+
+    // Also try sliding window of q_words.len() over t_words
+    let window = q_words.len();
+    let mut best = full_sim;
+    if t_words.len() >= window {
+        for start in 0..=(t_words.len() - window) {
+            let chunk: String = t_words[start..start + window].join(" ");
+            let sim = jaro_winkler(&chunk, &q_joined);
+            if sim > best {
+                best = sim;
+            }
+        }
+    }
+    best
 }
 
 fn calculate_relevance(
@@ -1084,18 +1290,43 @@ fn calculate_relevance(
     let q_title = normalize_string(q_title);
     let q_any = normalize_string(q_any);
 
-    // Language Match - highest priority for user experience
+    // --- Notoriety: edition_count from OpenLibrary ---
+    let edition_count = get_edition_count(book);
+    // Logarithmic scale with tiered bonuses for established and classic works.
+    // Base: 1 ed = 0, 10 ed ~ 46, 50 ed ~ 78, 100 ed ~ 92
+    let notoriety_score = if edition_count > 1 {
+        let mut n = ((edition_count as f64).ln() * 20.0).min(120.0) as i32;
+        // Tiered bonus: established works (>20 ed) and classics (>80 ed)
+        if edition_count > 80 {
+            n += 100; // Classic: Sabato, London, Verne...
+        } else if edition_count > 20 {
+            n += 40; // Established work
+        }
+        n
+    } else {
+        0
+    };
+    score += notoriety_score;
+
+    // --- Language Match ---
+    // When reading languages are configured, book language is a strong relevance signal.
+    // A matching language gets a significant boost; non-matching gets a penalty
+    // (reduced for widely-published classics so they still appear, just lower).
     if !user_langs.is_empty() {
-        // 1. Check direct language field
         if let Some(ref lang) = book.language {
             if lang_matches_any(lang, user_langs) {
-                score += 100; // Even stronger boost for direct language match
+                score += 80;
             } else {
-                score -= 100; // PENALTY for explicit mismatch
+                // Penalty for non-matching language, reduced for widely-published books
+                let penalty = if edition_count > 20 { -15 } else { -50 };
+                score += penalty;
             }
+        } else {
+            // No language info: mild penalty (unknown language can't confirm match)
+            score -= 20;
         }
 
-        // 2. Check source_data for languages
+        // Check source_data for additional language signals
         if let Some(source_data_str) = &book.source_data
             && let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str)
             && let Some(languages) = json.get("languages").and_then(|l| l.as_array())
@@ -1105,78 +1336,111 @@ fn calculate_relevance(
                 if let Some(lang_str) = lang.as_str()
                     && lang_matches_any(lang_str, user_langs)
                 {
-                    score += 60;
+                    score += 40;
                     found_match = true;
                     break;
                 }
             }
             if !found_match && !languages.is_empty() {
-                score -= 50; // Mismatch penalty in source data
+                let penalty = if edition_count > 20 { -10 } else { -30 };
+                score += penalty;
             }
         }
     }
 
-    // Source boost for French users: Prioritize BNF (national library) for French content
+    // Source boost for French users: BNF (national library)
+    // Minor signal - metadata quality, not relevance
     if user_langs.iter().any(|l| {
         let b = base_lang(l);
         b == "fr" || b == "fra" || b == "fre"
     }) && let Some(source) = &book.source
         && source == "BNF"
     {
-        score += 50; // National library bonus for French users
+        score += 20;
     }
 
-    // Author Match
+    // --- Author Match (exact > contains > fuzzy) ---
     if !q_author.is_empty() {
         if author == q_author {
             score += 100;
         } else if author.contains(&q_author) {
             score += 50;
+        } else {
+            let sim = jaro_winkler(&author, &q_author);
+            if sim >= 0.88 {
+                score += (sim * 40.0) as i32;
+            }
         }
     }
 
-    // Title Match
+    // --- Title Match (exact > contains > fuzzy phrase) ---
+    // Title match is the strongest signal - must dominate over metadata bonuses.
+    // For short queries like "Les mots", many titles contain those words.
+    // Scale the contains bonus by coverage ratio so exact/near-exact titles win.
     if !q_title.is_empty() {
         if title == q_title {
-            score += 80;
+            score += 200;
         } else if title.contains(&q_title) {
-            score += 40;
+            // Coverage: how much of the title does the query cover?
+            // "les mots" in "les mots et les choses" = 8/25 = 0.32 -> low bonus
+            // "les mots" in "les mots perdus" = 8/15 = 0.53 -> medium bonus
+            let coverage = q_title.len() as f64 / title.len() as f64;
+            // Scale from 40 (low coverage) to 150 (high coverage, near-exact)
+            score += (40.0 + coverage * 110.0) as i32;
+        } else {
+            let sim = best_phrase_similarity(&title, &q_title);
+            if sim >= 0.95 {
+                // Near-identical: accent/spelling/language variant
+                // "el tunel" vs "le tunnel" (sim ~0.96) should score almost like exact
+                score += 180;
+            } else if sim >= 0.88 {
+                // Good fuzzy match
+                score += (sim * 100.0) as i32;
+            }
         }
     }
 
-    // General Query Match
+    // --- General Query Match (exact > contains > fuzzy) ---
     if !q_any.is_empty() {
+        // Author
         if author.contains(&q_any) {
             score += 30;
+        } else {
+            let sim = jaro_winkler(&author, &q_any);
+            if sim >= 0.88 {
+                score += (sim * 20.0) as i32;
+            }
         }
+        // Title
         if title.contains(&q_any) {
             score += 30;
+        } else {
+            let sim = best_phrase_similarity(&title, &q_any);
+            if sim >= 0.88 {
+                score += (sim * 25.0) as i32;
+            }
         }
     }
 
-    // Check metadata completeness
+    // --- Metadata completeness ---
     let has_publisher = book
         .publisher
         .as_ref()
-        .map(|p| !p.trim().is_empty())
-        .unwrap_or(false);
+        .is_some_and(|p| !p.trim().is_empty());
     let has_cover = book
         .cover_url
         .as_ref()
-        .map(|c| !c.trim().is_empty())
-        .unwrap_or(false);
+        .is_some_and(|c| !c.trim().is_empty());
 
-    // Strong bonus for having BOTH cover AND publisher (complete metadata)
     if has_cover && has_publisher {
-        score += 50; // Significant boost for complete results
+        score += 20;
     }
 
-    // Boost for any publisher present
     if has_publisher {
-        score += 15;
+        score += 10;
     }
 
-    // Boost for common publishers (e.g. Livre de Poche, Pocket, etc.)
+    // Boost common publishers (minor signal, should not override title relevance)
     if let Some(publisher) = &book.publisher {
         let common_publishers = [
             "Livre de Poche",
@@ -1191,26 +1455,24 @@ fn calculate_relevance(
         ];
         for common in common_publishers {
             if publisher.to_lowercase().contains(&common.to_lowercase()) {
-                score += 30; // Stronger boost for common editions
+                score += 15;
                 break;
             }
         }
 
-        // Penalty for "Independently Published" or "CreateSpace"
+        // Penalty for self-published
         let publisher_lower = publisher.to_lowercase();
         if publisher_lower.contains("independently published")
             || publisher_lower.contains("createspace")
         {
-            score -= 100; // Heavy penalty for self-published/low-quality metadata editions
+            score -= 100;
         }
     }
 
-    // Boost items with covers
     if has_cover {
-        score += 25; // Higher boost for visual results
+        score += 10;
     }
 
-    // Boost items with summaries
     if book.summary.is_some() {
         score += 5;
     }
