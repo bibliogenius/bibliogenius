@@ -116,12 +116,14 @@ pub struct HubCatalog {
     pub expires_at: String,
 }
 
-/// A single entry in the enriched catalog (ISBN + title + author).
+/// A single entry in the enriched catalog (ISBN + title + author + optional cover).
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CatalogEntry {
     pub isbn: String,
     pub title: String,
     pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_url: Option<String>,
 }
 
 /// A hub-mediated borrow request (ADR-018).
@@ -438,6 +440,7 @@ impl HubDirectoryService {
                 isbn,
                 title: String::new(),
                 author: None,
+                cover_url: None,
             })
             .collect())
     }

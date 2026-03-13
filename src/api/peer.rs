@@ -2598,13 +2598,26 @@ pub struct ProxySearchRequest {
     peer_id: Option<i32>,
     peer_url: Option<String>,
     query: String,
+    page: Option<u64>,
+    limit: Option<u64>,
 }
 
 /// Plaintext HTTP proxy: fetch books from a peer URL directly.
-async fn plaintext_proxy_search(peer_url: &str, query: &str) -> axum::response::Response {
+/// When `page`/`limit` are provided, returns `{ "books": [...], "total": N, "has_more": bool }`.
+/// Without pagination params, returns a flat `Vec<Book>` array (legacy).
+async fn plaintext_proxy_search(
+    peer_url: &str,
+    query: &str,
+    page: Option<u64>,
+    limit: Option<u64>,
+) -> axum::response::Response {
     let client = get_safe_client();
     let res = if query.is_empty() {
-        let url = format!("{}/api/books?owned_only=true", peer_url);
+        let mut url = format!("{}/api/books?owned_only=true", peer_url);
+        if let Some(p) = page {
+            let l = limit.unwrap_or(20).min(50);
+            url.push_str(&format!("&page={}&limit={}", p, l));
+        }
         client.get(&url).send().await
     } else {
         let url = format!("{}/api/peers/search", peer_url);
@@ -2621,12 +2634,32 @@ async fn plaintext_proxy_search(peer_url: &str, query: &str) -> axum::response::
                 // /api/books returns {"books": [...], "total": N}
                 // /api/peers/search returns [...]
                 let body: serde_json::Value = response.json().await.unwrap_or(json!([]));
-                let books: Vec<crate::models::Book> = if let Some(arr) = body.get("books") {
-                    serde_json::from_value(arr.clone()).unwrap_or_default()
+
+                if page.is_some() && query.is_empty() {
+                    // Paginated: return envelope with has_more
+                    let books_val = body.get("books").cloned().unwrap_or(json!([]));
+                    let total = body.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let p = page.unwrap_or(0);
+                    let l = limit.unwrap_or(20).min(50);
+                    let has_more = ((p + 1) * l) < total;
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "books": books_val,
+                            "total": total,
+                            "has_more": has_more,
+                        })),
+                    )
+                        .into_response()
                 } else {
-                    serde_json::from_value(body).unwrap_or_default()
-                };
-                (StatusCode::OK, Json(books)).into_response()
+                    // Legacy: return flat array
+                    let books: Vec<crate::models::Book> = if let Some(arr) = body.get("books") {
+                        serde_json::from_value(arr.clone()).unwrap_or_default()
+                    } else {
+                        serde_json::from_value(body).unwrap_or_default()
+                    };
+                    (StatusCode::OK, Json(books)).into_response()
+                }
             } else {
                 (
                     StatusCode::BAD_GATEWAY,
@@ -2676,6 +2709,34 @@ pub async fn proxy_search(
                 .into_response();
         }
 
+        // Paginated library browse via E2EE (empty query + page param)
+        if payload.query.is_empty() && payload.page.is_some() {
+            let page = payload.page.unwrap_or(0);
+            let limit = payload.limit.unwrap_or(20).min(50);
+            match try_send_e2ee(
+                &state,
+                &peer,
+                "library_browse_request",
+                json!({ "page": page, "limit": limit }),
+            )
+            .await
+            {
+                Ok(Some(Some(response_msg))) => {
+                    return (StatusCode::OK, Json(response_msg.payload)).into_response();
+                }
+                Ok(Some(None)) | Ok(None) | Err(_) => {
+                    // E2EE browse not supported or failed — fall back to plaintext paginated
+                    return plaintext_proxy_search(
+                        &peer.url,
+                        &payload.query,
+                        payload.page,
+                        payload.limit,
+                    )
+                    .await;
+                }
+            }
+        }
+
         // Try E2EE path first (search is request-response: returns encrypted results)
         match try_send_e2ee(
             &state,
@@ -2708,7 +2769,8 @@ pub async fn proxy_search(
         }
 
         // 2. Legacy plaintext fallback
-        return plaintext_proxy_search(&peer.url, &payload.query).await;
+        return plaintext_proxy_search(&peer.url, &payload.query, payload.page, payload.limit)
+            .await;
     }
 
     // Peer not in DB but URL provided (e.g. unsaved mDNS peer): direct plaintext fetch
@@ -2720,7 +2782,7 @@ pub async fn proxy_search(
             )
                 .into_response();
         }
-        return plaintext_proxy_search(url, &payload.query).await;
+        return plaintext_proxy_search(url, &payload.query, payload.page, payload.limit).await;
     }
 
     (

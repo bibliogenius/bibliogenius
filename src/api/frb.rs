@@ -2824,6 +2824,7 @@ pub struct FrbCatalogEntry {
     pub isbn: String,
     pub title: String,
     pub author: Option<String>,
+    pub cover_url: Option<String>,
     /// When this entry was first seen locally (ISO 8601). Used for "new" badge.
     pub first_seen_at: Option<String>,
 }
@@ -2834,6 +2835,7 @@ impl From<CatalogEntry> for FrbCatalogEntry {
             isbn: e.isbn,
             title: e.title,
             author: e.author,
+            cover_url: e.cover_url,
             first_seen_at: None,
         }
     }
@@ -2906,6 +2908,7 @@ pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), St
             isbn,
             title: String::new(),
             author: None,
+            cover_url: None,
         })
         .collect();
     hub_directory_svc()
@@ -2959,6 +2962,7 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
                 isbn,
                 title: book.title,
                 author,
+                cover_url: book.cover_url,
             })
         })
         .collect();
@@ -3042,6 +3046,7 @@ pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalog
                         isbn,
                         title: pb.title,
                         author: pb.author,
+                        cover_url: pb.cover_url,
                         first_seen_at: pb.first_seen_at,
                     })
                 })
@@ -3100,6 +3105,7 @@ async fn upsert_directory_catalog_cache(
             let mut active: peer_book::ActiveModel = existing_entry.clone().into();
             active.title = Set(entry.title.clone());
             active.author = Set(entry.author.clone());
+            active.cover_url = Set(entry.cover_url.clone());
             active.synced_at = Set(now.clone());
             let _ = active.update(db).await;
 
@@ -3107,6 +3113,7 @@ async fn upsert_directory_catalog_cache(
                 isbn: entry.isbn.clone(),
                 title: entry.title.clone(),
                 author: entry.author.clone(),
+                cover_url: entry.cover_url.clone(),
                 first_seen_at: existing_entry.first_seen_at.clone(),
             });
         } else {
@@ -3123,7 +3130,7 @@ async fn upsert_directory_catalog_cache(
                 title: Set(entry.title.clone()),
                 isbn: Set(Some(entry.isbn.clone())),
                 author: Set(entry.author.clone()),
-                cover_url: Set(None),
+                cover_url: Set(entry.cover_url.clone()),
                 summary: Set(None),
                 synced_at: Set(now.clone()),
                 node_id: Set(Some(node_id.to_string())),
@@ -3140,6 +3147,7 @@ async fn upsert_directory_catalog_cache(
                 isbn: entry.isbn.clone(),
                 title: entry.title.clone(),
                 author: entry.author.clone(),
+                cover_url: entry.cover_url.clone(),
                 first_seen_at: first_seen,
             });
         }

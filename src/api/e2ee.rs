@@ -230,9 +230,22 @@ pub async fn dispatch_clear_message(
             )
         }
 
+        "library_browse_request" => {
+            let response_payload = handle_library_browse_request(db, clear_message).await;
+            seal_response(
+                crypto_service,
+                &known_peers[peer_index],
+                "library_browse_response",
+                response_payload,
+            )
+        }
+
         // Response message types - these are handled by correlation matching
         // in the relay poller, not dispatched to handlers.
-        "library_manifest_response" | "library_page_response" | "library_search_response" => {
+        "library_manifest_response"
+        | "library_page_response"
+        | "library_search_response"
+        | "library_browse_response" => {
             tracing::debug!(
                 "E2EE: Received '{}' (handled by correlation)",
                 clear_message.message_type
@@ -1085,6 +1098,46 @@ pub async fn handle_library_page_request(
         "books": browse_books,
         "next_cursor": next_cursor,
         "total": total,
+    })
+}
+
+/// Handle a paginated library browse request via direct E2EE (offset-based).
+/// Unlike `handle_library_page_request` (cursor-based, for relay), this uses
+/// page/limit pagination matching the `/api/books` endpoint.
+pub async fn handle_library_browse_request(
+    db: &DatabaseConnection,
+    msg: &ClearMessage,
+) -> serde_json::Value {
+    use crate::models::book;
+    use sea_orm::{PaginatorTrait, QueryFilter, QueryOrder};
+
+    let page = msg
+        .payload
+        .get("page")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let limit = msg
+        .payload
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(20)
+        .min(50);
+
+    let query = book::Entity::find()
+        .filter(book::Column::Owned.eq(true))
+        .order_by_asc(book::Column::ShelfPosition);
+
+    let paginator = query.paginate(db, limit);
+    let total = paginator.num_items().await.unwrap_or(0);
+    let books = paginator.fetch_page(page).await.unwrap_or_default();
+
+    let book_dtos = crate::models::Book::populate_authors(db, books).await;
+    let has_more = ((page + 1) * limit) < total;
+
+    json!({
+        "books": book_dtos,
+        "total": total,
+        "has_more": has_more,
     })
 }
 

@@ -4669,11 +4669,13 @@ impl SseDecode for crate::api::frb::FrbCatalogEntry {
         let mut var_isbn = <String>::sse_decode(deserializer);
         let mut var_title = <String>::sse_decode(deserializer);
         let mut var_author = <Option<String>>::sse_decode(deserializer);
+        let mut var_coverUrl = <Option<String>>::sse_decode(deserializer);
         let mut var_firstSeenAt = <Option<String>>::sse_decode(deserializer);
         return crate::api::frb::FrbCatalogEntry {
             isbn: var_isbn,
             title: var_title,
             author: var_author,
+            cover_url: var_coverUrl,
             first_seen_at: var_firstSeenAt,
         };
     }
@@ -6278,6 +6280,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbCatalogEntry {
             self.isbn.into_into_dart().into_dart(),
             self.title.into_into_dart().into_dart(),
             self.author.into_into_dart().into_dart(),
+            self.cover_url.into_into_dart().into_dart(),
             self.first_seen_at.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -7185,6 +7188,7 @@ impl SseEncode for crate::api::frb::FrbCatalogEntry {
         <String>::sse_encode(self.isbn, serializer);
         <String>::sse_encode(self.title, serializer);
         <Option<String>>::sse_encode(self.author, serializer);
+        <Option<String>>::sse_encode(self.cover_url, serializer);
         <Option<String>>::sse_encode(self.first_seen_at, serializer);
     }
 }
