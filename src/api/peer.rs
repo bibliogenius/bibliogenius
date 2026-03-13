@@ -1974,13 +1974,22 @@ pub async fn update_peer_url(
         }
     };
 
-    // Security: Only update URL for pending peers
-    if peer.auto_approve {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "Cannot update URL for connected peers" })),
-        )
-            .into_response();
+    // Security: Only update URL for pending peers, unless upgrading from relay
+    // to LAN or fixing a port mismatch (mDNS discovered the correct address).
+    // This endpoint is localhost-only, so the caller is always the local app.
+    if peer.auto_approve && !peer.url.starts_with("relay://") {
+        // Allow port updates for same-host LAN URLs (hot restart changes port)
+        let same_host = match (url::Url::parse(&peer.url), url::Url::parse(&payload.url)) {
+            (Ok(old), Ok(new_url)) => old.host() == new_url.host(),
+            _ => false,
+        };
+        if !same_host {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "Cannot update URL for connected peers" })),
+            )
+                .into_response();
+        }
     }
 
     // Check if URL is already taken by another peer
