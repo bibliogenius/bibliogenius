@@ -2938,6 +2938,7 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
         Vec<crate::models::author::Model>,
     )> = BookEntity::find()
         .filter(BookColumn::Isbn.is_not_null())
+        .filter(BookColumn::Owned.eq(true))
         .find_with_related(crate::models::author::Entity)
         .all(db)
         .await

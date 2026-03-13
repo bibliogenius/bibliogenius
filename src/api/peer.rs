@@ -842,16 +842,16 @@ pub async fn connect(
     State(db): State<DatabaseConnection>,
     Json(payload): Json<ConnectRequest>,
 ) -> impl IntoResponse {
-    // 1. Validate URL
-    if let Err(e) = validate_url(&payload.url) {
+    // Relay-only peers have an empty URL — skip URL validation and remote
+    // config fetch in that case. All data comes from the request payload.
+    let is_relay_only = payload.url.is_empty();
+
+    // 1. Validate URL (only for LAN peers with a real HTTP URL)
+    if !is_relay_only && let Err(e) = validate_url(&payload.url) {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
     }
 
     // 2. Fetch remote config to get location and verify connectivity
-    let client = get_safe_client();
-    let config_url = format!("{}/api/config", payload.url.trim_end_matches('/'));
-
-    // Struct to hold remote config data including E2EE keys and relay info
     struct RemoteConfigData {
         latitude: Option<f64>,
         longitude: Option<f64>,
@@ -864,64 +864,9 @@ pub async fn connect(
         relay_write_token: Option<String>,
     }
 
-    let (remote_data, remote_reachable) = match client.get(&config_url).send().await {
-        Ok(res) => {
-            if res.status().is_success() {
-                match res.json::<crate::api::setup::ConfigResponse>().await {
-                    Ok(config) => {
-                        let (lat, long) = if config.share_location {
-                            (config.latitude, config.longitude)
-                        } else {
-                            (None, None)
-                        };
-                        (
-                            RemoteConfigData {
-                                latitude: lat,
-                                longitude: long,
-                                remote_name: Some(config.library_name),
-                                library_uuid: config.library_uuid,
-                                ed25519_public_key: config.ed25519_public_key,
-                                x25519_public_key: config.x25519_public_key,
-                                relay_url: config.relay_url,
-                                mailbox_id: config.mailbox_id,
-                                relay_write_token: config.relay_write_token,
-                            },
-                            true,
-                        )
-                    }
-                    _ => (
-                        RemoteConfigData {
-                            latitude: None,
-                            longitude: None,
-                            remote_name: None,
-                            library_uuid: None,
-                            ed25519_public_key: None,
-                            x25519_public_key: None,
-                            relay_url: None,
-                            mailbox_id: None,
-                            relay_write_token: None,
-                        },
-                        false,
-                    ),
-                }
-            } else {
-                (
-                    RemoteConfigData {
-                        latitude: None,
-                        longitude: None,
-                        remote_name: None,
-                        library_uuid: None,
-                        ed25519_public_key: None,
-                        x25519_public_key: None,
-                        relay_url: None,
-                        mailbox_id: None,
-                        relay_write_token: None,
-                    },
-                    false,
-                )
-            }
-        }
-        Err(_) => (
+    let (remote_data, remote_reachable) = if is_relay_only {
+        // Relay-only: no remote config to fetch, all data from payload
+        (
             RemoteConfigData {
                 latitude: None,
                 longitude: None,
@@ -934,7 +879,82 @@ pub async fn connect(
                 relay_write_token: None,
             },
             false,
-        ),
+        )
+    } else {
+        let client = get_safe_client();
+        let config_url = format!("{}/api/config", payload.url.trim_end_matches('/'));
+        match client.get(&config_url).send().await {
+            Ok(res) => {
+                if res.status().is_success() {
+                    match res.json::<crate::api::setup::ConfigResponse>().await {
+                        Ok(config) => {
+                            let (lat, long) = if config.share_location {
+                                (config.latitude, config.longitude)
+                            } else {
+                                (None, None)
+                            };
+                            (
+                                RemoteConfigData {
+                                    latitude: lat,
+                                    longitude: long,
+                                    remote_name: Some(config.library_name),
+                                    library_uuid: config.library_uuid,
+                                    ed25519_public_key: config.ed25519_public_key,
+                                    x25519_public_key: config.x25519_public_key,
+                                    relay_url: config.relay_url,
+                                    mailbox_id: config.mailbox_id,
+                                    relay_write_token: config.relay_write_token,
+                                },
+                                true,
+                            )
+                        }
+                        _ => (
+                            RemoteConfigData {
+                                latitude: None,
+                                longitude: None,
+                                remote_name: None,
+                                library_uuid: None,
+                                ed25519_public_key: None,
+                                x25519_public_key: None,
+                                relay_url: None,
+                                mailbox_id: None,
+                                relay_write_token: None,
+                            },
+                            false,
+                        ),
+                    }
+                } else {
+                    (
+                        RemoteConfigData {
+                            latitude: None,
+                            longitude: None,
+                            remote_name: None,
+                            library_uuid: None,
+                            ed25519_public_key: None,
+                            x25519_public_key: None,
+                            relay_url: None,
+                            mailbox_id: None,
+                            relay_write_token: None,
+                        },
+                        false,
+                    )
+                }
+            }
+            Err(_) => (
+                RemoteConfigData {
+                    latitude: None,
+                    longitude: None,
+                    remote_name: None,
+                    library_uuid: None,
+                    ed25519_public_key: None,
+                    x25519_public_key: None,
+                    relay_url: None,
+                    mailbox_id: None,
+                    relay_write_token: None,
+                },
+                false,
+            ),
+        }
     };
 
     // Use provided name or fallback to remote name or "Unknown"
@@ -957,25 +977,39 @@ pub async fn connect(
     // Key exchange is done if we have both keys
     let key_exchange_done = ed25519_key.is_some() && x25519_key.is_some();
 
-    // Translate localhost URLs to Docker service names for inter-container communication
-    let docker_url = translate_url_for_docker(&payload.url);
-    let peer_url_for_sync = docker_url.clone(); // Clone before moving into ActiveModel
-
     // Library UUID: prefer payload (QR/invite), fall back to remote config
     let peer_library_uuid = payload.library_uuid.or(remote_data.library_uuid);
 
-    // Upsert: find existing peer by URL first, then by library_uuid (handles
-    // port changes from hot restarts where the UUID stays the same).
-    let mut existing = peer::Entity::find()
-        .filter(peer::Column::Url.eq(&docker_url))
-        .one(&db)
-        .await;
+    // Translate localhost URLs to Docker service names for inter-container communication
+    // For relay-only peers (empty URL), use a unique placeholder to satisfy
+    // the NOT NULL UNIQUE constraint on peers.url (same pattern as relay_poller).
+    let docker_url = if is_relay_only {
+        let unique_part = peer_library_uuid
+            .as_deref()
+            .or(ed25519_key.as_deref())
+            .map(String::from)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        format!("relay://{unique_part}")
+    } else {
+        translate_url_for_docker(&payload.url)
+    };
+    let peer_url_for_sync = docker_url.clone(); // Clone before moving into ActiveModel
 
-    if matches!(&existing, Ok(None))
-        && let Some(ref uuid) = peer_library_uuid
-    {
-        existing = peer::Entity::find()
+    // Upsert: find existing peer by library_uuid first (most reliable),
+    // then by URL (handles port changes from hot restarts).
+    // For relay-only peers (empty URL), UUID is the only reliable key.
+    let mut existing = if let Some(ref uuid) = peer_library_uuid {
+        peer::Entity::find()
             .filter(peer::Column::LibraryUuid.eq(uuid))
+            .one(&db)
+            .await
+    } else {
+        Ok(None)
+    };
+
+    if matches!(&existing, Ok(None)) && !docker_url.is_empty() {
+        existing = peer::Entity::find()
+            .filter(peer::Column::Url.eq(&docker_url))
             .one(&db)
             .await;
     }
