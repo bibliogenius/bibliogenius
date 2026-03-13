@@ -1946,6 +1946,9 @@ pub async fn update_peer_status(
 #[derive(Debug, Deserialize)]
 pub struct UpdatePeerUrlRequest {
     pub url: String,
+    /// Optional library_uuid to backfill when discovered via mDNS.
+    /// Validated as a proper UUID to prevent injection.
+    pub library_uuid: Option<String>,
 }
 
 /// Update a peer's URL (for mDNS IP changes)
@@ -2023,6 +2026,24 @@ pub async fn update_peer_url(
     let mut active_model: peer::ActiveModel = peer.into();
     active_model.url = Set(payload.url.clone());
     active_model.updated_at = Set(chrono::Utc::now().to_rfc3339());
+
+    // Backfill library_uuid if provided and valid UUID format
+    if let Some(ref uuid_str) = payload.library_uuid {
+        if uuid::Uuid::parse_str(uuid_str).is_ok() {
+            active_model.library_uuid = Set(Some(uuid_str.clone()));
+            tracing::info!(
+                "Backfilling library_uuid for peer {}: {}",
+                peer_id,
+                uuid_str
+            );
+        } else {
+            tracing::warn!(
+                "Ignoring invalid library_uuid for peer {}: {}",
+                peer_id,
+                uuid_str
+            );
+        }
+    }
 
     match active_model.update(&db).await {
         Ok(updated) => {
