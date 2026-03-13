@@ -961,14 +961,24 @@ pub async fn connect(
     let docker_url = translate_url_for_docker(&payload.url);
     let peer_url_for_sync = docker_url.clone(); // Clone before moving into ActiveModel
 
-    // Upsert: update existing peer by URL, or insert new
-    let existing = peer::Entity::find()
+    // Library UUID: prefer payload (QR/invite), fall back to remote config
+    let peer_library_uuid = payload.library_uuid.or(remote_data.library_uuid);
+
+    // Upsert: find existing peer by URL first, then by library_uuid (handles
+    // port changes from hot restarts where the UUID stays the same).
+    let mut existing = peer::Entity::find()
         .filter(peer::Column::Url.eq(&docker_url))
         .one(&db)
         .await;
 
-    // Library UUID: prefer payload (QR/invite), fall back to remote config
-    let peer_library_uuid = payload.library_uuid.or(remote_data.library_uuid);
+    if matches!(&existing, Ok(None))
+        && let Some(ref uuid) = peer_library_uuid
+    {
+        existing = peer::Entity::find()
+            .filter(peer::Column::LibraryUuid.eq(uuid))
+            .one(&db)
+            .await;
+    }
 
     // Relay info: prefer payload, fall back to remote config
     let relay_url = payload.relay_url.or(remote_data.relay_url);
@@ -987,6 +997,7 @@ pub async fn connect(
             let old_library_uuid = existing_peer.library_uuid.clone();
             let mut active: peer::ActiveModel = existing_peer.into();
             active.name = Set(name);
+            active.url = Set(docker_url.clone()); // Update URL (port may have changed)
             active.library_uuid = Set(peer_library_uuid.clone());
             active.public_key = Set(ed25519_key.clone());
             active.x25519_public_key = Set(x25519_key);
@@ -1570,10 +1581,20 @@ pub async fn receive_connection_request(
     }
 
     // Always handle locally: create/update peer in SQLite + return our E2EE keys
-    let existing = peer::Entity::find()
+    // Find by URL first, then by library_uuid (handles port changes)
+    let mut existing = peer::Entity::find()
         .filter(peer::Column::Url.eq(&payload.url))
         .one(&db)
         .await;
+
+    if matches!(&existing, Ok(None))
+        && let Some(ref uuid) = payload.library_uuid
+    {
+        existing = peer::Entity::find()
+            .filter(peer::Column::LibraryUuid.eq(uuid))
+            .one(&db)
+            .await;
+    }
 
     // Load our own public keys to include in the response
     let (my_ed25519, my_x25519) = crate::api::setup::load_public_keys_from_db(&db).await;
@@ -1589,6 +1610,7 @@ pub async fn receive_connection_request(
             let peer_id = existing_peer.id;
             if key_exchange_done && !existing_peer.key_exchange_done {
                 let mut active: peer::ActiveModel = existing_peer.into();
+                active.url = Set(payload.url.clone()); // Update URL (port may have changed)
                 if payload.library_uuid.is_some() {
                     active.library_uuid = Set(payload.library_uuid.clone());
                 }
