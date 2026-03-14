@@ -206,6 +206,10 @@ fn build_routes() -> Router<AppState> {
             axum::routing::delete(peer::delete_outgoing_request),
         )
         .route(
+            "/peers/requests/outgoing/sync",
+            post(peer::sync_outgoing_requests),
+        ) // Sync pending outgoing requests with lenders
+        .route(
             "/peers/requests/clear",
             axum::routing::delete(peer::clear_incoming_requests),
         ) // Clear non-pending incoming requests

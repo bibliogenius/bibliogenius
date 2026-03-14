@@ -240,6 +240,16 @@ pub async fn dispatch_clear_message(
             )
         }
 
+        "request_status_query" => {
+            let response_payload = handle_request_status_query(db, clear_message).await;
+            seal_response(
+                crypto_service,
+                &known_peers[peer_index],
+                "request_status_response",
+                response_payload,
+            )
+        }
+
         // Response message types - these are handled by correlation matching
         // in the relay poller, not dispatched to handlers.
         "library_manifest_response"
@@ -368,6 +378,10 @@ async fn save_loan_request(
 }
 
 /// Returns JSON payload for the loan request result (used by both E2EE and relay).
+///
+/// If auto-approve is enabled and the peer is accepted, immediately accepts the loan
+/// and returns the acceptance details in the response so the borrower can process it
+/// synchronously — no separate callback needed.
 async fn handle_loan_request_payload(
     db: &DatabaseConnection,
     sender_peer: &peer::Model,
@@ -375,6 +389,70 @@ async fn handle_loan_request_payload(
 ) -> serde_json::Value {
     match save_loan_request(db, sender_peer, msg).await {
         Ok((request_id, status)) => {
+            // Check auto-approve: if enabled and peer is accepted, accept inline
+            if status == "pending"
+                && crate::api::peer::is_auto_approve_loans_enabled(db).await
+                && sender_peer.connection_status == "accepted"
+            {
+                tracing::info!(
+                    "E2EE: Auto-approving loan request {} for peer {}",
+                    request_id,
+                    sender_peer.name
+                );
+
+                // Emit borrow_request notification (even though auto-approved)
+                let book_title = msg
+                    .payload
+                    .get("book_title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                crate::services::notification_service::emit(
+                    db,
+                    crate::domain::CreateNotification {
+                        event_type: crate::domain::NotificationEventType::BorrowRequest,
+                        title: book_title.to_string(),
+                        body: Some(sender_peer.name.clone()),
+                        ref_type: Some("peer".to_string()),
+                        ref_id: Some(request_id.clone()),
+                    },
+                )
+                .await;
+
+                match crate::api::peer::perform_loan_acceptance(
+                    db,
+                    &request_id,
+                    msg.payload
+                        .get("book_isbn")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                    book_title,
+                    sender_peer,
+                )
+                .await
+                {
+                    Ok(result) => {
+                        return json!({
+                            "status": "accepted",
+                            "request_id": request_id,
+                            "due_date": result.due_date,
+                            "lender_name": result.lender_name,
+                            "isbn": result.book_isbn,
+                            "title": result.book_title,
+                            "cover_url": result.book_cover_url,
+                            "message": "Loan request auto-approved",
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "E2EE: Auto-approve failed for request {}: {} - staying pending",
+                            request_id,
+                            e
+                        );
+                        // Fall through to return "pending"
+                    }
+                }
+            }
+
             json!({ "request_id": request_id, "status": status, "message": "Loan request received" })
         }
         Err(e) => json!({ "error": e }),
@@ -1401,6 +1479,95 @@ fn seal_response(
                 Json(json!({ "error": "Failed to encrypt response" })),
             )
                 .into_response()
+        }
+    }
+}
+
+/// Handle a request_status_query: look up the local p2p_request by requester_request_id
+/// and return its current status. This allows borrowers to poll for status changes
+/// when asynchronous callbacks fail (e.g., cross-network scenarios).
+pub async fn handle_request_status_query(
+    db: &DatabaseConnection,
+    msg: &ClearMessage,
+) -> serde_json::Value {
+    use crate::models::p2p_request;
+
+    let requester_request_id = msg
+        .payload
+        .get("requester_request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if requester_request_id.is_empty() {
+        return json!({ "error": "Missing requester_request_id" });
+    }
+
+    // Find the request by the borrower's outgoing ID
+    let request = p2p_request::Entity::find()
+        .filter(p2p_request::Column::RequesterRequestId.eq(requester_request_id))
+        .one(db)
+        .await
+        .ok()
+        .flatten();
+
+    match request {
+        Some(req) => {
+            let mut response = json!({
+                "requester_request_id": requester_request_id,
+                "status": req.status,
+            });
+
+            // If accepted, include loan details so borrower can create the borrowed copy
+            if req.status == "accepted" {
+                // Get lender name and due date from the loan
+                let lender_name = match crate::models::library::Entity::find_by_id(1).one(db).await
+                {
+                    Ok(Some(lib)) => lib.name,
+                    _ => "Unknown Library".to_string(),
+                };
+
+                // Find the associated loan for due_date
+                if let Ok(Some(book)) = crate::models::book::Entity::find()
+                    .filter(crate::models::book::Column::Isbn.eq(&req.book_isbn))
+                    .one(db)
+                    .await
+                {
+                    response["isbn"] = json!(book.isbn);
+                    response["title"] = json!(book.title);
+                    response["cover_url"] = json!(book.cover_url);
+                }
+
+                response["lender_name"] = json!(lender_name);
+                response["request_id"] = json!(req.id);
+
+                // Find loan due_date via copy/loan chain
+                if let Ok(Some(book)) = crate::models::book::Entity::find()
+                    .filter(crate::models::book::Column::Isbn.eq(&req.book_isbn))
+                    .one(db)
+                    .await
+                {
+                    let copies = crate::models::copy::Entity::find()
+                        .filter(crate::models::copy::Column::BookId.eq(book.id))
+                        .all(db)
+                        .await
+                        .unwrap_or_default();
+                    let copy_ids: Vec<i32> = copies.iter().map(|c| c.id).collect();
+                    if !copy_ids.is_empty()
+                        && let Ok(Some(loan)) = crate::models::loan::Entity::find()
+                            .filter(crate::models::loan::Column::CopyId.is_in(copy_ids))
+                            .filter(crate::models::loan::Column::Status.eq("active"))
+                            .one(db)
+                            .await
+                    {
+                        response["due_date"] = json!(loan.due_date);
+                    }
+                }
+            }
+
+            response
+        }
+        None => {
+            json!({ "requester_request_id": requester_request_id, "status": "not_found" })
         }
     }
 }

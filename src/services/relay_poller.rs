@@ -429,6 +429,10 @@ async fn handle_relay_request_response(
             "loan_request_response",
             crate::api::e2ee::handle_loan_request_for_relay(db, sender_peer, clear_message).await,
         ),
+        "request_status_query" => (
+            "request_status_response",
+            crate::api::e2ee::handle_request_status_query(db, clear_message).await,
+        ),
         _ => {
             // For other request-response types, fall back to standard dispatch
             let our_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
