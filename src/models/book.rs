@@ -182,6 +182,25 @@ impl From<Model> for Book {
 }
 
 impl Book {
+    /// Subquery returning book IDs whose related author name matches `query` (LIKE %query%).
+    /// Use with `Expr::col(book::Column::Id).in_subquery(...)` to filter books by author.
+    pub fn author_search_subquery(query: &str) -> sea_orm::sea_query::SelectStatement {
+        use sea_orm::sea_query::{Alias, Expr, Query};
+
+        Query::select()
+            .column(Alias::new("book_id"))
+            .from(Alias::new("book_authors"))
+            .inner_join(
+                Alias::new("authors"),
+                Expr::col((Alias::new("book_authors"), Alias::new("author_id")))
+                    .equals((Alias::new("authors"), Alias::new("id"))),
+            )
+            .and_where(
+                Expr::col((Alias::new("authors"), Alias::new("name"))).like(format!("%{}%", query)),
+            )
+            .to_owned()
+    }
+
     /// Convert book models to DTOs with author names and available copy counts populated.
     pub async fn populate_authors(
         db: &sea_orm::DatabaseConnection,
@@ -190,18 +209,23 @@ impl Book {
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
         use std::collections::HashMap;
 
-        // Batch-fetch available copy counts for all book IDs
+        // Batch-fetch copy info for all book IDs
         let book_ids: Vec<i32> = models.iter().map(|m| m.id).collect();
         let mut available_map: HashMap<i32, i32> = HashMap::new();
+        let mut borrowed_set: std::collections::HashSet<i32> = std::collections::HashSet::new();
         if !book_ids.is_empty()
             && let Ok(copies) = super::copy::Entity::find()
-                .filter(super::copy::Column::BookId.is_in(book_ids))
-                .filter(super::copy::Column::Status.eq("available"))
+                .filter(super::copy::Column::BookId.is_in(book_ids.clone()))
                 .all(db)
                 .await
         {
-            for c in copies {
-                *available_map.entry(c.book_id).or_insert(0) += 1;
+            for c in &copies {
+                if c.status == "available" {
+                    *available_map.entry(c.book_id).or_insert(0) += 1;
+                }
+                if c.status == "borrowed" && c.is_temporary {
+                    borrowed_set.insert(c.book_id);
+                }
             }
         }
 
@@ -217,6 +241,10 @@ impl Book {
                 dto.authors = Some(names);
             }
             dto.available_copies = Some(*available_map.get(&book_id).unwrap_or(&0));
+            // Override reading_status for books with a borrowed temporary copy
+            if borrowed_set.contains(&book_id) {
+                dto.reading_status = Some("borrowed".to_string());
+            }
             dtos.push(dto);
         }
         dtos

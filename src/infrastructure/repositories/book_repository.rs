@@ -48,10 +48,12 @@ impl BookRepository for SeaOrmBookRepository {
         if let Some(q) = &filter.query
             && !q.is_empty()
         {
+            use sea_orm::sea_query::Expr;
             let cond = Condition::any()
                 .add(Column::Title.contains(q))
                 .add(Column::Isbn.contains(q))
-                .add(Column::Subjects.contains(q));
+                .add(Column::Subjects.contains(q))
+                .add(Expr::col(Column::Id).in_subquery(Book::author_search_subquery(q)));
             query = query.filter(cond);
         }
 

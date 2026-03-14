@@ -9,8 +9,8 @@ use axum::{
     response::IntoResponse,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    Set,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
+    QueryFilter, Set,
 };
 use serde_json::json;
 
@@ -400,23 +400,11 @@ async fn handle_loan_request_payload(
                     sender_peer.name
                 );
 
-                // Emit borrow_request notification (even though auto-approved)
                 let book_title = msg
                     .payload
                     .get("book_title")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                crate::services::notification_service::emit(
-                    db,
-                    crate::domain::CreateNotification {
-                        event_type: crate::domain::NotificationEventType::BorrowRequest,
-                        title: book_title.to_string(),
-                        body: Some(sender_peer.name.clone()),
-                        ref_type: Some("peer".to_string()),
-                        ref_id: Some(request_id.clone()),
-                    },
-                )
-                .await;
 
                 match crate::api::peer::perform_loan_acceptance(
                     db,
@@ -431,6 +419,19 @@ async fn handle_loan_request_payload(
                 .await
                 {
                     Ok(result) => {
+                        // Emit borrow_request notification (auto-approved)
+                        crate::services::notification_service::emit(
+                            db,
+                            crate::domain::CreateNotification {
+                                event_type: crate::domain::NotificationEventType::BorrowRequest,
+                                title: book_title.to_string(),
+                                body: Some(sender_peer.name.clone()),
+                                ref_type: Some("peer".to_string()),
+                                ref_id: Some(request_id.clone()),
+                            },
+                        )
+                        .await;
+
                         return json!({
                             "status": "accepted",
                             "request_id": request_id,
@@ -451,6 +452,26 @@ async fn handle_loan_request_payload(
                         // Fall through to return "pending"
                     }
                 }
+            }
+
+            // Emit borrow_request notification (only when NOT auto-approved)
+            if status == "pending" {
+                let book_title = msg
+                    .payload
+                    .get("book_title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                crate::services::notification_service::emit(
+                    db,
+                    crate::domain::CreateNotification {
+                        event_type: crate::domain::NotificationEventType::BorrowRequest,
+                        title: book_title.to_string(),
+                        body: Some(sender_peer.name.clone()),
+                        ref_type: Some("peer".to_string()),
+                        ref_id: Some(request_id.clone()),
+                    },
+                )
+                .await;
             }
 
             json!({ "request_id": request_id, "status": status, "message": "Loan request received" })
@@ -781,6 +802,7 @@ pub async fn handle_search_request(
     msg: &ClearMessage,
 ) -> serde_json::Value {
     use crate::models::book;
+    use sea_orm::sea_query::Expr;
 
     let query = msg
         .payload
@@ -789,7 +811,14 @@ pub async fn handle_search_request(
         .unwrap_or("");
 
     let books = book::Entity::find()
-        .filter(book::Column::Title.contains(query))
+        .filter(
+            Condition::any()
+                .add(book::Column::Title.contains(query))
+                .add(
+                    Expr::col(book::Column::Id)
+                        .in_subquery(crate::models::Book::author_search_subquery(query)),
+                ),
+        )
         .all(db)
         .await
         .unwrap_or_default();
@@ -885,6 +914,19 @@ async fn handle_status_update(
                     );
                 }
             }
+
+            // Emit book_returned notification on borrower side
+            crate::services::notification_service::emit(
+                db,
+                crate::domain::CreateNotification {
+                    event_type: crate::domain::NotificationEventType::BookReturned,
+                    title: bk.title.clone(),
+                    body: None, // Lender name not easily available here
+                    ref_type: Some("loan".to_string()),
+                    ref_id: Some(loan_id.to_string()),
+                },
+            )
+            .await;
         }
 
         return (StatusCode::OK, Json(json!({ "message": "Status updated" }))).into_response();
@@ -954,6 +996,20 @@ async fn handle_status_update(
                                     "E2EE: Processed return for request {} — loan + copy updated",
                                     loan_id
                                 );
+
+                                // Emit book_returned notification
+                                crate::services::notification_service::emit(
+                                    db,
+                                    crate::domain::CreateNotification {
+                                        event_type:
+                                            crate::domain::NotificationEventType::BookReturned,
+                                        title: book.title.clone(),
+                                        body: Some(the_peer.name.clone()),
+                                        ref_type: Some("loan".to_string()),
+                                        ref_id: Some(loan_id.to_string()),
+                                    },
+                                )
+                                .await;
                             }
                         }
                     }
@@ -1226,6 +1282,7 @@ pub async fn handle_library_search_via_relay(
     msg: &ClearMessage,
 ) -> serde_json::Value {
     use crate::models::book;
+    use sea_orm::sea_query::Expr;
 
     let query = msg
         .payload
@@ -1241,7 +1298,14 @@ pub async fn handle_library_search_via_relay(
         .min(50) as usize;
 
     let books = book::Entity::find()
-        .filter(book::Column::Title.contains(query))
+        .filter(
+            Condition::any()
+                .add(book::Column::Title.contains(query))
+                .add(
+                    Expr::col(book::Column::Id)
+                        .in_subquery(crate::models::Book::author_search_subquery(query)),
+                ),
+        )
         .all(db)
         .await
         .unwrap_or_default();

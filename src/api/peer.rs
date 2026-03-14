@@ -8,8 +8,8 @@ use axum::{
 use chrono::Utc;
 use futures::future::join_all;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    Set,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
+    QueryFilter, Set,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1405,19 +1405,6 @@ async fn upsert_peer_books_cache(
             .await;
         }
 
-        // Grouped "new books" notification
-        crate::services::notification_service::emit(
-            db,
-            crate::domain::CreateNotification {
-                event_type: crate::domain::NotificationEventType::NewBooks,
-                title: format!("{} : {} nouveaux livres", peer_name, unnotified.len()),
-                body: None,
-                ref_type: Some("peer".to_string()),
-                ref_id: Some(ref_id),
-            },
-        )
-        .await;
-
         // Mark all un-notified books as notified so they won't trigger again
         for pb in unnotified {
             let mut active: peer_book::ActiveModel = pb.into();
@@ -1780,6 +1767,28 @@ pub async fn receive_connection_request(
             // Peer already exists - update keys, relay info, and library_uuid if provided
             let old_uuid = existing_peer.library_uuid.clone();
             let peer_id = existing_peer.id;
+            // Always update name if the peer sent a non-empty one
+            if !payload.name.is_empty() && payload.name != existing_peer.name {
+                let _ = peer::Entity::update_many()
+                    .filter(peer::Column::Id.eq(peer_id))
+                    .col_expr(
+                        peer::Column::Name,
+                        sea_orm::sea_query::Expr::value(payload.name.clone()),
+                    )
+                    .col_expr(
+                        peer::Column::UpdatedAt,
+                        sea_orm::sea_query::Expr::value(Utc::now().to_rfc3339()),
+                    )
+                    .exec(&db)
+                    .await;
+                tracing::info!(
+                    "register_peer: updated peer {} name '{}' -> '{}'",
+                    peer_id,
+                    existing_peer.name,
+                    payload.name
+                );
+            }
+
             if key_exchange_done && !existing_peer.key_exchange_done {
                 let mut active: peer::ActiveModel = existing_peer.into();
                 active.url = Set(payload.url.clone()); // Update URL (port may have changed)
@@ -1874,18 +1883,34 @@ pub async fn receive_connection_request(
 
             match new_peer.insert(&db).await {
                 Ok(_) => {
-                    // Emit connection_request notification
-                    crate::services::notification_service::emit(
-                        &db,
-                        crate::domain::CreateNotification {
-                            event_type: crate::domain::NotificationEventType::ConnectionRequest,
-                            title: peer_name_for_notif.clone(),
-                            body: None,
-                            ref_type: Some("peer".to_string()),
-                            ref_id: Some(peer_name_for_notif),
-                        },
-                    )
-                    .await;
+                    if connection_status == "pending" {
+                        // Emit connection_request notification (needs user action)
+                        crate::services::notification_service::emit(
+                            &db,
+                            crate::domain::CreateNotification {
+                                event_type: crate::domain::NotificationEventType::ConnectionRequest,
+                                title: peer_name_for_notif.clone(),
+                                body: None,
+                                ref_type: Some("peer".to_string()),
+                                ref_id: Some(peer_name_for_notif),
+                            },
+                        )
+                        .await;
+                    } else {
+                        // Auto-accepted: emit connection_accepted notification
+                        crate::services::notification_service::emit(
+                            &db,
+                            crate::domain::CreateNotification {
+                                event_type:
+                                    crate::domain::NotificationEventType::ConnectionAccepted,
+                                title: peer_name_for_notif.clone(),
+                                body: None,
+                                ref_type: Some("peer".to_string()),
+                                ref_id: Some(peer_name_for_notif),
+                            },
+                        )
+                        .await;
+                    }
 
                     (
                         StatusCode::OK,
@@ -2805,10 +2830,17 @@ pub async fn search_local(
     Json(payload): Json<SearchRequest>,
 ) -> impl IntoResponse {
     use crate::models::book;
+    use sea_orm::sea_query::Expr;
 
-    // Simple LIKE search for now
     let books = book::Entity::find()
-        .filter(book::Column::Title.contains(&payload.query))
+        .filter(
+            Condition::any()
+                .add(book::Column::Title.contains(&payload.query))
+                .add(
+                    Expr::col(book::Column::Id)
+                        .in_subquery(crate::models::Book::author_search_subquery(&payload.query)),
+                ),
+        )
         .all(&db)
         .await
         .unwrap_or(vec![]);
@@ -4586,19 +4618,6 @@ pub async fn receive_request(
                     .into_response();
             }
 
-            // Emit borrow_request notification
-            crate::services::notification_service::emit(
-                &db,
-                crate::domain::CreateNotification {
-                    event_type: crate::domain::NotificationEventType::BorrowRequest,
-                    title: payload.book_title.clone(),
-                    body: Some(peer.name.clone()),
-                    ref_type: Some("peer".to_string()),
-                    ref_id: Some(request_id.clone()),
-                },
-            )
-            .await;
-
             // If auto-approve is enabled, immediately accept the request
             if auto_approve {
                 tracing::info!(
@@ -4616,6 +4635,19 @@ pub async fn receive_request(
                 .await
                 {
                     Ok(result) => {
+                        // Emit borrow_request notification (auto-approved)
+                        crate::services::notification_service::emit(
+                            &db,
+                            crate::domain::CreateNotification {
+                                event_type: crate::domain::NotificationEventType::BorrowRequest,
+                                title: payload.book_title.clone(),
+                                body: Some(peer.name.clone()),
+                                ref_type: Some("peer".to_string()),
+                                ref_id: Some(request_id.clone()),
+                            },
+                        )
+                        .await;
+
                         // Fire-and-forget: try to notify borrower via E2EE (with relay fallback)
                         let confirm_payload = json!({
                             "isbn": result.book_isbn,
@@ -4654,6 +4686,19 @@ pub async fn receive_request(
                     }
                 }
             }
+
+            // Emit borrow_request notification (only when NOT auto-approved)
+            crate::services::notification_service::emit(
+                &db,
+                crate::domain::CreateNotification {
+                    event_type: crate::domain::NotificationEventType::BorrowRequest,
+                    title: payload.book_title.clone(),
+                    body: Some(peer.name.clone()),
+                    ref_type: Some("peer".to_string()),
+                    ref_id: Some(request_id.clone()),
+                },
+            )
+            .await;
 
             (
                 StatusCode::CREATED,
@@ -5096,6 +5141,23 @@ pub async fn update_request_status(
                         active_copy.status = Set("available".to_string());
                         let _ = active_copy.update(&db).await;
                     }
+
+                    // Emit book_returned notification
+                    let peer_name = peer_opt
+                        .as_ref()
+                        .map(|p| p.name.clone())
+                        .unwrap_or_default();
+                    crate::services::notification_service::emit(
+                        &db,
+                        crate::domain::CreateNotification {
+                            event_type: crate::domain::NotificationEventType::BookReturned,
+                            title: book.title.clone(),
+                            body: Some(peer_name),
+                            ref_type: Some("loan".to_string()),
+                            ref_id: Some(req.id.clone()),
+                        },
+                    )
+                    .await;
                 }
             }
         }
@@ -5645,6 +5707,42 @@ pub async fn update_outgoing_status(
                         }
                     }
                 }
+            }
+
+            // Emit book_returned notification on borrower side
+            if new_status == "returned" {
+                let book_title = book::Entity::find()
+                    .filter(book::Column::Isbn.eq(&book_isbn))
+                    .one(&db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|b| b.title)
+                    .unwrap_or_else(|| book_isbn.clone());
+                let lender_name = if let Ok(Some(req)) =
+                    p2p_outgoing_request::Entity::find_by_id(&id).one(&db).await
+                {
+                    peer::Entity::find_by_id(req.to_peer_id)
+                        .one(&db)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|p| p.name)
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                crate::services::notification_service::emit(
+                    &db,
+                    crate::domain::CreateNotification {
+                        event_type: crate::domain::NotificationEventType::BookReturned,
+                        title: book_title,
+                        body: Some(lender_name),
+                        ref_type: Some("loan".to_string()),
+                        ref_id: Some(id.clone()),
+                    },
+                )
+                .await;
             }
 
             StatusCode::OK.into_response()

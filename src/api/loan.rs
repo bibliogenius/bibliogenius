@@ -211,7 +211,29 @@ pub async fn return_loan(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // 4. Check for P2P implications
+    // 4. Emit book_returned notification
+    if let Ok(Some(book)) = Book::find_by_id(copy.book_id).one(&db).await {
+        let contact_name = Contact::find_by_id(loan.contact_id)
+            .one(&db)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.name)
+            .unwrap_or_default();
+        crate::services::notification_service::emit(
+            &db,
+            crate::domain::CreateNotification {
+                event_type: crate::domain::NotificationEventType::BookReturned,
+                title: book.title,
+                body: Some(contact_name),
+                ref_type: Some("loan".to_string()),
+                ref_id: Some(id.to_string()),
+            },
+        )
+        .await;
+    }
+
+    // 5. Check for P2P implications
     // If the contact is a "Library" (Peer), we should notify them and update the request
     use crate::models::{book, contact, p2p_request, peer};
 

@@ -3193,18 +3193,6 @@ async fn upsert_directory_catalog_cache(
             .await;
         }
 
-        crate::services::notification_service::emit(
-            db,
-            crate::domain::CreateNotification {
-                event_type: crate::domain::NotificationEventType::NewBooks,
-                title: format!("{} nouveaux livres", unnotified.len()),
-                body: Some(node_id.to_string()),
-                ref_type: Some("directory".to_string()),
-                ref_id: Some(node_id.to_string()),
-            },
-        )
-        .await;
-
         // Mark all un-notified entries as notified
         for pb in unnotified {
             let mut active: peer_book::ActiveModel = pb.into();
