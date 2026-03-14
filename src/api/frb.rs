@@ -3183,12 +3183,29 @@ async fn upsert_directory_catalog_cache(
             .collect();
 
         if !new_isbns.is_empty() {
+            // Resolve peer by library_uuid so we use the same ref_id as peer-sync
+            // (avoids duplicate wishlist_match notifications from both paths)
+            use crate::models::peer;
+            let matching_peer = peer::Entity::find()
+                .filter(peer::Column::LibraryUuid.eq(node_id))
+                .one(db)
+                .await
+                .ok()
+                .flatten();
+            let display_name = matching_peer
+                .as_ref()
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| node_id.to_string());
+            let peer_ref_id = matching_peer
+                .as_ref()
+                .map(|p| p.id.to_string())
+                .unwrap_or_else(|| format!("dir:{node_id}"));
             crate::services::notification_service::check_wishlist_matches(
                 db,
                 &new_isbns,
-                node_id,
-                "directory",
-                node_id,
+                &display_name,
+                "peer",
+                &peer_ref_id,
             )
             .await;
         }
