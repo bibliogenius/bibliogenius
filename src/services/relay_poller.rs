@@ -692,6 +692,10 @@ async fn handle_connection_request(
         .get("relay_write_token")
         .and_then(|v| v.as_str())
         .map(String::from);
+    let library_uuid = json
+        .get("library_uuid")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     // URL may be empty when the sender has no WiFi (relay-only connection).
     // Use a unique placeholder to satisfy the NOT NULL UNIQUE constraint on peers.url.
@@ -715,14 +719,29 @@ async fn handle_connection_request(
         key_exchange_done
     );
 
-    // Check if peer already exists (by ed25519 key first, then by URL if non-empty)
-    let existing_by_key = if let Some(ref key) = ed25519_key {
+    // Check if peer already exists (by library_uuid first, then ed25519 key, then URL)
+    let existing_by_uuid = if let Some(ref uuid) = library_uuid {
         peer::Entity::find()
-            .filter(peer::Column::PublicKey.eq(key.as_str()))
+            .filter(peer::Column::LibraryUuid.eq(uuid.as_str()))
             .one(db)
             .await
             .ok()
             .flatten()
+    } else {
+        None
+    };
+
+    let existing_by_key = if existing_by_uuid.is_none() {
+        if let Some(ref key) = ed25519_key {
+            peer::Entity::find()
+                .filter(peer::Column::PublicKey.eq(key.as_str()))
+                .one(db)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -738,7 +757,7 @@ async fn handle_connection_request(
         None
     };
 
-    let existing = existing_by_key.or(existing_by_url);
+    let existing = existing_by_uuid.or(existing_by_key).or(existing_by_url);
 
     if let Some(existing_peer) = existing {
         // Update existing peer with new keys/credentials
@@ -759,6 +778,9 @@ async fn handle_connection_request(
         }
         if relay_write_token.is_some() {
             active.relay_write_token = Set(relay_write_token);
+        }
+        if library_uuid.is_some() {
+            active.library_uuid = Set(library_uuid);
         }
         active.connection_status = Set("accepted".to_string());
         active.auto_approve = Set(true);
@@ -784,6 +806,7 @@ async fn handle_connection_request(
             relay_url: Set(relay_url),
             mailbox_id: Set(mailbox_id),
             relay_write_token: Set(relay_write_token),
+            library_uuid: Set(library_uuid),
             connection_status: Set("accepted".to_string()),
             auto_approve: Set(true),
             last_seen: Set(Some(chrono::Utc::now().to_rfc3339())),
