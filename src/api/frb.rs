@@ -2738,6 +2738,8 @@ pub struct FrbHubProfile {
     pub last_seen_at: Option<String>,
     pub x25519_public_key: Option<String>,
     pub website: Option<String>,
+    pub device_model: Option<String>,
+    pub device_fingerprint: Option<String>,
 }
 
 impl From<HubProfile> for FrbHubProfile {
@@ -2753,6 +2755,8 @@ impl From<HubProfile> for FrbHubProfile {
             last_seen_at: p.last_seen_at,
             x25519_public_key: p.x25519_public_key,
             website: p.website,
+            device_model: p.device_model,
+            device_fingerprint: p.device_fingerprint,
         }
     }
 }
@@ -2770,6 +2774,8 @@ pub struct FrbRegisterParams {
     pub allow_borrowing: bool,
     pub x25519_public_key: Option<String>,
     pub website: Option<String>,
+    pub device_model: Option<String>,
+    pub device_fingerprint: Option<String>,
 }
 
 impl From<FrbRegisterParams> for RegisterParams {
@@ -2786,6 +2792,8 @@ impl From<FrbRegisterParams> for RegisterParams {
             allow_borrowing: p.allow_borrowing,
             x25519_public_key: p.x25519_public_key,
             website: p.website,
+            device_model: p.device_model,
+            device_fingerprint: p.device_fingerprint,
         }
     }
 }

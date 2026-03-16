@@ -4942,6 +4942,8 @@ impl SseDecode for crate::api::frb::FrbHubProfile {
         let mut var_lastSeenAt = <Option<String>>::sse_decode(deserializer);
         let mut var_x25519PublicKey = <Option<String>>::sse_decode(deserializer);
         let mut var_website = <Option<String>>::sse_decode(deserializer);
+        let mut var_deviceModel = <Option<String>>::sse_decode(deserializer);
+        let mut var_deviceFingerprint = <Option<String>>::sse_decode(deserializer);
         return crate::api::frb::FrbHubProfile {
             node_id: var_nodeId,
             display_name: var_displayName,
@@ -4953,6 +4955,8 @@ impl SseDecode for crate::api::frb::FrbHubProfile {
             last_seen_at: var_lastSeenAt,
             x25519_public_key: var_x25519PublicKey,
             website: var_website,
+            device_model: var_deviceModel,
+            device_fingerprint: var_deviceFingerprint,
         };
     }
 }
@@ -5317,6 +5321,8 @@ impl SseDecode for crate::api::frb::FrbRegisterParams {
         let mut var_allowBorrowing = <bool>::sse_decode(deserializer);
         let mut var_x25519PublicKey = <Option<String>>::sse_decode(deserializer);
         let mut var_website = <Option<String>>::sse_decode(deserializer);
+        let mut var_deviceModel = <Option<String>>::sse_decode(deserializer);
+        let mut var_deviceFingerprint = <Option<String>>::sse_decode(deserializer);
         return crate::api::frb::FrbRegisterParams {
             node_id: var_nodeId,
             display_name: var_displayName,
@@ -5329,6 +5335,8 @@ impl SseDecode for crate::api::frb::FrbRegisterParams {
             allow_borrowing: var_allowBorrowing,
             x25519_public_key: var_x25519PublicKey,
             website: var_website,
+            device_model: var_deviceModel,
+            device_fingerprint: var_deviceFingerprint,
         };
     }
 }
@@ -7350,6 +7358,8 @@ impl SseEncode for crate::api::frb::FrbHubProfile {
         <Option<String>>::sse_encode(self.last_seen_at, serializer);
         <Option<String>>::sse_encode(self.x25519_public_key, serializer);
         <Option<String>>::sse_encode(self.website, serializer);
+        <Option<String>>::sse_encode(self.device_model, serializer);
+        <Option<String>>::sse_encode(self.device_fingerprint, serializer);
     }
 }
 
@@ -7571,6 +7581,8 @@ impl SseEncode for crate::api::frb::FrbRegisterParams {
         <bool>::sse_encode(self.allow_borrowing, serializer);
         <Option<String>>::sse_encode(self.x25519_public_key, serializer);
         <Option<String>>::sse_encode(self.website, serializer);
+        <Option<String>>::sse_encode(self.device_model, serializer);
+        <Option<String>>::sse_encode(self.device_fingerprint, serializer);
     }
 }
 

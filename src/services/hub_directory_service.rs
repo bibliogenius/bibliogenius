@@ -84,6 +84,12 @@ pub struct HubProfile {
     /// Public website URL (visible to all directory visitors).
     #[serde(default)]
     pub website: Option<String>,
+    /// Hardware model name (e.g. "SM-A405FN", "iPhone14,2").
+    #[serde(default)]
+    pub device_model: Option<String>,
+    /// SHA-256 hash of a platform-specific device identifier.
+    #[serde(default)]
+    pub device_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -160,6 +166,8 @@ pub struct RegisterParams {
     pub allow_borrowing: bool,
     pub x25519_public_key: Option<String>,
     pub website: Option<String>,
+    pub device_model: Option<String>,
+    pub device_fingerprint: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +314,12 @@ impl HubDirectoryService {
         }
         if let Some(ref url) = params.website {
             body["website"] = serde_json::Value::String(url.clone());
+        }
+        if let Some(ref model) = params.device_model {
+            body["device_model"] = serde_json::Value::String(model.clone());
+        }
+        if let Some(ref fp) = params.device_fingerprint {
+            body["device_fingerprint"] = serde_json::Value::String(fp.clone());
         }
 
         let mut req = self
