@@ -428,7 +428,7 @@ pub async fn search_unified(
     // Load profile config to check enabled providers and API keys
     let (
         mut enable_inventaire,
-        mut enable_bnf,
+        enable_bnf,
         mut enable_openlibrary,
         mut enable_google_books,
         google_books_api_key,
@@ -454,11 +454,27 @@ pub async fn search_unified(
     let is_autocomplete = params.autocomplete.unwrap_or(false);
     let mut search_timeout = std::time::Duration::from_secs(8);
 
+    // Separate BNF flags: SPARQL (slow) vs SRU (fast, better metadata)
+    let mut enable_bnf_sparql = enable_bnf;
+    let mut enable_bnf_sru = enable_bnf;
+
     if is_autocomplete {
-        // In autocomplete mode, disable only slow sources (BNF SPARQL)
-        // Keep Inventaire enabled - it has good metadata (covers, publishers)
-        enable_bnf = false;
+        // Always disable slow BNF SPARQL in autocomplete
+        enable_bnf_sparql = false;
         search_timeout = std::time::Duration::from_secs(4);
+
+        // Enable BNF SRU only for multi-word queries (≥3 raw words)
+        // where niche French titles are likely missing from Inventaire/OpenLibrary.
+        // Count raw words (not significant words) because French stop words like
+        // "pour", "la" still indicate a specific multi-word title query
+        // (e.g. "Agir pour la Guinée" = 4 raw words but only 2 significant).
+        let raw_q = params
+            .title
+            .as_deref()
+            .or(params.q.as_deref())
+            .unwrap_or("");
+        let raw_word_count = raw_q.split_whitespace().filter(|w| w.len() > 1).count();
+        enable_bnf_sru = enable_bnf && raw_word_count >= 3;
     }
 
     // Apply source filter if provided (overrides profile settings)
@@ -466,9 +482,11 @@ pub async fn search_unified(
         let sources: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
         // When user explicitly selects sources, use ONLY those (truly override profile)
         enable_inventaire = sources.iter().any(|s| s.eq_ignore_ascii_case("inventaire"));
-        enable_bnf = sources
+        let bnf_selected = sources
             .iter()
             .any(|s| s.eq_ignore_ascii_case("bnf") || s.eq_ignore_ascii_case("data.bnf.fr"));
+        enable_bnf_sparql = bnf_selected;
+        enable_bnf_sru = bnf_selected;
         enable_openlibrary = sources.iter().any(|s| {
             s.eq_ignore_ascii_case("openlibrary") || s.eq_ignore_ascii_case("open library")
         });
@@ -595,10 +613,9 @@ pub async fn search_unified(
                 Vec::new()
             }
         },
-        // Task 3: BNF (wrapped in timeout for extra safety)
+        // Task 3: BNF SPARQL (wrapped in timeout for extra safety)
         async move {
-            if enable_bnf && !bnf_query_str.trim().is_empty() {
-                // Use tokio timeout to prevent BNF from blocking indefinitely
+            if enable_bnf_sparql && !bnf_query_str.trim().is_empty() {
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(8),
                     crate::modules::integrations::bnf::search_bnf(&bnf_query_str),
@@ -614,16 +631,27 @@ pub async fn search_unified(
         },
         // Task 4: BNF SRU (catalogue.bnf.fr - better coverage for recent French books)
         async move {
-            if enable_bnf
+            if enable_bnf_sru
                 && (!bnf_sru_query_str.trim().is_empty()
                     || bnf_sru_title.is_some()
                     || bnf_sru_author.is_some())
             {
+                // In autocomplete, use tighter timeout and pass query as title hint
+                // so SRU searches bib.title (indexed) instead of bib.anywhere (full-text)
+                let (sru_timeout, sru_title) = if is_autocomplete {
+                    let title_hint = bnf_sru_title
+                        .as_deref()
+                        .or(Some(bnf_sru_query_str.as_str()))
+                        .filter(|s| !s.trim().is_empty());
+                    (std::time::Duration::from_secs(4), title_hint)
+                } else {
+                    (std::time::Duration::from_secs(8), bnf_sru_title.as_deref())
+                };
                 match tokio::time::timeout(
-                    std::time::Duration::from_secs(8),
+                    sru_timeout,
                     crate::modules::integrations::bnf::search_bnf_sru(
                         &bnf_sru_query_str,
-                        bnf_sru_title.as_deref(),
+                        sru_title,
                         bnf_sru_author.as_deref(),
                     ),
                 )
@@ -833,10 +861,12 @@ pub async fn search_unified(
     }
 
     // Process OpenLibrary Results - PARALLELIZED
-    // Check time budget: skip expensive HTTP enrichment if search phase was slow
-    // Flutter client has a 15s receiveTimeout, so we must stay well under that
+    // Check time budget: skip expensive HTTP enrichment if search phase was slow.
+    // Flutter client has a 15s receiveTimeout — leave at least 4s for enrichment.
+    // Previous threshold of 7s was too tight: BNF SPARQL alone can take 8s,
+    // causing enrichment skip and quality-filter removal of sparse OL results.
     let elapsed_after_search = search_start.elapsed();
-    let skip_ol_enrichment = elapsed_after_search.as_secs() >= 7;
+    let skip_ol_enrichment = elapsed_after_search.as_secs() >= 11;
     if skip_ol_enrichment {
         tracing::debug!(
             "Skipping OL enrichment: search phase took {:.1}s (budget exceeded)",
