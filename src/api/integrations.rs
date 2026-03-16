@@ -1422,6 +1422,34 @@ fn calculate_relevance(
         }
     }
 
+    // --- Word Coverage Bonus (multi-word queries, ≥3 significant words) ---
+    // When the user types a long, specific query, the proportion of query words
+    // found in the title is the strongest relevance signal — stronger than notoriety.
+    // Uses quadratic scaling so full coverage (4/4) massively outscores partial (1/4).
+    let query_for_coverage = if !q_title.is_empty() {
+        &q_title
+    } else if !q_any.is_empty() {
+        &q_any
+    } else {
+        ""
+    };
+    if !query_for_coverage.is_empty() {
+        let q_words = significant_words(query_for_coverage);
+        if q_words.len() >= 3 {
+            let title_words = significant_words(&title);
+            let matched = q_words
+                .iter()
+                .filter(|qw| {
+                    title_words
+                        .iter()
+                        .any(|tw| tw == *qw || jaro_winkler(tw, qw) >= 0.88)
+                })
+                .count();
+            let ratio = matched as f64 / q_words.len() as f64;
+            score += (ratio * ratio * 300.0) as i32;
+        }
+    }
+
     // --- Metadata completeness ---
     let has_publisher = book
         .publisher
