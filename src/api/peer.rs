@@ -2014,6 +2014,7 @@ pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoRespon
             json!({
                 "id": p.id,
                 "name": p.name,
+                "display_name": p.display_name,
                 "url": p.url,
                 "public_key": p.public_key,
                 "library_uuid": p.library_uuid,
