@@ -278,6 +278,9 @@ const RESPONSE_TYPES: &[&str] = &[
     "library_manifest_response",
     "library_page_response",
     "library_search_response",
+    "loan_request_response",
+    "request_status_response",
+    "book_sync_response",
 ];
 
 /// Process a single relay message through the existing E2EE pipeline.

@@ -3772,6 +3772,18 @@ async fn process_borrower_acceptance(
                 c.id,
                 book_id
             );
+            // Notify the borrower that the loan was accepted
+            crate::services::notification_service::emit(
+                db,
+                crate::domain::CreateNotification {
+                    event_type: crate::domain::NotificationEventType::BorrowAccepted,
+                    title: title.to_string(),
+                    body: Some(lender_name.to_string()),
+                    ref_type: Some("peer".to_string()),
+                    ref_id: None,
+                },
+            )
+            .await;
         }
         Err(e) => {
             tracing::error!("process_borrower_acceptance: failed to create copy: {e}");
