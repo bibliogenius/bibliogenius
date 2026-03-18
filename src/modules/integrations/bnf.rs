@@ -256,6 +256,41 @@ LIMIT 30
     Ok(books)
 }
 
+/// Build a catalogue.bnf.fr cover URL from an ARK ID.
+/// Returns the URL string without validating it (call `validate_bnf_cover_url` to check).
+fn catalogue_cover_url_from_ark(ark: &str) -> String {
+    format!(
+        "https://catalogue.bnf.fr/couverture?&appName=NE&idArk={}&couession=1",
+        ark.trim_start_matches("ark:/12148/")
+    )
+}
+
+/// Validate a catalogue.bnf.fr cover URL with a HEAD request.
+/// Returns `Some(url)` only if the server responds with a success status and an image content type.
+async fn validate_bnf_cover_url(url: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    match client.head(url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            // Ensure we got an actual image, not an error page
+            let is_image = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|ct| ct.starts_with("image/"));
+            if is_image {
+                Some(url.to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Generate a potential cover URL from BNF
 /// BNF doesn't always have covers, but we can try the Gallica thumbnail service
 fn generate_bnf_cover_url(bnf_uri: &str) -> Option<String> {
@@ -549,13 +584,13 @@ pub async fn lookup_bnf_sru(isbn: &str) -> Result<Option<BnfBook>, String> {
         }
     }
 
-    // Build cover URL from ARK ID (not always available)
-    let cover_url = ark_id.as_ref().map(|ark| {
-        format!(
-            "https://catalogue.bnf.fr/couverture?&appName=NE&idArk={}&couession=1",
-            ark.trim_start_matches("ark:/12148/")
-        )
-    });
+    // Build cover URL from ARK ID and validate it (catalogue.bnf.fr often returns 500)
+    let cover_url = if let Some(ark) = &ark_id {
+        let url = catalogue_cover_url_from_ark(ark);
+        validate_bnf_cover_url(&url).await
+    } else {
+        None
+    };
 
     let book = BnfBook {
         title,
@@ -755,9 +790,9 @@ pub async fn search_bnf_sru(
                     // Build and save book if it has a title
                     let book = std::mem::take(&mut current_book);
                     if !book.title.is_empty()
-                        && let Some(b) = book.build()
+                        && let Some((b, pending_cover)) = book.build()
                     {
-                        books.push(b);
+                        books.push((b, pending_cover));
                     }
                 } else if name.ends_with("datafield") {
                     in_datafield = false;
@@ -777,6 +812,16 @@ pub async fn search_bnf_sru(
         buf.clear();
     }
 
+    // Validate pending cover URLs in parallel (catalogue.bnf.fr often returns 500)
+    let validated_books: Vec<BnfBook> =
+        futures::future::join_all(books.into_iter().map(|(mut b, pending_cover)| async move {
+            if let Some(url) = pending_cover {
+                b.cover_url = validate_bnf_cover_url(&url).await;
+            }
+            b
+        }))
+        .await;
+
     // Store in cache
     if let Ok(mut cache) = BNF_SRU_CACHE.try_lock() {
         if cache.len() >= MAX_CACHE_ENTRIES {
@@ -785,13 +830,13 @@ pub async fn search_bnf_sru(
         cache.insert(
             cache_key,
             CacheEntry {
-                data: books.clone(),
+                data: validated_books.clone(),
                 created_at: Instant::now(),
             },
         );
     }
 
-    Ok(books)
+    Ok(validated_books)
 }
 
 /// Helper struct for building BnfBook from MARC fields
@@ -809,7 +854,8 @@ struct BnfBookBuilder {
 }
 
 impl BnfBookBuilder {
-    fn build(self) -> Option<BnfBook> {
+    /// Returns the book and an optional pending cover URL to validate asynchronously.
+    fn build(self) -> Option<(BnfBook, Option<String>)> {
         if self.title.is_empty() {
             return None;
         }
@@ -822,26 +868,29 @@ impl BnfBookBuilder {
                 _ => None,
             });
 
-        let cover_url = self.ark_id.as_ref().map(|ark| {
-            format!(
-                "https://catalogue.bnf.fr/couverture?&appName=NE&idArk={}&couession=1",
-                ark.trim_start_matches("ark:/12148/")
-            )
-        });
+        // Cover URL is NOT set here (sync context). The caller must validate
+        // asynchronously via `validate_bnf_cover_url` after build.
+        let pending_cover_url = self
+            .ark_id
+            .as_ref()
+            .map(|ark| catalogue_cover_url_from_ark(ark));
 
-        Some(BnfBook {
-            title: self.title,
-            author,
-            publisher: self.publisher,
-            publication_year: self.year,
-            isbn: self.isbn,
-            cover_url,
-            bnf_uri: self
-                .ark_id
-                .map(|a| format!("https://catalogue.bnf.fr/{}", a))
-                .unwrap_or_default(),
-            description: self.description,
-        })
+        Some((
+            BnfBook {
+                title: self.title,
+                author,
+                publisher: self.publisher,
+                publication_year: self.year,
+                isbn: self.isbn,
+                cover_url: None, // validated later
+                bnf_uri: self
+                    .ark_id
+                    .map(|a| format!("https://catalogue.bnf.fr/{}", a))
+                    .unwrap_or_default(),
+                description: self.description,
+            },
+            pending_cover_url,
+        ))
     }
 }
 
