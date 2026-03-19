@@ -1161,7 +1161,8 @@ pub async fn search_unified(
         &query_q
     };
     if !raw_query.is_empty() {
-        let query_words = significant_words(raw_query);
+        let normalized_query = normalize_string(raw_query);
+        let query_words = significant_words(&normalized_query);
         if !query_words.is_empty() {
             results.retain(|book| {
                 let title_words = significant_words(&normalize_string(&book.title));

@@ -20,6 +20,7 @@ pub enum NotificationCategory {
     Connections,
     Loans,
     Discoveries,
+    System,
 }
 
 impl NotificationCategory {
@@ -28,6 +29,7 @@ impl NotificationCategory {
             Self::Connections => "connections",
             Self::Loans => "loans",
             Self::Discoveries => "discoveries",
+            Self::System => "system",
         }
     }
 
@@ -36,6 +38,7 @@ impl NotificationCategory {
             "connections" => Some(Self::Connections),
             "loans" => Some(Self::Loans),
             "discoveries" => Some(Self::Discoveries),
+            "system" => Some(Self::System),
             _ => None,
         }
     }
@@ -56,6 +59,8 @@ pub enum NotificationEventType {
     // Discoveries
     NewBooks,
     WishlistMatch,
+    // System
+    Welcome,
 }
 
 impl NotificationEventType {
@@ -70,6 +75,7 @@ impl NotificationEventType {
             Self::BookReturned => "book_returned",
             Self::NewBooks => "new_books",
             Self::WishlistMatch => "wishlist_match",
+            Self::Welcome => "welcome",
         }
     }
 
@@ -83,6 +89,7 @@ impl NotificationEventType {
                 NotificationCategory::Loans
             }
             Self::NewBooks | Self::WishlistMatch => NotificationCategory::Discoveries,
+            Self::Welcome => NotificationCategory::System,
         }
     }
 
@@ -97,6 +104,7 @@ impl NotificationEventType {
             "book_returned" => Some(Self::BookReturned),
             "new_books" => Some(Self::NewBooks),
             "wishlist_match" => Some(Self::WishlistMatch),
+            "welcome" => Some(Self::Welcome),
             _ => None,
         }
     }
@@ -245,10 +253,14 @@ mod tests {
             NotificationEventType::WishlistMatch.category(),
             NotificationCategory::Discoveries
         );
+        assert_eq!(
+            NotificationEventType::Welcome.category(),
+            NotificationCategory::System
+        );
     }
 
     #[test]
-    fn test_all_event_types_have_9_variants() {
+    fn test_all_event_types_have_10_variants() {
         // Ensure new variants are covered by tests
         let all = [
             "connection_request",
@@ -260,6 +272,7 @@ mod tests {
             "book_returned",
             "new_books",
             "wishlist_match",
+            "welcome",
         ];
         for s in all {
             assert!(
@@ -268,6 +281,6 @@ mod tests {
                 s
             );
         }
-        assert_eq!(all.len(), 9);
+        assert_eq!(all.len(), 10);
     }
 }

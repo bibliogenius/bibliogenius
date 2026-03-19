@@ -569,10 +569,13 @@ pub async fn create_book(book: FrbBook) -> Result<FrbBook, String> {
                     crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(
                         db.clone(),
                     );
+                let hangman_repo =
+                    crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
                 crate::services::gamification_service::check_and_unlock_achievements(
                     &gamification_repo,
                     &game_repo,
                     Some(&puzzle_repo),
+                    Some(&hangman_repo),
                 )
                 .await
             };
@@ -1603,10 +1606,13 @@ pub async fn memory_game_finish(
         let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
         let puzzle_repo =
             crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
+        let hangman_repo =
+            crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
         crate::services::gamification_service::check_and_unlock_achievements(
             &gamification_repo,
             &game_repo,
             Some(&puzzle_repo),
+            Some(&hangman_repo),
         )
         .await
         .unwrap_or_default()
@@ -1906,10 +1912,13 @@ pub async fn puzzle_finish(
         let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
         let game_repo =
             crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+        let hangman_repo =
+            crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
         crate::services::gamification_service::check_and_unlock_achievements(
             &gamification_repo,
             &game_repo,
             Some(&puzzle_repo),
+            Some(&hangman_repo),
         )
         .await
         .unwrap_or_default()
@@ -2137,6 +2146,333 @@ pub async fn puzzle_game_refresh_leaderboard() -> Result<Vec<FrbPuzzleLeaderboar
     Ok(entries)
 }
 
+// ─── Hangman (FFI direct) ───────────────────────────────────────────────────
+
+/// A character in the hangman display (FFI-safe)
+pub struct FrbHangmanChar {
+    pub character: String,
+    pub base_char: String,
+    pub revealed: bool,
+    pub is_guessable: bool,
+}
+
+/// Game setup returned to Flutter (FFI-safe)
+pub struct FrbHangmanSetup {
+    pub title: String,
+    pub display: Vec<FrbHangmanChar>,
+    pub author: String,
+    pub cover_url: Option<String>,
+    pub max_errors: u8,
+    pub hints_available: u8,
+    pub difficulty: String,
+}
+
+/// A saved hangman score (FFI-safe)
+pub struct FrbHangmanScore {
+    pub id: Option<i32>,
+    pub difficulty: String,
+    pub elapsed_seconds: f64,
+    pub errors: i32,
+    pub hints_used: i32,
+    pub won: bool,
+    pub normalized_score: f64,
+    pub played_at: String,
+    /// Achievements unlocked after this game (empty if none)
+    pub new_achievements: Vec<String>,
+}
+
+/// A hangman leaderboard entry (FFI-safe)
+pub struct FrbHangmanLeaderboardEntry {
+    pub peer_id: i32,
+    pub library_name: String,
+    pub best_score: f64,
+    pub difficulty: String,
+    pub played_at: String,
+    pub is_self: bool,
+}
+
+/// Get available hangman difficulty levels based on valid titles count
+pub async fn hangman_available_difficulties() -> Result<Vec<String>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
+    let difficulties = crate::modules::hangman::service::available_difficulties(&repo)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(difficulties
+        .iter()
+        .map(|d| d.as_str().to_string())
+        .collect())
+}
+
+/// Set up a new hangman game with the given difficulty
+pub async fn hangman_setup(difficulty: String) -> Result<FrbHangmanSetup, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
+    let diff = crate::modules::hangman::service::HangmanDifficulty::parse(&difficulty)
+        .map_err(|e| e.to_string())?;
+    let setup = crate::modules::hangman::service::setup_game(&repo, diff)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(FrbHangmanSetup {
+        title: setup.title,
+        display: setup
+            .display
+            .into_iter()
+            .map(|c| FrbHangmanChar {
+                character: c.character.to_string(),
+                base_char: c.base_char.to_string(),
+                revealed: c.revealed,
+                is_guessable: c.is_guessable,
+            })
+            .collect(),
+        author: setup.author,
+        cover_url: setup.cover_url,
+        max_errors: setup.max_errors,
+        hints_available: setup.hints_available,
+        difficulty: setup.difficulty,
+    })
+}
+
+/// Submit a completed hangman game and get the score back
+pub async fn hangman_finish(
+    difficulty: String,
+    elapsed_seconds: f64,
+    errors: i32,
+    hints_used: i32,
+    won: bool,
+) -> Result<FrbHangmanScore, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let hangman_repo =
+        crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
+    let result = crate::modules::hangman::domain::HangmanResult {
+        difficulty,
+        elapsed_seconds,
+        errors,
+        hints_used,
+        won,
+    };
+    let score = crate::modules::hangman::service::finish_game(&hangman_repo, result)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Check achievements after game completion
+    let new_achievements = {
+        let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
+        let game_repo =
+            crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+        let puzzle_repo =
+            crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
+        crate::services::gamification_service::check_and_unlock_achievements(
+            &gamification_repo,
+            &game_repo,
+            Some(&puzzle_repo),
+            Some(&hangman_repo),
+        )
+        .await
+        .unwrap_or_default()
+    };
+
+    Ok(FrbHangmanScore {
+        id: score.id,
+        difficulty: score.difficulty,
+        elapsed_seconds: score.elapsed_seconds,
+        errors: score.errors,
+        hints_used: score.hints_used,
+        won: score.won,
+        normalized_score: score.normalized_score,
+        played_at: score.played_at,
+        new_achievements,
+    })
+}
+
+/// Get top hangman scores
+pub async fn hangman_top_scores() -> Result<Vec<FrbHangmanScore>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
+    use crate::modules::hangman::domain::HangmanRepository;
+    let scores = repo.get_top_scores(10).await.map_err(|e| e.to_string())?;
+    Ok(scores
+        .into_iter()
+        .map(|s| FrbHangmanScore {
+            id: s.id,
+            difficulty: s.difficulty,
+            elapsed_seconds: s.elapsed_seconds,
+            errors: s.errors,
+            hints_used: s.hints_used,
+            won: s.won,
+            normalized_score: s.normalized_score,
+            played_at: s.played_at,
+            new_achievements: vec![],
+        })
+        .collect())
+}
+
+/// Get hangman leaderboard (peer scores + local user's best)
+pub async fn hangman_leaderboard() -> Result<Vec<FrbHangmanLeaderboardEntry>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let hangman_repo =
+        crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
+    use crate::modules::hangman::domain::HangmanRepository;
+
+    let peer_scores = hangman_repo
+        .get_peer_scores()
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut entries: Vec<FrbHangmanLeaderboardEntry> = peer_scores
+        .into_iter()
+        .map(|s| FrbHangmanLeaderboardEntry {
+            peer_id: s.peer_id,
+            library_name: s.library_name,
+            best_score: s.best_score,
+            difficulty: s.difficulty,
+            played_at: s.played_at,
+            is_self: false,
+        })
+        .collect();
+
+    let top_scores = hangman_repo
+        .get_top_scores(1)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(best) = top_scores.first() {
+        let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
+        use crate::domain::GamificationRepository;
+        let library_name = gamification_repo
+            .get_library_name()
+            .await
+            .unwrap_or_else(|_| "My Library".to_string());
+
+        entries.push(FrbHangmanLeaderboardEntry {
+            peer_id: 0,
+            library_name,
+            best_score: best.normalized_score,
+            difficulty: best.difficulty.clone(),
+            played_at: best.played_at.clone(),
+            is_self: true,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        b.best_score
+            .partial_cmp(&a.best_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Ok(entries)
+}
+
+/// Refresh the hangman leaderboard by syncing with all accepted peers
+pub async fn hangman_refresh_leaderboard() -> Result<Vec<FrbHangmanLeaderboardEntry>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let hangman_repo =
+        crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
+    use crate::modules::hangman::domain::HangmanRepository;
+
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
+        .one(db)
+        .await
+    {
+        Ok(Some(p)) => {
+            let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
+            modules.contains(&"hangman".to_string())
+        }
+        _ => true,
+    };
+
+    if local_enabled {
+        let peers = crate::models::peer::Entity::find()
+            .filter(crate::models::peer::Column::ConnectionStatus.eq("accepted"))
+            .all(db)
+            .await
+            .unwrap_or_default();
+
+        if !peers.is_empty() {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_default();
+
+            for peer in &peers {
+                if crate::api::peer::validate_url(&peer.url).is_err() {
+                    tracing::warn!("Skipping peer {} with invalid URL: {}", peer.id, peer.name);
+                    continue;
+                }
+
+                let config_url = format!("{}/api/config", peer.url);
+                let peer_has_hangman = match client.get(&config_url).send().await {
+                    Ok(res) if res.status().is_success() => {
+                        match res.json::<crate::api::setup::ConfigResponse>().await {
+                            Ok(config) => {
+                                Some(config.enabled_modules.contains(&"hangman".to_string()))
+                            }
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                };
+
+                crate::modules::hangman::handlers::sync_peer_hangman_scores(
+                    db,
+                    peer.id,
+                    &peer.url,
+                    &peer.name,
+                    &client,
+                    peer_has_hangman,
+                )
+                .await;
+            }
+        }
+    }
+
+    let peer_scores = hangman_repo
+        .get_peer_scores()
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut entries: Vec<FrbHangmanLeaderboardEntry> = peer_scores
+        .into_iter()
+        .map(|s| FrbHangmanLeaderboardEntry {
+            peer_id: s.peer_id,
+            library_name: s.library_name,
+            best_score: s.best_score,
+            difficulty: s.difficulty,
+            played_at: s.played_at,
+            is_self: false,
+        })
+        .collect();
+
+    let top_scores = hangman_repo
+        .get_top_scores(1)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(best) = top_scores.first() {
+        let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
+        use crate::domain::GamificationRepository;
+        let library_name = gamification_repo
+            .get_library_name()
+            .await
+            .unwrap_or_else(|_| "My Library".to_string());
+
+        entries.push(FrbHangmanLeaderboardEntry {
+            peer_id: 0,
+            library_name,
+            best_score: best.normalized_score,
+            difficulty: best.difficulty.clone(),
+            played_at: best.played_at.clone(),
+            is_self: true,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        b.best_score
+            .partial_cmp(&a.best_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Ok(entries)
+}
+
 // ─── Gamification (FFI direct) ──────────────────────────────────────────────
 
 /// Track progress (FFI-safe)
@@ -2300,10 +2636,13 @@ pub async fn gamification_check_achievements() -> Result<Vec<String>, String> {
     let game_repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
     let puzzle_repo =
         crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
+    let hangman_repo =
+        crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
     crate::services::gamification_service::check_and_unlock_achievements(
         &gamification_repo,
         &game_repo,
         Some(&puzzle_repo),
+        Some(&hangman_repo),
     )
     .await
     .map_err(|e| e.to_string())
@@ -2994,11 +3333,18 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
                         .join(", "),
                 )
             };
+            // S5: only HTTP/HTTPS cover URLs go to the hub catalog.
+            // Local file paths (e.g. /var/mobile/...) are useless to
+            // other peers and leak internal directory structure.
+            let cover_url = book
+                .cover_url
+                .filter(|u| u.starts_with("http://") || u.starts_with("https://"));
+
             Some(CatalogEntry {
                 isbn,
                 title: book.title,
                 author,
-                cover_url: book.cover_url,
+                cover_url,
             })
         })
         .collect();
@@ -3778,4 +4124,22 @@ pub async fn notifications_prune() -> Result<i32, String> {
         .await
         .map(|c| c as i32)
         .map_err(|e| format!("{e:?}"))
+}
+
+/// Emit a one-time welcome notification after setup. Uses emit_unique
+/// so it fires at most once per install (idempotent on re-call).
+pub async fn emit_welcome_notification() -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+    crate::services::notification_service::emit_unique(
+        db,
+        crate::domain::CreateNotification {
+            event_type: crate::domain::notification_repository::NotificationEventType::Welcome,
+            title: "BiblioGenius".to_string(),
+            body: None,
+            ref_type: Some("system".to_string()),
+            ref_id: Some("welcome".to_string()),
+        },
+    )
+    .await;
+    Ok(())
 }
