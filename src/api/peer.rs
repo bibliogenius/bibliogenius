@@ -2025,63 +2025,10 @@ pub async fn receive_connection_request(
 }
 
 pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoResponse {
-    // 1. Sync with Hub in background (non-blocking) so the response is instant.
-    //    Previously this was awaited, causing up to 5s delay when the hub was
-    //    slow/unreachable — which made the Flutter side timeout and show an
-    //    empty peer list.
-    if let Ok(hub_url) = std::env::var("HUB_URL") {
-        let bg_db = db.clone();
-        tokio::spawn(async move {
-            let client = get_safe_client();
-            let url = format!("{}/api/peers", hub_url);
-
-            if let Ok(res) = client.get(&url).send().await
-                && res.status().is_success()
-            {
-                #[derive(Deserialize)]
-                struct HubPeer {
-                    name: String,
-                    url: String,
-                    #[serde(rename = "status")]
-                    _status: String,
-                }
-                #[derive(Deserialize)]
-                struct HubResponse {
-                    data: Vec<HubPeer>,
-                }
-
-                if let Ok(hub_res) = res.json::<HubResponse>().await {
-                    for hub_peer in hub_res.data {
-                        let docker_url = translate_url_for_docker(&hub_peer.url);
-
-                        let existing = peer::Entity::find()
-                            .filter(peer::Column::Url.eq(&docker_url))
-                            .one(&bg_db)
-                            .await;
-
-                        match existing {
-                            Ok(Some(p)) => {
-                                let mut active: peer::ActiveModel = p.into();
-                                active.updated_at = Set(chrono::Utc::now().to_rfc3339());
-                                let _ = active.update(&bg_db).await;
-                            }
-                            Ok(None) => {
-                                let new_peer = peer::ActiveModel {
-                                    name: Set(hub_peer.name),
-                                    url: Set(docker_url),
-                                    created_at: Set(chrono::Utc::now().to_rfc3339()),
-                                    updated_at: Set(chrono::Utc::now().to_rfc3339()),
-                                    ..Default::default()
-                                };
-                                let _ = peer::Entity::insert(new_peer).exec(&bg_db).await;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        });
-    }
+    // Legacy hub peer sync removed: peers are managed locally via invite
+    // links, QR codes, and mDNS discovery. The old GET /api/peers hub
+    // endpoint was causing SQLite lock contention and timeouts on every
+    // list_peers call, making peers appear to vanish from the UI.
 
     let peers = peer::Entity::find().all(&db).await.unwrap_or(vec![]);
 
