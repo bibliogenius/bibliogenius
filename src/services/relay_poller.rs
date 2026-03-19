@@ -323,6 +323,35 @@ async fn process_relay_message(
 
     // ADR-012: Check if this is a response with a correlation_id
     if RESPONSE_TYPES.contains(&clear_message.message_type.as_str()) {
+        // Update peer name if the response includes a library_name that
+        // differs from what we have locally (relay peers have no other
+        // sync path for name changes).
+        if let Some(new_name) = clear_message
+            .payload
+            .get("library_name")
+            .and_then(|v| v.as_str())
+            .filter(|n| !n.is_empty() && *n != sender_peer.name)
+        {
+            tracing::info!(
+                "Relay poller: peer {} renamed '{}' -> '{}'",
+                sender_peer.id,
+                sender_peer.name,
+                new_name
+            );
+            let _ = peer::Entity::update_many()
+                .filter(peer::Column::Id.eq(sender_peer.id))
+                .col_expr(
+                    peer::Column::Name,
+                    sea_orm::sea_query::Expr::value(new_name.to_string()),
+                )
+                .col_expr(
+                    peer::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(chrono::Utc::now().to_rfc3339()),
+                )
+                .exec(db)
+                .await;
+        }
+
         if let Some(ref corr_id) = clear_message.correlation_id {
             if state.resolve_relay_request(corr_id, clear_message.payload.clone()) {
                 tracing::info!(

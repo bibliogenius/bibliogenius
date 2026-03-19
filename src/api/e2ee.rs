@@ -1170,11 +1170,22 @@ pub async fn handle_library_manifest_request(db: &DatabaseConnection) -> serde_j
             .collect()
     };
 
+    // Include our library name so the requesting peer can update their
+    // local record if we renamed (relay peers have no other sync path).
+    let library_name = crate::models::library::Entity::find_by_id(1)
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .map(|lib| lib.name)
+        .unwrap_or_default();
+
     json!({
         "total_books": total_books,
         "catalog_hash": hash,
         "last_updated": last_updated,
         "preview_books": preview_books,
+        "library_name": library_name,
     })
 }
 
