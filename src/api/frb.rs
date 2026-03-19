@@ -2158,6 +2158,7 @@ pub struct FrbHangmanChar {
 
 /// Game setup returned to Flutter (FFI-safe)
 pub struct FrbHangmanSetup {
+    pub book_id: i32,
     pub title: String,
     pub display: Vec<FrbHangmanChar>,
     pub author: String,
@@ -2215,6 +2216,7 @@ pub async fn hangman_setup(difficulty: String) -> Result<FrbHangmanSetup, String
         .map_err(|e| e.to_string())?;
 
     Ok(FrbHangmanSetup {
+        book_id: setup.book_id,
         title: setup.title,
         display: setup
             .display
@@ -2236,6 +2238,7 @@ pub async fn hangman_setup(difficulty: String) -> Result<FrbHangmanSetup, String
 
 /// Submit a completed hangman game and get the score back
 pub async fn hangman_finish(
+    book_id: i32,
     difficulty: String,
     elapsed_seconds: f64,
     errors: i32,
@@ -2246,6 +2249,7 @@ pub async fn hangman_finish(
     let hangman_repo =
         crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
     let result = crate::modules::hangman::domain::HangmanResult {
+        book_id,
         difficulty,
         elapsed_seconds,
         errors,

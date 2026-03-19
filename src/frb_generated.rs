@@ -2189,6 +2189,7 @@ fn wire__crate__api__frb__hangman_finish_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_book_id = <i32>::sse_decode(&mut deserializer);
             let api_difficulty = <String>::sse_decode(&mut deserializer);
             let api_elapsed_seconds = <f64>::sse_decode(&mut deserializer);
             let api_errors = <i32>::sse_decode(&mut deserializer);
@@ -2199,6 +2200,7 @@ fn wire__crate__api__frb__hangman_finish_impl(
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let output_ok = crate::api::frb::hangman_finish(
+                            api_book_id,
                             api_difficulty,
                             api_elapsed_seconds,
                             api_errors,
@@ -5233,6 +5235,7 @@ impl SseDecode for crate::api::frb::FrbHangmanScore {
 impl SseDecode for crate::api::frb::FrbHangmanSetup {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_bookId = <i32>::sse_decode(deserializer);
         let mut var_title = <String>::sse_decode(deserializer);
         let mut var_display = <Vec<crate::api::frb::FrbHangmanChar>>::sse_decode(deserializer);
         let mut var_author = <String>::sse_decode(deserializer);
@@ -5241,6 +5244,7 @@ impl SseDecode for crate::api::frb::FrbHangmanSetup {
         let mut var_hintsAvailable = <u8>::sse_decode(deserializer);
         let mut var_difficulty = <String>::sse_decode(deserializer);
         return crate::api::frb::FrbHangmanSetup {
+            book_id: var_bookId,
             title: var_title,
             display: var_display,
             author: var_author,
@@ -7065,6 +7069,7 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbHangmanScore>
 impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbHangmanSetup {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
+            self.book_id.into_into_dart().into_dart(),
             self.title.into_into_dart().into_dart(),
             self.display.into_into_dart().into_dart(),
             self.author.into_into_dart().into_dart(),
@@ -7951,6 +7956,7 @@ impl SseEncode for crate::api::frb::FrbHangmanScore {
 impl SseEncode for crate::api::frb::FrbHangmanSetup {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.book_id, serializer);
         <String>::sse_encode(self.title, serializer);
         <Vec<crate::api::frb::FrbHangmanChar>>::sse_encode(self.display, serializer);
         <String>::sse_encode(self.author, serializer);

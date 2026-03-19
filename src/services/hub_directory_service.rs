@@ -352,6 +352,12 @@ impl HubDirectoryService {
         let status = response.status().as_u16();
         if status >= 400 {
             let msg = response.text().await.unwrap_or_default();
+            if status == 401 {
+                tracing::warn!(
+                    "Hub: 401 on directory operation (stale write_token). \
+                     Manual re-registration may be needed."
+                );
+            }
             return Err(HubDirectoryError::Hub(status, msg));
         }
 
