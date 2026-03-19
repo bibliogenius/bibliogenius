@@ -7,6 +7,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{DomainError, GamificationRepository};
+use crate::modules::hangman::domain::HangmanRepository;
 use crate::modules::memory_game::domain::MemoryGameRepository;
 use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
 
@@ -461,6 +462,7 @@ pub async fn check_and_unlock_achievements(
     repo: &dyn GamificationRepository,
     game_repo: &dyn MemoryGameRepository,
     puzzle_repo: Option<&dyn SlidingPuzzleRepository>,
+    hangman_repo: Option<&dyn HangmanRepository>,
 ) -> Result<Vec<String>, DomainError> {
     let user_id = repo.get_user_id().await?;
     let mut newly_unlocked = Vec::new();
@@ -522,6 +524,25 @@ pub async fn check_and_unlock_achievements(
     checks.push((
         "puzzle_master",
         puzzle_scores.iter().any(|s| s.grid_size == 5),
+    ));
+
+    // Hangman achievements
+    let hangman_scores = match hangman_repo {
+        Some(hr) => hr.get_top_scores(100).await.unwrap_or_default(),
+        None => vec![],
+    };
+    checks.push(("hangman_first_game", !hangman_scores.is_empty()));
+    checks.push((
+        "hangman_perfect",
+        hangman_scores
+            .iter()
+            .any(|s| s.won && s.errors == 0 && s.hints_used == 0),
+    ));
+    checks.push((
+        "hangman_master",
+        hangman_scores
+            .iter()
+            .any(|s| s.won && s.difficulty == "hard"),
     ));
 
     for (achievement_id, eligible) in checks {

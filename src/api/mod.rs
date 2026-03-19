@@ -307,6 +307,8 @@ fn build_routes() -> Router<AppState> {
         .merge(crate::modules::memory_game::routes())
         // Sliding Puzzle (self-contained module)
         .merge(crate::modules::sliding_puzzle::routes())
+        // Hangman (self-contained module)
+        .merge(crate::modules::hangman::routes())
         // Operation Log Viewer (self-contained module)
         .merge(crate::modules::operation_log_viewer::routes())
         // Peer relay setup
