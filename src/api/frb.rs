@@ -2776,6 +2776,9 @@ pub struct FrbRegisterParams {
     pub website: Option<String>,
     pub device_model: Option<String>,
     pub device_fingerprint: Option<String>,
+    pub relay_url: Option<String>,
+    pub relay_mailbox_id: Option<String>,
+    pub relay_write_token: Option<String>,
 }
 
 impl From<FrbRegisterParams> for RegisterParams {
@@ -2794,6 +2797,9 @@ impl From<FrbRegisterParams> for RegisterParams {
             website: p.website,
             device_model: p.device_model,
             device_fingerprint: p.device_fingerprint,
+            relay_url: p.relay_url,
+            relay_mailbox_id: p.relay_mailbox_id,
+            relay_write_token: p.relay_write_token,
         }
     }
 }
@@ -2891,6 +2897,27 @@ pub async fn hub_directory_get_config() -> Result<Option<FrbDirectoryConfig>, St
         .await
         .map(|opt| opt.map(FrbDirectoryConfig::from))
         .map_err(|e| e.to_string())
+}
+
+/// Returns the local relay configuration (relay_url, mailbox_uuid, write_token).
+/// Returns None if relay is not configured yet.
+/// Note: read_token is intentionally excluded (S2: never leaves the device).
+pub async fn get_relay_config_ffi() -> Result<Option<FrbRelayConfig>, String> {
+    let db = hub_db()?;
+    let config = crate::api::relay::get_my_relay_config(db).await;
+    Ok(config.map(|c| FrbRelayConfig {
+        relay_url: c.relay_url,
+        mailbox_uuid: c.mailbox_uuid,
+        write_token: c.write_token,
+    }))
+}
+
+/// Relay config exposed via FFI. Excludes read_token (S2).
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbRelayConfig {
+    pub relay_url: String,
+    pub mailbox_uuid: String,
+    pub write_token: String,
 }
 
 /// Registers with the hub directory (first call) or updates the profile.

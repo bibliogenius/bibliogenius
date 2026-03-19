@@ -90,6 +90,13 @@ pub struct HubProfile {
     /// SHA-256 hash of a platform-specific device identifier.
     #[serde(default)]
     pub device_fingerprint: Option<String>,
+    /// Relay credentials (returned only to authenticated requesters).
+    #[serde(default)]
+    pub relay_url: Option<String>,
+    #[serde(default)]
+    pub relay_mailbox_id: Option<String>,
+    #[serde(default)]
+    pub relay_write_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -168,6 +175,9 @@ pub struct RegisterParams {
     pub website: Option<String>,
     pub device_model: Option<String>,
     pub device_fingerprint: Option<String>,
+    pub relay_url: Option<String>,
+    pub relay_mailbox_id: Option<String>,
+    pub relay_write_token: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +217,7 @@ impl HubDirectoryService {
     // Hub URL (single source of truth via env var — CLAUDE.md Hub URL Policy)
     // -----------------------------------------------------------------------
 
-    fn hub_base_url() -> Result<String, HubDirectoryError> {
+    pub(crate) fn hub_base_url() -> Result<String, HubDirectoryError> {
         std::env::var("HUB_URL")
             .map(|u| u.trim_end_matches('/').to_string())
             .map_err(|_| {
@@ -320,6 +330,15 @@ impl HubDirectoryService {
         }
         if let Some(ref fp) = params.device_fingerprint {
             body["device_fingerprint"] = serde_json::Value::String(fp.clone());
+        }
+        if let Some(ref url) = params.relay_url {
+            body["relay_url"] = serde_json::Value::String(url.clone());
+        }
+        if let Some(ref mid) = params.relay_mailbox_id {
+            body["relay_mailbox_id"] = serde_json::Value::String(mid.clone());
+        }
+        if let Some(ref wt) = params.relay_write_token {
+            body["relay_write_token"] = serde_json::Value::String(wt.clone());
         }
 
         let mut req = self

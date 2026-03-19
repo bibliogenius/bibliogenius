@@ -553,42 +553,27 @@ async fn try_send_e2ee(
     }
 }
 
-/// Attempt to refresh a peer's relay credentials by fetching their `/api/config`.
+/// Attempt to refresh a peer's relay credentials.
 ///
-/// Returns `Some((relay_url, mailbox_id, write_token))` if the peer is reachable
-/// and has relay credentials. Updates the peer record in the database.
-/// Returns `None` if the peer is unreachable or has no relay config.
+/// Strategy:
+///   1. LAN peers: fetch `/api/config` directly (fast, no hub dependency).
+///   2. Relay-only peers: query the hub directory for updated credentials.
+///      The hub only returns relay fields to authenticated requesters, and
+///      the caller verifies the x25519 key matches before trusting them.
 ///
-/// For relay-only peers (URL starts with `relay://`), LAN refresh is not
-/// possible. The peer must re-send an invite or a `relay_credential_update`
-/// message after recreating their mailbox.
+/// Returns `Some((relay_url, mailbox_id, write_token))` on success.
+/// Updates the peer record in the database.
 async fn refresh_peer_relay_credentials(
     db: &DatabaseConnection,
     peer_model: &peer::Model,
 ) -> Option<(String, String, String)> {
-    // Relay-only peers have a synthetic URL; HTTP fetch is not possible.
-    if peer_model.url.starts_with("relay://") {
-        tracing::info!(
-            "Relay: Cannot refresh credentials for relay-only peer '{}'. \
-             Peer must re-share an invite link after mailbox recreation.",
-            peer_model.name
-        );
-        return None;
-    }
-
-    let client = get_safe_client();
-    let config_url = format!("{}/api/config", peer_model.url.trim_end_matches('/'));
-
-    let response = client.get(&config_url).send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-
-    let config: crate::api::setup::ConfigResponse = response.json().await.ok()?;
-
-    let relay_url = config.relay_url?;
-    let mailbox_id = config.mailbox_id?;
-    let write_token = config.relay_write_token?;
+    let (relay_url, mailbox_id, write_token) = if peer_model.url.starts_with("relay://") {
+        // Relay-only: query hub directory for updated credentials
+        refresh_via_hub(db, peer_model).await?
+    } else {
+        // LAN peer: direct HTTP fetch
+        refresh_via_lan(peer_model).await?
+    };
 
     if relay_url.is_empty() || mailbox_id.is_empty() || write_token.is_empty() {
         return None;
@@ -603,11 +588,95 @@ async fn refresh_peer_relay_credentials(
         active.updated_at = Set(chrono::Utc::now().to_rfc3339());
         let _ = active.update(db).await;
         tracing::info!(
-            "Relay: Refreshed credentials for peer {} (mailbox: {})",
+            "Relay: Refreshed credentials for peer '{}' (mailbox: {})",
             peer_model.name,
             mailbox_id
         );
     }
+
+    Some((relay_url, mailbox_id, write_token))
+}
+
+/// Refresh relay credentials via direct HTTP to the peer's LAN URL.
+async fn refresh_via_lan(peer_model: &peer::Model) -> Option<(String, String, String)> {
+    let client = get_safe_client();
+    let config_url = format!("{}/api/config", peer_model.url.trim_end_matches('/'));
+
+    let response = client.get(&config_url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let config: crate::api::setup::ConfigResponse = response.json().await.ok()?;
+    Some((
+        config.relay_url?,
+        config.mailbox_id?,
+        config.relay_write_token?,
+    ))
+}
+
+/// Refresh relay credentials via the hub directory (for relay-only peers).
+///
+/// Queries the hub for the peer's profile using their library_uuid (node_id).
+/// Verifies the x25519 key matches before trusting the returned credentials.
+async fn refresh_via_hub(
+    db: &DatabaseConnection,
+    peer_model: &peer::Model,
+) -> Option<(String, String, String)> {
+    let hub_url =
+        crate::services::hub_directory_service::HubDirectoryService::hub_base_url().ok()?;
+    let peer_node_id = peer_model.library_uuid.as_deref()?;
+
+    // Authenticate with our own write_token
+    let our_config = crate::services::hub_directory_service::HubDirectoryService::get_config(db)
+        .await
+        .ok()
+        .flatten()?;
+
+    let client = get_safe_client();
+    let url = format!("{hub_url}/api/directory/profile/{peer_node_id}");
+    let response = client
+        .get(&url)
+        .header(
+            "Authorization",
+            format!("Bearer {}", our_config.write_token),
+        )
+        .send()
+        .await
+        .ok()?;
+
+    if !response.status().is_success() {
+        tracing::debug!(
+            "Relay: Hub profile lookup failed for peer '{}' (status {})",
+            peer_model.name,
+            response.status()
+        );
+        return None;
+    }
+
+    let profile: crate::services::hub_directory_service::HubProfile = response.json().await.ok()?;
+
+    // Verify x25519 key matches what we have locally to prevent
+    // an attacker from redirecting messages to their own mailbox.
+    if let Some(ref local_key) = peer_model.x25519_public_key
+        && profile.x25519_public_key.as_deref() != Some(local_key.as_str())
+    {
+        tracing::warn!(
+            "Relay: Hub profile x25519 key mismatch for peer '{}', rejecting credentials",
+            peer_model.name
+        );
+        return None;
+    }
+
+    let relay_url = profile.relay_url?;
+    let mailbox_id = profile.relay_mailbox_id?;
+    let write_token = profile.relay_write_token?;
+
+    tracing::info!(
+        "Relay: Refreshed credentials for relay-only peer '{}' via hub (mailbox: {})",
+        peer_model.name,
+        mailbox_id
+    );
 
     Some((relay_url, mailbox_id, write_token))
 }
