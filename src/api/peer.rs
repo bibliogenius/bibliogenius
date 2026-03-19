@@ -558,10 +558,24 @@ async fn try_send_e2ee(
 /// Returns `Some((relay_url, mailbox_id, write_token))` if the peer is reachable
 /// and has relay credentials. Updates the peer record in the database.
 /// Returns `None` if the peer is unreachable or has no relay config.
+///
+/// For relay-only peers (URL starts with `relay://`), LAN refresh is not
+/// possible. The peer must re-send an invite or a `relay_credential_update`
+/// message after recreating their mailbox.
 async fn refresh_peer_relay_credentials(
     db: &DatabaseConnection,
     peer_model: &peer::Model,
 ) -> Option<(String, String, String)> {
+    // Relay-only peers have a synthetic URL; HTTP fetch is not possible.
+    if peer_model.url.starts_with("relay://") {
+        tracing::info!(
+            "Relay: Cannot refresh credentials for relay-only peer '{}'. \
+             Peer must re-share an invite link after mailbox recreation.",
+            peer_model.name
+        );
+        return None;
+    }
+
     let client = get_safe_client();
     let config_url = format!("{}/api/config", peer_model.url.trim_end_matches('/'));
 

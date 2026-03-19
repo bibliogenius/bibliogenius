@@ -714,12 +714,23 @@ async fn handle_connection_request(
     };
 
     let key_exchange_done = ed25519_key.is_some() && x25519_key.is_some();
+    let has_relay_creds =
+        relay_url.is_some() && mailbox_id.is_some() && relay_write_token.is_some();
+
+    if !has_relay_creds {
+        tracing::warn!(
+            "Relay poller: connection_request from '{}' has no relay credentials; \
+             we will not be able to reach this peer via relay",
+            name
+        );
+    }
 
     tracing::info!(
-        "Relay poller: Received connection_request from '{}' (url: {}, e2ee: {})",
+        "Relay poller: Received connection_request from '{}' (url: {}, e2ee: {}, relay: {})",
         name,
         peer_url,
-        key_exchange_done
+        key_exchange_done,
+        has_relay_creds
     );
 
     // Check if peer already exists (by library_uuid first, then ed25519 key, then URL)
