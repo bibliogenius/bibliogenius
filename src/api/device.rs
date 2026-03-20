@@ -139,7 +139,10 @@ pub async fn trigger_sync(
     body: Option<Json<TriggerSyncInput>>,
 ) -> impl IntoResponse {
     let input = body.map(|b| b.0).unwrap_or_default();
-    tracing::debug!("DeviceSync: trigger_sync device_id={device_id} peer_url={:?}", input.peer_url);
+    tracing::debug!(
+        "DeviceSync: trigger_sync device_id={device_id} peer_url={:?}",
+        input.peer_url
+    );
     // 1. Look up the device
     let device = match state.linked_device_repo.find_by_id(device_id).await {
         Ok(Some(d)) => d,
