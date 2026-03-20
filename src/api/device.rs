@@ -15,6 +15,12 @@ use crate::infrastructure::AppState;
 use crate::services::device_pairing_service::PairingAcceptInput;
 use crate::services::device_sync_service::RemoteOp;
 
+#[derive(Deserialize, Default)]
+pub struct TriggerSyncInput {
+    /// LAN URL of the peer (from mDNS discovery). Takes priority over stored relay_url.
+    pub peer_url: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct GenerateOfferInput {
     pub device_name: String,
@@ -59,6 +65,42 @@ pub async fn accept_offer(
     }
 }
 
+/// POST /api/devices/register - Register a linked device directly (used by acceptor after pairing)
+pub async fn register_device(
+    State(state): State<AppState>,
+    Json(input): Json<RegisterDeviceInput>,
+) -> impl IntoResponse {
+    use crate::domain::CreateLinkedDeviceInput;
+    match state
+        .linked_device_repo
+        .create(CreateLinkedDeviceInput {
+            name: input.name,
+            ed25519_public_key: input.ed25519_public_key,
+            x25519_public_key: input.x25519_public_key,
+            relay_url: input.relay_url,
+            mailbox_id: input.mailbox_id,
+            relay_write_token: None,
+        })
+        .await
+    {
+        Ok(device) => (StatusCode::CREATED, Json(json!({"device_id": device.id}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RegisterDeviceInput {
+    pub name: String,
+    pub ed25519_public_key: Vec<u8>,
+    pub x25519_public_key: Vec<u8>,
+    pub relay_url: Option<String>,
+    pub mailbox_id: Option<String>,
+}
+
 /// GET /api/devices - List all linked devices
 pub async fn list_devices(State(state): State<AppState>) -> impl IntoResponse {
     match state.device_pairing.list_devices().await {
@@ -94,7 +136,10 @@ pub async fn remove_device(
 pub async fn trigger_sync(
     State(state): State<AppState>,
     Path(device_id): Path<i32>,
+    body: Option<Json<TriggerSyncInput>>,
 ) -> impl IntoResponse {
+    let input = body.map(|b| b.0).unwrap_or_default();
+    tracing::debug!("DeviceSync: trigger_sync device_id={device_id} peer_url={:?}", input.peer_url);
     // 1. Look up the device
     let device = match state.linked_device_repo.find_by_id(device_id).await {
         Ok(Some(d)) => d,
@@ -168,11 +213,13 @@ pub async fn trigger_sync(
 
     // 4. Collect local ops since the device's last sync
     let since = device.last_synced.as_deref();
+    tracing::debug!("DeviceSync: collecting local ops since={since:?}");
     let local_ops = state
         .device_sync
         .get_local_ops_since(since)
         .await
         .unwrap_or_default();
+    tracing::debug!("DeviceSync: collected {} local ops", local_ops.len());
 
     let ops_payload: Vec<serde_json::Value> = local_ops
         .iter()
@@ -198,25 +245,37 @@ pub async fn trigger_sync(
         }),
     );
 
-    // 6. Need the device's LAN URL. For now, use relay_url as a fallback.
-    // In a full implementation, mDNS discovery would provide the LAN URL.
-    let peer_url = match &device.relay_url {
-        Some(url) if !url.is_empty() => url.clone(),
-        _ => {
+    // 6. Use LAN URL from request body (mDNS), falling back to stored relay_url.
+    let peer_url = input
+        .peer_url
+        .filter(|u| !u.is_empty())
+        .or_else(|| device.relay_url.clone().filter(|u| !u.is_empty()));
+
+    let peer_url = match peer_url {
+        Some(url) => url,
+        None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error": "No reachable URL for device (no relay URL configured)"})),
+                Json(json!({"error": "No reachable URL for device (no LAN peer and no relay URL configured)"})),
             )
                 .into_response();
         }
     };
 
     // 7. Send and process response
+    println!(
+        "DeviceSync: sending {} ops to {peer_url}",
+        ops_payload.len()
+    );
     match transport
         .send(&peer_url, &peer_x25519, &peer_info, &message)
         .await
     {
         Ok(Some(response)) => {
+            println!(
+                "DeviceSync: got encrypted response, type={}",
+                response.message_type
+            );
             // Process response ops
             let response_ops: Vec<RemoteOp> = response
                 .payload
@@ -272,6 +331,7 @@ pub async fn trigger_sync(
                 .into_response()
         }
         Ok(None) => {
+            tracing::debug!("DeviceSync: peer returned no encrypted response (fire-and-forget)");
             // Peer returned no encrypted response (fire-and-forget style)
             let _ = state
                 .device_sync
@@ -288,11 +348,14 @@ pub async fn trigger_sync(
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": format!("Sync failed: {e}")})),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::debug!("DeviceSync: transport error: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("Sync failed: {e}")})),
+            )
+                .into_response()
+        }
     }
 }
 

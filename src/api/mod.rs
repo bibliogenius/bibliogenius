@@ -88,6 +88,7 @@ fn build_routes() -> Router<AppState> {
         .route("/devices/pair/offer", post(device::generate_offer))
         .route("/devices/pair/accept", post(device::accept_offer))
         .route("/devices", get(device::list_devices))
+        .route("/devices/register", post(device::register_device))
         .route("/devices/:id", delete(device::remove_device))
         // Device sync
         .route(
@@ -345,4 +346,5 @@ fn build_routes() -> Router<AppState> {
         // Export/Import
         .route("/export", get(export::export_data))
         .route("/import", post(export::import_data))
+        .route("/import-upsert", post(export::import_data_upsert))
 }

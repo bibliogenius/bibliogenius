@@ -895,21 +895,27 @@ pub async fn update_tag(id: i32, name: String, parent_id: Option<i32>) -> Result
     use crate::models::tag;
     use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
-    let tag = tag::Entity::find_by_id(id)
+    let tag_model = tag::Entity::find_by_id(id)
         .one(db)
         .await
         .map_err(|e| format!("{:?}", e))?;
-    let Some(tag) = tag else {
+    let Some(tag_model) = tag_model else {
         return Err("Tag not found".to_string());
     };
 
-    let mut active: tag::ActiveModel = tag.into();
-    active.name = Set(name);
+    let old_name = tag_model.name.clone();
+
+    let mut active: tag::ActiveModel = tag_model.into();
+    active.name = Set(name.clone());
     active.parent_id = Set(parent_id);
     active.updated_at = Set(chrono::Utc::now().to_rfc3339());
 
     match active.update(db).await {
         Ok(t) => {
+            // Also rename the subject in all books that reference the old name
+            if old_name != name {
+                rename_subject_in_books(db, &old_name, &name).await;
+            }
             let _ = crate::sync::log_operation(db, "tag", t.id, "UPDATE", None).await;
             Ok(FrbTag {
                 id: t.id,
@@ -919,6 +925,52 @@ pub async fn update_tag(id: i32, name: String, parent_id: Option<i32>) -> Result
             })
         }
         Err(e) => Err(format!("{:?}", e)),
+    }
+}
+
+/// Public FFI entry point: rename a subject in all books.
+pub async fn rename_subject(old_name: String, new_name: String) -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+    rename_subject_in_books(db, &old_name, &new_name).await;
+    Ok(())
+}
+
+/// Rename a subject across all books' subjects JSON array.
+/// Used when renaming a tag/shelf to keep book associations in sync.
+async fn rename_subject_in_books(db: &sea_orm::DatabaseConnection, old_name: &str, new_name: &str) {
+    use crate::models::book::{Column as BookColumn, Entity as BookEntity};
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    let books = match BookEntity::find()
+        .filter(BookColumn::Subjects.contains(old_name))
+        .all(db)
+        .await
+    {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    for book in books {
+        let Some(subjects_str) = &book.subjects else {
+            continue;
+        };
+        let Ok(mut subjects) = serde_json::from_str::<Vec<String>>(subjects_str) else {
+            continue;
+        };
+        let mut changed = false;
+        for s in &mut subjects {
+            if s == old_name {
+                *s = new_name.to_string();
+                changed = true;
+            }
+        }
+        if changed {
+            let new_subjects = serde_json::to_string(&subjects).unwrap_or_default();
+            let mut active: crate::models::book::ActiveModel = book.into();
+            active.subjects = Set(Some(new_subjects));
+            active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+            let _ = active.update(db).await;
+        }
     }
 }
 
@@ -1433,6 +1485,9 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
 
                 let shared_id_svc = IDENTITY_SERVICE
                     .get_or_init(|| crate::services::IdentityService::new(db.clone()));
+                // Ensure the pairing service is initialized before AppState
+                // so both FFI and HTTP share the same in-memory offer store.
+                let _ = device_pairing_svc();
                 let state = crate::infrastructure::AppState::with_identity_service(
                     db,
                     std::sync::Arc::new(shared_id_svc.clone()),
@@ -2205,13 +2260,17 @@ pub async fn hangman_available_difficulties() -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Set up a new hangman game with the given difficulty
-pub async fn hangman_setup(difficulty: String) -> Result<FrbHangmanSetup, String> {
+/// Set up a new hangman game with the given difficulty.
+/// `exclude_book_ids` -- book IDs already played in the current session (avoids same series).
+pub async fn hangman_setup(
+    difficulty: String,
+    exclude_book_ids: Vec<i32>,
+) -> Result<FrbHangmanSetup, String> {
     let db = db().ok_or("Database not initialized")?;
     let repo = crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
     let diff = crate::modules::hangman::service::HangmanDifficulty::parse(&difficulty)
         .map_err(|e| e.to_string())?;
-    let setup = crate::modules::hangman::service::setup_game(&repo, diff)
+    let setup = crate::modules::hangman::service::setup_game(&repo, diff, &exclude_book_ids)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -2765,6 +2824,13 @@ use crate::services::device_pairing_service::DevicePairingService;
 
 static DEVICE_PAIRING_SERVICE: OnceLock<std::sync::Arc<DevicePairingService>> = OnceLock::new();
 
+/// Get the shared device pairing service instance (if initialized).
+/// Used by AppState to share the same in-memory offer store.
+#[flutter_rust_bridge::frb(ignore)]
+pub fn shared_device_pairing_svc() -> Option<&'static std::sync::Arc<DevicePairingService>> {
+    DEVICE_PAIRING_SERVICE.get()
+}
+
 /// Get or initialize the device pairing service
 fn device_pairing_svc() -> Result<&'static std::sync::Arc<DevicePairingService>, String> {
     if let Some(svc) = DEVICE_PAIRING_SERVICE.get() {
@@ -3263,6 +3329,29 @@ pub struct FrbRelayConfig {
     pub write_token: String,
 }
 
+/// Exports the hub directory write_token for Keychain backup.
+/// Used by Flutter to persist the token in platform-secure storage
+/// so it survives app reinstalls (critical on iOS).
+/// Returns None if not yet registered.
+pub async fn hub_directory_export_write_token() -> Result<Option<String>, String> {
+    let db = hub_db()?;
+    HubDirectoryService::get_write_token(db)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Imports a write_token recovered from Keychain after app reinstall.
+/// Restores hub authentication without requiring a new registration.
+pub async fn hub_directory_import_write_token(
+    node_id: String,
+    write_token: String,
+) -> Result<(), String> {
+    let db = hub_db()?;
+    HubDirectoryService::import_write_token(db, &node_id, &write_token)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Registers with the hub directory (first call) or updates the profile.
 /// On first registration, the write_token is persisted automatically.
 pub async fn hub_directory_register(
@@ -3280,6 +3369,9 @@ pub async fn hub_directory_register(
 pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), String> {
     use crate::services::hub_directory_service::CatalogEntry;
     let db = hub_db()?;
+    let book_count = crate::services::book_service::count_books(db)
+        .await
+        .map_err(|e| format!("count_books: {e:?}"))?;
     let entries: Vec<CatalogEntry> = isbn_list
         .into_iter()
         .map(|isbn| CatalogEntry {
@@ -3290,7 +3382,7 @@ pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), St
         })
         .collect();
     hub_directory_svc()
-        .push_catalog(db, &entries)
+        .push_catalog(db, &entries, book_count)
         .await
         .map_err(|e| e.to_string())
 }
@@ -3309,6 +3401,11 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Not registered in directory".to_string())?;
+
+    // Total book count (all owned books, regardless of ISBN presence).
+    let book_count = crate::services::book_service::count_books(db)
+        .await
+        .map_err(|e| format!("count_books: {e:?}"))?;
 
     // Collect books with their authors (2 queries via find_with_related).
     let books_with_authors: Vec<(
@@ -3353,14 +3450,11 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
         })
         .collect();
 
-    if entries.is_empty() {
-        return Ok(0);
-    }
-
     let count = entries.len() as i32;
 
+    // Always push: even with an empty catalog, book_count must reach the hub.
     hub_directory_svc()
-        .push_catalog(db, &entries)
+        .push_catalog(db, &entries, book_count)
         .await
         .map_err(|e| e.to_string())?;
 

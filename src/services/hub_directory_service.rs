@@ -289,6 +289,50 @@ impl HubDirectoryService {
         Ok(())
     }
 
+    /// Returns the current write_token for Keychain backup (reinstall recovery).
+    /// Returns None if not yet registered.
+    pub async fn get_write_token(
+        db: &DatabaseConnection,
+    ) -> Result<Option<String>, HubDirectoryError> {
+        let backend = db.get_database_backend();
+        let result = db
+            .query_one(Statement::from_string(
+                backend,
+                "SELECT write_token FROM hub_directory_config WHERE id = 1".to_owned(),
+            ))
+            .await?;
+        Ok(result.and_then(|row| row.try_get::<String>("", "write_token").ok()))
+    }
+
+    /// Imports a write_token recovered from Keychain after reinstall.
+    /// Creates a minimal config row so the next register_or_update() can
+    /// authenticate with the hub instead of failing with 401.
+    pub async fn import_write_token(
+        db: &DatabaseConnection,
+        node_id: &str,
+        write_token: &str,
+    ) -> Result<(), HubDirectoryError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let backend = db.get_database_backend();
+        db.execute(Statement::from_string(
+            backend,
+            format!(
+                "INSERT INTO hub_directory_config
+                     (id, node_id, write_token, is_listed, requires_approval, accept_from, allow_borrowing, created_at, updated_at)
+                 VALUES (1, '{node_id}', '{write_token}', 0, 1, 'everyone', 1, '{now}', '{now}')
+                 ON CONFLICT(id) DO UPDATE SET
+                     node_id     = excluded.node_id,
+                     write_token = excluded.write_token,
+                     updated_at  = excluded.updated_at",
+                node_id     = node_id.replace('\'', "''"),
+                write_token = write_token.replace('\'', "''"),
+                now         = now,
+            ),
+        ))
+        .await?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Profile
     // -----------------------------------------------------------------------
@@ -398,6 +442,7 @@ impl HubDirectoryService {
         &self,
         db: &DatabaseConnection,
         entries: &[CatalogEntry],
+        book_count: i64,
     ) -> Result<(), HubDirectoryError> {
         let cfg = Self::get_config(db)
             .await?
@@ -420,6 +465,7 @@ impl HubDirectoryService {
             .json(&serde_json::json!({
                 "isbn_payload": isbn_payload,
                 "catalog_payload": catalog_payload,
+                "book_count": book_count,
             }))
             .send()
             .await?;

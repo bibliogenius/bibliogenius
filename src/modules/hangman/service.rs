@@ -154,19 +154,59 @@ pub fn is_valid_title(title: &str) -> bool {
 /// Build the display mask for a title.
 ///
 /// Letters and digits are guessable (hidden). Spaces, punctuation, etc. are revealed.
+/// If the title ends with a trailing volume number (e.g. "My Book 3"), the number
+/// is pre-revealed as a hint -- but only when the title also contains non-digit
+/// characters (so pure-number titles like "1984" remain fully hidden).
 fn build_display(title: &str) -> Vec<HangmanChar> {
+    // Detect trailing volume number: find last whitespace, check if everything
+    // after it is digits, and ensure the title has non-digit content before it.
+    let reveal_from = trailing_volume_start(title);
+
     title
         .chars()
-        .map(|c| {
+        .enumerate()
+        .map(|(i, c)| {
             let is_guessable = c.is_alphanumeric();
+            let pre_reveal = i >= reveal_from && reveal_from < title.len();
             HangmanChar {
                 character: c,
                 base_char: if is_guessable { normalize_char(c) } else { c },
-                revealed: !is_guessable,
+                revealed: !is_guessable || pre_reveal,
                 is_guessable,
             }
         })
         .collect()
+}
+
+/// Returns the byte-index from which trailing volume digits should be revealed.
+/// Returns `title.len()` (i.e. nothing to reveal) when there is no trailing volume.
+///
+/// A trailing volume is a run of digits at the end, preceded by a space/separator,
+/// where the part before the separator contains at least one letter.
+fn trailing_volume_start(title: &str) -> usize {
+    let trimmed = title.trim_end();
+
+    // Find the last whitespace/separator position
+    let sep_pos = trimmed.rfind([' ', '\u{00A0}', '-']);
+    let sep_pos = match sep_pos {
+        Some(p) => p,
+        None => return trimmed.len(), // no separator -> no trailing volume
+    };
+
+    // Everything after the separator must be non-empty and all digits
+    let after = &trimmed[sep_pos + 1..];
+    if after.is_empty() || !after.chars().all(|c| c.is_ascii_digit()) {
+        return trimmed.len();
+    }
+
+    // The part before the separator must contain at least one letter
+    let before = &trimmed[..sep_pos];
+    if !before.chars().any(|c| c.is_alphabetic()) {
+        return trimmed.len();
+    }
+
+    // Reveal from the digit portion (not the separator itself)
+    sep_pos + 1
 }
 
 /// Get available difficulties based on how many valid titles exist
@@ -183,10 +223,29 @@ pub async fn available_difficulties(
     }
 }
 
+/// Extract the base title (without trailing volume number) for dedup.
+///
+/// "One Piece 42" -> "One Piece", "1984" -> "1984", "Dune" -> "Dune"
+fn base_title(title: &str) -> &str {
+    let start = trailing_volume_start(title);
+    if start < title.len() {
+        // There is a trailing volume -- base is everything before the separator
+        title[..start].trim_end()
+    } else {
+        title
+    }
+}
+
 /// Set up a new game: pick a random valid title, avoiding recently played ones
+/// and books that share the same base title (e.g. "One Piece 1" and "One Piece 42").
+///
+/// `session_exclude_ids` -- book IDs already played in the current app session
+/// (passed from the Flutter provider). These are combined with the DB-based
+/// recent IDs so that the same series is never repeated during a session.
 pub async fn setup_game(
     repo: &dyn HangmanRepository,
     difficulty: HangmanDifficulty,
+    session_exclude_ids: &[i32],
 ) -> Result<HangmanSetup, DomainError> {
     let books = repo.find_eligible_books().await?;
     let valid_books: Vec<&HangmanBook> =
@@ -202,16 +261,30 @@ pub async fn setup_game(
 
     // Exclude recently played titles (up to half the pool, so we always have choices)
     let recent_limit = (valid_books.len() / 2).min(20) as u32;
-    let recent_ids: HashSet<i32> = repo
+    let mut exclude_ids: HashSet<i32> = repo
         .get_recent_book_ids(recent_limit)
         .await
         .unwrap_or_default()
         .into_iter()
         .collect();
 
+    // Merge session-level exclusions
+    exclude_ids.extend(session_exclude_ids);
+
+    // Build set of base titles for excluded books, so that
+    // "One Piece 1" also excludes "One Piece 42", "One Piece 100", etc.
+    let excluded_base_titles: HashSet<String> = valid_books
+        .iter()
+        .filter(|b| exclude_ids.contains(&b.book_id))
+        .map(|b| base_title(&b.title).to_lowercase())
+        .collect();
+
     let fresh_books: Vec<&&HangmanBook> = valid_books
         .iter()
-        .filter(|b| !recent_ids.contains(&b.book_id))
+        .filter(|b| {
+            !exclude_ids.contains(&b.book_id)
+                && !excluded_base_titles.contains(&base_title(&b.title).to_lowercase())
+        })
         .collect();
 
     let mut rng = thread_rng();
@@ -563,6 +636,95 @@ mod tests {
         assert!(display[0].is_guessable);
         assert_eq!(display[0].character, '\u{00E9}');
         assert_eq!(display[0].base_char, 'e');
+    }
+
+    // ── Trailing volume number tests ────────────────────────────────
+
+    #[test]
+    fn test_trailing_volume_revealed() {
+        // "Mon Livre 3" -> the '3' should be pre-revealed
+        let display = build_display("Mon Livre 3");
+        let three = &display[10]; // '3'
+        assert!(three.is_guessable);
+        assert!(three.revealed); // pre-revealed!
+    }
+
+    #[test]
+    fn test_trailing_volume_multi_digit() {
+        // "Naruto 42" -> '4' and '2' pre-revealed
+        let display = build_display("Naruto 42");
+        assert!(display[7].revealed); // '4'
+        assert!(display[8].revealed); // '2'
+        // But 'N' is still hidden
+        assert!(!display[0].revealed);
+    }
+
+    #[test]
+    fn test_no_trailing_volume_pure_number() {
+        // "1984" -> no letter before, so digits stay hidden
+        let display = build_display("1984");
+        assert!(!display[0].revealed);
+        assert!(!display[1].revealed);
+        assert!(!display[2].revealed);
+        assert!(!display[3].revealed);
+    }
+
+    #[test]
+    fn test_no_trailing_volume_inline_digits() {
+        // "Fahrenheit 451" -> '451' is trailing after space with letters before -> revealed
+        let display = build_display("Fahrenheit 451");
+        assert!(display[11].revealed); // '4'
+        assert!(display[12].revealed); // '5'
+        assert!(display[13].revealed); // '1'
+    }
+
+    #[test]
+    fn test_no_trailing_volume_no_space() {
+        // "F451" -> digits not separated by space, no trailing volume
+        let display = build_display("F451");
+        assert!(!display[1].revealed); // '4'
+        assert!(!display[2].revealed); // '5'
+    }
+
+    #[test]
+    fn test_trailing_volume_title_letters_still_hidden() {
+        // "One Piece 100" -> title letters hidden, '100' revealed
+        let display = build_display("One Piece 100");
+        assert!(!display[0].revealed); // 'O'
+        assert!(!display[4].revealed); // 'P'
+        assert!(display[10].revealed); // '1'
+        assert!(display[11].revealed); // '0'
+        assert!(display[12].revealed); // '0'
+    }
+
+    // ── Base title extraction tests ─────────────────────────────────
+
+    #[test]
+    fn test_base_title_with_volume() {
+        assert_eq!(base_title("One Piece 42"), "One Piece");
+        assert_eq!(base_title("Naruto 1"), "Naruto");
+        assert_eq!(base_title("Mon Livre 100"), "Mon Livre");
+    }
+
+    #[test]
+    fn test_base_title_pure_number() {
+        assert_eq!(base_title("1984"), "1984");
+    }
+
+    #[test]
+    fn test_base_title_no_trailing_number() {
+        assert_eq!(base_title("Dune"), "Dune");
+        assert_eq!(base_title("Les Miserables"), "Les Miserables");
+    }
+
+    #[test]
+    fn test_base_title_inline_digits() {
+        assert_eq!(base_title("Fahrenheit 451"), "Fahrenheit");
+    }
+
+    #[test]
+    fn test_base_title_no_separator() {
+        assert_eq!(base_title("F451"), "F451");
     }
 
     // ── Library multiplier tests ───────────────────────────────────

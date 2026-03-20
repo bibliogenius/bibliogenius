@@ -35,6 +35,8 @@ pub async fn available_difficulties(State(state): State<AppState>) -> impl IntoR
 #[derive(Deserialize)]
 pub struct SetupRequest {
     pub difficulty: String,
+    #[serde(default)]
+    pub exclude_book_ids: Vec<i32>,
 }
 
 /// POST /api/game/hangman/setup
@@ -53,7 +55,7 @@ pub async fn setup_game(
         }
     };
 
-    match service::setup_game(&repo(&state), difficulty).await {
+    match service::setup_game(&repo(&state), difficulty, &payload.exclude_book_ids).await {
         Ok(setup) => (StatusCode::OK, Json(setup)).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,

@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::crypto::envelope::{ClearMessage, EncryptedEnvelope};
 use crate::infrastructure::AppState;
-use crate::models::peer;
+use crate::models::{linked_device, peer};
 use crate::services::crypto_service::PeerInfo;
 
 /// Receive and process an encrypted peer message.
@@ -57,8 +57,17 @@ pub async fn receive_encrypted_message(
         }
     };
 
-    // 3. Build PeerInfo vec from peers with valid keys
-    let (known_peers, peer_models) = build_known_peers(&peers);
+    // 2b. Also load linked devices (device sync uses a separate table)
+    let linked_devices = match linked_device::Entity::find().all(db).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("E2EE: Failed to load linked devices: {e}");
+            vec![]
+        }
+    };
+
+    // 3. Build PeerInfo vec from peers with valid keys + linked devices
+    let (known_peers, peer_models) = build_known_peers_with_devices(&peers, &linked_devices);
 
     if known_peers.is_empty() {
         return (
@@ -129,6 +138,73 @@ pub fn build_known_peers(peers: &[peer::Model]) -> (Vec<PeerInfo>, Vec<peer::Mod
                 peer_models.push(p.clone());
             }
         }
+    }
+
+    (known_peers, peer_models)
+}
+
+/// Build PeerInfo vec from both peers and linked devices.
+/// Linked devices use raw binary keys instead of hex strings.
+/// Returns synthetic peer::Model entries for linked devices so the dispatch
+/// chain can log the sender name regardless of the source table.
+pub fn build_known_peers_with_devices(
+    peers: &[peer::Model],
+    devices: &[linked_device::Model],
+) -> (Vec<PeerInfo>, Vec<peer::Model>) {
+    // Start with regular peers
+    let (mut known_peers, mut peer_models) = build_known_peers(peers);
+
+    // Add linked devices (binary keys, not hex)
+    for d in devices {
+        let ed_bytes = &d.ed25519_public_key;
+        let x_bytes = &d.x25519_public_key;
+
+        if ed_bytes.len() != 32 || x_bytes.len() != 32 {
+            continue;
+        }
+
+        let ed_arr: [u8; 32] = match ed_bytes.as_slice().try_into() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let x_arr: [u8; 32] = match x_bytes.as_slice().try_into() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+
+        let verifying_key = match ed25519_dalek::VerifyingKey::from_bytes(&ed_arr) {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+        let x25519_public = x25519_dalek::PublicKey::from(x_arr);
+
+        known_peers.push(PeerInfo {
+            verifying_key,
+            x25519_public,
+        });
+        // Synthesize a peer::Model so the dispatch chain can reference the sender
+        peer_models.push(peer::Model {
+            id: d.id,
+            name: d.name.clone(),
+            display_name: None,
+            url: String::new(),
+            library_uuid: None,
+            public_key: Some(hex::encode(ed_bytes)),
+            x25519_public_key: Some(hex::encode(x_bytes)),
+            key_exchange_done: true,
+            mailbox_id: d.mailbox_id.clone(),
+            relay_url: d.relay_url.clone(),
+            relay_write_token: d.relay_write_token.clone(),
+            latitude: None,
+            longitude: None,
+            auto_approve: false,
+            connection_status: "accepted".to_string(),
+            last_seen: d.last_synced.clone(),
+            catalog_hash: None,
+            last_catalog_sync: None,
+            created_at: d.created_at.clone(),
+            updated_at: d.created_at.clone(),
+        });
     }
 
     (known_peers, peer_models)

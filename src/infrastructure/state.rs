@@ -81,10 +81,16 @@ impl AppState {
         let linked_device_repo = Arc::new(SeaOrmLinkedDeviceRepository::new(db.clone()));
         let notification_repo = Arc::new(SeaOrmNotificationRepository::new(db.clone()));
 
-        let device_pairing = Arc::new(DevicePairingService::new(
-            identity_service.clone(),
-            linked_device_repo.clone(),
-        ));
+        // Reuse the FFI-initialized pairing service so code generation
+        // and HTTP acceptance share the same in-memory offer store.
+        let device_pairing = crate::api::frb::shared_device_pairing_svc()
+            .cloned()
+            .unwrap_or_else(|| {
+                Arc::new(DevicePairingService::new(
+                    identity_service.clone(),
+                    linked_device_repo.clone(),
+                ))
+            });
 
         let device_sync = Arc::new(DeviceSyncService::new(
             db.clone(),

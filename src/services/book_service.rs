@@ -106,6 +106,33 @@ pub async fn list_books(
 
     tracing::info!("DB query returned {} books", books_with_authors.len());
 
+    // Batch-fetch copy info for all book IDs (same as populate_authors)
+    let book_ids: Vec<i32> = books_with_authors.iter().map(|(m, _)| m.id).collect();
+    let mut available_map: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
+    let mut lent_set: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let mut borrowed_set: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    if !book_ids.is_empty()
+        && let Ok(copies) = crate::models::copy::Entity::find()
+            .filter(crate::models::copy::Column::BookId.is_in(book_ids))
+            .all(db)
+            .await
+    {
+        for c in &copies {
+            if c.status == "available" {
+                *available_map.entry(c.book_id).or_insert(0) += 1;
+            }
+            if c.status == "borrowed" {
+                if c.is_temporary {
+                    // Temporary copy borrowed = I borrowed this from someone
+                    borrowed_set.insert(c.book_id);
+                } else {
+                    // My own copy is lent out
+                    lent_set.insert(c.book_id);
+                }
+            }
+        }
+    }
+
     let mut book_dtos = Vec::new();
 
     for (book_model, authors) in books_with_authors {
@@ -119,6 +146,17 @@ pub async fn list_books(
                     .collect::<Vec<_>>()
                     .join(", "),
             );
+        }
+
+        book_dto.available_copies =
+            Some(*available_map.get(&book_dto.id.unwrap_or(0)).unwrap_or(&0));
+        // Override reading_status based on copy status:
+        // - Temporary copy borrowed → I borrowed this book from someone
+        // - Own copy borrowed → I lent this book to someone
+        if borrowed_set.contains(&book_dto.id.unwrap_or(0)) {
+            book_dto.reading_status = Some("borrowed".to_string());
+        } else if lent_set.contains(&book_dto.id.unwrap_or(0)) {
+            book_dto.reading_status = Some("lent".to_string());
         }
 
         // In-memory status filter (safety net)
