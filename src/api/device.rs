@@ -19,6 +19,8 @@ use crate::services::device_sync_service::RemoteOp;
 pub struct TriggerSyncInput {
     /// LAN URL of the peer (from mDNS discovery). Takes priority over stored relay_url.
     pub peer_url: Option<String>,
+    /// Sync direction: "push" (master→slave), "pull" (slave←master), "both" (bidirectional, default)
+    pub direction: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -214,30 +216,42 @@ pub async fn trigger_sync(
         x25519_public: peer_x25519,
     };
 
-    // 4. Collect local ops since the device's last sync
+    // 4. Determine sync direction
+    let direction = input.direction.as_deref().unwrap_or("both");
+    let is_push = direction == "push" || direction == "both";
+    let is_pull = direction == "pull" || direction == "both";
+
+    // 5. Collect local ops (skip if pull-only)
     let since = device.last_synced.as_deref();
-    tracing::debug!("DeviceSync: collecting local ops since={since:?}");
-    let local_ops = state
-        .device_sync
-        .get_local_ops_since(since)
-        .await
-        .unwrap_or_default();
-    tracing::debug!("DeviceSync: collected {} local ops", local_ops.len());
-
-    let ops_payload: Vec<serde_json::Value> = local_ops
-        .iter()
-        .map(|op| {
-            json!({
-                "entity_type": op.entity_type,
-                "entity_id": op.entity_id,
-                "operation": op.operation,
-                "payload": op.payload.as_ref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
-                "created_at": op.created_at,
+    let ops_payload: Vec<serde_json::Value> = if is_push {
+        tracing::debug!("DeviceSync: collecting local ops since={since:?}");
+        let local_ops = state
+            .device_sync
+            .get_local_ops_since(since)
+            .await
+            .unwrap_or_default();
+        tracing::debug!(
+            "DeviceSync: collected {} local ops (direction={direction})",
+            local_ops.len()
+        );
+        local_ops
+            .iter()
+            .map(|op| {
+                json!({
+                    "entity_type": op.entity_type,
+                    "entity_id": op.entity_id,
+                    "operation": op.operation,
+                    "payload": op.payload.as_ref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
+                    "created_at": op.created_at,
+                })
             })
-        })
-        .collect();
+            .collect()
+    } else {
+        tracing::debug!("DeviceSync: pull-only mode, sending 0 ops");
+        vec![]
+    };
 
-    // 5. Build sync request message
+    // 6. Build sync request message
     let transport = crate::services::e2ee_transport::DirectTransport::new(crypto_service);
     let message = crate::services::e2ee_transport::DirectTransport::build_message(
         "device_sync_request",
@@ -279,32 +293,36 @@ pub async fn trigger_sync(
                 "DeviceSync: got encrypted response, type={}",
                 response.message_type
             );
-            // Process response ops
-            let response_ops: Vec<RemoteOp> = response
-                .payload
-                .get("ops")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
+            // Process response ops (skip in push-only mode)
+            let received_count = if is_pull {
+                let response_ops: Vec<RemoteOp> = response
+                    .payload
+                    .get("ops")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
 
-            let safety_mode = {
-                use crate::models::installation_profile::ProfileConfig;
-                match ProfileConfig::load(state.db()).await {
-                    Ok(config) => config.is_module_enabled("sync_safety"),
-                    Err(_) => true,
-                }
-            };
-
-            let received_count = if !response_ops.is_empty() {
-                match state
-                    .device_sync
-                    .receive_remote_ops(device_id, response_ops, safety_mode)
-                    .await
-                {
-                    Ok(result) => result.inserted_count,
-                    Err(e) => {
-                        tracing::error!("Sync: Failed to process response ops: {e}");
-                        0
+                let safety_mode = {
+                    use crate::models::installation_profile::ProfileConfig;
+                    match ProfileConfig::load(state.db()).await {
+                        Ok(config) => config.is_module_enabled("sync_safety"),
+                        Err(_) => true,
                     }
+                };
+
+                if !response_ops.is_empty() {
+                    match state
+                        .device_sync
+                        .receive_remote_ops(device_id, response_ops, safety_mode)
+                        .await
+                    {
+                        Ok(result) => result.inserted_count,
+                        Err(e) => {
+                            tracing::error!("Sync: Failed to process response ops: {e}");
+                            0
+                        }
+                    }
+                } else {
+                    0
                 }
             } else {
                 0

@@ -1504,6 +1504,12 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                     .await;
                 });
 
+                // Spawn operation processor (applies pending ops from device sync)
+                let processor_db = state.db().clone();
+                tokio::spawn(async move {
+                    crate::sync::processor::run_processor(processor_db).await;
+                });
+
                 let api = crate::api::api_router_with_state(state);
                 // Allow CORS for all origins/methods/headers for P2P ease
                 let cors = CorsLayer::new()
@@ -3089,6 +3095,145 @@ pub async fn device_sync_reject_all() -> Result<u32, String> {
     svc.reject_all_pending_review()
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Backfill the operation_log with INSERT ops for all existing books, authors, tags, copies.
+/// This allows syncing a library that was created before operation logging was added.
+pub async fn device_sync_backfill() -> Result<u32, String> {
+    let db_conn = db().ok_or("Database not initialized")?;
+    use sea_orm::{ConnectionTrait, Statement};
+
+    let be = db_conn.get_database_backend();
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut count: u32 = 0;
+
+    // Backfill books (with full payload for the processor to recreate them)
+    let books = db_conn
+        .query_all(Statement::from_string(be, "SELECT id, title, isbn, subtitle, publisher, publish_date, page_count, language, description, cover_url, created_at FROM books".to_owned()))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    for row in &books {
+        let id: i32 = row.try_get("", "id").unwrap_or(0);
+        let title: String = row.try_get("", "title").unwrap_or_default();
+        let isbn: Option<String> = row.try_get("", "isbn").ok();
+        let subtitle: Option<String> = row.try_get("", "subtitle").ok();
+        let publisher: Option<String> = row.try_get("", "publisher").ok();
+        let publish_date: Option<String> = row.try_get("", "publish_date").ok();
+        let page_count: Option<i32> = row.try_get("", "page_count").ok();
+        let language: Option<String> = row.try_get("", "language").ok();
+        let description: Option<String> = row.try_get("", "description").ok();
+        let cover_url: Option<String> = row.try_get("", "cover_url").ok();
+
+        let payload = serde_json::json!({
+            "title": title,
+            "isbn": isbn,
+            "subtitle": subtitle,
+            "publisher": publisher,
+            "publish_date": publish_date,
+            "page_count": page_count,
+            "language": language,
+            "description": description,
+            "cover_url": cover_url,
+        });
+
+        // Skip if an op for this book already exists
+        let existing: Option<i32> = db_conn
+            .query_one(Statement::from_sql_and_values(
+                be,
+                "SELECT id FROM operation_log WHERE entity_type = 'book' AND entity_id = $1 AND source = 'local' LIMIT 1",
+                [id.into()],
+            ))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.try_get("", "id").ok());
+
+        if existing.is_some() {
+            continue;
+        }
+
+        let _ = db_conn
+            .execute(Statement::from_sql_and_values(
+                be,
+                "INSERT INTO operation_log (entity_type, entity_id, operation, payload, source, status, created_at) VALUES ('book', $1, 'INSERT', $2, 'local', 'applied', $3)",
+                [id.into(), payload.to_string().into(), now.clone().into()],
+            ))
+            .await;
+        count += 1;
+    }
+
+    // Backfill authors
+    let authors = db_conn
+        .query_all(Statement::from_string(
+            be,
+            "SELECT id, name FROM authors".to_owned(),
+        ))
+        .await
+        .unwrap_or_default();
+
+    for row in &authors {
+        let id: i32 = row.try_get("", "id").unwrap_or(0);
+        let name: String = row.try_get("", "name").unwrap_or_default();
+        let payload = serde_json::json!({"name": name});
+
+        let _ = db_conn
+            .execute(Statement::from_sql_and_values(
+                be,
+                "INSERT OR IGNORE INTO operation_log (entity_type, entity_id, operation, payload, source, status, created_at) VALUES ('author', $1, 'INSERT', $2, 'local', 'applied', $3)",
+                [id.into(), payload.to_string().into(), now.clone().into()],
+            ))
+            .await;
+        count += 1;
+    }
+
+    // Backfill book_authors junctions
+    let junctions = db_conn
+        .query_all(Statement::from_string(
+            be,
+            "SELECT book_id, author_id FROM book_authors".to_owned(),
+        ))
+        .await
+        .unwrap_or_default();
+
+    for row in &junctions {
+        let book_id: i32 = row.try_get("", "book_id").unwrap_or(0);
+        let author_id: i32 = row.try_get("", "author_id").unwrap_or(0);
+        let payload = serde_json::json!({"book_id": book_id, "author_id": author_id});
+
+        let _ = db_conn
+            .execute(Statement::from_sql_and_values(
+                be,
+                "INSERT OR IGNORE INTO operation_log (entity_type, entity_id, operation, payload, source, status, created_at) VALUES ('book_author', $1, 'INSERT', $2, 'local', 'applied', $3)",
+                [book_id.into(), payload.to_string().into(), now.clone().into()],
+            ))
+            .await;
+        count += 1;
+    }
+
+    Ok(count)
+}
+
+/// Purge the entire operation log and reset sync timestamps on all linked devices
+pub async fn device_sync_reset() -> Result<u32, String> {
+    let db_conn = db().ok_or("Database not initialized")?;
+    use sea_orm::{ConnectionTrait, Statement};
+    let be = db_conn.get_database_backend();
+    let result = db_conn
+        .execute(Statement::from_string(
+            be,
+            "DELETE FROM operation_log".to_owned(),
+        ))
+        .await
+        .map_err(|e| e.to_string())?;
+    // Reset last_synced so next sync pulls everything from scratch
+    let _ = db_conn
+        .execute(Statement::from_string(
+            be,
+            "UPDATE linked_devices SET last_synced = NULL".to_owned(),
+        ))
+        .await;
+    Ok(result.rows_affected() as u32)
 }
 
 // =============================================================================

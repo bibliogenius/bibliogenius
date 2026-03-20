@@ -132,15 +132,34 @@ async fn apply_book_create(
     let payload: Value =
         serde_json::from_str(payload_str).map_err(|e| DbErr::Custom(e.to_string()))?;
 
-    // Check if book already exists (Idempotency)
-    // Note: In a real P2P system, we rely on UUIDs. Here we might use ISBN or a shared ID.
-    // For specific P2P logic, we assume payload contains the full book data.
-
-    // Simplification: We blindly insert/update based on ID if provided, or ignore if ID mismatch.
-    // Ideally we deserialize into book::Model
-
     let title = payload["title"].as_str().unwrap_or("Unknown").to_string();
     let isbn = payload["isbn"].as_str().map(|s| s.to_string());
+
+    // Deduplication: skip if a book with the same ISBN already exists
+    if let Some(ref isbn_val) = isbn {
+        if !isbn_val.is_empty() {
+            let existing = book::Entity::find()
+                .filter(book::Column::Isbn.eq(isbn_val.clone()))
+                .one(db)
+                .await?;
+            if existing.is_some() {
+                tracing::info!("⏭️ Skipping duplicate book (ISBN {isbn_val}): {title}");
+                return Ok(());
+            }
+        }
+    }
+
+    // Deduplication fallback: skip if exact title match exists (for books without ISBN)
+    if isbn.is_none() || isbn.as_deref() == Some("") {
+        let existing = book::Entity::find()
+            .filter(book::Column::Title.eq(title.clone()))
+            .one(db)
+            .await?;
+        if existing.is_some() {
+            tracing::info!("⏭️ Skipping duplicate book (title match): {title}");
+            return Ok(());
+        }
+    }
 
     let new_book = book::ActiveModel {
         title: Set(title),
@@ -267,9 +286,20 @@ async fn apply_contact_create(
     let payload = parse_payload(op)?;
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Deduplication: skip if contact with same name already exists
+    let name = payload["name"].as_str().unwrap_or("Unknown").to_string();
+    let existing = contact::Entity::find()
+        .filter(contact::Column::Name.eq(name.clone()))
+        .one(db)
+        .await?;
+    if existing.is_some() {
+        tracing::info!("⏭️ Skipping duplicate contact: {name}");
+        return Ok(());
+    }
+
     let new_contact = contact::ActiveModel {
         r#type: Set(payload["type"].as_str().unwrap_or("Person").to_string()),
-        name: Set(payload["name"].as_str().unwrap_or("Unknown").to_string()),
+        name: Set(name),
         first_name: Set(payload["first_name"].as_str().map(|s| s.to_string())),
         email: Set(payload["email"].as_str().map(|s| s.to_string())),
         phone: Set(payload["phone"].as_str().map(|s| s.to_string())),
@@ -369,6 +399,16 @@ async fn apply_tag_create(
     let name = payload["name"].as_str().unwrap_or("Unknown").to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Deduplication: skip if tag with same name already exists
+    let existing = tag::Entity::find()
+        .filter(tag::Column::Name.eq(name.clone()))
+        .one(db)
+        .await?;
+    if existing.is_some() {
+        tracing::info!("⏭️ Skipping duplicate tag: {name}");
+        return Ok(());
+    }
+
     let new_tag = tag::ActiveModel {
         name: Set(name.clone()),
         parent_id: Set(payload["parent_id"].as_i64().map(|v| v as i32)),
@@ -390,8 +430,19 @@ async fn apply_author_create(
     let payload = parse_payload(op)?;
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Deduplication: skip if author with same name already exists
+    let name = payload["name"].as_str().unwrap_or("Unknown").to_string();
+    let existing = author::Entity::find()
+        .filter(author::Column::Name.eq(name.clone()))
+        .one(db)
+        .await?;
+    if existing.is_some() {
+        tracing::info!("⏭️ Skipping duplicate author: {name}");
+        return Ok(());
+    }
+
     let new_author = author::ActiveModel {
-        name: Set(payload["name"].as_str().unwrap_or("Unknown").to_string()),
+        name: Set(name),
         created_at: Set(now.clone()),
         updated_at: Set(now),
         ..Default::default()
