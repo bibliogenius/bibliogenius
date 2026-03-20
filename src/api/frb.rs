@@ -3107,9 +3107,12 @@ pub async fn device_sync_backfill() -> Result<u32, String> {
     let now = chrono::Utc::now().to_rfc3339();
     let mut count: u32 = 0;
 
-    // Backfill books (with full payload for the processor to recreate them)
+    // Backfill books (only columns guaranteed to exist in all schema versions)
     let books = db_conn
-        .query_all(Statement::from_string(be, "SELECT id, title, isbn, subtitle, publisher, publish_date, page_count, language, description, cover_url, created_at FROM books".to_owned()))
+        .query_all(Statement::from_string(
+            be,
+            "SELECT id, title, isbn, cover_url, owned, reading_status FROM books".to_owned(),
+        ))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -3117,24 +3120,18 @@ pub async fn device_sync_backfill() -> Result<u32, String> {
         let id: i32 = row.try_get("", "id").unwrap_or(0);
         let title: String = row.try_get("", "title").unwrap_or_default();
         let isbn: Option<String> = row.try_get("", "isbn").ok();
-        let subtitle: Option<String> = row.try_get("", "subtitle").ok();
-        let publisher: Option<String> = row.try_get("", "publisher").ok();
-        let publish_date: Option<String> = row.try_get("", "publish_date").ok();
-        let page_count: Option<i32> = row.try_get("", "page_count").ok();
-        let language: Option<String> = row.try_get("", "language").ok();
-        let description: Option<String> = row.try_get("", "description").ok();
         let cover_url: Option<String> = row.try_get("", "cover_url").ok();
+        let owned: bool = row.try_get::<i32>("", "owned").unwrap_or(1) == 1;
+        let reading_status: String = row
+            .try_get("", "reading_status")
+            .unwrap_or("to_read".to_string());
 
         let payload = serde_json::json!({
             "title": title,
             "isbn": isbn,
-            "subtitle": subtitle,
-            "publisher": publisher,
-            "publish_date": publish_date,
-            "page_count": page_count,
-            "language": language,
-            "description": description,
             "cover_url": cover_url,
+            "owned": owned,
+            "reading_status": reading_status,
         });
 
         // Skip if an op for this book already exists

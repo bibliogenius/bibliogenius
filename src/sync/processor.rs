@@ -136,16 +136,16 @@ async fn apply_book_create(
     let isbn = payload["isbn"].as_str().map(|s| s.to_string());
 
     // Deduplication: skip if a book with the same ISBN already exists
-    if let Some(ref isbn_val) = isbn {
-        if !isbn_val.is_empty() {
-            let existing = book::Entity::find()
-                .filter(book::Column::Isbn.eq(isbn_val.clone()))
-                .one(db)
-                .await?;
-            if existing.is_some() {
-                tracing::info!("⏭️ Skipping duplicate book (ISBN {isbn_val}): {title}");
-                return Ok(());
-            }
+    if let Some(ref isbn_val) = isbn
+        && !isbn_val.is_empty()
+    {
+        let existing = book::Entity::find()
+            .filter(book::Column::Isbn.eq(isbn_val.clone()))
+            .one(db)
+            .await?;
+        if existing.is_some() {
+            tracing::info!("⏭️ Skipping duplicate book (ISBN {isbn_val}): {title}");
+            return Ok(());
         }
     }
 
@@ -161,9 +161,19 @@ async fn apply_book_create(
         }
     }
 
+    let owned = payload["owned"].as_bool().unwrap_or(true);
+    let reading_status = payload["reading_status"]
+        .as_str()
+        .unwrap_or("to_read")
+        .to_string();
+    let cover_url = payload["cover_url"].as_str().map(|s| s.to_string());
+
     let new_book = book::ActiveModel {
         title: Set(title),
         isbn: Set(isbn),
+        owned: Set(owned),
+        reading_status: Set(reading_status),
+        cover_url: Set(cover_url),
         created_at: Set(chrono::Utc::now().to_rfc3339()),
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
         ..Default::default()
