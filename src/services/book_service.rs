@@ -271,25 +271,12 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
     // Log sync operation (minimal payload, no sensitive data)
     let _ = crate::sync::log_operation(db, "book", model.id, "INSERT", None).await;
 
-    // Create default copy only for individual/kid profiles AND only if book is owned
-    // Librarians manage copies manually through inventory
-    // Wishlist items (owned=false) should not have copies
-    if let Ok(Some(profile)) = crate::models::installation_profile::Entity::find_by_id(1)
-        .one(db)
-        .await
-    {
-        let is_individual_profile =
-            profile.profile_type == "individual" || profile.profile_type == "kid";
-        if is_individual_profile && model.owned {
-            // Dynamically get the library_id
-            let library = crate::models::library::Entity::find()
-                .one(db)
-                .await?
-                .ok_or(ServiceError::NotFound)?; // Return NotFound if no library exists
-
+    // Create default copy if book is owned (wishlist items with owned=false skip this)
+    if model.owned {
+        if let Ok(Some(library)) = crate::models::library::Entity::find().one(db).await {
             let copy = crate::models::copy::ActiveModel {
                 book_id: Set(model.id),
-                library_id: Set(library.id), // Use the dynamically fetched library ID
+                library_id: Set(library.id),
                 status: Set("available".to_string()),
                 is_temporary: Set(false),
                 created_at: Set(now.to_rfc3339()),
@@ -306,6 +293,11 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
                 )
                 .await;
             }
+        } else {
+            tracing::warn!(
+                "Skipping auto-copy creation: no library found for book {}",
+                model.id
+            );
         }
     }
 

@@ -26,6 +26,7 @@ pub struct SudocBook {
     pub publication_year: Option<i32>,
     pub dewey: Option<String>,
     pub subjects: Vec<String>,
+    pub summary: Option<String>,
     pub ppn: String,
     pub raw_data: Option<String>,
 }
@@ -117,18 +118,20 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
     let mut year = None;
     let mut dewey = None;
     let mut subjects = Vec::new();
+    let mut summary = None;
 
     let mut buf = Vec::new();
     let mut current_tag = String::new();
     let mut current_code = String::new();
 
     // Simple parser state machine
-    // Note: SUDOC XML is MARCXML-like but specific.
+    // Note: SUDOC XML is MARCXML-like but specific (UNIMARC).
     // We look for specific datafields.
     // 200 $a = Title
     // 200 $f = Author
     // 210 $c = Publisher
     // 210 $d = Year
+    // 330 $a = Summary / abstract (4ème de couverture)
     // 676 $a = Dewey
     // 606 $a = Subject (RAMEAU)
 
@@ -172,6 +175,7 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
                             year = Some(y);
                         }
                     }
+                    ("330", "a") => summary = Some(text),
                     ("676", "a") => dewey = Some(text),
                     ("606", "a") => subjects.push(text),
                     _ => {}
@@ -200,6 +204,7 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
         publication_year: year,
         dewey,
         subjects,
+        summary,
         ppn: ppn.to_string(),
         raw_data: Some(xml.to_string()),
     })

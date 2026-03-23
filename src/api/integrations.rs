@@ -227,6 +227,28 @@ async fn fetch_work_edition_extras(work_key: &str) -> Option<(String, Option<Str
     None
 }
 
+/// Fetch description from an OpenLibrary Work.
+/// Handles both plain string and `{type, value}` object formats.
+async fn fetch_work_description(work_key: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    let url = format!("https://openlibrary.org{}.json", work_key);
+    let work: serde_json::Value = client.get(&url).send().await.ok()?.json().await.ok()?;
+
+    match work.get("description")? {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Object(obj) => obj
+            .get("value")?
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from),
+        _ => None,
+    }
+}
+
 pub async fn search_external(
     query: &crate::api::search::SearchQuery,
     db: &DatabaseConnection,
@@ -971,6 +993,14 @@ pub async fn search_unified(
                             if dto.publisher.is_none() && fetched_pub.is_some() {
                                 dto.publisher = fetched_pub;
                             }
+                        }
+
+                        // Fetch work description if summary is still empty
+                        if is_openlibrary
+                            && dto.summary.is_none()
+                            && let Some(work_key) = json.get("key").and_then(|k| k.as_str())
+                        {
+                            dto.summary = fetch_work_description(work_key).await;
                         }
                     }
 

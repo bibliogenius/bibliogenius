@@ -107,16 +107,61 @@ pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
             .as_ref()
             .and_then(|c| c.large.clone().or(c.medium.clone()));
 
+        // Fetch description from edition/work API
+        let summary = fetch_description(isbn).await;
+
         Ok(BookMetadata {
             title: book.title.clone(),
             authors,
             publisher,
             publication_year: book.publish_date.clone(),
             cover_url,
-            summary: None, // OpenLibrary "data" API often lacks a clean summary
+            summary,
         })
     } else {
         Err("Book not found".to_string())
+    }
+}
+
+/// Fetch description from Open Library edition and/or work API.
+/// Tries edition-level description first, then follows to the parent work.
+async fn fetch_description(isbn: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+
+    let url = format!("https://openlibrary.org/isbn/{}.json", isbn);
+    let edition: serde_json::Value = client.get(&url).send().await.ok()?.json().await.ok()?;
+
+    // Try edition-level description first
+    if let Some(desc) = extract_ol_description(&edition) {
+        return Some(desc);
+    }
+
+    // Follow to work for description
+    let work_key = edition
+        .get("works")?
+        .as_array()?
+        .first()?
+        .get("key")?
+        .as_str()?;
+    let work_url = format!("https://openlibrary.org{}.json", work_key);
+    let work: serde_json::Value = client.get(&work_url).send().await.ok()?.json().await.ok()?;
+    extract_ol_description(&work)
+}
+
+/// Extract description from an Open Library JSON response.
+/// Handles both plain string and `{type, value}` object formats.
+fn extract_ol_description(json: &serde_json::Value) -> Option<String> {
+    match json.get("description")? {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Object(obj) => obj
+            .get("value")?
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from),
+        _ => None,
     }
 }
 
@@ -213,5 +258,58 @@ pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
     match client.head(&check_url).send().await {
         Ok(resp) if resp.status().is_success() => Some(cover_url),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_extract_ol_description_plain_string() {
+        let data = json!({ "description": "A classic novel about identity." });
+        assert_eq!(
+            extract_ol_description(&data),
+            Some("A classic novel about identity.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ol_description_typed_object() {
+        let data = json!({
+            "description": {
+                "type": "/type/text",
+                "value": "An epic tale of adventure."
+            }
+        });
+        assert_eq!(
+            extract_ol_description(&data),
+            Some("An epic tale of adventure.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ol_description_empty_string_returns_none() {
+        let data = json!({ "description": "" });
+        assert_eq!(extract_ol_description(&data), None);
+    }
+
+    #[test]
+    fn test_extract_ol_description_empty_value_returns_none() {
+        let data = json!({ "description": { "type": "/type/text", "value": "" } });
+        assert_eq!(extract_ol_description(&data), None);
+    }
+
+    #[test]
+    fn test_extract_ol_description_missing_field_returns_none() {
+        let data = json!({ "title": "Some book" });
+        assert_eq!(extract_ol_description(&data), None);
+    }
+
+    #[test]
+    fn test_extract_ol_description_unexpected_type_returns_none() {
+        let data = json!({ "description": 42 });
+        assert_eq!(extract_ol_description(&data), None);
     }
 }

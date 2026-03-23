@@ -33,6 +33,15 @@ async fn process_next_batch(db: &DatabaseConnection) -> Result<(), DbErr> {
 
     match pending_op {
         Some(op) => {
+            // Skip local operations — they are already applied by the handler that created them.
+            // Only operations received from peers (source != "local") need to be replayed.
+            if op.source == "local" {
+                let mut active_op: operation_log::ActiveModel = op.into();
+                active_op.status = Set("applied".to_string());
+                active_op.save(db).await?;
+                return Ok(());
+            }
+
             tracing::info!(
                 "⚙️ Processing Op #{}: {} on {} {}",
                 op.id,
@@ -637,6 +646,7 @@ mod tests {
             operation: Set("create".to_owned()),
             payload: Set(Some(payload.to_string())),
             status: Set("pending".to_owned()),
+            source: Set("device:test".to_owned()),
             created_at: Set(chrono::Utc::now().to_rfc3339()),
             ..Default::default()
         };
