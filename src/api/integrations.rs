@@ -357,6 +357,7 @@ pub async fn search_external(
                             owned: true, // External search results are assumed owned
                             price: None, // No price from external search
                             digital_formats: None,
+                            private: false,
                         };
                         books.push(book);
                     }
@@ -744,6 +745,7 @@ pub async fn search_unified(
                 language: item.language.clone(), // Language from Wikidata
                 digital_formats: None,
                 available_copies: None,
+                private: None,
             };
             results.push(book);
         }
@@ -789,6 +791,7 @@ pub async fn search_unified(
                     language: Some("fr".to_string()), // BNF is French National Library
                     digital_formats: None,
                     available_copies: None,
+                    private: None,
                 };
                 results.push(book);
             }
@@ -875,6 +878,7 @@ pub async fn search_unified(
                     language: Some("fr".to_string()),
                     digital_formats: None,
                     available_copies: None,
+                    private: None,
                 };
                 results.push(book);
             }

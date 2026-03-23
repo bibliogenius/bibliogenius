@@ -887,6 +887,7 @@ pub async fn handle_search_request(
         .unwrap_or("");
 
     let books = book::Entity::find()
+        .filter(book::Column::Private.eq(false))
         .filter(
             Condition::any()
                 .add(book::Column::Title.contains(query))
@@ -1286,7 +1287,9 @@ pub async fn handle_library_page_request(
         .unwrap_or(50)
         .min(50) as usize;
 
-    let mut query = book::Entity::find().order_by_asc(book::Column::Id);
+    let mut query = book::Entity::find()
+        .filter(book::Column::Private.eq(false))
+        .order_by_asc(book::Column::Id);
     if let Some(c) = cursor {
         query = query.filter(book::Column::Id.gt(c));
     }
@@ -1346,6 +1349,7 @@ pub async fn handle_library_browse_request(
 
     let query = book::Entity::find()
         .filter(book::Column::Owned.eq(true))
+        .filter(book::Column::Private.eq(false))
         .order_by_asc(book::Column::ShelfPosition);
 
     let paginator = query.paginate(db, limit);
@@ -1385,6 +1389,7 @@ pub async fn handle_library_search_via_relay(
         .min(50) as usize;
 
     let books = book::Entity::find()
+        .filter(book::Column::Private.eq(false))
         .filter(
             Condition::any()
                 .add(book::Column::Title.contains(query))

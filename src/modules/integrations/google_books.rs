@@ -317,6 +317,7 @@ pub async fn search_books(
                 owned: true,
                 price: None,
                 digital_formats: None,
+                private: false,
             };
             books.push(book);
         }

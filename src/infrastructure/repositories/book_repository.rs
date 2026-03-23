@@ -60,6 +60,8 @@ impl BookRepository for SeaOrmBookRepository {
         // Filter owned books only (used by peer sync to exclude borrowed books)
         if filter.owned_only == Some(true) {
             query = query.filter(Column::Owned.eq(true));
+            // Also exclude private books from peer-facing queries
+            query = query.filter(Column::Private.eq(false));
         }
 
         // Apply sorting
@@ -144,6 +146,7 @@ impl BookRepository for SeaOrmBookRepository {
             source_data: Set(book.source_data),
             finished_reading_at: Set(book.finished_reading_at.flatten()),
             started_reading_at: Set(book.started_reading_at.flatten()),
+            private: Set(book.private.unwrap_or(false)),
             created_at: Set(now.to_rfc3339()),
             updated_at: Set(now.to_rfc3339()),
             ..Default::default()
@@ -191,6 +194,7 @@ impl BookRepository for SeaOrmBookRepository {
         active.digital_formats = Set(digital_formats_json);
         active.finished_reading_at = Set(book.finished_reading_at.flatten());
         active.started_reading_at = Set(book.started_reading_at.flatten());
+        active.private = Set(book.private.unwrap_or(false));
         active.updated_at = Set(now.to_rfc3339());
 
         let result = active.update(&self.db).await?;

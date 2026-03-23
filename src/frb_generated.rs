@@ -5100,6 +5100,7 @@ impl SseDecode for crate::api::frb::FrbBook {
         let mut var_owned = <bool>::sse_decode(deserializer);
         let mut var_price = <Option<f64>>::sse_decode(deserializer);
         let mut var_digitalFormats = <Option<Vec<String>>>::sse_decode(deserializer);
+        let mut var_private = <bool>::sse_decode(deserializer);
         return crate::api::frb::FrbBook {
             id: var_id,
             title: var_title,
@@ -5121,6 +5122,7 @@ impl SseDecode for crate::api::frb::FrbBook {
             owned: var_owned,
             price: var_price,
             digital_formats: var_digitalFormats,
+            private: var_private,
         };
     }
 }
@@ -6918,6 +6920,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbBook {
             self.owned.into_into_dart().into_dart(),
             self.price.into_into_dart().into_dart(),
             self.digital_formats.into_into_dart().into_dart(),
+            self.private.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -7979,6 +7982,7 @@ impl SseEncode for crate::api::frb::FrbBook {
         <bool>::sse_encode(self.owned, serializer);
         <Option<f64>>::sse_encode(self.price, serializer);
         <Option<Vec<String>>>::sse_encode(self.digital_formats, serializer);
+        <bool>::sse_encode(self.private, serializer);
     }
 }
 

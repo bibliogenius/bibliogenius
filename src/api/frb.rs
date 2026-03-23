@@ -106,6 +106,7 @@ pub struct FrbBook {
     pub owned: bool,        // Added for copy management
     pub price: Option<f64>, // Added for bookseller profile
     pub digital_formats: Option<Vec<String>>,
+    pub private: bool, // Hidden from network peers
 }
 
 /// Convert domain Book to FFI-safe FrbBook
@@ -134,6 +135,7 @@ impl From<crate::models::Book> for FrbBook {
             owned: book.owned.unwrap_or(true), // Default to owned if None (legacy/missing)
             price: book.price,
             digital_formats: book.digital_formats,
+            private: book.private.unwrap_or(false),
         }
     }
 }
@@ -499,6 +501,7 @@ impl From<FrbBook> for crate::models::Book {
             language: None,
             digital_formats: frb_book.digital_formats,
             available_copies: None,
+            private: Some(frb_book.private),
         }
     }
 }

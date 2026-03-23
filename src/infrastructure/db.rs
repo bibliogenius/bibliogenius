@@ -1518,6 +1518,16 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 060: Add private flag to books.
+    // When true, the book is hidden from peers (not shared on the network).
+    // Default false: all existing books remain visible (no regression).
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE books ADD COLUMN private INTEGER NOT NULL DEFAULT 0".to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

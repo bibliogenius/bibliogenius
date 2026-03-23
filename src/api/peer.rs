@@ -2866,6 +2866,7 @@ pub async fn search_local(
     use sea_orm::sea_query::Expr;
 
     let books = book::Entity::find()
+        .filter(book::Column::Private.eq(false))
         .filter(
             Condition::any()
                 .add(book::Column::Title.contains(&payload.query))

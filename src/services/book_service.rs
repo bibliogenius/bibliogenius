@@ -354,6 +354,9 @@ pub async fn update_book(
     if let Some(owned_value) = book_data.owned {
         book.owned = Set(owned_value);
     }
+    if let Some(private_value) = book_data.private {
+        book.private = Set(private_value);
+    }
     book.price = Set(book_data.price);
 
     book.updated_at = Set(now.to_rfc3339());

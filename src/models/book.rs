@@ -45,6 +45,10 @@ pub struct Model {
     /// If set, this is the default price for all copies of this book.
     pub price: Option<f64>,
     pub digital_formats: Option<String>, // JSON array
+    /// When true, this book is hidden from network peers.
+    /// Only relevant for the "reader" profile (librarian/bookseller always share all books).
+    #[sea_orm(default_value = "false")]
+    pub private: bool,
 }
 
 // ... (Relation enum and Related impls omit for brevity) ...
@@ -124,6 +128,8 @@ pub struct Book {
     pub digital_formats: Option<Vec<String>>, // ["ebook", "audiobook"]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub available_copies: Option<i32>, // Number of copies with status "available"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private: Option<bool>, // When true, hidden from network peers
 }
 
 impl From<Model> for Book {
@@ -177,6 +183,7 @@ impl From<Model> for Book {
             language,
             digital_formats,
             available_copies: None, // Populated separately
+            private: Some(model.private),
         }
     }
 }
@@ -282,6 +289,7 @@ impl From<Book> for ActiveModel {
                 .digital_formats
                 .map(|s| serde_json::to_string(&s).unwrap_or_default())
                 .map_or(NotSet, |s| Set(Some(s))),
+            private: book.private.map_or(NotSet, Set),
         }
     }
 }
