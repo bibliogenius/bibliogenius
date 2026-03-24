@@ -253,6 +253,48 @@ async fn apply_book_update(
     Ok(())
 }
 
+// ── Shared helper: resolve book_id by ISBN lookup ────────────────────
+
+/// Resolve a local book_id from a sync payload.
+///
+/// Priority:
+/// 1. `book_isbn` field -> lookup local book by ISBN (cross-device safe)
+/// 2. `book_id` field -> raw ID (backward compat with backfill data on same device)
+///
+/// Returns `None` if the book cannot be found locally.
+async fn resolve_local_book_id(
+    db: &DatabaseTransaction,
+    payload: &serde_json::Value,
+) -> Result<Option<i32>, DbErr> {
+    // Prefer ISBN-based lookup (works across devices with different auto-increment IDs)
+    if let Some(isbn) = payload
+        .get("book_isbn")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let local_book = book::Entity::find()
+            .filter(book::Column::Isbn.eq(isbn))
+            .one(db)
+            .await?;
+        if let Some(b) = local_book {
+            return Ok(Some(b.id));
+        }
+        tracing::warn!("Sync: book with ISBN {isbn} not found locally");
+        return Ok(None);
+    }
+
+    // Fallback: use raw book_id (works for same-device backfill data)
+    let raw_id = payload["book_id"].as_i64().unwrap_or(0) as i32;
+    if raw_id > 0 {
+        let exists = book::Entity::find_by_id(raw_id).one(db).await?;
+        if exists.is_some() {
+            return Ok(Some(raw_id));
+        }
+    }
+
+    Ok(None)
+}
+
 // ── Copy handlers ────────────────────────────────────────────────────
 
 async fn apply_copy_create(
@@ -262,18 +304,45 @@ async fn apply_copy_create(
     let payload = parse_payload(op)?;
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Resolve book_id via ISBN lookup (cross-device safe)
+    let book_id = match resolve_local_book_id(db, &payload).await? {
+        Some(id) => id,
+        None => {
+            tracing::info!(
+                "Skipping copy create: referenced book not found locally (op #{})",
+                op.id
+            );
+            return Ok(());
+        }
+    };
+
+    let status = payload["status"]
+        .as_str()
+        .unwrap_or("available")
+        .to_string();
+    let is_temporary = payload["is_temporary"].as_bool().unwrap_or(false);
+
+    // Deduplication: skip if a copy with same (book_id, status, is_temporary) already exists
+    let existing = copy::Entity::find()
+        .filter(copy::Column::BookId.eq(book_id))
+        .filter(copy::Column::Status.eq(status.clone()))
+        .filter(copy::Column::IsTemporary.eq(is_temporary))
+        .one(db)
+        .await?;
+    if existing.is_some() {
+        tracing::info!("Skipping duplicate copy for book_id={book_id}");
+        return Ok(());
+    }
+
     let new_copy = copy::ActiveModel {
-        book_id: Set(payload["book_id"].as_i64().unwrap_or(0) as i32),
+        book_id: Set(book_id),
         library_id: Set(match payload["library_id"].as_i64().map(|v| v as i32) {
             Some(id) => id,
             None => crate::utils::library_helpers::resolve_library_id(db).await?,
         }),
-        status: Set(payload["status"]
-            .as_str()
-            .unwrap_or("available")
-            .to_string()),
+        status: Set(status),
         notes: Set(payload["notes"].as_str().map(|s| s.to_string())),
-        is_temporary: Set(payload["is_temporary"].as_bool().unwrap_or(false)),
+        is_temporary: Set(is_temporary),
         created_at: Set(now.clone()),
         updated_at: Set(now),
         ..Default::default()
@@ -639,12 +708,37 @@ async fn apply_book_note_create(
     let payload = parse_payload(op)?;
     let now = chrono::Utc::now().to_rfc3339();
 
-    let book_id = payload["book_id"].as_i64().unwrap_or(0) as i32;
+    // Resolve book_id via ISBN lookup (cross-device safe)
+    let book_id = match resolve_local_book_id(db, &payload).await? {
+        Some(id) => id,
+        None => {
+            tracing::info!(
+                "Skipping book_note create: referenced book not found locally (op #{})",
+                op.id
+            );
+            return Ok(());
+        }
+    };
+
     let content = payload["content"].as_str().unwrap_or("").to_string();
     let page = payload["page"].as_i64().map(|v| v as i32);
 
     if content.is_empty() {
         return Err(DbErr::Custom("book_note: empty content".to_string()));
+    }
+
+    // Deduplication: skip if an identical note already exists for this book
+    let mut dedup_query = bn::Entity::find()
+        .filter(bn::Column::BookId.eq(book_id))
+        .filter(bn::Column::Content.eq(content.clone()));
+    if let Some(p) = page {
+        dedup_query = dedup_query.filter(bn::Column::Page.eq(p));
+    } else {
+        dedup_query = dedup_query.filter(bn::Column::Page.is_null());
+    }
+    if dedup_query.one(db).await?.is_some() {
+        tracing::info!("Skipping duplicate book_note for book_id={book_id}");
+        return Ok(());
     }
 
     let note = bn::ActiveModel {
@@ -687,35 +781,41 @@ mod tests {
     use crate::db::init_db;
     use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
-    #[tokio::test]
-    async fn test_apply_book_create_operation() {
-        // 1. Setup in-memory DB
-        let db = init_db("sqlite::memory:").await.expect("Failed to init db");
-
-        // 2. Insert a pending operation
-        let payload = serde_json::json!({
-            "title": "Test Book",
-            "isbn": "TEST-123",
-            "authors": "Test Author"
-        });
-
+    /// Helper: insert a pending operation from a remote device.
+    async fn insert_remote_op(
+        db: &DatabaseConnection,
+        entity_type: &str,
+        entity_id: i32,
+        operation: &str,
+        payload: serde_json::Value,
+    ) -> operation_log::Model {
         let op = operation_log::ActiveModel {
-            entity_type: Set("book".to_owned()),
-            entity_id: Set(1),
-            operation: Set("create".to_owned()),
+            entity_type: Set(entity_type.to_owned()),
+            entity_id: Set(entity_id),
+            operation: Set(operation.to_owned()),
             payload: Set(Some(payload.to_string())),
             status: Set("pending".to_owned()),
             source: Set("device:test".to_owned()),
             created_at: Set(chrono::Utc::now().to_rfc3339()),
             ..Default::default()
         };
-        let op = op.insert(&db).await.expect("Failed to insert op");
+        op.insert(db).await.expect("Failed to insert op")
+    }
 
-        // 3. Process the batch (call private function)
+    #[tokio::test]
+    async fn test_apply_book_create_operation() {
+        let db = init_db("sqlite::memory:").await.expect("Failed to init db");
+
+        let payload = serde_json::json!({
+            "title": "Test Book",
+            "isbn": "TEST-123",
+            "authors": "Test Author"
+        });
+
+        let op = insert_remote_op(&db, "book", 1, "create", payload).await;
+
         process_next_batch(&db).await.expect("Processing failed");
 
-        // 4. Verify Side Effects
-        // Check Operation Status updated first to see if it failed
         let updated_op = operation_log::Entity::find_by_id(op.id)
             .one(&db)
             .await
@@ -728,7 +828,6 @@ mod tests {
             updated_op.error_message
         );
 
-        // Check Book created
         let book = book::Entity::find()
             .filter(book::Column::Isbn.eq("TEST-123"))
             .one(&db)
@@ -736,7 +835,214 @@ mod tests {
             .expect("DB error");
 
         assert!(book.is_some(), "Book should be created");
-        let book = book.unwrap();
-        assert_eq!(book.title, "Test Book");
+        assert_eq!(book.unwrap().title, "Test Book");
+    }
+
+    #[tokio::test]
+    async fn test_copy_created_via_isbn_resolution() {
+        let db = init_db("sqlite::memory:").await.expect("Failed to init db");
+
+        // Pre-existing local book (different ID than source device)
+        let local_book = book::ActiveModel {
+            title: Set("Existing Book".to_string()),
+            isbn: Set(Some("ISBN-CROSS-DEVICE".to_string())),
+            owned: Set(true),
+            reading_status: Set("to_read".to_string()),
+            created_at: Set(chrono::Utc::now().to_rfc3339()),
+            updated_at: Set(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+        let local_book = local_book.insert(&db).await.unwrap();
+
+        // Insert copy operation with book_isbn (from another device, book_id=999 does NOT exist locally)
+        let payload = serde_json::json!({
+            "book_id": 999,
+            "book_isbn": "ISBN-CROSS-DEVICE",
+            "status": "available",
+            "is_temporary": false,
+        });
+        let op = insert_remote_op(&db, "copy", 50, "insert", payload).await;
+
+        process_next_batch(&db).await.expect("Processing failed");
+
+        // Verify operation applied
+        let updated_op = operation_log::Entity::find_by_id(op.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated_op.status, "applied",
+            "Copy op should be applied. Error: {:?}",
+            updated_op.error_message
+        );
+
+        // Verify copy was created with the LOCAL book_id
+        let copies = copy::Entity::find()
+            .filter(copy::Column::BookId.eq(local_book.id))
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(copies.len(), 1, "One copy should exist for the local book");
+        assert_eq!(copies[0].status, "available");
+    }
+
+    #[tokio::test]
+    async fn test_copy_skipped_when_book_not_found() {
+        let db = init_db("sqlite::memory:").await.expect("Failed to init db");
+
+        // Copy with ISBN that does NOT match any local book
+        let payload = serde_json::json!({
+            "book_id": 999,
+            "book_isbn": "ISBN-DOES-NOT-EXIST",
+            "status": "available",
+            "is_temporary": false,
+        });
+        let op = insert_remote_op(&db, "copy", 50, "insert", payload).await;
+
+        process_next_batch(&db).await.expect("Processing failed");
+
+        // Operation should be applied (gracefully skipped, not failed)
+        let updated_op = operation_log::Entity::find_by_id(op.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_op.status, "applied");
+
+        // No copies created
+        let all_copies = copy::Entity::find().all(&db).await.unwrap();
+        assert!(all_copies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_book_note_created_via_isbn_resolution() {
+        use crate::modules::book_notes::models as bn;
+
+        let db = init_db("sqlite::memory:").await.expect("Failed to init db");
+
+        // Pre-existing local book
+        let local_book = book::ActiveModel {
+            title: Set("Note Target".to_string()),
+            isbn: Set(Some("ISBN-NOTE-SYNC".to_string())),
+            owned: Set(true),
+            reading_status: Set("reading".to_string()),
+            created_at: Set(chrono::Utc::now().to_rfc3339()),
+            updated_at: Set(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+        let local_book = local_book.insert(&db).await.unwrap();
+
+        // Insert book_note operation with book_isbn
+        let payload = serde_json::json!({
+            "book_id": 888,
+            "book_isbn": "ISBN-NOTE-SYNC",
+            "content": "Great chapter on page 10",
+            "page": 10,
+        });
+        let op = insert_remote_op(&db, "book_note", 30, "insert", payload).await;
+
+        process_next_batch(&db).await.expect("Processing failed");
+
+        let updated_op = operation_log::Entity::find_by_id(op.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated_op.status, "applied",
+            "book_note op should be applied. Error: {:?}",
+            updated_op.error_message
+        );
+
+        // Verify note was created with the LOCAL book_id
+        let notes = bn::Entity::find()
+            .filter(bn::Column::BookId.eq(local_book.id))
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "Great chapter on page 10");
+        assert_eq!(notes[0].page, Some(10));
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_copy_skipped_on_second_sync() {
+        let db = init_db("sqlite::memory:").await.expect("Failed to init db");
+
+        let local_book = book::ActiveModel {
+            title: Set("Dedup Book".to_string()),
+            isbn: Set(Some("ISBN-DEDUP-COPY".to_string())),
+            owned: Set(true),
+            reading_status: Set("to_read".to_string()),
+            created_at: Set(chrono::Utc::now().to_rfc3339()),
+            updated_at: Set(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+        let local_book = local_book.insert(&db).await.unwrap();
+
+        let payload = serde_json::json!({
+            "book_id": 999,
+            "book_isbn": "ISBN-DEDUP-COPY",
+            "status": "available",
+            "is_temporary": false,
+        });
+
+        // First sync: copy created
+        insert_remote_op(&db, "copy", 50, "insert", payload.clone()).await;
+        process_next_batch(&db).await.unwrap();
+
+        // Second sync: same copy operation again
+        insert_remote_op(&db, "copy", 50, "insert", payload).await;
+        process_next_batch(&db).await.unwrap();
+
+        // Only ONE copy should exist
+        let copies = copy::Entity::find()
+            .filter(copy::Column::BookId.eq(local_book.id))
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(copies.len(), 1, "Duplicate copy should be skipped");
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_book_note_skipped_on_second_sync() {
+        use crate::modules::book_notes::models as bn;
+
+        let db = init_db("sqlite::memory:").await.expect("Failed to init db");
+
+        let local_book = book::ActiveModel {
+            title: Set("Dedup Note Book".to_string()),
+            isbn: Set(Some("ISBN-DEDUP-NOTE".to_string())),
+            owned: Set(true),
+            reading_status: Set("reading".to_string()),
+            created_at: Set(chrono::Utc::now().to_rfc3339()),
+            updated_at: Set(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+        let local_book = local_book.insert(&db).await.unwrap();
+
+        let payload = serde_json::json!({
+            "book_id": 888,
+            "book_isbn": "ISBN-DEDUP-NOTE",
+            "content": "Same note twice",
+            "page": 5,
+        });
+
+        // First sync: note created
+        insert_remote_op(&db, "book_note", 30, "insert", payload.clone()).await;
+        process_next_batch(&db).await.unwrap();
+
+        // Second sync: same note again
+        insert_remote_op(&db, "book_note", 30, "insert", payload).await;
+        process_next_batch(&db).await.unwrap();
+
+        // Only ONE note should exist
+        let notes = bn::Entity::find()
+            .filter(bn::Column::BookId.eq(local_book.id))
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(notes.len(), 1, "Duplicate book_note should be skipped");
     }
 }

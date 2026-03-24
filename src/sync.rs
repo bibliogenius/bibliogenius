@@ -145,6 +145,61 @@ pub async fn log_remote_operation(
     source_device_id: i32,
     safety_mode: bool,
 ) -> Result<i32, DbErr> {
+    // Deduplication: skip if an identical operation from a device is already
+    // pending, pending_review, or applied. This prevents accumulation when
+    // multiple syncs are triggered successively.
+    //
+    // Exception for INSERT: if a local DELETE was applied AFTER the previous
+    // remote INSERT, allow re-insertion so the entity can be recreated.
+    let op_upper = operation.to_uppercase();
+    let already_exists = operation_log::Entity::find()
+        .filter(operation_log::Column::EntityType.eq(entity_type))
+        .filter(operation_log::Column::EntityId.eq(entity_id))
+        .filter(operation_log::Column::Operation.eq(operation))
+        .filter(operation_log::Column::Status.is_in(["pending", "pending_review", "applied"]))
+        .filter(operation_log::Column::Source.ne("local"))
+        .one(db)
+        .await?;
+
+    if let Some(existing) = already_exists {
+        // For INSERTs: allow re-creation if the entity was deleted locally since
+        if op_upper == "INSERT" {
+            let deleted_after = operation_log::Entity::find()
+                .filter(operation_log::Column::EntityType.eq(entity_type))
+                .filter(operation_log::Column::EntityId.eq(entity_id))
+                .filter(operation_log::Column::Operation.eq("DELETE"))
+                .filter(operation_log::Column::Source.eq("local"))
+                .filter(operation_log::Column::CreatedAt.gt(&existing.created_at))
+                .one(db)
+                .await?;
+            if deleted_after.is_some() {
+                tracing::info!(
+                    "Re-allowing remote INSERT after local DELETE: {} {}",
+                    entity_type,
+                    entity_id
+                );
+                // Fall through to insert a new pending operation
+            } else {
+                tracing::debug!(
+                    "Skipping duplicate remote INSERT: {} {} (existing #{})",
+                    entity_type,
+                    entity_id,
+                    existing.id
+                );
+                return Ok(existing.id);
+            }
+        } else {
+            tracing::debug!(
+                "Skipping duplicate remote op: {} {} {} (existing #{})",
+                entity_type,
+                operation,
+                entity_id,
+                existing.id
+            );
+            return Ok(existing.id);
+        }
+    }
+
     let status = if safety_mode {
         "pending_review"
     } else {
@@ -253,4 +308,5 @@ async fn prune_old_entries(db: &DatabaseConnection) -> Result<(), DbErr> {
     Ok(())
 }
 
+pub mod enrichment;
 pub mod processor;

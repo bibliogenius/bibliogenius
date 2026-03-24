@@ -262,7 +262,7 @@ pub async fn dispatch_clear_message(
         "status_update" => handle_status_update(db, clear_message).await,
 
         "device_sync_request" => {
-            let response_payload = handle_device_sync_request(db, clear_message).await;
+            let response_payload = handle_device_sync_request(db, clear_message, sender_peer).await;
             seal_response(
                 crypto_service,
                 &known_peers[peer_index],
@@ -271,7 +271,7 @@ pub async fn dispatch_clear_message(
             )
         }
 
-        "device_sync_push" => handle_device_sync_push(db, clear_message).await,
+        "device_sync_push" => handle_device_sync_push(db, clear_message, sender_peer).await,
 
         "peer_disconnect" => handle_peer_disconnect(db, sender_peer, our_library_uuid).await,
 
@@ -1445,16 +1445,17 @@ async fn is_sync_safety_enabled(db: &DatabaseConnection) -> bool {
 async fn handle_device_sync_request(
     db: &DatabaseConnection,
     msg: &ClearMessage,
+    sender_peer: &crate::models::peer::Model,
 ) -> serde_json::Value {
     use crate::services::device_sync_service::{DeviceSyncService, RemoteOp};
 
     let since = msg.payload.get("since").and_then(|v| v.as_str());
 
-    let device_id = msg
-        .payload
-        .get("device_id")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as i32;
+    // Use sender_peer.id which is the LOCAL linked_device ID.
+    // (The synthetic peer::Model built from linked_device data carries the correct ID.)
+    // The device_id in the request payload is the SENDER's local ID for us, which
+    // does not match our local ID for the sender -- do not use it.
+    let device_id = sender_peer.id;
 
     let remote_ops: Vec<RemoteOp> = msg
         .payload
@@ -1488,18 +1489,10 @@ async fn handle_device_sync_request(
     // 2. Fetch our local ops since the given timestamp
     let local_ops = svc.get_local_ops_since(since).await.unwrap_or_default();
 
-    let ops_payload: Vec<serde_json::Value> = local_ops
-        .iter()
-        .map(|op| {
-            json!({
-                "entity_type": op.entity_type,
-                "entity_id": op.entity_id,
-                "operation": op.operation,
-                "payload": op.payload.as_ref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
-                "created_at": op.created_at,
-            })
-        })
-        .collect();
+    let mut ops_payload: Vec<serde_json::Value> = Vec::with_capacity(local_ops.len());
+    for op in &local_ops {
+        ops_payload.push(crate::sync::enrichment::op_to_sync_json(db, op).await);
+    }
 
     // 3. Update last_synced on the device
     if device_id > 0 {
@@ -1527,14 +1520,12 @@ async fn handle_device_sync_request(
 async fn handle_device_sync_push(
     db: &DatabaseConnection,
     msg: &ClearMessage,
+    sender_peer: &crate::models::peer::Model,
 ) -> axum::response::Response {
     use crate::services::device_sync_service::{DeviceSyncService, RemoteOp};
 
-    let device_id = msg
-        .payload
-        .get("device_id")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as i32;
+    // Use sender_peer.id (LOCAL linked_device ID from synthetic peer model)
+    let device_id = sender_peer.id;
 
     let remote_ops: Vec<RemoteOp> = msg
         .payload

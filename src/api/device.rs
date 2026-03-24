@@ -224,28 +224,21 @@ pub async fn trigger_sync(
     // 5. Collect local ops (skip if pull-only)
     let since = device.last_synced.as_deref();
     let ops_payload: Vec<serde_json::Value> = if is_push {
-        tracing::debug!("DeviceSync: collecting local ops since={since:?}");
+        tracing::info!("DeviceSync: collecting local ops since={since:?}");
         let local_ops = state
             .device_sync
             .get_local_ops_since(since)
             .await
             .unwrap_or_default();
-        tracing::debug!(
+        tracing::info!(
             "DeviceSync: collected {} local ops (direction={direction})",
             local_ops.len()
         );
-        local_ops
-            .iter()
-            .map(|op| {
-                json!({
-                    "entity_type": op.entity_type,
-                    "entity_id": op.entity_id,
-                    "operation": op.operation,
-                    "payload": op.payload.as_ref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
-                    "created_at": op.created_at,
-                })
-            })
-            .collect()
+        let mut enriched = Vec::with_capacity(local_ops.len());
+        for op in &local_ops {
+            enriched.push(crate::sync::enrichment::op_to_sync_json(state.db(), op).await);
+        }
+        enriched
     } else {
         tracing::debug!("DeviceSync: pull-only mode, sending 0 ops");
         vec![]
