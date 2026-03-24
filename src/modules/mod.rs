@@ -1,3 +1,4 @@
+pub mod book_notes;
 pub mod hangman;
 pub mod import;
 pub mod integrations;

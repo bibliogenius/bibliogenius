@@ -304,6 +304,8 @@ fn build_routes() -> Router<AppState> {
             "/gamification/refresh-leaderboard",
             post(gamification::refresh_leaderboard),
         )
+        // Book Notes (self-contained module)
+        .merge(crate::modules::book_notes::routes())
         // Memory Game (self-contained module)
         .merge(crate::modules::memory_game::routes())
         // Sliding Puzzle (self-contained module)

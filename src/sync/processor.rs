@@ -100,6 +100,12 @@ async fn apply_operation(db: &DatabaseConnection, op: operation_log::Model) -> R
         ("collection", "delete") => apply_collection_delete(&txn, &op).await,
         ("collection_book", "insert") => apply_collection_book_insert(&txn, &op).await,
         ("collection_book", "delete") => apply_collection_book_delete(&txn, &op).await,
+        // Book notes (device sync only)
+        ("book_note", "insert") => apply_book_note_create(&txn, &op).await,
+        ("book_note", "update") => apply_book_note_update(&txn, &op).await,
+        ("book_note", "delete") => {
+            apply_delete::<crate::modules::book_notes::models::Entity>(&txn, op.entity_id).await
+        }
         _ => {
             tracing::warn!(
                 "Unhandled operation type: {} {}",
@@ -618,6 +624,59 @@ async fn apply_collection_book_delete(
             [collection_id.into(), book_id.into()],
         ))
         .await?;
+    }
+    Ok(())
+}
+
+// ── Book note handlers (device sync only) ───────────────────────────
+
+async fn apply_book_note_create(
+    db: &DatabaseTransaction,
+    op: &operation_log::Model,
+) -> Result<(), DbErr> {
+    use crate::modules::book_notes::models as bn;
+
+    let payload = parse_payload(op)?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let book_id = payload["book_id"].as_i64().unwrap_or(0) as i32;
+    let content = payload["content"].as_str().unwrap_or("").to_string();
+    let page = payload["page"].as_i64().map(|v| v as i32);
+
+    if content.is_empty() {
+        return Err(DbErr::Custom("book_note: empty content".to_string()));
+    }
+
+    let note = bn::ActiveModel {
+        book_id: Set(book_id),
+        content: Set(content),
+        page: Set(page),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    bn::Entity::insert(note).exec(db).await?;
+    Ok(())
+}
+
+async fn apply_book_note_update(
+    db: &DatabaseTransaction,
+    op: &operation_log::Model,
+) -> Result<(), DbErr> {
+    use crate::modules::book_notes::models as bn;
+
+    let existing = bn::Entity::find_by_id(op.entity_id).one(db).await?;
+    if let Some(n) = existing {
+        let payload = parse_payload(op)?;
+        let mut active: bn::ActiveModel = n.into();
+        if let Some(c) = payload.get("content").and_then(|v| v.as_str()) {
+            active.content = Set(c.to_string());
+        }
+        if payload.get("page").is_some() {
+            active.page = Set(payload["page"].as_i64().map(|v| v as i32));
+        }
+        active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        active.save(db).await?;
     }
     Ok(())
 }
