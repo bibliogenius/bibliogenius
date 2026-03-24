@@ -231,6 +231,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore] // Flaky in CI due to external network request
     async fn test_fetch_inventaire_metadata() {
         // Martin Eden (ISBN from the CSV export)
         let isbn = "9782264024848";
