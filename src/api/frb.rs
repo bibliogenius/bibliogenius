@@ -731,8 +731,10 @@ pub async fn search_all_covers_by_title(
     author: Option<String>,
     enable_google: Option<bool>,
 ) -> Result<Vec<FrbCoverCandidate>, String> {
+    let db = db().ok_or("Database not initialized")?;
     let gb_api_key = load_google_books_api_key().await;
     crate::services::book_service::search_all_covers_by_title(
+        db,
         &title,
         author.as_deref(),
         enable_google.unwrap_or(false),
@@ -3100,7 +3102,9 @@ pub async fn device_sync_reject_all() -> Result<u32, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Backfill the operation_log with INSERT ops for all existing books, authors, tags, copies.
+/// Backfill the operation_log with INSERT ops for all existing entities
+/// (books, authors, book_authors, tags, book_tags, contacts, copies, loans,
+/// collections, collection_books, book_notes).
 /// This allows syncing a library that was created before operation logging was added.
 pub async fn device_sync_backfill() -> Result<u32, String> {
     let db_conn = db().ok_or("Database not initialized")?;
@@ -3206,6 +3210,239 @@ pub async fn device_sync_backfill() -> Result<u32, String> {
                 be,
                 "INSERT OR IGNORE INTO operation_log (entity_type, entity_id, operation, payload, source, status, created_at) VALUES ('book_author', $1, 'INSERT', $2, 'local', 'applied', $3)",
                 [book_id.into(), payload.to_string().into(), now.clone().into()],
+            ))
+            .await;
+        count += 1;
+    }
+
+    // Backfill tags
+    let tags = db_conn
+        .query_all(Statement::from_string(
+            be,
+            "SELECT id, name, parent_id, path FROM tags".to_owned(),
+        ))
+        .await
+        .unwrap_or_default();
+
+    for row in &tags {
+        let id: i32 = row.try_get("", "id").unwrap_or(0);
+        let name: String = row.try_get("", "name").unwrap_or_default();
+        let parent_id: Option<i32> = row.try_get("", "parent_id").ok();
+        let path: String = row.try_get("", "path").unwrap_or_default();
+        let payload = serde_json::json!({"name": name, "parent_id": parent_id, "path": path});
+
+        let _ = db_conn
+            .execute(Statement::from_sql_and_values(
+                be,
+                "INSERT OR IGNORE INTO operation_log (entity_type, entity_id, operation, payload, source, status, created_at) VALUES ('tag', $1, 'INSERT', $2, 'local', 'applied', $3)",
+                [id.into(), payload.to_string().into(), now.clone().into()],
+            ))
+            .await;
+        count += 1;
+    }
+
+    // Backfill book_tags junctions
+    let book_tags = db_conn
+        .query_all(Statement::from_string(
+            be,
+            "SELECT book_id, tag_id FROM book_tags".to_owned(),
+        ))
+        .await
+        .unwrap_or_default();
+
+    for row in &book_tags {
+        let book_id: i32 = row.try_get("", "book_id").unwrap_or(0);
+        let tag_id: i32 = row.try_get("", "tag_id").unwrap_or(0);
+        let payload = serde_json::json!({"book_id": book_id, "tag_id": tag_id});
+
+        let _ = db_conn
+            .execute(Statement::from_sql_and_values(
+                be,
+                "INSERT OR IGNORE INTO operation_log (entity_type, entity_id, operation, payload, source, status, created_at) VALUES ('book_tag', $1, 'INSERT', $2, 'local', 'applied', $3)",
+                [book_id.into(), payload.to_string().into(), now.clone().into()],
+            ))
+            .await;
+        count += 1;
+    }
+
+    // Backfill contacts
+    let contacts = db_conn
+        .query_all(Statement::from_string(
+            be,
+            "SELECT id, type, name, first_name, email, phone, notes, library_owner_id FROM contacts".to_owned(),
+        ))
+        .await
+        .unwrap_or_default();
+
+    for row in &contacts {
+        let id: i32 = row.try_get("", "id").unwrap_or(0);
+        let ctype: String = row.try_get("", "type").unwrap_or("Person".to_string());
+        let name: String = row.try_get("", "name").unwrap_or_default();
+        let first_name: Option<String> = row.try_get("", "first_name").ok();
+        let email: Option<String> = row.try_get("", "email").ok();
+        let phone: Option<String> = row.try_get("", "phone").ok();
+        let notes: Option<String> = row.try_get("", "notes").ok();
+        let library_owner_id: i32 = row.try_get("", "library_owner_id").unwrap_or(1);
+        let payload = serde_json::json!({
+            "type": ctype, "name": name, "first_name": first_name,
+            "email": email, "phone": phone, "notes": notes,
+            "library_owner_id": library_owner_id,
+        });
+
+        let _ = db_conn
+            .execute(Statement::from_sql_and_values(
+                be,
+                "INSERT OR IGNORE INTO operation_log (entity_type, entity_id, operation, payload, source, status, created_at) VALUES ('contact', $1, 'INSERT', $2, 'local', 'applied', $3)",
+                [id.into(), payload.to_string().into(), now.clone().into()],
+            ))
+            .await;
+        count += 1;
+    }
+
+    // Backfill copies
+    let copies = db_conn
+        .query_all(Statement::from_string(
+            be,
+            "SELECT id, book_id, library_id, status, notes, is_temporary FROM copies".to_owned(),
+        ))
+        .await
+        .unwrap_or_default();
+
+    for row in &copies {
+        let id: i32 = row.try_get("", "id").unwrap_or(0);
+        let book_id: i32 = row.try_get("", "book_id").unwrap_or(0);
+        let library_id: i32 = row.try_get("", "library_id").unwrap_or(1);
+        let status: String = row.try_get("", "status").unwrap_or("available".to_string());
+        let notes: Option<String> = row.try_get("", "notes").ok();
+        let is_temporary: bool = row.try_get::<i32>("", "is_temporary").unwrap_or(0) == 1;
+        let payload = serde_json::json!({
+            "book_id": book_id, "library_id": library_id,
+            "status": status, "notes": notes, "is_temporary": is_temporary,
+        });
+
+        let _ = db_conn
+            .execute(Statement::from_sql_and_values(
+                be,
+                "INSERT OR IGNORE INTO operation_log (entity_type, entity_id, operation, payload, source, status, created_at) VALUES ('copy', $1, 'INSERT', $2, 'local', 'applied', $3)",
+                [id.into(), payload.to_string().into(), now.clone().into()],
+            ))
+            .await;
+        count += 1;
+    }
+
+    // Backfill loans
+    let loans = db_conn
+        .query_all(Statement::from_string(
+            be,
+            "SELECT id, copy_id, contact_id, library_id, loan_date, due_date, return_date, status, notes FROM loans".to_owned(),
+        ))
+        .await
+        .unwrap_or_default();
+
+    for row in &loans {
+        let id: i32 = row.try_get("", "id").unwrap_or(0);
+        let copy_id: i32 = row.try_get("", "copy_id").unwrap_or(0);
+        let contact_id: i32 = row.try_get("", "contact_id").unwrap_or(0);
+        let library_id: i32 = row.try_get("", "library_id").unwrap_or(1);
+        let loan_date: String = row.try_get("", "loan_date").unwrap_or_default();
+        let due_date: String = row.try_get("", "due_date").unwrap_or_default();
+        let return_date: Option<String> = row.try_get("", "return_date").ok();
+        let status: String = row.try_get("", "status").unwrap_or("active".to_string());
+        let notes: Option<String> = row.try_get("", "notes").ok();
+        let payload = serde_json::json!({
+            "copy_id": copy_id, "contact_id": contact_id, "library_id": library_id,
+            "loan_date": loan_date, "due_date": due_date, "return_date": return_date,
+            "status": status, "notes": notes,
+        });
+
+        let _ = db_conn
+            .execute(Statement::from_sql_and_values(
+                be,
+                "INSERT OR IGNORE INTO operation_log (entity_type, entity_id, operation, payload, source, status, created_at) VALUES ('loan', $1, 'INSERT', $2, 'local', 'applied', $3)",
+                [id.into(), payload.to_string().into(), now.clone().into()],
+            ))
+            .await;
+        count += 1;
+    }
+
+    // Backfill collections (string UUID IDs)
+    let collections = db_conn
+        .query_all(Statement::from_string(
+            be,
+            "SELECT id, name, description, source FROM collections".to_owned(),
+        ))
+        .await
+        .unwrap_or_default();
+
+    for row in &collections {
+        let str_id: String = row.try_get("", "id").unwrap_or_default();
+        let name: String = row.try_get("", "name").unwrap_or_default();
+        let description: Option<String> = row.try_get("", "description").ok();
+        let source: String = row.try_get("", "source").unwrap_or("user".to_string());
+        let payload = serde_json::json!({
+            "_str_id": str_id, "name": name, "description": description, "source": source,
+        });
+
+        // entity_id=0 for string-keyed entities; _str_id in payload carries the real ID
+        let _ = db_conn
+            .execute(Statement::from_sql_and_values(
+                be,
+                "INSERT OR IGNORE INTO operation_log (entity_type, entity_id, operation, payload, source, status, created_at) VALUES ('collection', 0, 'INSERT', $1, 'local', 'applied', $2)",
+                [payload.to_string().into(), now.clone().into()],
+            ))
+            .await;
+        count += 1;
+    }
+
+    // Backfill collection_books junctions
+    let col_books = db_conn
+        .query_all(Statement::from_string(
+            be,
+            "SELECT collection_id, book_id FROM collection_books".to_owned(),
+        ))
+        .await
+        .unwrap_or_default();
+
+    for row in &col_books {
+        let collection_id: String = row.try_get("", "collection_id").unwrap_or_default();
+        let book_id: i32 = row.try_get("", "book_id").unwrap_or(0);
+        let payload = serde_json::json!({
+            "_str_id": collection_id, "book_id": book_id,
+        });
+
+        let _ = db_conn
+            .execute(Statement::from_sql_and_values(
+                be,
+                "INSERT OR IGNORE INTO operation_log (entity_type, entity_id, operation, payload, source, status, created_at) VALUES ('collection_book', $1, 'INSERT', $2, 'local', 'applied', $3)",
+                [book_id.into(), payload.to_string().into(), now.clone().into()],
+            ))
+            .await;
+        count += 1;
+    }
+
+    // Backfill book_notes
+    let notes = db_conn
+        .query_all(Statement::from_string(
+            be,
+            "SELECT id, book_id, content, page FROM book_notes".to_owned(),
+        ))
+        .await
+        .unwrap_or_default();
+
+    for row in &notes {
+        let id: i32 = row.try_get("", "id").unwrap_or(0);
+        let book_id: i32 = row.try_get("", "book_id").unwrap_or(0);
+        let content: String = row.try_get("", "content").unwrap_or_default();
+        let page: Option<i32> = row.try_get("", "page").ok();
+        let payload = serde_json::json!({
+            "book_id": book_id, "content": content, "page": page,
+        });
+
+        let _ = db_conn
+            .execute(Statement::from_sql_and_values(
+                be,
+                "INSERT OR IGNORE INTO operation_log (entity_type, entity_id, operation, payload, source, status, created_at) VALUES ('book_note', $1, 'INSERT', $2, 'local', 'applied', $3)",
+                [id.into(), payload.to_string().into(), now.clone().into()],
             ))
             .await;
         count += 1;

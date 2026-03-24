@@ -34,6 +34,8 @@ pub struct TagDto {
 pub struct CoverCandidate {
     pub url: String,
     pub source: String,
+    /// Edition language code (e.g. "fr", "en"), used for sorting by relevance.
+    pub language: Option<String>,
 }
 
 /// Error type for service operations
@@ -774,6 +776,7 @@ pub async fn search_all_covers_for_book(
             .map(|url| CoverCandidate {
                 url,
                 source: "Inventaire".to_string(),
+                language: None,
             })
     };
 
@@ -783,6 +786,7 @@ pub async fn search_all_covers_for_book(
             .map(|url| CoverCandidate {
                 url,
                 source: "OpenLibrary".to_string(),
+                language: None,
             })
     };
 
@@ -798,6 +802,7 @@ pub async fn search_all_covers_for_book(
             .map(|url| CoverCandidate {
                 url,
                 source: "BNF".to_string(),
+                language: None,
             })
     };
 
@@ -816,6 +821,7 @@ pub async fn search_all_covers_for_book(
             .map(|url| CoverCandidate {
                 url,
                 source: "Google Books".to_string(),
+                language: None,
             })
     };
 
@@ -835,13 +841,17 @@ pub async fn search_all_covers_for_book(
         candidates.push(c);
     }
 
-    candidates.dedup_by(|a, b| a.url == b.url);
+    {
+        let mut seen = std::collections::HashSet::new();
+        candidates.retain(|c| seen.insert(c.url.clone()));
+    }
     Ok(candidates)
 }
 
 /// Search ALL enabled sources by title in parallel, collecting all cover candidates.
 /// Used as fallback when ISBN-based search returns too few results.
 pub async fn search_all_covers_by_title(
+    db: &DatabaseConnection,
     title: &str,
     author: Option<&str>,
     enable_google: bool,
@@ -849,24 +859,53 @@ pub async fn search_all_covers_by_title(
 ) -> Result<Vec<CoverCandidate>, ServiceError> {
     let author_lower = author.filter(|a| !a.is_empty()).map(|a| a.to_lowercase());
 
+    // Get the book's language from DB (stored in source_data JSON) for sorting covers.
+    // Try "languages" array (OpenLibrary/BNF) then "language" string (Google Books).
+    // Fallback to "fr" (consistent with Inventaire search default).
+    let book_lang: String = BookEntity::find()
+        .filter(crate::models::book::Column::Title.eq(title))
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|b| {
+            b.source_data.as_ref().and_then(|sd| {
+                serde_json::from_str::<serde_json::Value>(sd)
+                    .ok()
+                    .and_then(|json| {
+                        json.get("languages")
+                            .and_then(|l| l.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .or_else(|| {
+                                json.get("language")
+                                    .and_then(|l| l.as_str())
+                                    .map(|s| s.to_string())
+                            })
+                    })
+            })
+        })
+        .unwrap_or_else(|| "fr".to_string());
+
     let inv_fut = {
         let title = title.to_string();
         let author_lower = author_lower.clone();
+        let author_for_query = author.filter(|a| !a.is_empty()).map(|s| s.to_string());
         async move {
             let mut results = Vec::new();
+            let search_query = match &author_for_query {
+                Some(a) => format!("{} {}", title, a),
+                None => title.clone(),
+            };
             if let Ok(items) =
-                crate::modules::integrations::inventaire::search_inventaire(&title).await
+                crate::modules::integrations::inventaire::search_inventaire(&search_query).await
             {
                 for item in &items {
-                    let Some(ref image_url) = item.image else {
-                        continue;
-                    };
+                    // Author filter: skip items that don't match the expected author
                     if let Some(ref al) = author_lower {
                         let authors_match = item.authors.as_ref().is_some_and(|authors| {
-                            authors.iter().any(|ra| {
-                                let ra_lower = ra.to_lowercase();
-                                ra_lower.contains(al) || al.contains(&ra_lower)
-                            })
+                            authors.iter().any(|ra| author_tokens_match(al, ra))
                         });
                         let desc_match = !authors_match
                             && item
@@ -877,10 +916,31 @@ pub async fn search_all_covers_by_title(
                             continue;
                         }
                     }
-                    results.push(CoverCandidate {
-                        url: image_url.clone(),
-                        source: "Inventaire".to_string(),
-                    });
+
+                    // Fetch edition covers (with language) for this matching work
+                    let edition_covers =
+                        crate::modules::integrations::inventaire::fetch_work_edition_covers(
+                            &item.uri,
+                        )
+                        .await;
+                    if edition_covers.is_empty() {
+                        // Fallback: work-level image when no editions found
+                        if let Some(ref image_url) = item.image {
+                            results.push(CoverCandidate {
+                                url: image_url.clone(),
+                                source: "Inventaire".to_string(),
+                                language: None,
+                            });
+                        }
+                    } else {
+                        for ec in edition_covers {
+                            results.push(CoverCandidate {
+                                url: ec.url,
+                                source: "Inventaire".to_string(),
+                                language: ec.lang,
+                            });
+                        }
+                    }
                 }
             }
             results
@@ -889,6 +949,7 @@ pub async fn search_all_covers_by_title(
 
     let gb_fut = {
         let title = title.to_string();
+        let author_orig = author.filter(|a| !a.is_empty()).map(|s| s.to_string());
         let author_lower = author_lower.clone();
         let gb_key = google_api_key.map(|s| s.to_string());
         async move {
@@ -896,9 +957,9 @@ pub async fn search_all_covers_by_title(
                 return Vec::new();
             }
             let query = crate::api::search::SearchQuery {
-                q: Some(title),
-                title: None,
-                author: None,
+                q: None,
+                title: Some(title),
+                author: author_orig,
                 publisher: None,
                 year_min: None,
                 year_max: None,
@@ -925,17 +986,24 @@ pub async fn search_all_covers_by_title(
                                 .and_then(|a| serde_json::from_value::<Vec<String>>(a.clone()).ok())
                         })
                         .unwrap_or_default();
-                    let match_found = source_authors.iter().any(|ra| {
-                        let ra_lower = ra.to_lowercase();
-                        ra_lower.contains(al) || al.contains(&ra_lower)
-                    });
+                    let match_found = source_authors.iter().any(|ra| author_tokens_match(al, ra));
                     if !match_found {
                         continue;
                     }
                 }
+                // Extract language from Google Books source_data
+                let gb_lang = book
+                    .source_data
+                    .as_ref()
+                    .and_then(|sd| serde_json::from_str::<serde_json::Value>(sd).ok())
+                    .and_then(|v| {
+                        v.get("language")
+                            .and_then(|l| l.as_str().map(|s| s.to_string()))
+                    });
                 results.push(CoverCandidate {
                     url: cover_url.clone(),
                     source: "Google Books".to_string(),
+                    language: gb_lang,
                 });
             }
             results
@@ -947,7 +1015,25 @@ pub async fn search_all_covers_by_title(
     let mut candidates = Vec::new();
     candidates.extend(inv_results);
     candidates.extend(gb_results);
-    candidates.dedup_by(|a, b| a.url == b.url);
+    {
+        let mut seen = std::collections::HashSet::new();
+        candidates.retain(|c| seen.insert(c.url.clone()));
+    }
+
+    // Sort by language match: matching lang first, unknown middle, non-matching last
+    let lang_base = book_lang
+        .split('-')
+        .next()
+        .unwrap_or(&book_lang)
+        .to_lowercase();
+    candidates.sort_by_key(|c| match &c.language {
+        Some(cl) => {
+            let cl_base = cl.split('-').next().unwrap_or(cl).to_lowercase();
+            if cl_base == lang_base { 0 } else { 2 }
+        }
+        None => 1,
+    });
+
     Ok(candidates)
 }
 
@@ -1118,4 +1204,74 @@ async fn create_or_link_author(
     }
 
     Ok(())
+}
+
+/// Token-based author name matching for cover search filtering.
+/// Splits the query author on whitespace/commas, then checks that every token
+/// appears somewhere in the candidate string (case-insensitive).
+/// Handles name order differences: "Jean-Paul Sartre" matches "Sartre, Jean-Paul".
+fn author_tokens_match(query_author: &str, candidate_author: &str) -> bool {
+    let q = query_author.to_lowercase();
+    let c = candidate_author.to_lowercase();
+    if q.is_empty() || c.is_empty() {
+        return false;
+    }
+    // Fast path: one contains the other entirely
+    if q.contains(&c) || c.contains(&q) {
+        return true;
+    }
+    // Token-based: split on whitespace and commas (hyphens preserved for compound names)
+    let q_tokens: Vec<&str> = q
+        .split(|ch: char| ch.is_whitespace() || ch == ',')
+        .filter(|s| !s.is_empty())
+        .collect();
+    if q_tokens.is_empty() {
+        return false;
+    }
+    q_tokens.iter().all(|t| c.contains(t))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_author_tokens_match_same_order() {
+        assert!(author_tokens_match("Jean-Paul Sartre", "Jean-Paul Sartre"));
+    }
+
+    #[test]
+    fn test_author_tokens_match_reversed_order() {
+        assert!(author_tokens_match("Jean-Paul Sartre", "Sartre, Jean-Paul"));
+    }
+
+    #[test]
+    fn test_author_tokens_match_case_insensitive() {
+        assert!(author_tokens_match("victor hugo", "Victor Hugo"));
+    }
+
+    #[test]
+    fn test_author_tokens_match_substring() {
+        assert!(author_tokens_match("Hugo", "Victor Hugo"));
+    }
+
+    #[test]
+    fn test_author_tokens_match_no_match() {
+        assert!(!author_tokens_match("Albert Camus", "Jean-Paul Sartre"));
+    }
+
+    #[test]
+    fn test_author_tokens_match_partial_token_no_false_positive() {
+        assert!(!author_tokens_match("Paul Martin", "Jean-Paul Sartre"));
+    }
+
+    #[test]
+    fn test_author_tokens_match_empty_query() {
+        assert!(!author_tokens_match("", "Victor Hugo"));
+    }
+
+    #[test]
+    fn test_author_tokens_match_accented_names() {
+        assert!(author_tokens_match("Emile Zola", "Zola, Emile"));
+    }
 }

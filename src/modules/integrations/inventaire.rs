@@ -705,6 +705,77 @@ fn get_entity_image_url(entity: &InventaireEntity) -> Option<String> {
         })
 }
 
+/// A cover image with optional language metadata from an Inventaire edition.
+pub struct EditionCover {
+    pub url: String,
+    pub lang: Option<String>,
+}
+
+/// Fetch cover URLs (with language) from all editions of a given work.
+/// Lighter than `enrich_search_results`: only fetches edition entities and extracts images.
+/// Used by cover search to get multiple cover variants for a single work.
+pub async fn fetch_work_edition_covers(work_uri: &str) -> Vec<EditionCover> {
+    let client = match reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let editions_url = format!(
+        "https://inventaire.io/api/entities?action=reverse-claims&property=wdt:P629&value={}",
+        urlencoding::encode(work_uri)
+    );
+
+    let uris: Vec<String> = match client.get(&editions_url).send().await {
+        Ok(resp) if resp.status().is_success() => resp
+            .text()
+            .await
+            .ok()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+            .and_then(|json| {
+                json.get("uris").and_then(|u| {
+                    u.as_array().map(|arr| {
+                        arr.iter()
+                            .take(20)
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                })
+            })
+            .unwrap_or_default(),
+        _ => return Vec::new(),
+    };
+
+    if uris.is_empty() {
+        return Vec::new();
+    }
+
+    let entities = match fetch_entities_batch(&client, &uris).await {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut covers: Vec<EditionCover> = entities
+        .values()
+        .filter_map(|e| {
+            let url = get_entity_image_url(e)?;
+            let lang = e
+                .claims
+                .language
+                .as_ref()
+                .and_then(|v| v.first())
+                .map(|uri| wikidata_language_to_code(uri));
+            Some(EditionCover { url, lang })
+        })
+        .collect();
+    covers.sort_by(|a, b| a.url.cmp(&b.url));
+    covers.dedup_by(|a, b| a.url == b.url);
+    covers
+}
+
 /// Lightweight cover-only lookup: fetch the edition entity and extract its image URL.
 pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
     let client = reqwest::Client::builder()
