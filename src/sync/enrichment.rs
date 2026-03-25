@@ -47,13 +47,32 @@ pub async fn enrich_op_payload(
 
 /// Enrich a book operation with fields needed by the processor on the receiver.
 async fn enrich_book(db: &DatabaseConnection, book_id: i32) -> Option<Value> {
+    use crate::models::author;
+    use sea_orm::ModelTrait;
+
     let model = book::Entity::find_by_id(book_id).one(db).await.ok()??;
+
+    // Fetch related author names so the receiver can recreate the junction
+    let author_names: Vec<String> = model
+        .find_related(author::Entity)
+        .all(db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+
     Some(json!({
         "title": model.title,
         "isbn": model.isbn,
         "cover_url": model.cover_url,
         "owned": model.owned,
         "reading_status": model.reading_status,
+        "summary": model.summary,
+        "publisher": model.publisher,
+        "publication_year": model.publication_year,
+        "page_count": model.page_count,
+        "authors": author_names,
     }))
 }
 

@@ -183,9 +183,18 @@ async fn apply_book_create(
         .to_string();
     let cover_url = payload["cover_url"].as_str().map(|s| s.to_string());
 
+    let summary = payload["summary"].as_str().map(|s| s.to_string());
+    let publisher = payload["publisher"].as_str().map(|s| s.to_string());
+    let publication_year = payload["publication_year"].as_i64().map(|v| v as i32);
+    let page_count = payload["page_count"].as_i64().map(|v| v as i32);
+
     let new_book = book::ActiveModel {
         title: Set(title),
         isbn: Set(isbn),
+        summary: Set(summary),
+        publisher: Set(publisher),
+        publication_year: Set(publication_year),
+        page_count: Set(page_count),
         owned: Set(owned),
         reading_status: Set(reading_status),
         cover_url: Set(cover_url),
@@ -194,7 +203,44 @@ async fn apply_book_create(
         ..Default::default()
     };
 
-    book::Entity::insert(new_book).exec(db).await?;
+    let insert_result = book::Entity::insert(new_book).exec(db).await?;
+    let local_book_id = insert_result.last_insert_id;
+
+    // Create author records and book_authors junction entries
+    if let Some(author_names) = payload["authors"].as_array() {
+        for name_val in author_names {
+            if let Some(name) = name_val.as_str() {
+                let name = name.trim();
+                if name.is_empty() {
+                    continue;
+                }
+                // Find or create the author
+                let author_id = match author::Entity::find()
+                    .filter(author::Column::Name.eq(name))
+                    .one(db as &DatabaseTransaction)
+                    .await?
+                {
+                    Some(existing) => existing.id,
+                    None => {
+                        let new_author = author::ActiveModel {
+                            name: Set(name.to_string()),
+                            ..Default::default()
+                        };
+                        let res = author::Entity::insert(new_author).exec(db).await?;
+                        res.last_insert_id
+                    }
+                };
+                // Insert junction (ignore if already exists)
+                let _ = db
+                    .execute(Statement::from_sql_and_values(
+                        db.get_database_backend(),
+                        "INSERT OR IGNORE INTO book_authors (book_id, author_id) VALUES ($1, $2)",
+                        [local_book_id.into(), author_id.into()],
+                    ))
+                    .await;
+            }
+        }
+    }
 
     Ok(())
 }
