@@ -220,6 +220,7 @@ async fn try_bnf_sparql(
                 publication_year: bnf_book.publication_year.map(|y| y.to_string()),
                 cover_url,
                 summary: bnf_book.description,
+                page_count: None,
             })
         }
         Ok(None) => {
@@ -261,6 +262,7 @@ async fn try_sudoc(
                 publication_year: sudoc_book.publication_year.map(|y| y.to_string()),
                 cover_url,
                 summary: None,
+                page_count: None,
             })
         }
         Err(e) => {
@@ -301,6 +303,7 @@ async fn try_bnf_sru(
                 publication_year: bnf_book.publication_year.map(|y| y.to_string()),
                 cover_url,
                 summary: bnf_book.description,
+                page_count: None,
             })
         }
         Ok(None) => {
@@ -344,6 +347,7 @@ async fn try_inventaire(
                 publication_year: inv_metadata.publication_year,
                 cover_url,
                 summary: inv_metadata.summary,
+                page_count: inv_metadata.page_count,
             })
         }
         Err(e) => {

@@ -107,6 +107,7 @@ pub struct FrbBook {
     pub price: Option<f64>, // Added for bookseller profile
     pub digital_formats: Option<Vec<String>>,
     pub private: bool, // Hidden from network peers
+    pub page_count: Option<i32>,
 }
 
 /// Convert domain Book to FFI-safe FrbBook
@@ -136,6 +137,7 @@ impl From<crate::models::Book> for FrbBook {
             price: book.price,
             digital_formats: book.digital_formats,
             private: book.private.unwrap_or(false),
+            page_count: book.page_count,
         }
     }
 }
@@ -502,6 +504,7 @@ impl From<FrbBook> for crate::models::Book {
             digital_formats: frb_book.digital_formats,
             available_copies: None,
             private: Some(frb_book.private),
+            page_count: frb_book.page_count,
         }
     }
 }
@@ -755,6 +758,7 @@ pub struct FrbBookMetadata {
     pub publication_year: Option<String>,
     pub cover_url: Option<String>,
     pub summary: Option<String>,
+    pub page_count: Option<u32>,
 }
 
 /// Look up book metadata by ISBN from external sources (BNF, Inventaire, OpenLibrary, etc.).
@@ -784,6 +788,7 @@ pub async fn lookup_book_metadata(
         publication_year: m.publication_year,
         cover_url: m.cover_url,
         summary: m.summary,
+        page_count: m.page_count,
     }))
 }
 

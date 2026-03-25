@@ -11,6 +11,7 @@ pub struct InventaireMetadata {
     pub cover_url: Option<String>,
     pub inventaire_uri: String,
     pub summary: Option<String>,
+    pub page_count: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -71,6 +72,8 @@ pub struct Claims {
     pub isbn_10: Option<Vec<String>>,
     #[serde(rename = "wdt:P407")] // Language of work (Wikidata URI like "wd:Q150" for French)
     pub language: Option<Vec<String>>,
+    #[serde(rename = "wdt:P1104")] // Number of pages
+    pub page_count: Option<Vec<String>>,
 }
 
 const USER_AGENT: &str = "BiblioGenius/1.0 (federico@bibliogenius.org)";
@@ -193,6 +196,13 @@ pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<InventaireMetadata,
         None
     };
 
+    let page_count = edition_entity
+        .claims
+        .page_count
+        .as_ref()
+        .and_then(|v| v.first())
+        .and_then(|s| s.parse::<u32>().ok());
+
     Ok(InventaireMetadata {
         title,
         authors,
@@ -205,6 +215,7 @@ pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<InventaireMetadata,
             work_entity_opt.as_ref(),
         ),
         inventaire_uri: format!("https://inventaire.io/entity/{}", edition_uri),
+        page_count,
     })
 }
 

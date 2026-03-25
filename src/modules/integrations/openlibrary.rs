@@ -10,6 +10,7 @@ pub struct BookMetadata {
     pub publication_year: Option<String>,
     pub cover_url: Option<String>,
     pub summary: Option<String>,
+    pub page_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -25,6 +26,7 @@ struct OpenLibraryBook {
     publishers: Option<Vec<OpenLibraryPublisher>>,
     publish_date: Option<String>,
     cover: Option<OpenLibraryCover>,
+    number_of_pages: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,6 +119,7 @@ pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
             publication_year: book.publish_date.clone(),
             cover_url,
             summary,
+            page_count: book.number_of_pages,
         })
     } else {
         Err("Book not found".to_string())
@@ -222,6 +225,7 @@ pub async fn search_books(query: &str) -> Result<Vec<BookMetadata>, String> {
                 publication_year: doc.first_publish_year.map(|y| y.to_string()),
                 cover_url,
                 summary: None,
+                page_count: None,
             }
         })
         .collect();

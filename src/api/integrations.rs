@@ -358,6 +358,7 @@ pub async fn search_external(
                             price: None, // No price from external search
                             digital_formats: None,
                             private: false,
+                            page_count: None,
                         };
                         books.push(book);
                     }
@@ -746,6 +747,7 @@ pub async fn search_unified(
                 digital_formats: None,
                 available_copies: None,
                 private: None,
+                page_count: None,
             };
             results.push(book);
         }
@@ -792,6 +794,7 @@ pub async fn search_unified(
                     digital_formats: None,
                     available_copies: None,
                     private: None,
+                    page_count: None,
                 };
                 results.push(book);
             }
@@ -879,6 +882,7 @@ pub async fn search_unified(
                     digital_formats: None,
                     available_copies: None,
                     private: None,
+                    page_count: None,
                 };
                 results.push(book);
             }

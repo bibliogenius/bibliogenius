@@ -20,6 +20,8 @@ struct GoogleVolumeInfo {
     published_date: Option<String>,
     description: Option<String>,
     language: Option<String>,
+    #[serde(rename = "pageCount")]
+    page_count: Option<u32>,
     #[serde(rename = "imageLinks")]
     image_links: Option<GoogleImageLinks>,
     #[serde(rename = "industryIdentifiers")]
@@ -125,6 +127,7 @@ pub async fn fetch_book_metadata(
             publication_year: info.published_date.clone(),
             cover_url,
             summary: info.description.clone(),
+            page_count: info.page_count,
         });
     }
 
@@ -318,6 +321,7 @@ pub async fn search_books(
                 price: None,
                 digital_formats: None,
                 private: false,
+                page_count: info.page_count.map(|p| p as i32),
             };
             books.push(book);
         }

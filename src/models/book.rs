@@ -49,6 +49,7 @@ pub struct Model {
     /// Only relevant for the "reader" profile (librarian/bookseller always share all books).
     #[sea_orm(default_value = "false")]
     pub private: bool,
+    pub page_count: Option<i32>,
 }
 
 // ... (Relation enum and Related impls omit for brevity) ...
@@ -130,6 +131,8 @@ pub struct Book {
     pub available_copies: Option<i32>, // Number of copies with status "available"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub private: Option<bool>, // When true, hidden from network peers
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_count: Option<i32>,
 }
 
 impl From<Model> for Book {
@@ -184,6 +187,7 @@ impl From<Model> for Book {
             digital_formats,
             available_copies: None, // Populated separately
             private: Some(model.private),
+            page_count: model.page_count,
         }
     }
 }
@@ -290,6 +294,7 @@ impl From<Book> for ActiveModel {
                 .map(|s| serde_json::to_string(&s).unwrap_or_default())
                 .map_or(NotSet, |s| Set(Some(s))),
             private: book.private.map_or(NotSet, Set),
+            page_count: book.page_count.map_or(NotSet, |p| Set(Some(p))),
         }
     }
 }
