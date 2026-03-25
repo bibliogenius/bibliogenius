@@ -486,7 +486,12 @@ impl From<FrbBook> for crate::models::Book {
             user_rating: frb_book.user_rating,
             shelf_position: frb_book.shelf_position,
             author: frb_book.author.clone(),
-            authors: frb_book.author.map(|a| vec![a]), // Convert single author to array
+            authors: frb_book.author.map(|a| {
+                a.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            }),
             cover_url: frb_book.cover_url,
             large_cover_url: frb_book.large_cover_url,
             // Default other fields

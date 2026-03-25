@@ -360,6 +360,10 @@ pub async fn update_book(
         book.private = Set(private_value);
     }
     book.price = Set(book_data.price);
+    book.page_count = Set(book_data.page_count);
+    book.digital_formats = Set(book_data
+        .digital_formats
+        .map(|f| serde_json::to_string(&f).unwrap_or_else(|_| "[]".to_string())));
 
     book.updated_at = Set(now.to_rfc3339());
 
