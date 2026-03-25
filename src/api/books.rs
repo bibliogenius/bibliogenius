@@ -303,10 +303,71 @@ pub async fn update_book(
 
     tracing::debug!("Updating book {} with data: {:?}", id, book_data);
 
+    // Extract author info before moving book_data to repository
+    let author_names: Vec<String> = if let Some(ref authors) = book_data.authors {
+        authors.clone()
+    } else if let Some(ref author) = book_data.author {
+        author
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // Update book via repository
     match state.book_repo.update(id, book_data).await {
         Ok(updated_book) => {
             let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
+
+            // Update authors in book_authors join table
+            {
+                use crate::models::author::{ActiveModel as AuthorActive, Entity as AuthorEntity};
+                use crate::models::book_authors::{
+                    ActiveModel as BookAuthorActive, Column as BAColumn, Entity as BookAuthorEntity,
+                };
+                use sea_orm::{ColumnTrait, QueryFilter};
+
+                // Remove existing author links
+                let _ = BookAuthorEntity::delete_many()
+                    .filter(BAColumn::BookId.eq(id))
+                    .exec(db)
+                    .await;
+
+                // Find or create each author and link to book
+                for author_name in &author_names {
+                    let author = match AuthorEntity::find()
+                        .filter(crate::models::author::Column::Name.eq(author_name))
+                        .one(db)
+                        .await
+                    {
+                        Ok(Some(existing)) => existing,
+                        _ => {
+                            let new_author = AuthorActive {
+                                name: Set(author_name.clone()),
+                                created_at: Set(now.to_rfc3339()),
+                                updated_at: Set(now.to_rfc3339()),
+                                ..Default::default()
+                            };
+                            match new_author.insert(db).await {
+                                Ok(created) => created,
+                                Err(e) => {
+                                    tracing::warn!("Failed to create author: {}", e);
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+
+                    let book_author = BookAuthorActive {
+                        book_id: Set(id),
+                        author_id: Set(author.id),
+                        ..Default::default()
+                    };
+                    let _ = book_author.insert(db).await;
+                }
+            }
 
             // Handle owned change: create or delete copies
             if new_owned != old_owned {
