@@ -229,7 +229,7 @@ async fn fetch_work_edition_extras(work_key: &str) -> Option<(String, Option<Str
 
 /// Fetch description from an OpenLibrary Work.
 /// Handles both plain string and `{type, value}` object formats.
-async fn fetch_work_description(work_key: &str) -> Option<String> {
+pub async fn fetch_work_description(work_key: &str) -> Option<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
@@ -359,6 +359,7 @@ pub async fn search_external(
                             digital_formats: None,
                             private: false,
                             page_count: None,
+                            loan_duration_days: None,
                         };
                         books.push(book);
                     }
@@ -599,7 +600,6 @@ pub async fn search_unified(
         // Task 1: Inventaire (wrapped in timeout to prevent blocking)
         async move {
             if enable_inventaire && !inv_query_str.trim().is_empty() {
-                // Use tokio timeout to prevent Inventaire from blocking indefinitely
                 match tokio::time::timeout(std::time::Duration::from_secs(8), async {
                     match crate::inventaire_client::search_inventaire_with_lang(
                         &inv_query_str,
@@ -608,7 +608,6 @@ pub async fn search_unified(
                     .await
                     {
                         Ok(inv_results) => {
-                            // Enrich results (also async)
                             match crate::inventaire_client::enrich_search_results(inv_results).await
                             {
                                 Ok(res) => Ok(res),
@@ -748,6 +747,7 @@ pub async fn search_unified(
                 available_copies: None,
                 private: None,
                 page_count: None,
+                loan_duration_days: None,
             };
             results.push(book);
         }
@@ -795,6 +795,7 @@ pub async fn search_unified(
                     available_copies: None,
                     private: None,
                     page_count: None,
+                    loan_duration_days: None,
                 };
                 results.push(book);
             }
@@ -883,6 +884,7 @@ pub async fn search_unified(
                     available_copies: None,
                     private: None,
                     page_count: None,
+                    loan_duration_days: None,
                 };
                 results.push(book);
             }
@@ -1003,13 +1005,8 @@ pub async fn search_unified(
                             }
                         }
 
-                        // Fetch work description if summary is still empty
-                        if is_openlibrary
-                            && dto.summary.is_none()
-                            && let Some(work_key) = json.get("key").and_then(|k| k.as_str())
-                        {
-                            dto.summary = fetch_work_description(work_key).await;
-                        }
+                        // Description is NOT fetched here -- it's deferred to
+                        // book_service::create_book to keep search fast.
                     }
 
                     // Set source based on the actual data

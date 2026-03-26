@@ -263,7 +263,22 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         ..Default::default()
     };
 
-    let model = new_book.insert(db).await?;
+    let mut model = new_book.insert(db).await?;
+
+    // Deferred enrichment: fetch OL description if summary is empty
+    if model.summary.is_none()
+        && let Some(ref sd) = model.source_data
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(sd)
+        && json.get("source").and_then(|s| s.as_str()) == Some("openlibrary")
+        && let Some(work_key) = json.get("key").and_then(|k| k.as_str())
+        && let Some(desc) = crate::api::integrations::fetch_work_description(work_key).await
+    {
+        let mut update: BookActiveModel = model.clone().into();
+        update.summary = Set(Some(desc));
+        if let Ok(updated) = update.update(db).await {
+            model = updated;
+        }
+    }
 
     // Handle author if provided
     if let Some(author_name) = book.author {

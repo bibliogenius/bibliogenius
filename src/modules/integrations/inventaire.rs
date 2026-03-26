@@ -1,6 +1,25 @@
 use futures::stream::{self, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+
+/// Deserialize a JSON array where elements may be strings OR numbers.
+/// Inventaire stores most claims as strings (URIs), but numeric claims
+/// like wdt:P1104 (page count) are returned as bare integers.
+fn deserialize_nums_as_strings<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt: Option<Vec<serde_json::Value>> = Option::deserialize(deserializer)?;
+    Ok(opt.map(|vec| {
+        vec.into_iter()
+            .filter_map(|v| match v {
+                serde_json::Value::String(s) => Some(s),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .collect()
+    }))
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InventaireMetadata {
@@ -72,7 +91,7 @@ pub struct Claims {
     pub isbn_10: Option<Vec<String>>,
     #[serde(rename = "wdt:P407")] // Language of work (Wikidata URI like "wd:Q150" for French)
     pub language: Option<Vec<String>>,
-    #[serde(rename = "wdt:P1104")] // Number of pages
+    #[serde(rename = "wdt:P1104", default, deserialize_with = "deserialize_nums_as_strings")]
     pub page_count: Option<Vec<String>>,
 }
 
@@ -305,7 +324,7 @@ struct InventaireSearchResponse {
     results: Vec<InventaireSearchResult>,
 }
 
-#[derive(Debug, Serialize, Deserialize)] // Added Serialize for re-use in API response if needed
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InventaireSearchResult {
     pub uri: String,
     pub label: String,
