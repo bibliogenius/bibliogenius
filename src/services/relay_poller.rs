@@ -11,7 +11,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, Query
 
 use tokio::sync::RwLock;
 
-use crate::api::e2ee::{build_known_peers, dispatch_clear_message};
+use crate::api::e2ee::{build_known_peers_with_devices, dispatch_clear_message};
 
 /// Cooldown tracker for relay-based peer views (keyed by peer ID).
 /// 15-minute cooldown per peer, same as the HTTP middleware.
@@ -214,16 +214,24 @@ pub async fn poll_once(state: &AppState) -> Result<(), String> {
         return Ok(());
     };
 
-    // 4c. Load all E2EE-capable peers (reload after raw processing, new peers may exist)
+    // 4c. Load all E2EE-capable peers AND linked devices
+    //     (reload after raw processing, new peers may exist)
     let peers = peer::Entity::find()
         .filter(peer::Column::KeyExchangeDone.eq(true))
         .all(db)
         .await
         .map_err(|e| format!("failed to load peers: {e}"))?;
 
-    let (known_peers, peer_models) = build_known_peers(&peers);
+    let linked_devices = crate::models::linked_device::Entity::find()
+        .all(db)
+        .await
+        .unwrap_or_default();
+
+    let (known_peers, peer_models) = build_known_peers_with_devices(&peers, &linked_devices);
     if known_peers.is_empty() && !envelopes.is_empty() {
-        tracing::warn!("Relay poller: No known E2EE peers, cannot process encrypted messages");
+        tracing::warn!(
+            "Relay poller: No known E2EE peers or linked devices, cannot process encrypted messages"
+        );
         return Ok(());
     }
 
