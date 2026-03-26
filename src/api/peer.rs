@@ -148,6 +148,22 @@ pub(crate) struct LoanAcceptResult {
     pub book_cover_url: Option<String>,
 }
 
+/// Resolve the effective loan duration (in days) for a given book.
+///
+/// Reads from `loan_settings` (global default + per-book override).
+/// Falls back to 21 days if the settings table is unreachable.
+async fn resolve_loan_duration_days(db: &DatabaseConnection, book_id: i32) -> i64 {
+    let repo = crate::infrastructure::SeaOrmLoanSettingsRepository::new(db.clone());
+    use crate::domain::LoanSettingsRepository;
+    match repo.get_effective_duration(book_id).await {
+        Ok(days) => days as i64,
+        Err(e) => {
+            tracing::warn!("Failed to read loan settings, using 21-day default: {e}");
+            21
+        }
+    }
+}
+
 /// Core acceptance logic shared by plaintext and E2EE auto-approve paths.
 ///
 /// Finds book/copy, creates contact/loan, updates copy status and request status.
@@ -227,7 +243,8 @@ pub(crate) async fn perform_loan_acceptance(
     let lib_id = crate::utils::library_helpers::resolve_library_id(db)
         .await
         .map_err(|e| format!("No library: {e}"))?;
-    let due = Utc::now() + chrono::Duration::days(14);
+    let duration_days = resolve_loan_duration_days(db, book.id).await;
+    let due = Utc::now() + chrono::Duration::days(duration_days);
     let loan = loan::ActiveModel {
         copy_id: Set(copy.id),
         contact_id: Set(contact.id),
@@ -5015,7 +5032,9 @@ pub async fn update_request_status(
                 },
             ),
             loan_date: Set(chrono::Utc::now().to_rfc3339()),
-            due_date: Set((chrono::Utc::now() + chrono::Duration::days(14)).to_rfc3339()), // 2 weeks default
+            due_date: Set((chrono::Utc::now()
+                + chrono::Duration::days(resolve_loan_duration_days(&db, book.id).await))
+            .to_rfc3339()),
             status: Set("active".to_string()),
             created_at: Set(chrono::Utc::now().to_rfc3339()),
             updated_at: Set(chrono::Utc::now().to_rfc3339()),
@@ -5051,9 +5070,10 @@ pub async fn update_request_status(
         let book_isbn = book.isbn.clone();
         let book_title = book.title.clone();
         let book_cover = book.cover_url.clone();
-        let due_date = (chrono::Utc::now() + chrono::Duration::days(14))
-            .format("%Y-%m-%d")
-            .to_string();
+        let due_date = (chrono::Utc::now()
+            + chrono::Duration::days(resolve_loan_duration_days(&db, book.id).await))
+        .format("%Y-%m-%d")
+        .to_string();
 
         // Get library name for lender identification
         let lender_name = match crate::models::library::Entity::find_by_id(1).one(&db).await {

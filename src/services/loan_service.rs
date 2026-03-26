@@ -325,7 +325,6 @@ pub async fn delete_closed_outgoing_requests(db: &DatabaseConnection) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::domain::DomainError;
     use crate::domain::loan_settings_repository::{LoanSettings, LoanSettingsRepository};
     use async_trait::async_trait;
