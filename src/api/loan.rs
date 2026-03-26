@@ -8,6 +8,7 @@ use sea_orm::*;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::infrastructure::AppState;
 use crate::models::book::Entity as Book;
 use crate::models::contact::Entity as Contact;
 use crate::models::copy::{self, Entity as Copy};
@@ -325,4 +326,72 @@ pub async fn return_loan(
         "message": "Loan returned successfully",
         "p2p_notified": true
     })))
+}
+
+// ── Loan Settings (Clean Architecture) ──────────────────────────────
+
+#[derive(Deserialize)]
+pub struct UpdateLoanSettingsPayload {
+    pub default_loan_duration_days: i32,
+    pub per_book_duration_enabled: bool,
+}
+
+pub async fn get_loan_settings(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let settings = state.loan_settings_repo.get_settings().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok(Json(json!({
+        "default_loan_duration_days": settings.default_loan_duration_days,
+        "per_book_duration_enabled": settings.per_book_duration_enabled,
+    })))
+}
+
+pub async fn update_loan_settings(
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateLoanSettingsPayload>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use crate::domain::LoanSettings;
+
+    let updated = state
+        .loan_settings_repo
+        .update_settings(LoanSettings {
+            default_loan_duration_days: payload.default_loan_duration_days,
+            per_book_duration_enabled: payload.per_book_duration_enabled,
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    Ok(Json(json!({
+        "default_loan_duration_days": updated.default_loan_duration_days,
+        "per_book_duration_enabled": updated.per_book_duration_enabled,
+    })))
+}
+
+pub async fn get_effective_loan_duration(
+    State(state): State<AppState>,
+    Path(book_id): Path<i32>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let days = state
+        .loan_settings_repo
+        .get_effective_duration(book_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    Ok(Json(json!({ "duration_days": days })))
 }

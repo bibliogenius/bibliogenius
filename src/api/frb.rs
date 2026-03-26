@@ -510,6 +510,7 @@ impl From<FrbBook> for crate::models::Book {
             available_copies: None,
             private: Some(frb_book.private),
             page_count: frb_book.page_count,
+            loan_duration_days: None,
         }
     }
 }
@@ -1369,6 +1370,85 @@ pub async fn return_loan(id: i32) -> Result<String, String> {
     }
 }
 
+// ============ Loan Settings API ============
+
+/// Loan settings for FFI
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbLoanSettings {
+    pub default_loan_duration_days: i32,
+    pub per_book_duration_enabled: bool,
+}
+
+/// Get the current loan settings
+pub async fn get_loan_settings() -> Result<FrbLoanSettings, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::infrastructure::SeaOrmLoanSettingsRepository::new(db.clone());
+    use crate::domain::LoanSettingsRepository;
+
+    let settings = repo.get_settings().await.map_err(|e| e.to_string())?;
+    Ok(FrbLoanSettings {
+        default_loan_duration_days: settings.default_loan_duration_days,
+        per_book_duration_enabled: settings.per_book_duration_enabled,
+    })
+}
+
+/// Update the global loan settings
+pub async fn update_loan_settings(
+    default_loan_duration_days: i32,
+    per_book_duration_enabled: bool,
+) -> Result<FrbLoanSettings, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::infrastructure::SeaOrmLoanSettingsRepository::new(db.clone());
+    use crate::domain::LoanSettingsRepository;
+
+    let updated = repo
+        .update_settings(crate::domain::LoanSettings {
+            default_loan_duration_days,
+            per_book_duration_enabled,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(FrbLoanSettings {
+        default_loan_duration_days: updated.default_loan_duration_days,
+        per_book_duration_enabled: updated.per_book_duration_enabled,
+    })
+}
+
+/// Get the effective loan duration for a specific book (in days).
+/// Returns the per-book override if enabled and set, otherwise the global default.
+pub async fn get_effective_loan_duration(book_id: i32) -> Result<i32, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::infrastructure::SeaOrmLoanSettingsRepository::new(db.clone());
+    use crate::domain::LoanSettingsRepository;
+
+    repo.get_effective_duration(book_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Get the per-book loan duration override (None = uses global default)
+pub async fn get_book_loan_duration(book_id: i32) -> Result<Option<i32>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::infrastructure::SeaOrmLoanSettingsRepository::new(db.clone());
+    use crate::domain::LoanSettingsRepository;
+
+    repo.get_book_loan_duration(book_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Set the per-book loan duration override (pass None to clear and use global default)
+pub async fn set_book_loan_duration(book_id: i32, days: Option<i32>) -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+    let repo = crate::infrastructure::SeaOrmLoanSettingsRepository::new(db.clone());
+    use crate::domain::LoanSettingsRepository;
+
+    repo.set_book_loan_duration(book_id, days)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ============ Reset API ============
 
 /// Reset the entire application - deletes all data from all tables
@@ -1388,8 +1468,8 @@ pub async fn reset_app() -> Result<String, String> {
 
     use crate::models::{
         author, book, book_authors, book_tags, collection, collection_book, contact, copy,
-        installation_profile, library, library_config, loan, operation_log, p2p_outgoing_request,
-        p2p_request, peer, peer_book, tag, user,
+        installation_profile, library, library_config, loan, notification, operation_log,
+        p2p_outgoing_request, p2p_request, peer, peer_book, tag, user,
     };
     use sea_orm::{ConnectionTrait, EntityTrait};
 
@@ -1419,6 +1499,7 @@ pub async fn reset_app() -> Result<String, String> {
     delete_all!(peer);
     delete_all!(contact);
 
+    delete_all!(notification);
     delete_all!(operation_log);
 
     delete_all!(library_config);

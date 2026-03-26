@@ -149,54 +149,62 @@ pub async fn log_remote_operation(
     // pending, pending_review, or applied. This prevents accumulation when
     // multiple syncs are triggered successively.
     //
-    // Exception for INSERT: if a local DELETE was applied AFTER the previous
+    // Exception 1 for INSERT: if a local DELETE was applied AFTER the previous
     // remote INSERT, allow re-insertion so the entity can be recreated.
+    //
+    // Exception 2: entities with entity_id=0 are string-keyed (collections,
+    // collection_book, etc.) - their identity is in the payload, not entity_id.
+    // Dedup by (entity_type, 0, operation) would incorrectly merge all of them.
+    // Skip dedup for these; the processor handles duplicates via INSERT OR IGNORE.
     let op_upper = operation.to_uppercase();
-    let already_exists = operation_log::Entity::find()
-        .filter(operation_log::Column::EntityType.eq(entity_type))
-        .filter(operation_log::Column::EntityId.eq(entity_id))
-        .filter(operation_log::Column::Operation.eq(operation))
-        .filter(operation_log::Column::Status.is_in(["pending", "pending_review", "applied"]))
-        .filter(operation_log::Column::Source.ne("local"))
-        .one(db)
-        .await?;
 
-    if let Some(existing) = already_exists {
-        // For INSERTs: allow re-creation if the entity was deleted locally since
-        if op_upper == "INSERT" {
-            let deleted_after = operation_log::Entity::find()
-                .filter(operation_log::Column::EntityType.eq(entity_type))
-                .filter(operation_log::Column::EntityId.eq(entity_id))
-                .filter(operation_log::Column::Operation.eq("DELETE"))
-                .filter(operation_log::Column::Source.eq("local"))
-                .filter(operation_log::Column::CreatedAt.gt(&existing.created_at))
-                .one(db)
-                .await?;
-            if deleted_after.is_some() {
-                tracing::info!(
-                    "Re-allowing remote INSERT after local DELETE: {} {}",
-                    entity_type,
-                    entity_id
-                );
-                // Fall through to insert a new pending operation
+    if entity_id != 0 {
+        let already_exists = operation_log::Entity::find()
+            .filter(operation_log::Column::EntityType.eq(entity_type))
+            .filter(operation_log::Column::EntityId.eq(entity_id))
+            .filter(operation_log::Column::Operation.eq(operation))
+            .filter(operation_log::Column::Status.is_in(["pending", "pending_review", "applied"]))
+            .filter(operation_log::Column::Source.ne("local"))
+            .one(db)
+            .await?;
+
+        if let Some(existing) = already_exists {
+            // For INSERTs: allow re-creation if the entity was deleted locally since
+            if op_upper == "INSERT" {
+                let deleted_after = operation_log::Entity::find()
+                    .filter(operation_log::Column::EntityType.eq(entity_type))
+                    .filter(operation_log::Column::EntityId.eq(entity_id))
+                    .filter(operation_log::Column::Operation.eq("DELETE"))
+                    .filter(operation_log::Column::Source.eq("local"))
+                    .filter(operation_log::Column::CreatedAt.gt(&existing.created_at))
+                    .one(db)
+                    .await?;
+                if deleted_after.is_some() {
+                    tracing::info!(
+                        "Re-allowing remote INSERT after local DELETE: {} {}",
+                        entity_type,
+                        entity_id
+                    );
+                    // Fall through to insert a new pending operation
+                } else {
+                    tracing::debug!(
+                        "Skipping duplicate remote INSERT: {} {} (existing #{})",
+                        entity_type,
+                        entity_id,
+                        existing.id
+                    );
+                    return Ok(existing.id);
+                }
             } else {
                 tracing::debug!(
-                    "Skipping duplicate remote INSERT: {} {} (existing #{})",
+                    "Skipping duplicate remote op: {} {} {} (existing #{})",
                     entity_type,
+                    operation,
                     entity_id,
                     existing.id
                 );
                 return Ok(existing.id);
             }
-        } else {
-            tracing::debug!(
-                "Skipping duplicate remote op: {} {} {} (existing #{})",
-                entity_type,
-                operation,
-                entity_id,
-                existing.id
-            );
-            return Ok(existing.id);
         }
     }
 

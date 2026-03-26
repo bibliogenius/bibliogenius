@@ -463,8 +463,8 @@ pub async fn reset_app(
 ) -> impl IntoResponse {
     use crate::models::{
         author, book, book_authors, book_tags, collection, collection_book, contact, copy,
-        installation_profile, library, library_config, loan, operation_log, p2p_outgoing_request,
-        p2p_request, peer, peer_book, peer_gamification_stats, tag, user,
+        installation_profile, library, library_config, loan, notification, operation_log,
+        p2p_outgoing_request, p2p_request, peer, peer_book, peer_gamification_stats, tag, user,
     };
 
     // Helper macro to delete all from a table
@@ -499,6 +499,7 @@ pub async fn reset_app(
     delete_all!(peer);
     delete_all!(contact);
 
+    delete_all!(notification);
     delete_all!(operation_log);
 
     delete_all!(library_config);

@@ -156,6 +156,7 @@ pub struct ImportBook {
     #[serde(default)]
     pub private: bool,
     pub page_count: Option<i32>,
+    pub loan_duration_days: Option<i32>,
     // Ignored fields from simplified format
     #[serde(default)]
     pub author: Option<String>,
@@ -297,6 +298,7 @@ pub async fn import_data(
                 digital_formats: Set(b.digital_formats),
                 private: Set(b.private),
                 page_count: Set(b.page_count),
+                loan_duration_days: Set(b.loan_duration_days),
             };
             if active.insert(&db).await.is_ok() {
                 books_count += 1;
@@ -589,6 +591,7 @@ pub async fn import_data_upsert(
                 digital_formats: Set(b.digital_formats),
                 private: Set(b.private),
                 page_count: Set(b.page_count),
+                loan_duration_days: Set(b.loan_duration_days),
             };
             let res = book::Entity::insert(active)
                 .on_conflict(

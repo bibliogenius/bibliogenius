@@ -322,6 +322,7 @@ pub async fn search_books(
                 digital_formats: None,
                 private: false,
                 page_count: info.page_count.map(|p| p as i32),
+                loan_duration_days: None,
             };
             books.push(book);
         }

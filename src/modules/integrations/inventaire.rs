@@ -91,7 +91,11 @@ pub struct Claims {
     pub isbn_10: Option<Vec<String>>,
     #[serde(rename = "wdt:P407")] // Language of work (Wikidata URI like "wd:Q150" for French)
     pub language: Option<Vec<String>>,
-    #[serde(rename = "wdt:P1104", default, deserialize_with = "deserialize_nums_as_strings")]
+    #[serde(
+        rename = "wdt:P1104",
+        default,
+        deserialize_with = "deserialize_nums_as_strings"
+    )]
     pub page_count: Option<Vec<String>>,
 }
 

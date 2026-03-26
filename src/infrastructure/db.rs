@@ -1536,6 +1536,40 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 062: Loan settings (customizable loan duration).
+    // - New table `loan_settings` with global default duration + per-book toggle.
+    // - New column `loan_duration_days` on `books` for per-book override.
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        CREATE TABLE IF NOT EXISTS loan_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            default_loan_duration_days INTEGER NOT NULL DEFAULT 21,
+            per_book_duration_enabled INTEGER NOT NULL DEFAULT 0
+        )
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    // Seed a single row if the table is empty
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        INSERT OR IGNORE INTO loan_settings (id, default_loan_duration_days, per_book_duration_enabled)
+        VALUES (1, 21, 0)
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE books ADD COLUMN loan_duration_days INTEGER".to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

@@ -322,3 +322,151 @@ pub async fn delete_closed_outgoing_requests(db: &DatabaseConnection) -> Result<
         .await?;
     Ok(result.rows_affected)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::DomainError;
+    use crate::domain::loan_settings_repository::{LoanSettings, LoanSettingsRepository};
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    /// In-memory mock for testing effective duration logic
+    struct MockLoanSettingsRepo {
+        settings: Mutex<LoanSettings>,
+        book_durations: Mutex<std::collections::HashMap<i32, Option<i32>>>,
+    }
+
+    impl MockLoanSettingsRepo {
+        fn new(default_days: i32, per_book_enabled: bool) -> Self {
+            Self {
+                settings: Mutex::new(LoanSettings {
+                    default_loan_duration_days: default_days,
+                    per_book_duration_enabled: per_book_enabled,
+                }),
+                book_durations: Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+
+        fn set_book_duration(&self, book_id: i32, days: Option<i32>) {
+            self.book_durations.lock().unwrap().insert(book_id, days);
+        }
+    }
+
+    #[async_trait]
+    impl LoanSettingsRepository for MockLoanSettingsRepo {
+        async fn get_settings(&self) -> Result<LoanSettings, DomainError> {
+            Ok(self.settings.lock().unwrap().clone())
+        }
+
+        async fn update_settings(
+            &self,
+            settings: LoanSettings,
+        ) -> Result<LoanSettings, DomainError> {
+            let clamped = LoanSettings {
+                default_loan_duration_days: settings.default_loan_duration_days.clamp(1, 365),
+                per_book_duration_enabled: settings.per_book_duration_enabled,
+            };
+            *self.settings.lock().unwrap() = clamped.clone();
+            Ok(clamped)
+        }
+
+        async fn get_book_loan_duration(&self, book_id: i32) -> Result<Option<i32>, DomainError> {
+            Ok(self
+                .book_durations
+                .lock()
+                .unwrap()
+                .get(&book_id)
+                .copied()
+                .flatten())
+        }
+
+        async fn set_book_loan_duration(
+            &self,
+            book_id: i32,
+            days: Option<i32>,
+        ) -> Result<(), DomainError> {
+            self.book_durations.lock().unwrap().insert(book_id, days);
+            Ok(())
+        }
+
+        async fn get_effective_duration(&self, book_id: i32) -> Result<i32, DomainError> {
+            let settings = self.get_settings().await?;
+            if settings.per_book_duration_enabled {
+                if let Ok(Some(days)) = self.get_book_loan_duration(book_id).await {
+                    return Ok(days);
+                }
+            }
+            Ok(settings.default_loan_duration_days)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_effective_duration_returns_global_default() {
+        let repo = MockLoanSettingsRepo::new(21, false);
+        let duration = repo.get_effective_duration(1).await.unwrap();
+        assert_eq!(duration, 21);
+    }
+
+    #[tokio::test]
+    async fn test_effective_duration_ignores_per_book_when_disabled() {
+        let repo = MockLoanSettingsRepo::new(21, false);
+        repo.set_book_duration(1, Some(7));
+        let duration = repo.get_effective_duration(1).await.unwrap();
+        assert_eq!(duration, 21); // per-book disabled, should use global
+    }
+
+    #[tokio::test]
+    async fn test_effective_duration_uses_per_book_when_enabled() {
+        let repo = MockLoanSettingsRepo::new(21, true);
+        repo.set_book_duration(1, Some(7));
+        let duration = repo.get_effective_duration(1).await.unwrap();
+        assert_eq!(duration, 7);
+    }
+
+    #[tokio::test]
+    async fn test_effective_duration_falls_back_to_global_when_no_per_book() {
+        let repo = MockLoanSettingsRepo::new(21, true);
+        // No per-book duration set for book 1
+        let duration = repo.get_effective_duration(1).await.unwrap();
+        assert_eq!(duration, 21);
+    }
+
+    #[tokio::test]
+    async fn test_update_settings_clamps_duration() {
+        let repo = MockLoanSettingsRepo::new(21, false);
+
+        let updated = repo
+            .update_settings(LoanSettings {
+                default_loan_duration_days: 0,
+                per_book_duration_enabled: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(updated.default_loan_duration_days, 1); // clamped to min
+
+        let updated = repo
+            .update_settings(LoanSettings {
+                default_loan_duration_days: 500,
+                per_book_duration_enabled: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(updated.default_loan_duration_days, 365); // clamped to max
+    }
+
+    #[tokio::test]
+    async fn test_set_and_clear_book_duration() {
+        let repo = MockLoanSettingsRepo::new(21, true);
+
+        repo.set_book_loan_duration(1, Some(14)).await.unwrap();
+        assert_eq!(repo.get_book_loan_duration(1).await.unwrap(), Some(14));
+
+        repo.set_book_loan_duration(1, None).await.unwrap();
+        assert_eq!(repo.get_book_loan_duration(1).await.unwrap(), None);
+
+        // Effective should fall back to global
+        let duration = repo.get_effective_duration(1).await.unwrap();
+        assert_eq!(duration, 21);
+    }
+}

@@ -263,6 +263,14 @@ fn build_routes() -> Router<AppState> {
         // P2P routes
         .route("/loans", get(loan::list_loans).post(loan::create_loan))
         .route("/loans/:id/return", put(loan::return_loan))
+        .route(
+            "/loan-settings",
+            get(loan::get_loan_settings).put(loan::update_loan_settings),
+        )
+        .route(
+            "/loan-settings/effective/:book_id",
+            get(loan::get_effective_loan_duration),
+        )
         // Sales (Bookseller profile)
         .route("/sales", get(sales::list_sales).post(sales::create_sale))
         .route("/sales/:id", axum::routing::delete(sales::cancel_sale))

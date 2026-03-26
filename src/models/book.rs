@@ -50,6 +50,7 @@ pub struct Model {
     #[sea_orm(default_value = "false")]
     pub private: bool,
     pub page_count: Option<i32>,
+    pub loan_duration_days: Option<i32>,
 }
 
 // ... (Relation enum and Related impls omit for brevity) ...
@@ -133,6 +134,8 @@ pub struct Book {
     pub private: Option<bool>, // When true, hidden from network peers
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loan_duration_days: Option<i32>,
 }
 
 impl From<Model> for Book {
@@ -188,6 +191,7 @@ impl From<Model> for Book {
             available_copies: None, // Populated separately
             private: Some(model.private),
             page_count: model.page_count,
+            loan_duration_days: model.loan_duration_days,
         }
     }
 }
@@ -295,6 +299,7 @@ impl From<Book> for ActiveModel {
                 .map_or(NotSet, |s| Set(Some(s))),
             private: book.private.map_or(NotSet, Set),
             page_count: book.page_count.map_or(NotSet, |p| Set(Some(p))),
+            loan_duration_days: book.loan_duration_days.map_or(NotSet, |d| Set(Some(d))),
         }
     }
 }

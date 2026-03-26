@@ -6,12 +6,13 @@ use tokio::sync::OnceCell;
 
 use crate::domain::{
     AuthorRepository, BookRepository, CollectionRepository, CopyRepository, GamificationRepository,
-    LinkedDeviceRepository, NotificationRepository,
+    LinkedDeviceRepository, LoanSettingsRepository, NotificationRepository,
 };
 use crate::infrastructure::nonce_store::SqliteNonceStore;
 use crate::infrastructure::{
     SeaOrmAuthorRepository, SeaOrmBookRepository, SeaOrmCollectionRepository, SeaOrmCopyRepository,
-    SeaOrmGamificationRepository, SeaOrmLinkedDeviceRepository, SeaOrmNotificationRepository,
+    SeaOrmGamificationRepository, SeaOrmLinkedDeviceRepository, SeaOrmLoanSettingsRepository,
+    SeaOrmNotificationRepository,
 };
 use crate::services::IdentityService;
 use crate::services::crypto_service::CryptoService;
@@ -46,6 +47,8 @@ pub struct AppState {
     pub linked_device_repo: Arc<dyn LinkedDeviceRepository>,
     /// Notification repository (activity feed)
     pub notification_repo: Arc<dyn NotificationRepository>,
+    /// Loan settings repository (loan duration configuration)
+    pub loan_settings_repo: Arc<dyn LoanSettingsRepository>,
     /// Identity service for E2EE key management
     pub identity_service: Arc<IdentityService>,
     /// Crypto service for E2EE seal/open (lazily initialized after identity is ready)
@@ -80,6 +83,7 @@ impl AppState {
         let gamification_repo = Arc::new(SeaOrmGamificationRepository::new(db.clone()));
         let linked_device_repo = Arc::new(SeaOrmLinkedDeviceRepository::new(db.clone()));
         let notification_repo = Arc::new(SeaOrmNotificationRepository::new(db.clone()));
+        let loan_settings_repo = Arc::new(SeaOrmLoanSettingsRepository::new(db.clone()));
 
         // Reuse the FFI-initialized pairing service so code generation
         // and HTTP acceptance share the same in-memory offer store.
@@ -107,6 +111,7 @@ impl AppState {
             gamification_repo,
             linked_device_repo,
             notification_repo,
+            loan_settings_repo,
             identity_service,
             crypto_service: Arc::new(OnceCell::new()),
             device_pairing,
