@@ -812,15 +812,16 @@ pub async fn search_bnf_sru(
         buf.clear();
     }
 
-    // Validate pending cover URLs in parallel (catalogue.bnf.fr often returns 500)
-    let validated_books: Vec<BnfBook> =
-        futures::future::join_all(books.into_iter().map(|(mut b, pending_cover)| async move {
-            if let Some(url) = pending_cover {
-                b.cover_url = validate_bnf_cover_url(&url).await;
-            }
+    // Set pending cover URLs directly without validation to avoid burning
+    // the search time budget on HEAD requests to catalogue.bnf.fr (which often
+    // returns 500). Cover validation is deferred to book creation/display.
+    let validated_books: Vec<BnfBook> = books
+        .into_iter()
+        .map(|(mut b, pending_cover)| {
+            b.cover_url = pending_cover;
             b
-        }))
-        .await;
+        })
+        .collect();
 
     // Store in cache
     if let Ok(mut cache) = BNF_SRU_CACHE.try_lock() {

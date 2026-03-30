@@ -271,7 +271,7 @@ pub async fn search_external(
     if enable_openlibrary {
         // Add timeout to prevent hanging when OpenLibrary is down
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(12))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -305,7 +305,7 @@ pub async fn search_external(
             20
         };
         let url = format!(
-            "https://openlibrary.org/search.json?q={}&limit={}",
+            "https://openlibrary.org/search.json?q={}&limit={}&fields=title,author_name,first_publish_year,cover_i,key,publisher,isbn,edition_key,edition_count,language",
             urlencoding::encode(&q_terms.join(" ")),
             limit_val
         );
@@ -477,7 +477,7 @@ pub async fn search_unified(
     };
 
     let is_autocomplete = params.autocomplete.unwrap_or(false);
-    let mut search_timeout = std::time::Duration::from_secs(8);
+    let mut search_timeout = std::time::Duration::from_secs(12);
 
     // Separate BNF flags: SPARQL (slow) vs SRU (fast, better metadata)
     let mut enable_bnf_sparql = enable_bnf;
@@ -1378,10 +1378,12 @@ fn calculate_relevance(
     // When reading languages are configured, book language is a strong relevance signal.
     // A matching language gets a significant boost; non-matching gets a penalty
     // (reduced for widely-published classics so they still appear, just lower).
+    let mut lang_already_matched = false;
     if !user_langs.is_empty() {
         if let Some(ref lang) = book.language {
             if lang_matches_any(lang, user_langs) {
                 score += 80;
+                lang_already_matched = true;
             } else {
                 // Penalty for non-matching language, reduced for widely-published books
                 let penalty = if edition_count > 20 { -15 } else { -50 };
@@ -1393,7 +1395,9 @@ fn calculate_relevance(
         }
 
         // Check source_data for additional language signals
-        if let Some(source_data_str) = &book.source_data
+        // Only apply if book.language didn't already match (avoid double-counting)
+        if !lang_already_matched
+            && let Some(source_data_str) = &book.source_data
             && let Ok(json) = serde_json::from_str::<serde_json::Value>(source_data_str)
             && let Some(languages) = json.get("languages").and_then(|l| l.as_array())
         {
@@ -1415,14 +1419,14 @@ fn calculate_relevance(
     }
 
     // Source boost for French users: BNF (national library)
-    // Minor signal - metadata quality, not relevance
+    // Minor signal - metadata quality, not relevance (must not override notoriety)
     if user_langs.iter().any(|l| {
         let b = base_lang(l);
         b == "fr" || b == "fra" || b == "fre"
     }) && let Some(source) = &book.source
         && source == "BNF"
     {
-        score += 20;
+        score += 5;
     }
 
     // --- Author Match (exact > contains > fuzzy) ---
