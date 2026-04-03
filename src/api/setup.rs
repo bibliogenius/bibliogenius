@@ -284,6 +284,9 @@ pub struct ConfigResponse {
     /// Write token for peers to deposit relay messages
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_write_token: Option<String>,
+    /// JSON avatar configuration for this library's profile
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_config: Option<serde_json::Value>,
 }
 
 pub async fn get_config(State(state): State<crate::infrastructure::AppState>) -> impl IntoResponse {
@@ -302,16 +305,26 @@ pub async fn get_config(State(state): State<crate::infrastructure::AppState>) ->
         .ok()
         .flatten();
 
-    let (profile_type, enabled_modules, theme) = match &profile {
+    let (profile_type, enabled_modules, theme, avatar_config) = match &profile {
         Some(p) => {
             let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
+            let avatar: Option<serde_json::Value> = p
+                .avatar_config
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
             (
                 p.profile_type.clone(),
                 modules,
                 p.theme.clone().unwrap_or_else(|| "default".to_string()),
+                avatar,
             )
         }
-        None => ("individual".to_string(), vec![], "default".to_string()),
+        None => (
+            "individual".to_string(),
+            vec![],
+            "default".to_string(),
+            None,
+        ),
     };
 
     // Check if library owner allows caching (opt-in, default false for privacy)
@@ -378,6 +391,7 @@ pub async fn get_config(State(state): State<crate::infrastructure::AppState>) ->
             relay_url: relay_config.as_ref().map(|r| r.relay_url.clone()),
             mailbox_id: relay_config.as_ref().map(|r| r.mailbox_uuid.clone()),
             relay_write_token: relay_config.as_ref().map(|r| r.write_token.clone()),
+            avatar_config,
         }),
     )
         .into_response()

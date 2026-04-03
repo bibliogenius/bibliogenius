@@ -1100,6 +1100,7 @@ pub async fn connect(
         relay_url: Option<String>,
         mailbox_id: Option<String>,
         relay_write_token: Option<String>,
+        avatar_config: Option<String>,
     }
 
     let (remote_data, remote_reachable) = if is_relay_only {
@@ -1115,6 +1116,7 @@ pub async fn connect(
                 relay_url: None,
                 mailbox_id: None,
                 relay_write_token: None,
+                avatar_config: None,
             },
             false,
         )
@@ -1131,6 +1133,9 @@ pub async fn connect(
                             } else {
                                 (None, None)
                             };
+                            let avatar = config
+                                .avatar_config
+                                .map(|v| serde_json::to_string(&v).unwrap_or_default());
                             (
                                 RemoteConfigData {
                                     latitude: lat,
@@ -1142,6 +1147,7 @@ pub async fn connect(
                                     relay_url: config.relay_url,
                                     mailbox_id: config.mailbox_id,
                                     relay_write_token: config.relay_write_token,
+                                    avatar_config: avatar,
                                 },
                                 true,
                             )
@@ -1157,6 +1163,7 @@ pub async fn connect(
                                 relay_url: None,
                                 mailbox_id: None,
                                 relay_write_token: None,
+                                avatar_config: None,
                             },
                             false,
                         ),
@@ -1173,6 +1180,7 @@ pub async fn connect(
                             relay_url: None,
                             mailbox_id: None,
                             relay_write_token: None,
+                            avatar_config: None,
                         },
                         false,
                     )
@@ -1189,6 +1197,7 @@ pub async fn connect(
                     relay_url: None,
                     mailbox_id: None,
                     relay_write_token: None,
+                    avatar_config: None,
                 },
                 false,
             ),
@@ -1280,6 +1289,10 @@ pub async fn connect(
             active.updated_at = Set(chrono::Utc::now().to_rfc3339());
             active.auto_approve = Set(true);
             active.connection_status = Set("accepted".to_string());
+            // Store avatar config if provided
+            if remote_data.avatar_config.is_some() {
+                active.avatar_config = Set(remote_data.avatar_config.clone());
+            }
             // Store relay info if provided
             if relay_url.is_some() {
                 active.relay_url = Set(relay_url);
@@ -1334,6 +1347,7 @@ pub async fn connect(
                 relay_url: Set(relay_url),
                 mailbox_id: Set(mailbox_id),
                 relay_write_token: Set(relay_write_token),
+                avatar_config: Set(remote_data.avatar_config),
                 last_seen: Set(Some(chrono::Utc::now().to_rfc3339())),
                 created_at: Set(chrono::Utc::now().to_rfc3339()),
                 updated_at: Set(chrono::Utc::now().to_rfc3339()),
@@ -1550,20 +1564,30 @@ async fn sync_peer_internal(
         .as_ref()
         .map(|c| c.enabled_modules.contains(&"sliding_puzzle".to_string()));
 
-    // Extract updated name from peer config (if changed)
+    // Extract updated name and avatar from peer config (single DB read)
     let peer_library_name = peer_config.as_ref().map(|c| c.library_name.clone());
-    let updated_name = if let Some(config) = &peer_config {
+    let (updated_name, updated_avatar) = if let Some(config) = &peer_config {
         if let Ok(Some(p)) = peer::Entity::find_by_id(peer_id).one(db).await {
-            if p.name != config.library_name {
+            let name = if p.name != config.library_name {
                 Some(config.library_name.clone())
             } else {
                 None
-            }
+            };
+            let avatar_json = config
+                .avatar_config
+                .as_ref()
+                .map(|v| serde_json::to_string(v).unwrap_or_default());
+            let avatar = if avatar_json != p.avatar_config {
+                avatar_json
+            } else {
+                None
+            };
+            (name, avatar)
         } else {
-            None
+            (None, None)
         }
     } else {
-        None
+        (None, None)
     };
 
     // Resolve peer display name for memory score upsert
@@ -1610,6 +1634,9 @@ async fn sync_peer_internal(
             if let Some(ref new_name) = updated_name {
                 active_peer.name = Set(new_name.clone());
                 tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
+            }
+            if let Some(ref avatar) = updated_avatar {
+                active_peer.avatar_config = Set(Some(avatar.clone()));
             }
             active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
             active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
@@ -1679,6 +1706,9 @@ async fn sync_peer_internal(
         if let Some(ref new_name) = updated_name {
             active_peer.name = Set(new_name.clone());
             tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
+        }
+        if let Some(ref avatar) = updated_avatar {
+            active_peer.avatar_config = Set(Some(avatar.clone()));
         }
         active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
         active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
@@ -2074,6 +2104,7 @@ pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoRespon
                 "mailbox_id": p.mailbox_id,
                 "relay_write_token": p.relay_write_token,
                 "last_seen": p.last_seen,
+                "avatar_config": p.avatar_config,
                 "created_at": p.created_at,
                 "updated_at": p.updated_at,
             })
@@ -3438,6 +3469,19 @@ pub async fn sync_peer_by_url(
         .filter(|c| c.library_name != peer.name)
         .map(|c| c.library_name.clone());
 
+    // Extract updated avatar config from peer config (if changed)
+    let updated_avatar = peer_config.as_ref().and_then(|c| {
+        let new_json = c
+            .avatar_config
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        if new_json != peer.avatar_config {
+            new_json
+        } else {
+            None
+        }
+    });
+
     // Refresh relay credentials from peer config if they changed
     if let Some(ref config) = peer_config {
         let new_relay = (
@@ -3511,6 +3555,9 @@ pub async fn sync_peer_by_url(
         if let Some(ref new_name) = updated_name {
             active_peer.name = Set(new_name.clone());
             tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
+        }
+        if let Some(ref avatar) = updated_avatar {
+            active_peer.avatar_config = Set(Some(avatar.clone()));
         }
         active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
         active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
@@ -3618,6 +3665,9 @@ pub async fn sync_peer_by_url(
     if let Some(ref new_name) = updated_name {
         active_peer.name = Set(new_name.clone());
         tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
+    }
+    if let Some(ref avatar) = updated_avatar {
+        active_peer.avatar_config = Set(Some(avatar.clone()));
     }
     active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
     active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());

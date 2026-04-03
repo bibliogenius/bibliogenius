@@ -37,6 +37,8 @@ pub struct Model {
     pub catalog_hash: Option<String>,
     /// ISO 8601 timestamp of last catalog sync (ADR-012)
     pub last_catalog_sync: Option<String>,
+    /// JSON avatar configuration from the remote peer's profile
+    pub avatar_config: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

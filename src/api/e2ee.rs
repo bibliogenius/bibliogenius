@@ -200,6 +200,7 @@ pub fn build_known_peers_with_devices(
             auto_approve: false,
             connection_status: "accepted".to_string(),
             last_seen: d.last_synced.clone(),
+            avatar_config: None,
             catalog_hash: None,
             last_catalog_sync: None,
             created_at: d.created_at.clone(),

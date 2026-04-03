@@ -444,6 +444,7 @@ pub async fn import_data(
                 auto_approve: Set(p.auto_approve),
                 connection_status: Set("pending".to_string()),
                 last_seen: Set(None),
+                avatar_config: Set(None),
                 catalog_hash: Set(None),
                 last_catalog_sync: Set(None),
                 created_at: Set(p.created_at),
