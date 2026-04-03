@@ -3475,6 +3475,12 @@ pub async fn sync_peer_by_url(
             .avatar_config
             .as_ref()
             .map(|v| serde_json::to_string(v).unwrap_or_default());
+        tracing::info!(
+            "Sync avatar check for peer {}: remote={:?}, stored={:?}",
+            peer.name,
+            new_json.as_deref().map(|s| &s[..s.len().min(50)]),
+            peer.avatar_config.as_deref().map(|s| &s[..s.len().min(50)]),
+        );
         if new_json != peer.avatar_config {
             new_json
         } else {

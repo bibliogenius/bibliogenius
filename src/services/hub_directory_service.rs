@@ -97,6 +97,9 @@ pub struct HubProfile {
     pub relay_mailbox_id: Option<String>,
     #[serde(default)]
     pub relay_write_token: Option<String>,
+    /// JSON avatar configuration (DiceBear style + seed + customisation).
+    #[serde(default)]
+    pub avatar_config: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -178,6 +181,7 @@ pub struct RegisterParams {
     pub relay_url: Option<String>,
     pub relay_mailbox_id: Option<String>,
     pub relay_write_token: Option<String>,
+    pub avatar_config: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +387,11 @@ impl HubDirectoryService {
         }
         if let Some(ref wt) = params.relay_write_token {
             body["relay_write_token"] = serde_json::Value::String(wt.clone());
+        }
+        if let Some(ref ac) = params.avatar_config
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(ac)
+        {
+            body["avatar_config"] = val;
         }
 
         let mut req = self
