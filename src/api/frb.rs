@@ -3829,6 +3829,29 @@ pub async fn hub_directory_import_write_token(
         .map_err(|e| e.to_string())
 }
 
+/// Returns the locally stored recovery code for display in settings.
+/// Returns None if not yet registered or if registration predates recovery codes.
+pub async fn hub_directory_get_recovery_code() -> Result<Option<String>, String> {
+    let db = hub_db()?;
+    HubDirectoryService::get_recovery_code(db)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Recovers a hub profile using a one-time recovery code.
+/// On success: stores the new write_token + recovery_code locally and returns the config.
+pub async fn hub_directory_recover(
+    node_id: String,
+    recovery_code: String,
+) -> Result<FrbDirectoryConfig, String> {
+    let db = hub_db()?;
+    hub_directory_svc()
+        .recover(db, &node_id, &recovery_code)
+        .await
+        .map(FrbDirectoryConfig::from)
+        .map_err(|e| e.to_string())
+}
+
 /// Registers with the hub directory (first call) or updates the profile.
 /// On first registration, the write_token is persisted automatically.
 pub async fn hub_directory_register(

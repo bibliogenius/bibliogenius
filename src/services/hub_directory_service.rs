@@ -100,6 +100,9 @@ pub struct HubProfile {
     /// JSON avatar configuration (DiceBear style + seed + customisation).
     #[serde(default)]
     pub avatar_config: Option<String>,
+    /// One-time recovery code (returned once on first registration and on recovery).
+    #[serde(default)]
+    pub recovery_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -196,6 +199,7 @@ pub struct DirectoryConfig {
     pub requires_approval: bool,
     pub accept_from: String,
     pub allow_borrowing: bool,
+    pub recovery_code: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +261,7 @@ impl HubDirectoryService {
             requires_approval: row.try_get::<i32>("", "requires_approval")? != 0,
             accept_from: row.try_get("", "accept_from")?,
             allow_borrowing: row.try_get::<i32>("", "allow_borrowing").unwrap_or(1) != 0,
+            recovery_code: row.try_get::<String>("", "recovery_code").ok(),
         }))
     }
 
@@ -270,8 +275,8 @@ impl HubDirectoryService {
             backend,
             format!(
                 "INSERT INTO hub_directory_config
-                     (id, node_id, write_token, is_listed, requires_approval, accept_from, allow_borrowing, created_at, updated_at)
-                 VALUES (1, '{node_id}', '{write_token}', {is_listed}, {requires_approval}, '{accept_from}', {allow_borrowing}, '{now}', '{now}')
+                     (id, node_id, write_token, is_listed, requires_approval, accept_from, allow_borrowing, recovery_code, created_at, updated_at)
+                 VALUES (1, '{node_id}', '{write_token}', {is_listed}, {requires_approval}, '{accept_from}', {allow_borrowing}, {recovery_code}, '{now}', '{now}')
                  ON CONFLICT(id) DO UPDATE SET
                      node_id           = excluded.node_id,
                      write_token       = excluded.write_token,
@@ -279,6 +284,7 @@ impl HubDirectoryService {
                      requires_approval = excluded.requires_approval,
                      accept_from       = excluded.accept_from,
                      allow_borrowing   = excluded.allow_borrowing,
+                     recovery_code     = COALESCE(excluded.recovery_code, hub_directory_config.recovery_code),
                      updated_at        = excluded.updated_at",
                 node_id          = config.node_id.replace('\'', "''"),
                 write_token      = config.write_token.replace('\'', "''"),
@@ -286,6 +292,9 @@ impl HubDirectoryService {
                 requires_approval = if config.requires_approval { 1 } else { 0 },
                 accept_from      = config.accept_from.replace('\'', "''"),
                 allow_borrowing  = if config.allow_borrowing { 1 } else { 0 },
+                recovery_code    = config.recovery_code.as_ref()
+                    .map(|c| format!("'{}'", c.replace('\'', "''")))
+                    .unwrap_or_else(|| "NULL".to_string()),
                 now              = now,
             ),
         ))
@@ -433,9 +442,87 @@ impl HubDirectoryService {
             requires_approval: params.requires_approval,
             accept_from: params.accept_from,
             allow_borrowing: params.allow_borrowing,
+            recovery_code: profile.recovery_code,
         };
 
         Self::save_config(db, &config).await?;
+        Ok(config)
+    }
+
+    /// Returns the locally stored recovery code, if any.
+    pub async fn get_recovery_code(
+        db: &DatabaseConnection,
+    ) -> Result<Option<String>, HubDirectoryError> {
+        let backend = db.get_database_backend();
+        let result = db
+            .query_one(Statement::from_string(
+                backend,
+                "SELECT recovery_code FROM hub_directory_config WHERE id = 1".to_owned(),
+            ))
+            .await?;
+        Ok(result.and_then(|row| row.try_get::<String>("", "recovery_code").ok()))
+    }
+
+    /// Recovers a hub profile using a one-time recovery code.
+    /// On success: stores the new write_token + recovery_code locally.
+    pub async fn recover(
+        &self,
+        db: &DatabaseConnection,
+        node_id: &str,
+        recovery_code: &str,
+    ) -> Result<DirectoryConfig, HubDirectoryError> {
+        let hub_url = Self::hub_base_url()?;
+
+        let body = serde_json::json!({
+            "node_id": node_id,
+            "recovery_code": recovery_code,
+        });
+
+        let response = self
+            .http_client
+            .post(format!("{hub_url}/api/directory/recover"))
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        let profile: HubProfile = response
+            .json()
+            .await
+            .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
+
+        let write_token = profile.write_token.ok_or_else(|| {
+            HubDirectoryError::Config("Hub did not return write_token on recovery".to_string())
+        })?;
+
+        // Read existing config to preserve local settings (is_listed, etc.)
+        let existing = Self::get_config(db).await?.unwrap_or(DirectoryConfig {
+            node_id: node_id.to_string(),
+            write_token: String::new(),
+            is_listed: false,
+            requires_approval: true,
+            accept_from: "everyone".to_string(),
+            allow_borrowing: true,
+            recovery_code: None,
+        });
+
+        let config = DirectoryConfig {
+            node_id: node_id.to_string(),
+            write_token,
+            is_listed: existing.is_listed,
+            requires_approval: existing.requires_approval,
+            accept_from: existing.accept_from,
+            allow_borrowing: existing.allow_borrowing,
+            recovery_code: profile.recovery_code,
+        };
+
+        Self::save_config(db, &config).await?;
+        tracing::info!("Hub: profile recovered via recovery code");
         Ok(config)
     }
 
