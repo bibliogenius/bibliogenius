@@ -383,10 +383,12 @@ async fn try_send_e2ee(
                 (&peer.relay_url, &peer.mailbox_id, &peer.relay_write_token)
             {
                 tracing::info!(
-                    "E2EE: Direct failed ({}), trying relay for '{}' to peer {}",
+                    "E2EE: Direct failed ({}), trying relay for '{}' to peer {} (mailbox={}, relay={})",
                     net_err,
                     message_type,
-                    peer.name
+                    peer.name,
+                    mailbox_id,
+                    relay_url
                 );
 
                 // For relay messages, attach reply_to fields from our relay config
@@ -441,8 +443,10 @@ async fn try_send_e2ee(
                         // Peer's mailbox expired/deleted on the hub.
                         // Try to refresh their relay credentials from /api/config.
                         tracing::warn!(
-                            "E2EE Relay: Peer {} mailbox not found ({}), attempting credential refresh",
+                            "E2EE Relay: Peer {} mailbox {} not found on {} ({}), attempting credential refresh",
                             peer.name,
+                            mailbox_id,
+                            relay_url,
                             body
                         );
                         if let Some(refreshed) =
@@ -475,6 +479,12 @@ async fn try_send_e2ee(
                                 }
                             }
                         } else {
+                            tracing::warn!(
+                                "E2EE Relay: Credential refresh returned nothing for peer {} (url={}, is_relay_only={})",
+                                peer.name,
+                                peer.url,
+                                peer.url.starts_with("relay://")
+                            );
                             if let Some(corr_id) = correlation_id_for_await {
                                 state.cancel_relay_request(&corr_id);
                             }
@@ -564,6 +574,13 @@ async fn try_send_e2ee(
                 }
             }
 
+            tracing::warn!(
+                "E2EE: Peer {} unreachable via LAN ({}) and has no relay credentials (relay_url={:?}, mailbox={:?})",
+                peer.name,
+                net_err,
+                peer.relay_url,
+                peer.mailbox_id
+            );
             Err(format!("E2EE send failed: network error: {net_err}"))
         }
         Err(e) => Err(format!("E2EE send failed: {e}")),
@@ -972,13 +989,31 @@ pub async fn relay_library_request(
     };
 
     // 3. Send via E2EE (direct or relay with reply-to)
+    tracing::info!(
+        "Relay library request: type='{}' peer='{}' (id={}) relay_mailbox={:?}",
+        req.request_type,
+        the_peer.name,
+        the_peer.id,
+        the_peer.mailbox_id
+    );
+
     match try_send_e2ee(&state, &the_peer, message_type, payload).await {
         Ok(Some(Some(response))) => {
             // Direct response (LAN path)
+            tracing::info!(
+                "Relay library request: '{}' for peer '{}' resolved via direct LAN",
+                req.request_type,
+                the_peer.name
+            );
             (StatusCode::OK, Json(response.payload)).into_response()
         }
         Ok(Some(None)) => {
             // Sent via relay (no immediate response)
+            tracing::info!(
+                "Relay library request: '{}' for peer '{}' sent via relay (pending)",
+                req.request_type,
+                the_peer.name
+            );
             (
                 StatusCode::ACCEPTED,
                 Json(json!({
@@ -990,17 +1025,50 @@ pub async fn relay_library_request(
         }
         Ok(None) => {
             // E2EE not available - no plaintext fallback for library sync
+            tracing::warn!(
+                "Relay library request: '{}' for peer '{}' failed - E2EE not available",
+                req.request_type,
+                the_peer.name
+            );
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "E2EE not available for this peer" })),
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e })),
-        )
-            .into_response(),
+        Err(e) if e.contains("peer unreachable for credential refresh")
+            || e.contains("failed after credential refresh") =>
+        {
+            // Peer's mailbox expired and we cannot refresh credentials.
+            // Return 502 so the client stops retrying (circuit breaker).
+            tracing::warn!(
+                "Relay library request: '{}' for peer '{}' - peer unreachable (502): {}",
+                req.request_type,
+                the_peer.name,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": "peer_unreachable",
+                    "message": e,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Relay library request: '{}' for peer '{}' failed (500): {}",
+                req.request_type,
+                the_peer.name,
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e })),
+            )
+                .into_response()
+        }
     }
 }
 
