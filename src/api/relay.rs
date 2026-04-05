@@ -150,15 +150,18 @@ pub async fn create_mailbox(
     };
 
     match mailbox.insert(db).await {
-        Ok(_) => (
-            StatusCode::CREATED,
-            Json(json!({
-                "uuid": uuid,
-                "read_token": read_token,
-                "write_token": write_token,
-            })),
-        )
-            .into_response(),
+        Ok(_) => {
+            tracing::info!("Relay: Created mailbox {uuid}");
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "uuid": uuid,
+                    "read_token": read_token,
+                    "write_token": write_token,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!("Relay: Failed to create mailbox: {e}");
             (
@@ -213,6 +216,7 @@ pub async fn deposit_message(
     };
 
     if mailbox.write_token != token {
+        tracing::warn!("Relay: Invalid write token for mailbox {uuid}");
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "Invalid write token" })),
@@ -239,6 +243,7 @@ pub async fn deposit_message(
         .unwrap_or(0);
 
     if count >= MAX_MESSAGES_PER_MAILBOX {
+        tracing::warn!("Relay: Mailbox {uuid} full ({count}/{MAX_MESSAGES_PER_MAILBOX})");
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({ "error": format!("Mailbox full ({MAX_MESSAGES_PER_MAILBOX} messages max)") })),
@@ -256,7 +261,15 @@ pub async fn deposit_message(
     };
 
     match msg.insert(db).await {
-        Ok(inserted) => (StatusCode::CREATED, Json(json!({ "id": inserted.id }))).into_response(),
+        Ok(inserted) => {
+            tracing::info!(
+                "Relay: Deposited message to mailbox {} ({} bytes, id={})",
+                inserted.mailbox_uuid,
+                body.len(),
+                inserted.id
+            );
+            (StatusCode::CREATED, Json(json!({ "id": inserted.id }))).into_response()
+        }
         Err(e) => {
             tracing::error!("Relay: Failed to deposit message: {e}");
             (
@@ -310,6 +323,7 @@ pub async fn collect_messages(
     };
 
     if mailbox.read_token != token {
+        tracing::warn!("Relay: Invalid read token for mailbox {uuid}");
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "Invalid read token" })),
@@ -345,6 +359,10 @@ pub async fn collect_messages(
     // 5. Probabilistic cleanup
     maybe_cleanup(db).await;
 
+    tracing::info!(
+        "Relay: Collected {} message(s) from mailbox {uuid}",
+        items.len()
+    );
     (StatusCode::OK, Json(json!({ "messages": items }))).into_response()
 }
 
@@ -407,7 +425,10 @@ pub async fn ack_message(
         Ok(Some(msg)) => {
             let active: relay_message::ActiveModel = msg.into();
             match active.delete(db).await {
-                Ok(_) => (StatusCode::OK, Json(json!({ "message": "Deleted" }))).into_response(),
+                Ok(_) => {
+                    tracing::debug!("Relay: Acked message {message_id} from mailbox {uuid}");
+                    (StatusCode::OK, Json(json!({ "message": "Deleted" }))).into_response()
+                }
                 Err(e) => {
                     tracing::error!("Relay: Failed to delete message: {e}");
                     (

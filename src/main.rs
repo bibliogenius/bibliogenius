@@ -73,10 +73,11 @@ fn get_port_file_path(profile: &str) -> PathBuf {
 #[tokio::main]
 async fn main() {
     // Initialize tracing
+    // Filter targets the lib crate name "rust_lib_app" (not the package name "bibliogenius")
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "bibliogenius=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "rust_lib_app=debug,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();

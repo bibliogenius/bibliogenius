@@ -208,9 +208,16 @@ impl RelayTransport {
         let status = response.status().as_u16();
         if status >= 400 {
             let body = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                "Relay: deposit_raw to mailbox {mailbox_uuid} failed: HTTP {status} {body}"
+            );
             return Err(E2eeTransportError::PeerError(status, body));
         }
 
+        tracing::info!(
+            "Relay: Deposited raw message to mailbox {mailbox_uuid} ({} bytes)",
+            body.len()
+        );
         Ok(())
     }
 
@@ -240,9 +247,13 @@ impl RelayTransport {
         let status = response.status().as_u16();
         if status >= 400 {
             let body = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                "Relay: ack message {message_id} from mailbox {mailbox_uuid} failed: HTTP {status} {body}"
+            );
             return Err(E2eeTransportError::PeerError(status, body));
         }
 
+        tracing::debug!("Relay: Acked message {message_id} from mailbox {mailbox_uuid}");
         Ok(())
     }
 

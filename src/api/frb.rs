@@ -150,17 +150,28 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
     // Install panic hook first thing to catch any panics
     install_panic_hook();
 
-    // Initialize tracing for FFI mode (makes Rust logs visible in stderr).
-    // Only runs once - subsequent calls are no-ops.
+    // Initialize tracing for FFI mode.
+    // Writes to /tmp/bibliogenius-rust.log (stderr is invisible in macOS FFI).
+    // Filter targets the lib crate name "rust_lib_app", not the package name.
     static TRACING_INIT: std::sync::Once = std::sync::Once::new();
     TRACING_INIT.call_once(|| {
-        let _ = tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "bibliogenius=info".into()),
-            )
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-            .try_init();
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/bibliogenius-rust.log")
+        {
+            let _ = tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "rust_lib_app=info".into()),
+                )
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(std::sync::Mutex::new(file))
+                        .with_ansi(false),
+                )
+                .try_init();
+        }
     });
 
     if DB.get().is_some() {

@@ -597,7 +597,7 @@ async fn try_send_e2ee(
 ///
 /// Returns `Some((relay_url, mailbox_id, write_token))` on success.
 /// Updates the peer record in the database.
-async fn refresh_peer_relay_credentials(
+pub async fn refresh_peer_relay_credentials(
     db: &DatabaseConnection,
     peer_model: &peer::Model,
 ) -> Option<(String, String, String)> {
@@ -605,8 +605,20 @@ async fn refresh_peer_relay_credentials(
         // Relay-only: query hub directory for updated credentials
         refresh_via_hub(db, peer_model).await?
     } else {
-        // LAN peer: direct HTTP fetch
-        refresh_via_lan(peer_model).await?
+        // LAN peer: try direct HTTP fetch first (fast, no hub dependency)
+        let lan_result = refresh_via_lan(peer_model).await;
+        if lan_result.is_some() {
+            lan_result?
+        } else if peer_model.library_uuid.is_some() {
+            // LAN unreachable -- fallback to hub directory if peer is registered
+            tracing::info!(
+                "Relay: LAN refresh failed for peer '{}', falling back to hub directory",
+                peer_model.name
+            );
+            refresh_via_hub(db, peer_model).await?
+        } else {
+            return None;
+        }
     };
 
     if relay_url.is_empty() || mailbox_id.is_empty() || write_token.is_empty() {
@@ -635,9 +647,29 @@ async fn refresh_peer_relay_credentials(
 async fn refresh_via_lan(peer_model: &peer::Model) -> Option<(String, String, String)> {
     let client = get_safe_client();
     let config_url = format!("{}/api/config", peer_model.url.trim_end_matches('/'));
+    tracing::debug!(
+        "Relay: LAN refresh attempt for peer '{}' at {}",
+        peer_model.name,
+        config_url
+    );
 
-    let response = client.get(&config_url).send().await.ok()?;
+    let response = match client.get(&config_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!(
+                "Relay: LAN refresh failed for peer '{}': {}",
+                peer_model.name,
+                e
+            );
+            return None;
+        }
+    };
     if !response.status().is_success() {
+        tracing::debug!(
+            "Relay: LAN refresh for peer '{}' returned HTTP {}",
+            peer_model.name,
+            response.status()
+        );
         return None;
     }
 
@@ -657,6 +689,11 @@ async fn refresh_via_hub(
     db: &DatabaseConnection,
     peer_model: &peer::Model,
 ) -> Option<(String, String, String)> {
+    tracing::info!(
+        "Relay: Hub refresh attempt for peer '{}' (node_id: {:?})",
+        peer_model.name,
+        peer_model.library_uuid
+    );
     let hub_url =
         crate::services::hub_directory_service::HubDirectoryService::hub_base_url().ok()?;
     let peer_node_id = peer_model.library_uuid.as_deref()?;
@@ -668,7 +705,7 @@ async fn refresh_via_hub(
         .flatten()?;
 
     let client = get_safe_client();
-    let url = format!("{hub_url}/api/directory/profile/{peer_node_id}");
+    let url = format!("{hub_url}/api/directory/{peer_node_id}");
     let response = client
         .get(&url)
         .header(
@@ -892,11 +929,47 @@ pub async fn get_relay_config_endpoint(
 }
 
 /// DELETE /api/peers/relay/config - Remove relay config (disconnect from hub).
+///
+/// Before deleting the local config, attempts to delete the mailbox on the hub
+/// so it does not linger as an orphan accepting stale deposits.
 pub async fn delete_relay_config_endpoint(
     State(state): State<crate::infrastructure::AppState>,
 ) -> impl IntoResponse {
     let db = state.db();
 
+    // 1. Read current config before deleting (need mailbox UUID + read_token for hub cleanup)
+    let config = crate::api::relay::get_my_relay_config(db).await;
+
+    // 2. Best-effort: delete the mailbox on the hub
+    if let Some(ref cfg) = config {
+        let url = format!("{}/api/relay/mailbox/{}", cfg.relay_url, cfg.mailbox_uuid);
+        let client = get_safe_client();
+        match client
+            .delete(&url)
+            .header("Authorization", format!("Bearer {}", cfg.read_token))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("Relay: Deleted mailbox {} on hub", cfg.mailbox_uuid);
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    "Relay: Hub mailbox delete returned {} for {}",
+                    resp.status(),
+                    cfg.mailbox_uuid
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Relay: Failed to delete mailbox {} on hub: {e}",
+                    cfg.mailbox_uuid
+                );
+            }
+        }
+    }
+
+    // 3. Delete local config
     use sea_orm::ConnectionTrait;
     match db
         .execute(sea_orm::Statement::from_string(
@@ -1036,8 +1109,9 @@ pub async fn relay_library_request(
             )
                 .into_response()
         }
-        Err(e) if e.contains("peer unreachable for credential refresh")
-            || e.contains("failed after credential refresh") =>
+        Err(e)
+            if e.contains("peer unreachable for credential refresh")
+                || e.contains("failed after credential refresh") =>
         {
             // Peer's mailbox expired and we cannot refresh credentials.
             // Return 502 so the client stops retrying (circuit breaker).
@@ -1921,6 +1995,15 @@ pub async fn receive_connection_request(
     State(db): State<DatabaseConnection>,
     Json(payload): Json<IncomingConnectionRequest>,
 ) -> impl IntoResponse {
+    tracing::info!(
+        "Peer: Received connection_request from '{}' (url='{}', e2ee={}, relay={}, library_uuid={:?})",
+        payload.name,
+        payload.url,
+        payload.ed25519_public_key.is_some() && payload.x25519_public_key.is_some(),
+        payload.relay_url.is_some(),
+        payload.library_uuid
+    );
+
     // Try forwarding to Hub (fire-and-forget for central directory).
     // Always continue to local handling regardless of hub result,
     // so the peer is created in our local SQLite and we return our E2EE keys.
@@ -2080,7 +2163,15 @@ pub async fn receive_connection_request(
             let my_relay = crate::api::relay::get_my_relay_config(&db).await;
 
             match new_peer.insert(&db).await {
-                Ok(_) => {
+                Ok(ref inserted) => {
+                    tracing::info!(
+                        "Peer: Created new peer '{}' (id={}, e2ee={}, relay={}, status={})",
+                        peer_name_for_notif,
+                        inserted.id,
+                        key_exchange_done,
+                        my_relay.is_some(),
+                        connection_status
+                    );
                     if connection_status == "pending" {
                         // Emit connection_request notification (needs user action)
                         crate::services::notification_service::emit(
