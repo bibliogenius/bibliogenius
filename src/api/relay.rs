@@ -151,7 +151,7 @@ pub async fn create_mailbox(
 
     match mailbox.insert(db).await {
         Ok(_) => {
-            tracing::info!("Relay: Created mailbox {uuid}");
+            tracing::info!("Relay: Created mailbox");
             (
                 StatusCode::CREATED,
                 Json(json!({
@@ -216,7 +216,7 @@ pub async fn deposit_message(
     };
 
     if mailbox.write_token != token {
-        tracing::warn!("Relay: Invalid write token for mailbox {uuid}");
+        tracing::warn!("Relay: Invalid write token for mailbox");
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "Invalid write token" })),
@@ -243,7 +243,7 @@ pub async fn deposit_message(
         .unwrap_or(0);
 
     if count >= MAX_MESSAGES_PER_MAILBOX {
-        tracing::warn!("Relay: Mailbox {uuid} full ({count}/{MAX_MESSAGES_PER_MAILBOX})");
+        tracing::warn!("Relay: Mailbox full ({count}/{MAX_MESSAGES_PER_MAILBOX})");
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({ "error": format!("Mailbox full ({MAX_MESSAGES_PER_MAILBOX} messages max)") })),
@@ -323,7 +323,7 @@ pub async fn collect_messages(
     };
 
     if mailbox.read_token != token {
-        tracing::warn!("Relay: Invalid read token for mailbox {uuid}");
+        tracing::warn!("Relay: Invalid read token for mailbox");
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "Invalid read token" })),

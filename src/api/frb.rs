@@ -150,15 +150,16 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
     // Install panic hook first thing to catch any panics
     install_panic_hook();
 
-    // Initialize tracing for FFI mode.
-    // Writes to /tmp/bibliogenius-rust.log (stderr is invisible in macOS FFI).
+    // Initialize tracing for FFI mode (debug builds only).
+    // Release builds produce no log file to avoid leaking sensitive data.
     // Filter targets the lib crate name "rust_lib_app", not the package name.
     static TRACING_INIT: std::sync::Once = std::sync::Once::new();
     TRACING_INIT.call_once(|| {
-        if let Ok(file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/bibliogenius-rust.log")
+        if cfg!(debug_assertions)
+            && let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/bibliogenius-rust.log")
         {
             let _ = tracing_subscriber::registry()
                 .with(
@@ -184,7 +185,7 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
     // can access the correct database path being used by the FFI instance.
     // TODO: Audit that the environment access only happens in single-threaded code.
     unsafe { std::env::set_var("DATABASE_URL", &db_url) };
-    tracing::info!("FFI: Set DATABASE_URL env var to: {}", db_url);
+    tracing::info!("FFI: DATABASE_URL configured");
 
     match crate::db::init_db(&db_url).await {
         Ok(conn) => match DB.set(conn) {

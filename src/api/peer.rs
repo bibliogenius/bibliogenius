@@ -383,12 +383,10 @@ async fn try_send_e2ee(
                 (&peer.relay_url, &peer.mailbox_id, &peer.relay_write_token)
             {
                 tracing::info!(
-                    "E2EE: Direct failed ({}), trying relay for '{}' to peer {} (mailbox={}, relay={})",
+                    "E2EE: Direct failed ({}), trying relay for '{}' to peer {}",
                     net_err,
                     message_type,
                     peer.name,
-                    mailbox_id,
-                    relay_url
                 );
 
                 // For relay messages, attach reply_to fields from our relay config
@@ -438,16 +436,13 @@ async fn try_send_e2ee(
                     Ok(()) => true,
                     Err(crate::services::e2ee_transport::E2eeTransportError::PeerError(
                         404,
-                        ref body,
+                        ref _body,
                     )) => {
                         // Peer's mailbox expired/deleted on the hub.
                         // Try to refresh their relay credentials from /api/config.
                         tracing::warn!(
-                            "E2EE Relay: Peer {} mailbox {} not found on {} ({}), attempting credential refresh",
+                            "E2EE Relay: Peer {} mailbox not found (404), attempting credential refresh",
                             peer.name,
-                            mailbox_id,
-                            relay_url,
-                            body
                         );
                         if let Some(refreshed) =
                             refresh_peer_relay_credentials(state.db(), peer).await
@@ -480,9 +475,8 @@ async fn try_send_e2ee(
                             }
                         } else {
                             tracing::warn!(
-                                "E2EE Relay: Credential refresh returned nothing for peer {} (url={}, is_relay_only={})",
+                                "E2EE Relay: Credential refresh returned nothing for peer {} (is_relay_only={})",
                                 peer.name,
-                                peer.url,
                                 peer.url.starts_with("relay://")
                             );
                             if let Some(corr_id) = correlation_id_for_await {
@@ -575,11 +569,9 @@ async fn try_send_e2ee(
             }
 
             tracing::warn!(
-                "E2EE: Peer {} unreachable via LAN ({}) and has no relay credentials (relay_url={:?}, mailbox={:?})",
+                "E2EE: Peer {} unreachable via LAN ({}) and has no relay credentials",
                 peer.name,
                 net_err,
-                peer.relay_url,
-                peer.mailbox_id
             );
             Err(format!("E2EE send failed: network error: {net_err}"))
         }
@@ -885,7 +877,7 @@ pub async fn setup_relay(
 
     match config.insert(db).await {
         Ok(_) => {
-            tracing::info!("Relay: Mailbox registered: {mailbox_uuid}");
+            tracing::info!("Relay: Mailbox registered");
             (
                 StatusCode::OK,
                 Json(json!({
@@ -951,20 +943,13 @@ pub async fn delete_relay_config_endpoint(
             .await
         {
             Ok(resp) if resp.status().is_success() => {
-                tracing::info!("Relay: Deleted mailbox {} on hub", cfg.mailbox_uuid);
+                tracing::info!("Relay: Deleted mailbox on hub");
             }
             Ok(resp) => {
-                tracing::warn!(
-                    "Relay: Hub mailbox delete returned {} for {}",
-                    resp.status(),
-                    cfg.mailbox_uuid
-                );
+                tracing::warn!("Relay: Hub mailbox delete returned {}", resp.status(),);
             }
             Err(e) => {
-                tracing::warn!(
-                    "Relay: Failed to delete mailbox {} on hub: {e}",
-                    cfg.mailbox_uuid
-                );
+                tracing::warn!("Relay: Failed to delete mailbox on hub: {e}");
             }
         }
     }
@@ -1063,11 +1048,10 @@ pub async fn relay_library_request(
 
     // 3. Send via E2EE (direct or relay with reply-to)
     tracing::info!(
-        "Relay library request: type='{}' peer='{}' (id={}) relay_mailbox={:?}",
+        "Relay library request: type='{}' peer='{}' (id={})",
         req.request_type,
         the_peer.name,
         the_peer.id,
-        the_peer.mailbox_id
     );
 
     match try_send_e2ee(&state, &the_peer, message_type, payload).await {
