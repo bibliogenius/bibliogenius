@@ -447,7 +447,11 @@ async fn handle_relay_request_response(
     let (response_type, response_payload) = match clear_message.message_type.as_str() {
         "library_manifest_request" => (
             "library_manifest_response",
-            crate::api::e2ee::handle_library_manifest_request(db).await,
+            crate::api::e2ee::handle_library_manifest_request(
+                db,
+                state.identity_service.library_uuid(),
+            )
+            .await,
         ),
         "library_page_request" => (
             "library_page_response",

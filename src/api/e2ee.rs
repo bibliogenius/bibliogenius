@@ -278,7 +278,7 @@ pub async fn dispatch_clear_message(
 
         // ── Library sync via relay (ADR-012) ─────────────────────────
         "library_manifest_request" => {
-            let response_payload = handle_library_manifest_request(db).await;
+            let response_payload = handle_library_manifest_request(db, our_library_uuid).await;
             seal_response(
                 crypto_service,
                 &known_peers[peer_index],
@@ -1197,7 +1197,11 @@ async fn handle_peer_disconnect(
 
 /// Handle a library manifest request - return catalog hash and book count.
 /// Used for quick "has anything changed?" checks (like HTTP ETag).
-pub async fn handle_library_manifest_request(db: &DatabaseConnection) -> serde_json::Value {
+/// Includes `library_uuid` so the requester can detect stale node IDs.
+pub async fn handle_library_manifest_request(
+    db: &DatabaseConnection,
+    library_uuid: Option<&str>,
+) -> serde_json::Value {
     use crate::models::book;
     use sha2::{Digest, Sha256};
 
@@ -1264,6 +1268,7 @@ pub async fn handle_library_manifest_request(db: &DatabaseConnection) -> serde_j
         "last_updated": last_updated,
         "preview_books": preview_books,
         "library_name": library_name,
+        "library_uuid": library_uuid,
     })
 }
 

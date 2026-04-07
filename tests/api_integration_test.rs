@@ -1234,3 +1234,194 @@ async fn test_connect_uuid_change_clears_cache() {
         .unwrap();
     assert_eq!(old_peer.library_uuid, Some("uuid-v1".to_string()));
 }
+
+// ========== UPSERT PEER BOOKS CACHE: UUID CHANGE ATOMICITY ==========
+// These tests verify that when a peer's library_uuid changes (DB reset),
+// upsert_peer_books_cache handles the transition correctly without a
+// premature delete_many that would leave the cache empty on timeout.
+
+/// Helper: insert peer_book cache entries directly.
+async fn insert_peer_book_cache(
+    db: &DatabaseConnection,
+    peer_id: i32,
+    remote_id: i32,
+    title: &str,
+) {
+    use rust_lib_app::models::peer_book;
+    let entry = peer_book::ActiveModel {
+        peer_id: Set(peer_id),
+        remote_book_id: Set(remote_id),
+        title: Set(title.to_string()),
+        synced_at: Set(chrono::Utc::now().to_rfc3339()),
+        ..Default::default()
+    };
+    peer_book::Entity::insert(entry)
+        .exec(db)
+        .await
+        .expect("Insert peer_book cache failed");
+}
+
+/// UUID change with non-overlapping remote_book_ids: old IDs get replaced
+/// atomically by new IDs (no empty-cache window).
+#[tokio::test]
+async fn test_upsert_cache_uuid_change_different_ids() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rust_lib_app::models::peer_book;
+    use tower::ServiceExt;
+
+    let db = setup_test_db().await;
+    let peer_id = create_test_peer(&db, "Mac Peer", "http://mac:8000").await;
+
+    // Old cache: remote IDs 100, 101, 102 (from old peer DB)
+    insert_peer_book_cache(&db, peer_id, 100, "Old Book A").await;
+    insert_peer_book_cache(&db, peer_id, 101, "Old Book B").await;
+    insert_peer_book_cache(&db, peer_id, 102, "Old Book C").await;
+
+    // Verify old cache is in place
+    let count_before = peer_book::Entity::find()
+        .filter(peer_book::Column::PeerId.eq(peer_id))
+        .count(&db)
+        .await
+        .unwrap();
+    assert_eq!(count_before, 3, "Should have 3 old cached books");
+
+    // Simulate uuid change: peer was reset, new books have IDs 1, 2, 3
+    let new_books = serde_json::json!({
+        "books": [
+            {"id": 1, "title": "New Book X", "isbn": "111", "owned": true},
+            {"id": 2, "title": "New Book Y", "isbn": "222", "owned": true},
+            {"id": 3, "title": "New Book Z", "isbn": "333", "owned": true}
+        ]
+    });
+
+    let app = rust_lib_app::api::api_router(db.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/peers/{}/cache_books", peer_id))
+                .header("Content-Type", "application/json")
+                .body(Body::from(new_books.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Verify: only 3 new books, old ones removed
+    let cached = peer_book::Entity::find()
+        .filter(peer_book::Column::PeerId.eq(peer_id))
+        .all(&db)
+        .await
+        .unwrap();
+
+    assert_eq!(cached.len(), 3, "Should have exactly 3 books after upsert");
+    let titles: Vec<&str> = cached.iter().map(|b| b.title.as_str()).collect();
+    assert!(titles.contains(&"New Book X"));
+    assert!(titles.contains(&"New Book Y"));
+    assert!(titles.contains(&"New Book Z"));
+    // Old books must be gone
+    assert!(!titles.contains(&"Old Book A"));
+    assert!(!titles.contains(&"Old Book B"));
+    assert!(!titles.contains(&"Old Book C"));
+}
+
+/// UUID change with overlapping remote_book_ids: same IDs get updated
+/// in place (peer reset, SQLite auto-increment restarts at 1).
+#[tokio::test]
+async fn test_upsert_cache_uuid_change_overlapping_ids() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rust_lib_app::models::peer_book;
+    use tower::ServiceExt;
+
+    let db = setup_test_db().await;
+    let peer_id = create_test_peer(&db, "Mac Peer", "http://mac2:8000").await;
+
+    // Old cache: remote IDs 1, 2, 3 (from old peer DB)
+    insert_peer_book_cache(&db, peer_id, 1, "Old Title 1").await;
+    insert_peer_book_cache(&db, peer_id, 2, "Old Title 2").await;
+    insert_peer_book_cache(&db, peer_id, 3, "Old Title 3").await;
+
+    // New books with same IDs but different content (peer reset, fresh DB)
+    let new_books = serde_json::json!({
+        "books": [
+            {"id": 1, "title": "Fresh Title 1", "isbn": "AAA", "owned": true},
+            {"id": 2, "title": "Fresh Title 2", "isbn": "BBB", "owned": true}
+        ]
+    });
+
+    let app = rust_lib_app::api::api_router(db.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/peers/{}/cache_books", peer_id))
+                .header("Content-Type", "application/json")
+                .body(Body::from(new_books.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Verify: 2 books with updated titles, old book 3 deleted
+    let cached = peer_book::Entity::find()
+        .filter(peer_book::Column::PeerId.eq(peer_id))
+        .all(&db)
+        .await
+        .unwrap();
+
+    assert_eq!(cached.len(), 2, "Should have 2 books (ID 3 removed)");
+    let book1 = cached.iter().find(|b| b.remote_book_id == 1).unwrap();
+    assert_eq!(book1.title, "Fresh Title 1", "ID 1 should be updated");
+    let book2 = cached.iter().find(|b| b.remote_book_id == 2).unwrap();
+    assert_eq!(book2.title, "Fresh Title 2", "ID 2 should be updated");
+}
+
+/// Empty incoming list must NOT wipe existing cache (relay truncation guard).
+#[tokio::test]
+async fn test_upsert_cache_empty_incoming_preserves_cache() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rust_lib_app::models::peer_book;
+    use tower::ServiceExt;
+
+    let db = setup_test_db().await;
+    let peer_id = create_test_peer(&db, "Mac Peer", "http://mac3:8000").await;
+
+    // Existing cache with 3 books
+    insert_peer_book_cache(&db, peer_id, 1, "Book A").await;
+    insert_peer_book_cache(&db, peer_id, 2, "Book B").await;
+    insert_peer_book_cache(&db, peer_id, 3, "Book C").await;
+
+    // Send empty books list (simulates relay timeout / truncation)
+    let empty_books = serde_json::json!({ "books": [] });
+
+    let app = rust_lib_app::api::api_router(db.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/peers/{}/cache_books", peer_id))
+                .header("Content-Type", "application/json")
+                .body(Body::from(empty_books.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Verify: cache preserved (guard prevented wipe)
+    let cached = peer_book::Entity::find()
+        .filter(peer_book::Column::PeerId.eq(peer_id))
+        .count(&db)
+        .await
+        .unwrap();
+
+    assert_eq!(cached, 3, "Empty incoming must NOT wipe existing cache");
+}

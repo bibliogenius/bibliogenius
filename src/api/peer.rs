@@ -1465,14 +1465,13 @@ pub async fn connect(
                         _ => false,
                     };
                     if uuid_changed {
+                        // upsert_peer_books_cache (called by background sync)
+                        // handles the transition atomically: insert new, update
+                        // existing, delete absent. No premature cache wipe.
                         tracing::info!(
-                            "Peer {} library_uuid changed, clearing cached books",
+                            "Peer {} library_uuid changed, will refresh via upsert",
                             peer_id
                         );
-                        let _ = peer_book::Entity::delete_many()
-                            .filter(peer_book::Column::PeerId.eq(peer_id))
-                            .exec(&db)
-                            .await;
                     }
                     peer_id
                 }
@@ -3389,15 +3388,13 @@ pub async fn sync_peer(
                 if let Err(e) = active.update(&db).await {
                     tracing::warn!("Failed to update library_uuid for peer {}: {}", peer_id, e);
                 } else if uuid_changed {
-                    // Peer was reset/reinstalled - clear stale cached books
+                    // Peer was reset/reinstalled - upsert_peer_books_cache will
+                    // handle the transition atomically (insert new, update
+                    // existing, delete absent). No premature cache wipe needed.
                     tracing::info!(
-                        "Peer {} library_uuid changed during sync, clearing cached books",
+                        "Peer {} library_uuid changed during sync, will refresh via upsert",
                         peer_id
                     );
-                    let _ = peer_book::Entity::delete_many()
-                        .filter(peer_book::Column::PeerId.eq(peer_id))
-                        .exec(&db)
-                        .await;
                 } else {
                     tracing::info!("Backfilled library_uuid for peer {}", peer_id);
                 }
