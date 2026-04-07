@@ -406,22 +406,34 @@ impl HubDirectoryService {
         let mut req = self
             .http_client
             .post(format!("{hub_url}/api/directory/profile"));
+        let has_auth = existing.is_some();
         if let Some(ref cfg) = existing {
             req = req.header("Authorization", format!("Bearer {}", cfg.write_token));
         }
 
-        let response = req.json(&body).send().await?;
+        tracing::info!(
+            "Hub directory: register_or_update node_id={} hub={} auth={} relay_mailbox={}",
+            &params.node_id[..12.min(params.node_id.len())],
+            hub_url,
+            has_auth,
+            params.relay_mailbox_id.as_deref().unwrap_or("none"),
+        );
+
+        let response = match req.json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Hub directory: network error: {e}");
+                return Err(HubDirectoryError::Network(e.to_string()));
+            }
+        };
         let status = response.status().as_u16();
         if status >= 400 {
             let msg = response.text().await.unwrap_or_default();
-            if status == 401 {
-                tracing::warn!(
-                    "Hub: 401 on directory operation (stale write_token). \
-                     Manual re-registration may be needed."
-                );
-            }
+            tracing::warn!("Hub directory: register_or_update failed {status}: {msg}");
             return Err(HubDirectoryError::Hub(status, msg));
         }
+
+        tracing::info!("Hub directory: register_or_update succeeded (status={status})");
 
         let profile: HubProfile = response
             .json()
