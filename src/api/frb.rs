@@ -1612,6 +1612,12 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                     .await;
                 });
 
+                // Spawn WS nudge listener (instant relay notifications, ADR-017)
+                let ws_state = state.clone();
+                tokio::spawn(async move {
+                    crate::services::ws_nudge::start_ws_nudge(ws_state).await;
+                });
+
                 // Spawn operation processor (applies pending ops from device sync)
                 let processor_db = state.db().clone();
                 tokio::spawn(async move {

@@ -19,6 +19,7 @@ pub mod notification_service;
 pub mod relay_poller;
 pub mod relay_transport;
 pub mod sale_service; // Service de vente pour profil Libraire
+pub mod ws_nudge;
 
 // Re-export for convenience
 pub use book_service::*;

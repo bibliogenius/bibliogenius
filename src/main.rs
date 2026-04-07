@@ -147,6 +147,14 @@ async fn main() {
         });
     }
 
+    // Spawn WS nudge listener (instant relay notifications via WebSocket, ADR-017)
+    {
+        let ws_state = state.clone();
+        tokio::spawn(async move {
+            rust_lib_app::services::ws_nudge::start_ws_nudge(ws_state).await;
+        });
+    }
+
     // Swagger UI
     use rust_lib_app::api_docs::ApiDoc;
     use utoipa::OpenApi;
