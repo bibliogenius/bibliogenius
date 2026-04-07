@@ -42,7 +42,7 @@ pub struct DirectTransport {
 impl DirectTransport {
     pub fn new(crypto_service: Arc<CryptoService<SqliteNonceStore>>) -> Self {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(3))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();

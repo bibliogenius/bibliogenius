@@ -26,6 +26,14 @@ use crate::services::hub_directory_service::HubDirectoryService;
 type PendingRelayRequests =
     Arc<dashmap::DashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>;
 
+/// Cache of peers whose direct LAN connection recently failed.
+/// Key = peer id, value = timestamp of the failure.
+/// Entries older than [`PEER_UNREACHABLE_TTL`] are treated as expired.
+type PeerDirectFailures = Arc<dashmap::DashMap<i32, std::time::Instant>>;
+
+/// How long a peer stays in the "unreachable via direct" cache before we retry.
+const PEER_UNREACHABLE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Application state shared across all handlers
 #[derive(Clone)]
 pub struct AppState {
@@ -61,6 +69,9 @@ pub struct AppState {
     pending_relay_requests: PendingRelayRequests,
     /// Hub directory service — manages public directory and follow relationships (ADR-015).
     pub hub_directory: Arc<HubDirectoryService>,
+    /// Cache of peers whose direct LAN connection recently failed.
+    /// Used by `try_send_e2ee` to skip direct and go straight to relay.
+    peer_direct_failures: PeerDirectFailures,
 }
 
 impl AppState {
@@ -118,6 +129,7 @@ impl AppState {
             device_sync,
             pending_relay_requests: Arc::new(dashmap::DashMap::new()),
             hub_directory: Arc::new(HubDirectoryService::new()),
+            peer_direct_failures: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -189,6 +201,36 @@ impl AppState {
         crate::utils::net::get_public_url(self.server_port())
     }
 
+    // ── Peer reachability cache ─────────────────────────────────────
+
+    /// Mark a peer as unreachable via direct LAN connection.
+    /// Subsequent calls to `is_peer_direct_unreachable` will return `true`
+    /// until [`PEER_UNREACHABLE_TTL`] expires.
+    pub fn mark_peer_direct_failed(&self, peer_id: i32) {
+        self.peer_direct_failures
+            .insert(peer_id, std::time::Instant::now());
+    }
+
+    /// Check whether a peer is in the "unreachable via direct" cache.
+    /// Returns `true` if the peer failed recently (within TTL).
+    /// Expired entries are removed lazily.
+    pub fn is_peer_direct_unreachable(&self, peer_id: i32) -> bool {
+        if let Some(entry) = self.peer_direct_failures.get(&peer_id) {
+            if entry.value().elapsed() < PEER_UNREACHABLE_TTL {
+                return true;
+            }
+            // Expired -- remove lazily
+            drop(entry);
+            self.peer_direct_failures.remove(&peer_id);
+        }
+        false
+    }
+
+    /// Clear the "unreachable" mark for a peer (e.g. when direct succeeds).
+    pub fn clear_peer_direct_failed(&self, peer_id: i32) {
+        self.peer_direct_failures.remove(&peer_id);
+    }
+
     /// Get the database connection (for backward compatibility during migration)
     pub fn db(&self) -> &DatabaseConnection {
         &self.db
@@ -206,5 +248,51 @@ impl AsRef<DatabaseConnection> for AppState {
 impl axum::extract::FromRef<AppState> for DatabaseConnection {
     fn from_ref(state: &AppState) -> Self {
         state.db.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_state() -> AppState {
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let _ = crate::infrastructure::db::run_migrations(&db).await;
+        AppState::new(db)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_unreachable_mark_and_check() {
+        let state = test_state().await;
+        assert!(!state.is_peer_direct_unreachable(42));
+
+        state.mark_peer_direct_failed(42);
+        assert!(state.is_peer_direct_unreachable(42));
+        // Other peers unaffected
+        assert!(!state.is_peer_direct_unreachable(99));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_unreachable_clear() {
+        let state = test_state().await;
+        state.mark_peer_direct_failed(42);
+        assert!(state.is_peer_direct_unreachable(42));
+
+        state.clear_peer_direct_failed(42);
+        assert!(!state.is_peer_direct_unreachable(42));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_unreachable_expiry() {
+        let state = test_state().await;
+        // Insert a synthetic entry far in the past to simulate expiry
+        state
+            .peer_direct_failures
+            .insert(42, std::time::Instant::now() - PEER_UNREACHABLE_TTL);
+
+        // Should be expired (elapsed >= TTL)
+        assert!(!state.is_peer_direct_unreachable(42));
+        // Entry should have been lazily removed
+        assert!(!state.peer_direct_failures.contains_key(&42));
     }
 }

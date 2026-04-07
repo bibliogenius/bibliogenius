@@ -362,11 +362,33 @@ async fn try_send_e2ee(
     let message =
         crate::services::e2ee_transport::DirectTransport::build_message(message_type, payload);
 
-    match transport
-        .send(&peer.url, &peer_x25519, &peer_info, &message)
-        .await
-    {
+    // Skip direct if peer recently failed and has relay credentials available.
+    // This avoids burning 3s on a timeout when we already know the peer is off-LAN.
+    let skip_direct = state.is_peer_direct_unreachable(peer.id)
+        && peer.relay_url.is_some()
+        && peer.mailbox_id.is_some()
+        && peer.relay_write_token.is_some();
+
+    let direct_result = if skip_direct {
+        tracing::info!(
+            "E2EE: Skipping direct for peer {} (cached unreachable), using relay",
+            peer.name,
+        );
+        Err(
+            crate::services::e2ee_transport::E2eeTransportError::Network(
+                "peer cached as unreachable".to_string(),
+            ),
+        )
+    } else {
+        transport
+            .send(&peer.url, &peer_x25519, &peer_info, &message)
+            .await
+    };
+
+    match direct_result {
         Ok(response) => {
+            // Direct succeeded -- clear any cached failure for this peer
+            state.clear_peer_direct_failed(peer.id);
             tracing::info!(
                 "E2EE: Sent '{}' to peer {} ({})",
                 message_type,
@@ -376,6 +398,10 @@ async fn try_send_e2ee(
             Ok(Some(response))
         }
         Err(crate::services::e2ee_transport::E2eeTransportError::Network(ref net_err)) => {
+            // Mark peer as unreachable so subsequent calls skip direct
+            if !skip_direct {
+                state.mark_peer_direct_failed(peer.id);
+            }
             // Network error - peer unreachable. Try relay fallback.
             // ADR-012: All message types can now be relayed. Request-response messages
             // attach reply_to fields so responses come back via our mailbox.
@@ -1539,6 +1565,12 @@ async fn upsert_peer_books_cache(
     let now = chrono::Utc::now().to_rfc3339();
     let count = books.len();
 
+    tracing::info!(
+        "upsert_peer_books_cache: peer_id={}, incoming={} books",
+        peer_id,
+        count,
+    );
+
     // 1. Load existing cached books for this peer
     let existing = peer_book::Entity::find()
         .filter(peer_book::Column::PeerId.eq(peer_id))
@@ -1552,6 +1584,18 @@ async fn upsert_peer_books_cache(
         .collect();
 
     let mut fresh_ids = std::collections::HashSet::new();
+
+    // Guard: if incoming list is empty but we have cached books, this would
+    // wipe the entire cache. Log a warning to help diagnose relay truncation.
+    if count == 0 && !existing_map.is_empty() {
+        tracing::warn!(
+            "upsert_peer_books_cache: peer_id={} - incoming=0 but {} cached books exist, \
+             skipping destructive sync (possible relay truncation)",
+            peer_id,
+            existing_map.len(),
+        );
+        return 0;
+    }
 
     // On initial discovery (no existing books for this peer), all books arrive
     // at once so marking them all as "new" is meaningless noise. Set first_seen_at
@@ -3557,18 +3601,31 @@ pub async fn sync_peer_by_url(
 
     let client = get_safe_client();
 
-    // 4. Check peer's config for privacy consent flags
-    let config_url = format!("{}/api/config", peer.url);
-    let mut peer_config = match client.get(&config_url).send().await {
-        Ok(res) if res.status().is_success() => {
-            res.json::<crate::api::setup::ConfigResponse>().await.ok()
+    // 4. Check peer's config for privacy consent flags.
+    // Skip the network fetch + port scan if the peer is cached as unreachable --
+    // avoids burning 5-10s on timeouts we already know will fail.
+    let peer_cached_unreachable = state.is_peer_direct_unreachable(peer.id);
+
+    let mut peer_config = if peer_cached_unreachable {
+        tracing::debug!(
+            "Sync: Skipping config fetch for peer {} (cached unreachable)",
+            peer.name,
+        );
+        None
+    } else {
+        let config_url = format!("{}/api/config", peer.url);
+        match client.get(&config_url).send().await {
+            Ok(res) if res.status().is_success() => {
+                res.json::<crate::api::setup::ConfigResponse>().await.ok()
+            }
+            _ => None,
         }
-        _ => None,
     };
 
     // 4b. If config fetch failed, the peer may have restarted on a different port.
     // Try scanning ports 8000-8010 on the same host.
-    let effective_url = if peer_config.is_none() {
+    // (Skip when peer is cached unreachable -- port scan would also timeout.)
+    let effective_url = if peer_config.is_none() && !peer_cached_unreachable {
         match crate::utils::peer_discovery::try_discover_peer_port(&peer.url, &client).await {
             Some(new_url) => {
                 // Retry config fetch with discovered URL
