@@ -84,6 +84,7 @@ use crate::crypto::envelope::ClearMessage;
 use crate::infrastructure::AppState;
 use crate::models::peer;
 use crate::services::e2ee_transport::E2eeTransportError;
+use crate::services::nudge_events::{self, NudgeEvent, NudgeSource};
 use crate::services::relay_transport::{RelayBlob, RelayTransport};
 
 /// Start the background relay polling loop.
@@ -97,7 +98,7 @@ pub async fn start_relay_polling(state: AppState, interval: Duration) {
     tracing::info!("Relay poller: started (interval: {}s)", interval.as_secs());
 
     // First poll immediately at startup (auto-heal stale mailboxes without waiting 60s)
-    if let Err(e) = poll_once(&state).await {
+    if let Err(e) = poll_once(&state, NudgeSource::Polling).await {
         tracing::warn!("Relay poller: {e}");
     }
 
@@ -108,7 +109,7 @@ pub async fn start_relay_polling(state: AppState, interval: Duration) {
         let jitter_ms = rand::thread_rng().gen_range(0..10_000);
         tokio::time::sleep(interval + Duration::from_millis(jitter_ms)).await;
 
-        if let Err(e) = poll_once(&state).await {
+        if let Err(e) = poll_once(&state, NudgeSource::Polling).await {
             tracing::warn!("Relay poller: {e}");
         }
 
@@ -121,7 +122,11 @@ pub async fn start_relay_polling(state: AppState, interval: Duration) {
 }
 
 /// Execute a single poll cycle. Public so it can be triggered by `poll_now` endpoint (ADR-012).
-pub async fn poll_once(state: &AppState) -> Result<(), String> {
+///
+/// `source` indicates which subsystem triggered this cycle (timer, WS nudge, manual).
+/// It is forwarded to the nudge event bus so Flutter UI consumers can distinguish
+/// fast-path (WebSocket) from fallback-path (Polling) updates.
+pub async fn poll_once(state: &AppState, source: NudgeSource) -> Result<(), String> {
     let db = state.db();
 
     // 1. Load my relay config
@@ -211,6 +216,14 @@ pub async fn poll_once(state: &AppState) -> Result<(), String> {
                 envelopes.len()
             );
         }
+        // Phase 3a (ADR-017): if raw blobs were processed, signal Flutter listeners
+        // even though encrypted processing is deferred.
+        if !raw_blobs.is_empty() {
+            nudge_events::bus().emit(NudgeEvent {
+                mailbox_id: config.mailbox_uuid.clone(),
+                source,
+            });
+        }
         return Ok(());
     };
 
@@ -266,6 +279,14 @@ pub async fn poll_once(state: &AppState) -> Result<(), String> {
             tracing::warn!("Relay poller: Failed to ack message {message_id}: {e}");
         }
     }
+
+    // Phase 3a (ADR-017): signal Flutter listeners that fresh data was persisted.
+    // Reaching this point means at least one message (raw or encrypted) was processed,
+    // because the empty case returns early above.
+    nudge_events::bus().emit(NudgeEvent {
+        mailbox_id: config.mailbox_uuid.clone(),
+        source,
+    });
 
     Ok(())
 }

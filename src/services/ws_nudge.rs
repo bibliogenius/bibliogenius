@@ -13,6 +13,7 @@ use tokio_tungstenite::tungstenite;
 
 use crate::api::relay::get_my_relay_config;
 use crate::infrastructure::AppState;
+use crate::services::nudge_events::NudgeSource;
 use crate::services::relay_poller::poll_once;
 
 /// Maximum reconnection backoff.
@@ -168,7 +169,7 @@ async fn handle_nudge_message(state: &AppState, text: &str) {
     }
 
     tracing::info!("WS nudge: received nudge, triggering immediate poll");
-    if let Err(e) = poll_once(state).await {
+    if let Err(e) = poll_once(state, NudgeSource::WebSocket).await {
         tracing::warn!("WS nudge: poll_once failed: {e}");
     }
 }

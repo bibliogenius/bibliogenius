@@ -462,7 +462,8 @@ pub async fn ack_message(
 /// Used by Flutter when awaiting a relay response to reduce latency
 /// from ~120s (background polling) to ~10-15s (adaptive fast-polling).
 pub async fn poll_now(State(state): State<crate::infrastructure::AppState>) -> impl IntoResponse {
-    match crate::services::relay_poller::poll_once(&state).await {
+    use crate::services::nudge_events::NudgeSource;
+    match crate::services::relay_poller::poll_once(&state, NudgeSource::Manual).await {
         Ok(()) => (StatusCode::OK, Json(json!({ "message": "Poll completed" }))).into_response(),
         Err(e) => {
             tracing::warn!("poll_now: {e}");

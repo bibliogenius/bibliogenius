@@ -544,7 +544,11 @@ async fn try_send_e2ee(
                         let overall_timeout = std::time::Duration::from_secs(90);
 
                         // Trigger immediate poll (don't wait for 60s background cycle)
-                        let _ = crate::services::relay_poller::poll_once(state).await;
+                        let _ = crate::services::relay_poller::poll_once(
+                            state,
+                            crate::services::nudge_events::NudgeSource::Manual,
+                        )
+                        .await;
 
                         loop {
                             tokio::select! {
@@ -584,7 +588,11 @@ async fn try_send_e2ee(
                                         state.cancel_relay_request(&corr_id);
                                         return Ok(Some(None));
                                     }
-                                    let _ = crate::services::relay_poller::poll_once(state).await;
+                                    let _ = crate::services::relay_poller::poll_once(
+                                        state,
+                                        crate::services::nudge_events::NudgeSource::Manual,
+                                    )
+                                    .await;
                                 }
                             }
                         }
