@@ -554,6 +554,148 @@ async fn relay_config_singleton_stored_and_retrievable() {
     assert_eq!(config.write_token, "write-tok");
 }
 
+/// When a relay request with reply_to_* fields is processed, the sender peer's
+/// relay credentials are updated in the DB. This ensures outbound notifications
+/// (e.g. update_request_status → status_update) can reach relay-only peers.
+#[tokio::test]
+async fn peer_relay_credentials_updated_from_reply_to_fields() {
+    let db = setup_test_db().await;
+
+    // Peer with no relay credentials (connected before relay credential sharing,
+    // or connection_request omitted relay_write_token).
+    let now = chrono::Utc::now().to_rfc3339();
+    let peer = rust_lib_app::models::peer::ActiveModel {
+        name: Set("iPhone Library".to_string()),
+        url: Set("relay://abc123deadbeef".to_string()),
+        key_exchange_done: Set(true),
+        relay_url: Set(None),
+        mailbox_id: Set(None),
+        relay_write_token: Set(None),
+        connection_status: Set("accepted".to_string()),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    let res = rust_lib_app::models::peer::Entity::insert(peer)
+        .exec(&db)
+        .await
+        .unwrap();
+    let peer_id = res.last_insert_id;
+
+    rust_lib_app::services::relay_poller::update_peer_relay_from_reply_to(
+        &db,
+        peer_id,
+        "https://hub.bibliogenius.org",
+        "iphone-mailbox-uuid",
+        "iphone-write-token",
+    )
+    .await;
+
+    let updated = rust_lib_app::models::peer::Entity::find_by_id(peer_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.relay_url.as_deref(),
+        Some("https://hub.bibliogenius.org")
+    );
+    assert_eq!(updated.mailbox_id.as_deref(), Some("iphone-mailbox-uuid"));
+    assert_eq!(
+        updated.relay_write_token.as_deref(),
+        Some("iphone-write-token")
+    );
+}
+
+/// Stale relay credentials (e.g. peer refreshed its mailbox) are replaced
+/// with the current ones from reply_to fields.
+#[tokio::test]
+async fn stale_peer_relay_credentials_replaced_from_reply_to() {
+    let db = setup_test_db().await;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let peer = rust_lib_app::models::peer::ActiveModel {
+        name: Set("iPhone Library".to_string()),
+        url: Set("relay://abc123deadbeef".to_string()),
+        key_exchange_done: Set(true),
+        relay_url: Set(Some("https://hub.bibliogenius.org".to_string())),
+        mailbox_id: Set(Some("old-mailbox-uuid".to_string())),
+        relay_write_token: Set(Some("old-write-token".to_string())),
+        connection_status: Set("accepted".to_string()),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    let res = rust_lib_app::models::peer::Entity::insert(peer)
+        .exec(&db)
+        .await
+        .unwrap();
+    let peer_id = res.last_insert_id;
+
+    rust_lib_app::services::relay_poller::update_peer_relay_from_reply_to(
+        &db,
+        peer_id,
+        "https://hub.bibliogenius.org",
+        "new-mailbox-uuid",
+        "new-write-token",
+    )
+    .await;
+
+    let updated = rust_lib_app::models::peer::Entity::find_by_id(peer_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.mailbox_id.as_deref(), Some("new-mailbox-uuid"));
+    assert_eq!(
+        updated.relay_write_token.as_deref(),
+        Some("new-write-token")
+    );
+}
+
+/// When credentials are already up to date, no DB write is performed
+/// (verified by confirming timestamps are unchanged).
+#[tokio::test]
+async fn peer_relay_credentials_not_written_when_unchanged() {
+    let db = setup_test_db().await;
+
+    let now = "2026-01-01T00:00:00+00:00";
+    let peer = rust_lib_app::models::peer::ActiveModel {
+        name: Set("iPhone Library".to_string()),
+        url: Set("relay://abc123deadbeef".to_string()),
+        key_exchange_done: Set(true),
+        relay_url: Set(Some("https://hub.bibliogenius.org".to_string())),
+        mailbox_id: Set(Some("same-mailbox".to_string())),
+        relay_write_token: Set(Some("same-token".to_string())),
+        connection_status: Set("accepted".to_string()),
+        created_at: Set(now.to_string()),
+        updated_at: Set(now.to_string()),
+        ..Default::default()
+    };
+    let res = rust_lib_app::models::peer::Entity::insert(peer)
+        .exec(&db)
+        .await
+        .unwrap();
+    let peer_id = res.last_insert_id;
+
+    rust_lib_app::services::relay_poller::update_peer_relay_from_reply_to(
+        &db,
+        peer_id,
+        "https://hub.bibliogenius.org",
+        "same-mailbox",
+        "same-token",
+    )
+    .await;
+
+    let unchanged = rust_lib_app::models::peer::Entity::find_by_id(peer_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    // updated_at must be unchanged — no write happened
+    assert_eq!(unchanged.updated_at, now);
+}
+
 #[tokio::test]
 async fn relay_peer_fields_stored_correctly() {
     let db = setup_test_db().await;

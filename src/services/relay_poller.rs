@@ -464,6 +464,17 @@ async fn handle_relay_request_response(
     let reply_to_mailbox = clear_message.reply_to_mailbox.as_ref().unwrap();
     let reply_to_write_token = clear_message.reply_to_write_token.as_ref().unwrap();
 
+    // Persist the sender's current relay credentials so we can reach them later
+    // (e.g. notify the borrower after update_request_status).
+    update_peer_relay_from_reply_to(
+        db,
+        sender_peer.id,
+        relay_url,
+        reply_to_mailbox,
+        reply_to_write_token,
+    )
+    .await;
+
     // Determine response type and compute payload
     let (response_type, response_payload) = match clear_message.message_type.as_str() {
         "library_manifest_request" => (
@@ -641,6 +652,64 @@ pub async fn recreate_mailbox(
 
     tracing::info!("Relay: Mailbox recreated successfully");
     Ok(mailbox_uuid)
+}
+
+/// Persist a peer's relay credentials learned from incoming `reply_to_*` fields.
+///
+/// Called whenever a relay request arrives with `reply_to_mailbox` /
+/// `reply_to_write_token` fields. These fields carry the sender's **current**
+/// mailbox credentials, so storing them ensures we can reach that peer later
+/// (e.g. `update_request_status` notifying the borrower after accept/reject).
+///
+/// This fixes the unidirectional relay bug: without this update the Mac could
+/// silently fail to notify an iPhone whose `relay_write_token` was `None` or stale.
+pub async fn update_peer_relay_from_reply_to(
+    db: &sea_orm::DatabaseConnection,
+    peer_id: i32,
+    relay_url: &str,
+    reply_to_mailbox: &str,
+    reply_to_write_token: &str,
+) {
+    if reply_to_mailbox.is_empty() || reply_to_write_token.is_empty() {
+        return;
+    }
+
+    match peer::Entity::find_by_id(peer_id).one(db).await {
+        Ok(Some(existing)) => {
+            // Skip the write if nothing has changed.
+            if existing.mailbox_id.as_deref() == Some(reply_to_mailbox)
+                && existing.relay_write_token.as_deref() == Some(reply_to_write_token)
+            {
+                return;
+            }
+            let mut active: peer::ActiveModel = existing.into();
+            active.relay_url = Set(Some(relay_url.to_string()));
+            active.mailbox_id = Set(Some(reply_to_mailbox.to_string()));
+            active.relay_write_token = Set(Some(reply_to_write_token.to_string()));
+            active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+            if let Err(e) = active.update(db).await {
+                tracing::warn!(
+                    "Relay poller: Failed to update relay credentials for peer {peer_id}: {e}"
+                );
+            } else {
+                tracing::info!(
+                    "Relay poller: Updated relay credentials for peer {peer_id} \
+                     from reply_to fields (mailbox: {reply_to_mailbox})"
+                );
+            }
+        }
+        Ok(None) => {
+            // Linked-device peer or unknown id — no peers row to update.
+            tracing::debug!(
+                "Relay poller: peer {peer_id} not found in peers table, skipping credential update"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Relay poller: DB error looking up peer {peer_id} for credential update: {e}"
+            );
+        }
+    }
 }
 
 /// Handle a `relay_credential_update` message from a peer who recreated their mailbox.
