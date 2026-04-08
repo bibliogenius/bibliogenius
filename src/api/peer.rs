@@ -2348,6 +2348,21 @@ pub async fn update_peer_status(
     if payload.status == "rejected" {
         match peer::Entity::delete_by_id(peer_id).exec(&db).await {
             Ok(_) => {
+                // Deactivate Library contacts associated with this peer (matched by name).
+                use crate::models::contact;
+                let _ = contact::Entity::update_many()
+                    .filter(contact::Column::Name.eq(&peer.name))
+                    .filter(contact::Column::Type.eq("Library"))
+                    .col_expr(
+                        contact::Column::IsActive,
+                        sea_orm::sea_query::Expr::value(false),
+                    )
+                    .col_expr(
+                        contact::Column::UpdatedAt,
+                        sea_orm::sea_query::Expr::value(chrono::Utc::now().to_rfc3339()),
+                    )
+                    .exec(&db)
+                    .await;
                 tracing::info!("🗑️ Peer {} rejected and deleted", peer_id);
                 return (
                     StatusCode::OK,
@@ -2572,6 +2587,23 @@ pub async fn delete_peer(
     // 3. Delete locally
     match peer::Entity::delete_by_id(peer_id).exec(db).await {
         Ok(_) => {
+            // Deactivate Library contacts associated with this peer (matched by name).
+            // These contacts were auto-created during P2P interactions and are stale
+            // now that the peer connection is gone.
+            use crate::models::contact;
+            let _ = contact::Entity::update_many()
+                .filter(contact::Column::Name.eq(&peer_model.name))
+                .filter(contact::Column::Type.eq("Library"))
+                .col_expr(
+                    contact::Column::IsActive,
+                    sea_orm::sea_query::Expr::value(false),
+                )
+                .col_expr(
+                    contact::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(chrono::Utc::now().to_rfc3339()),
+                )
+                .exec(db)
+                .await;
             tracing::info!("🗑️ Peer {} ({}) deleted", peer_id, peer_model.name);
             (StatusCode::OK, Json(json!({ "message": "Peer deleted" }))).into_response()
         }

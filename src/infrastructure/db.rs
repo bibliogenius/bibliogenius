@@ -1586,6 +1586,24 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 065: Deactivate stale Library contacts.
+    // Library-type contacts are auto-created when a peer lends/borrows a book.
+    // They were not cleaned up when their associated peer was deleted, causing them
+    // to appear as selectable contacts in the borrow dialog. This migration deactivates
+    // any Library contact whose peer no longer exists (matched by name).
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"UPDATE contacts
+               SET is_active = 0,
+                   updated_at = datetime('now')
+               WHERE type = 'Library'
+                 AND is_active = 1
+                 AND name NOT IN (SELECT name FROM peers)"#
+                .to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

@@ -1,4 +1,7 @@
-use crate::models::contact::{self as contact_model, Entity as Contact};
+use crate::models::{
+    contact::{self as contact_model, Entity as Contact},
+    peer, peer_book,
+};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -7,6 +10,7 @@ use axum::{
 };
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ContactDto {
@@ -27,6 +31,8 @@ pub struct ContactDto {
     pub user_id: Option<i32>,
     pub library_owner_id: Option<i32>,
     pub is_active: bool,
+    /// True when this contact's peer owns the requested book (book_isbn query param).
+    pub has_book: bool,
 }
 
 impl From<contact_model::Model> for ContactDto {
@@ -49,6 +55,7 @@ impl From<contact_model::Model> for ContactDto {
             user_id: model.user_id,
             library_owner_id: Some(model.library_owner_id),
             is_active: model.is_active,
+            has_book: false,
         }
     }
 }
@@ -57,6 +64,9 @@ impl From<contact_model::Model> for ContactDto {
 pub struct ContactsQuery {
     pub library_id: Option<i32>,
     pub r#type: Option<String>,
+    /// When provided, annotates each contact with `has_book = true` if the
+    /// contact's peer owns a book with this ISBN.
+    pub book_isbn: Option<String>,
 }
 
 // List contacts with optional filters
@@ -71,26 +81,63 @@ pub async fn list_contacts(
         query = query.filter(contact_model::Column::LibraryOwnerId.eq(library_id));
     }
 
-    if let Some(contact_type) = params.r#type {
-        query = query.filter(contact_model::Column::Type.eq(contact_type));
+    if let Some(contact_type) = &params.r#type {
+        query = query.filter(contact_model::Column::Type.eq(contact_type.clone()));
     }
 
-    match query.all(&db).await {
-        Ok(contacts) => {
-            let contact_dtos: Vec<ContactDto> =
-                contacts.into_iter().map(ContactDto::from).collect();
-            Json(serde_json::json!({
-                "contacts": contact_dtos,
-                "total": contact_dtos.len()
-            }))
-            .into_response()
+    let contacts = match query.all(&db).await {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Database error: {}", e)})),
+            )
+                .into_response();
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Database error: {}", e)})),
-        )
-            .into_response(),
-    }
+    };
+
+    // Resolve which peers own the requested book (by ISBN), if provided.
+    let peer_names_with_book: HashSet<String> = match &params.book_isbn {
+        None => HashSet::new(),
+        Some(isbn) => {
+            let matching_books = peer_book::Entity::find()
+                .filter(peer_book::Column::Isbn.eq(isbn.as_str()))
+                .all(&db)
+                .await
+                .unwrap_or_default();
+            let peer_ids: Vec<i32> = matching_books.iter().map(|b| b.peer_id).collect();
+            if peer_ids.is_empty() {
+                HashSet::new()
+            } else {
+                peer::Entity::find()
+                    .filter(peer::Column::Id.is_in(peer_ids))
+                    .all(&db)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|p| p.name)
+                    .collect()
+            }
+        }
+    };
+
+    let contact_dtos: Vec<ContactDto> = contacts
+        .into_iter()
+        .map(|c| {
+            let has_book = peer_names_with_book.contains(&c.name);
+            ContactDto {
+                has_book,
+                ..ContactDto::from(c)
+            }
+        })
+        .collect();
+
+    let total = contact_dtos.len();
+    Json(serde_json::json!({
+        "contacts": contact_dtos,
+        "total": total
+    }))
+    .into_response()
 }
 
 // Get single contact
@@ -269,5 +316,199 @@ pub async fn delete_contact(
             Json(serde_json::json!({"error": "Contact not found"})),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::needless_update)]
+mod tests {
+    use super::*;
+    use sea_orm::{ConnectionTrait, Database, Set, Statement};
+
+    async fn setup() -> DatabaseConnection {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        crate::infrastructure::db::run_migrations(&db)
+            .await
+            .unwrap();
+        // Seed minimal user + library so contact FK (library_owner_id) is satisfied.
+        let _: sea_orm::ExecResult = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                "INSERT INTO users (username, password_hash, role, created_at, updated_at) \
+                 VALUES ('test', 'x', 'user', datetime('now'), datetime('now'))"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap();
+        let _: sea_orm::ExecResult = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                "INSERT INTO libraries (name, owner_id, created_at, updated_at) \
+                 VALUES ('Test Library', 1, datetime('now'), datetime('now'))"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap();
+        db
+    }
+
+    /// Insert a peer and a matching Library contact, then verify that the
+    /// has_book lookup returns true when the peer owns the given ISBN.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn has_book_true_when_peer_owns_isbn() {
+        let db = setup().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let saved_peer = peer::ActiveModel {
+            name: Set("Alice".to_string()),
+            url: Set("http://alice.local:3000".to_string()),
+            connection_status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        // Library contact whose name matches the peer
+        contact_model::ActiveModel {
+            r#type: Set("Library".to_string()),
+            name: Set("Alice".to_string()),
+            library_owner_id: Set(1), // SQLite FK not enforced
+            is_active: Set(true),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        // Peer owns this book
+        peer_book::ActiveModel {
+            peer_id: Set(saved_peer.id),
+            remote_book_id: Set(1),
+            title: Set("Test Book".to_string()),
+            isbn: Set(Some("9780123456789".to_string())),
+            synced_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        // Replicate the has_book lookup from list_contacts
+        let matching = peer_book::Entity::find()
+            .filter(peer_book::Column::Isbn.eq("9780123456789"))
+            .all(&db)
+            .await
+            .unwrap();
+        let peer_ids: Vec<i32> = matching.iter().map(|b| b.peer_id).collect();
+        let names: HashSet<String> = peer::Entity::find()
+            .filter(peer::Column::Id.is_in(peer_ids))
+            .all(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+
+        assert!(
+            names.contains("Alice"),
+            "Alice's peer owns the ISBN - should be annotated"
+        );
+    }
+
+    /// When no peer_book matches the ISBN, the lookup returns an empty set.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn has_book_empty_when_no_matching_peer_book() {
+        let db = setup().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        peer::ActiveModel {
+            name: Set("Bob".to_string()),
+            url: Set("http://bob.local:3000".to_string()),
+            connection_status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        // No peer_book inserted for this ISBN
+        let matching = peer_book::Entity::find()
+            .filter(peer_book::Column::Isbn.eq("9780000000000"))
+            .all(&db)
+            .await
+            .unwrap();
+
+        assert!(matching.is_empty(), "No peer owns this ISBN");
+    }
+
+    /// Library contacts linked to a deleted peer must be deactivated,
+    /// so they no longer appear in the borrow dialog.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn library_contact_deactivated_after_peer_deletion() {
+        let db = setup().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let saved_peer = peer::ActiveModel {
+            name: Set("Carol".to_string()),
+            url: Set("http://carol.local:3000".to_string()),
+            connection_status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        contact_model::ActiveModel {
+            r#type: Set("Library".to_string()),
+            name: Set("Carol".to_string()),
+            library_owner_id: Set(1),
+            is_active: Set(true),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        // Simulate delete_peer: remove peer, then deactivate associated Library contact
+        peer::Entity::delete_by_id(saved_peer.id)
+            .exec(&db)
+            .await
+            .unwrap();
+        let _ = contact_model::Entity::update_many()
+            .filter(contact_model::Column::Name.eq("Carol"))
+            .filter(contact_model::Column::Type.eq("Library"))
+            .col_expr(
+                contact_model::Column::IsActive,
+                sea_orm::sea_query::Expr::value(false),
+            )
+            .col_expr(
+                contact_model::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .exec(&db)
+            .await;
+
+        let still_active = Contact::find()
+            .filter(contact_model::Column::IsActive.eq(true))
+            .filter(contact_model::Column::Name.eq("Carol"))
+            .all(&db)
+            .await
+            .unwrap();
+
+        assert!(
+            still_active.is_empty(),
+            "Library contact must be inactive after peer deletion"
+        );
     }
 }
