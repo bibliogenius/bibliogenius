@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1422165282;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -651398886;
 
 // Section: executor
 
@@ -5189,6 +5189,45 @@ fn wire__crate__api__frb__stop_mdns_ffi_impl(
         },
     )
 }
+fn wire__crate__api__frb__subscribe_relay_nudges_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "subscribe_relay_nudges",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_sink = <StreamSink<
+                crate::api::frb::FrbNudgeEvent,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::subscribe_relay_nudges(api_sink).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__frb__update_book_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -5461,6 +5500,24 @@ fn wire__crate__api__frb__update_tag_impl(
 }
 
 // Section: dart2rust
+
+impl SseDecode for flutter_rust_bridge::for_generated::anyhow::Error {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return flutter_rust_bridge::for_generated::anyhow::anyhow!("{}", inner);
+    }
+}
+
+impl SseDecode
+    for StreamSink<crate::api::frb::FrbNudgeEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
+    }
+}
 
 impl SseDecode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -6161,6 +6218,18 @@ impl SseDecode for crate::api::frb::FrbNotification {
             ref_id: var_refId,
             read_at: var_readAt,
             created_at: var_createdAt,
+        };
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbNudgeEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_mailboxId = <String>::sse_decode(deserializer);
+        let mut var_source = <String>::sse_decode(deserializer);
+        return crate::api::frb::FrbNudgeEvent {
+            mailbox_id: var_mailboxId,
+            source: var_source,
         };
     }
 }
@@ -7364,17 +7433,20 @@ fn pde_ffi_dispatcher_primary_impl(
         137 => wire__crate__api__frb__set_hub_url_ffi_impl(port, ptr, rust_vec_len, data_len),
         138 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
         139 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
-        140 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
-        141 => {
+        140 => {
+            wire__crate__api__frb__subscribe_relay_nudges_impl(port, ptr, rust_vec_len, data_len)
+        }
+        141 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
+        142 => {
             wire__crate__api__frb__update_book_collections_impl(port, ptr, rust_vec_len, data_len)
         }
-        142 => wire__crate__api__frb__update_book_note_impl(port, ptr, rust_vec_len, data_len),
-        143 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
-        144 => {
+        143 => wire__crate__api__frb__update_book_note_impl(port, ptr, rust_vec_len, data_len),
+        144 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
+        145 => {
             wire__crate__api__frb__update_library_name_ffi_impl(port, ptr, rust_vec_len, data_len)
         }
-        145 => wire__crate__api__frb__update_loan_settings_impl(port, ptr, rust_vec_len, data_len),
-        146 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
+        146 => wire__crate__api__frb__update_loan_settings_impl(port, ptr, rust_vec_len, data_len),
+        147 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -8136,6 +8208,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbNotification>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbNudgeEvent {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.mailbox_id.into_into_dart().into_dart(),
+            self.source.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbNudgeEvent
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbNudgeEvent>
+    for crate::api::frb::FrbNudgeEvent
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbNudgeEvent {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbOperationLogEntry {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -8477,6 +8570,22 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbTrackProgress>
 {
     fn into_into_dart(self) -> crate::api::frb::FrbTrackProgress {
         self
+    }
+}
+
+impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(format!("{:?}", self), serializer);
+    }
+}
+
+impl SseEncode
+    for StreamSink<crate::api::frb::FrbNudgeEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
     }
 }
 
@@ -8897,6 +9006,14 @@ impl SseEncode for crate::api::frb::FrbNotification {
         <Option<String>>::sse_encode(self.ref_id, serializer);
         <Option<String>>::sse_encode(self.read_at, serializer);
         <String>::sse_encode(self.created_at, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbNudgeEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.mailbox_id, serializer);
+        <String>::sse_encode(self.source, serializer);
     }
 }
 

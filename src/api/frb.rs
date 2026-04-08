@@ -1692,6 +1692,82 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
     ))
 }
 
+// ============ Relay Nudge Stream (FFI, ADR-017 Phase 3a) ============
+//
+// Lets Flutter subscribe to a stream of relay nudge events emitted by
+// `relay_poller::poll_once()` whenever fresh relay data has been written to
+// the local DB. Flutter listeners can use this to refresh providers
+// immediately, instead of waiting for their own 30s polling timers.
+//
+// The existing polling timers in Flutter remain in place as a safety net
+// during this rollout (Phase 3a "additive" approach). They will be removed
+// in Phase 3b once the stream has been validated in production.
+
+/// FFI-safe view of a relay nudge event.
+///
+/// `source` is one of: "websocket" (instant nudge), "polling" (fallback timer),
+/// "manual" (user-triggered or peer.rs request-response).
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbNudgeEvent {
+    pub mailbox_id: String,
+    pub source: String,
+}
+
+fn nudge_source_label(source: crate::services::nudge_events::NudgeSource) -> String {
+    use crate::services::nudge_events::NudgeSource;
+    match source {
+        NudgeSource::WebSocket => "websocket".to_string(),
+        NudgeSource::Polling => "polling".to_string(),
+        NudgeSource::Manual => "manual".to_string(),
+    }
+}
+
+/// Subscribe to the relay nudge event stream.
+///
+/// Each emitted event indicates that `poll_once()` finished processing at
+/// least one message and persisted it to the local DB. Flutter consumers
+/// should refresh the relevant providers (notifications, loan requests,
+/// peer libraries) on receipt.
+///
+/// The function returns immediately after spawning a forwarding task. The
+/// task lives until the Dart side drops the StreamSink.
+pub async fn subscribe_relay_nudges(
+    sink: crate::frb_generated::StreamSink<FrbNudgeEvent>,
+) -> Result<(), String> {
+    let mut rx = crate::services::nudge_events::bus().subscribe();
+
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let frb_event = FrbNudgeEvent {
+                        mailbox_id: event.mailbox_id,
+                        source: nudge_source_label(event.source),
+                    };
+                    if sink.add(frb_event).is_err() {
+                        // Dart dropped the subscription, exit cleanly.
+                        tracing::debug!("Relay nudge stream: Dart sink closed, ending forwarder");
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Relay nudge stream: subscriber lagged, dropped {n} events");
+                    // Lagged is recoverable; the next recv() returns the
+                    // oldest still-buffered event.
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    // Should never happen: the bus's Sender is held in a static
+                    // OnceLock that lives for the entire process lifetime.
+                    tracing::error!("Relay nudge stream: bus sender closed unexpectedly");
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
 // ============ Memory Game (FFI) ============
 
 /// A card in the memory game (FFI-safe)
