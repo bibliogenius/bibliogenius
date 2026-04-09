@@ -894,6 +894,9 @@ pub async fn setup_relay(
     use sea_orm::ConnectionTrait;
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Keep a copy for the post-registration peer notification (payload.relay_url is moved below).
+    let relay_url_for_notify = payload.relay_url.clone();
+
     // Delete existing config if any, then insert
     let _ = db
         .execute(sea_orm::Statement::from_string(
@@ -914,6 +917,18 @@ pub async fn setup_relay(
     match config.insert(db).await {
         Ok(_) => {
             tracing::info!("Relay: Mailbox registered");
+            // Proactively notify all E2EE peers of the new mailbox credentials.
+            // This prevents the window where peers have stale relay info after a hub switch.
+            let state_clone = state.clone();
+            let mailbox_uuid_for_notify = mailbox_uuid.clone();
+            tokio::spawn(async move {
+                crate::services::relay_poller::notify_peers_of_new_credentials(
+                    &state_clone,
+                    &relay_url_for_notify,
+                    &mailbox_uuid_for_notify,
+                )
+                .await;
+            });
             (
                 StatusCode::OK,
                 Json(json!({

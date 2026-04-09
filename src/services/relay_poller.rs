@@ -973,12 +973,12 @@ async fn handle_connection_request(
     Ok(())
 }
 
-/// After recreating our mailbox, notify all E2EE peers of the new credentials.
+/// After recreating our mailbox (or switching hubs), notify all E2EE peers of the new credentials.
 ///
 /// Deposits a `relay_credential_update` message in each peer's relay mailbox.
 /// If a peer's mailbox is also expired (404), the notification silently fails
 /// and credentials will be exchanged on the next direct sync.
-async fn notify_peers_of_new_credentials(state: &AppState, relay_url: &str, new_mailbox: &str) {
+pub async fn notify_peers_of_new_credentials(state: &AppState, relay_url: &str, new_mailbox: &str) {
     let db = state.db();
 
     let crypto_service = match state.crypto_service() {
