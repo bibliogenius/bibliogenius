@@ -577,7 +577,9 @@ async fn try_send_e2ee(
                                         }
                                     }
                                 }
-                                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                                // Poll every 2s (was 5s) so responses are picked up faster
+                                // when the WS nudge is unavailable (e.g. connection in progress).
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
                                     if start.elapsed() >= overall_timeout {
                                         tracing::info!(
                                             "E2EE Relay: Timeout waiting for '{}' response from peer {} ({}s)",
