@@ -2224,6 +2224,16 @@ pub async fn receive_connection_request(
                         my_relay.is_some(),
                         connection_status
                     );
+                    // Signal Flutter instantly so PendingPeersProvider refreshes
+                    // without waiting for the 30s fallback timer (direct LAN path has
+                    // no relay_poller cycle to emit this automatically).
+                    crate::services::nudge_events::bus().emit(
+                        crate::services::nudge_events::NudgeEvent {
+                            mailbox_id: String::new(),
+                            source: crate::services::nudge_events::NudgeSource::Manual,
+                        },
+                    );
+
                     if connection_status == "pending" {
                         // Emit connection_request notification (needs user action)
                         crate::services::notification_service::emit(
@@ -3836,9 +3846,23 @@ pub async fn sync_peer_by_url(
     }
 
     // 4. Fetch remote books — try E2EE first, then plaintext fallback
+    // When the peer is unreachable via direct HTTP (e.g. on 5G), avatar_config and
+    // library_name are also piggy-backed on the E2EE response as a fallback.
+    let mut e2ee_avatar: Option<String> = None;
+    let mut e2ee_library_name: Option<String> = None;
     let books: Vec<crate::models::Book> =
         match try_send_e2ee(&state, &peer, "book_sync_request", json!({})).await {
             Ok(Some(Some(response_msg))) => {
+                // Extract avatar and library name for relay-only sync (5G fallback)
+                e2ee_avatar = response_msg
+                    .payload
+                    .get("avatar_config")
+                    .and_then(|v| serde_json::to_string(v).ok())
+                    .filter(|s| s != "null" && !s.is_empty());
+                e2ee_library_name = response_msg
+                    .payload
+                    .get("library_name")
+                    .and_then(|v| v.as_str().map(|s| s.to_string()));
                 // Got encrypted book list
                 serde_json::from_value(
                     response_msg
@@ -3914,19 +3938,26 @@ pub async fn sync_peer_by_url(
     )
     .await;
 
-    // 7. Update peer's last_seen (and name/URL if changed)
+    // 7. Update peer's last_seen (and name/URL/avatar if changed)
     let peer_id = peer.id;
     let url_changed = effective_url != peer.url;
+    // Fall back to E2EE-sourced metadata when peer was unreachable via direct HTTP (5G)
+    let final_updated_name = updated_name.or_else(|| {
+        e2ee_library_name.filter(|n| n != &peer.name)
+    });
+    let final_updated_avatar = updated_avatar.or_else(|| {
+        e2ee_avatar.filter(|a| Some(a.as_str()) != peer.avatar_config.as_deref())
+    });
     let mut active_peer: peer::ActiveModel = peer.into();
     if url_changed {
         active_peer.url = Set(effective_url);
         tracing::info!("Port discovery: persisted new URL for peer {}", peer_id);
     }
-    if let Some(ref new_name) = updated_name {
+    if let Some(ref new_name) = final_updated_name {
         active_peer.name = Set(new_name.clone());
         tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
     }
-    if let Some(ref avatar) = updated_avatar {
+    if let Some(ref avatar) = final_updated_avatar {
         active_peer.avatar_config = Set(Some(avatar.clone()));
     }
     active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
@@ -4174,7 +4205,46 @@ pub async fn request_book(
         }
     };
 
-    // 2. Save Outgoing Request
+    // 2. Guards: prevent invalid borrow requests.
+    {
+        use crate::models::{p2p_outgoing_request, p2p_request};
+
+        // 2a. Reject if there is already a pending or accepted outgoing request for this
+        //     book from this peer (prevents double-borrowing the same copy).
+        let already_borrowing = p2p_outgoing_request::Entity::find()
+            .filter(p2p_outgoing_request::Column::ToPeerId.eq(peer.id))
+            .filter(p2p_outgoing_request::Column::BookIsbn.eq(&payload.book_isbn))
+            .filter(
+                Condition::any()
+                    .add(p2p_outgoing_request::Column::Status.eq("pending"))
+                    .add(p2p_outgoing_request::Column::Status.eq("accepted")),
+            )
+            .one(db)
+            .await
+            .unwrap_or(None)
+            .is_some();
+
+        // 2b. Reject if user is currently lending this book to the same peer
+        //     (prevents borrowing back a book that is out on loan to them).
+        let currently_lending = p2p_request::Entity::find()
+            .filter(p2p_request::Column::FromPeerId.eq(peer.id))
+            .filter(p2p_request::Column::BookIsbn.eq(&payload.book_isbn))
+            .filter(p2p_request::Column::Status.eq("accepted"))
+            .one(db)
+            .await
+            .unwrap_or(None)
+            .is_some();
+
+        if already_borrowing || currently_lending {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "already_requested" })),
+            )
+                .into_response();
+        }
+    }
+
+    // 3. Save Outgoing Request
     let outgoing_id = uuid::Uuid::new_v4().to_string();
     let outgoing = crate::models::p2p_outgoing_request::ActiveModel {
         id: Set(outgoing_id.clone()),
@@ -4199,7 +4269,7 @@ pub async fn request_book(
             .into_response();
     }
 
-    // 3. Send request to peer
+    // 4. Send request to peer
     // Note: validate_url is deferred to the plaintext fallback path below.
     // Relay-only peers have a relay:// URL that is valid for E2EE but not for
     // direct HTTP, so SSRF validation must not block the E2EE path.
@@ -4474,7 +4544,46 @@ pub async fn request_book_by_url(
 
     let peer = peer.unwrap();
 
-    // 2. Save Outgoing Request
+    // 2. Guards: prevent invalid borrow requests.
+    {
+        use crate::models::{p2p_outgoing_request, p2p_request};
+
+        // 2a. Reject if there is already a pending or accepted outgoing request for this
+        //     book from this peer (prevents double-borrowing the same copy).
+        let already_borrowing = p2p_outgoing_request::Entity::find()
+            .filter(p2p_outgoing_request::Column::ToPeerId.eq(peer.id))
+            .filter(p2p_outgoing_request::Column::BookIsbn.eq(&payload.book_isbn))
+            .filter(
+                Condition::any()
+                    .add(p2p_outgoing_request::Column::Status.eq("pending"))
+                    .add(p2p_outgoing_request::Column::Status.eq("accepted")),
+            )
+            .one(db)
+            .await
+            .unwrap_or(None)
+            .is_some();
+
+        // 2b. Reject if user is currently lending this book to the same peer
+        //     (prevents borrowing back a book that is out on loan to them).
+        let currently_lending = p2p_request::Entity::find()
+            .filter(p2p_request::Column::FromPeerId.eq(peer.id))
+            .filter(p2p_request::Column::BookIsbn.eq(&payload.book_isbn))
+            .filter(p2p_request::Column::Status.eq("accepted"))
+            .one(db)
+            .await
+            .unwrap_or(None)
+            .is_some();
+
+        if already_borrowing || currently_lending {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "already_requested" })),
+            )
+                .into_response();
+        }
+    }
+
+    // 3. Save Outgoing Request
     let outgoing_id = uuid::Uuid::new_v4().to_string();
     let outgoing = crate::models::p2p_outgoing_request::ActiveModel {
         id: Set(outgoing_id.clone()),
@@ -4498,7 +4607,7 @@ pub async fn request_book_by_url(
             .into_response();
     }
 
-    // 3. Send request to peer
+    // 4. Send request to peer
     // Note: validate_url is deferred to the plaintext fallback path below.
     // Relay-only peers have a relay:// URL that is valid for E2EE but not for
     // direct HTTP, so SSRF validation must not block the E2EE path.
@@ -4924,7 +5033,7 @@ pub async fn receive_request(
         }
     };
 
-    // 2. Check copy availability before creating the request
+    // 2. Check copy availability and guard against duplicate active loans.
     let has_available_copy = {
         use crate::models::book;
         use crate::models::copy;
@@ -4948,12 +5057,30 @@ pub async fn receive_request(
         }
     };
 
+    // Guard: reject if this peer already has a pending or accepted request for this book
+    //        (defense-in-depth — borrower side should catch this first).
+    let already_has_active_request = {
+        use crate::models::p2p_request;
+        p2p_request::Entity::find()
+            .filter(p2p_request::Column::FromPeerId.eq(peer.id))
+            .filter(p2p_request::Column::BookIsbn.eq(&payload.book_isbn))
+            .filter(
+                Condition::any()
+                    .add(p2p_request::Column::Status.eq("pending"))
+                    .add(p2p_request::Column::Status.eq("accepted")),
+            )
+            .one(&db)
+            .await
+            .unwrap_or(None)
+            .is_some()
+    };
+
     // 3. Check if auto-approve should be used
     let auto_approve =
         is_auto_approve_loans_enabled(&db).await && peer.connection_status == "accepted";
 
-    // Determine initial status: auto-reject if no copy available
-    let initial_status = if !has_available_copy {
+    // Determine initial status: auto-reject if no copy available or duplicate request
+    let initial_status = if !has_available_copy || already_has_active_request {
         "rejected"
     } else {
         "pending"
@@ -4977,16 +5104,22 @@ pub async fn receive_request(
         .await
     {
         Ok(_) => {
-            // Auto-rejected: no available copy
-            if !has_available_copy {
+            // Auto-rejected: no available copy or duplicate active request
+            if !has_available_copy || already_has_active_request {
+                let reason = if already_has_active_request {
+                    "already_borrowed"
+                } else {
+                    "no_available_copy"
+                };
                 tracing::info!(
-                    "Auto-rejected loan request {} for '{}' - no available copy",
+                    "Auto-rejected loan request {} for '{}' - {}",
                     request_id,
-                    payload.book_title
+                    payload.book_title,
+                    reason
                 );
                 return (
                     StatusCode::CONFLICT,
-                    Json(json!({ "success": false, "status": "rejected", "reason": "no_available_copy" })),
+                    Json(json!({ "success": false, "status": "rejected", "reason": reason })),
                 )
                     .into_response();
             }

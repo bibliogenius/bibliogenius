@@ -413,7 +413,22 @@ async fn save_loan_request(
         }
     };
 
-    let initial_status = if has_available_copy {
+    // Guard: reject if this peer already has a pending or accepted request for this book
+    //        (defense-in-depth — borrower side should catch this first).
+    let already_has_active_request = p2p_request::Entity::find()
+        .filter(p2p_request::Column::FromPeerId.eq(sender_peer.id))
+        .filter(p2p_request::Column::BookIsbn.eq(book_isbn))
+        .filter(
+            Condition::any()
+                .add(p2p_request::Column::Status.eq("pending"))
+                .add(p2p_request::Column::Status.eq("accepted")),
+        )
+        .one(db)
+        .await
+        .unwrap_or(None)
+        .is_some();
+
+    let initial_status = if has_available_copy && !already_has_active_request {
         "pending"
     } else {
         "rejected"
@@ -438,11 +453,17 @@ async fn save_loan_request(
         .await
         .map_err(|e| format!("Failed to save request: {e}"))?;
 
-    if !has_available_copy {
+    if initial_status == "rejected" {
+        let reason = if already_has_active_request {
+            "already_borrowed"
+        } else {
+            "no_available_copy"
+        };
         tracing::info!(
-            "E2EE: Loan request auto-rejected: {} for '{}' - no available copy",
+            "E2EE: Loan request auto-rejected: {} for '{}' - {}",
             request_id,
-            book_title
+            book_title,
+            reason
         );
     } else {
         tracing::info!(
@@ -878,12 +899,40 @@ async fn handle_loan_confirmation(
 }
 
 /// Handle a book sync request - return local books as JSON payload.
+///
+/// Also includes `avatar_config` and `library_name` so relay-only peers (e.g. on 5G
+/// where the LAN /api/config call would fail) can still update the peer's avatar and
+/// display name from the relay response.
 pub async fn handle_book_sync_request(db: &DatabaseConnection) -> serde_json::Value {
     use crate::models::book;
 
     let books = book::Entity::find().all(db).await.unwrap_or_default();
     let book_dtos = crate::models::Book::populate_authors(db, books).await;
-    json!({ "books": book_dtos })
+
+    let avatar_config: Option<serde_json::Value> =
+        crate::models::installation_profile::Entity::find_by_id(1)
+            .one(db)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|p| p.avatar_config)
+            .and_then(|s| serde_json::from_str(&s).ok());
+
+    let library_name: Option<String> = crate::models::library_config::Entity::find_by_id(1)
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.name);
+
+    let mut payload = json!({ "books": book_dtos });
+    if let Some(avatar) = avatar_config {
+        payload["avatar_config"] = avatar;
+    }
+    if let Some(name) = library_name {
+        payload["library_name"] = json!(name);
+    }
+    payload
 }
 
 /// Handle a search request - search local books and return results.
@@ -1752,5 +1801,71 @@ pub async fn handle_request_status_query(
         None => {
             json!({ "requester_request_id": requester_request_id, "status": "not_found" })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
+
+    async fn setup_test_db() -> sea_orm::DatabaseConnection {
+        crate::db::init_db("sqlite::memory:")
+            .await
+            .expect("Failed to init in-memory DB")
+    }
+
+    /// Update the seeded installation_profile (id=1) to set an avatar_config.
+    async fn set_avatar_config(db: &sea_orm::DatabaseConnection, avatar_json: &str) {
+        use crate::models::installation_profile::Entity as ProfileEntity;
+        let profile = ProfileEntity::find_by_id(1)
+            .one(db)
+            .await
+            .expect("DB error")
+            .expect("Default profile missing");
+        let mut active = profile.into_active_model();
+        active.avatar_config = Set(Some(avatar_json.to_string()));
+        active.save(db).await.expect("Failed to update avatar_config");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn book_sync_response_includes_avatar_and_library_name() {
+        let db = setup_test_db().await;
+        // init_db seeds installation_profile (id=1, no avatar) and library_config (id=1, "My Library")
+        let avatar_json = r#"{"style":"lorelei","seed":"alice"}"#;
+        set_avatar_config(&db, avatar_json).await;
+
+        let response = handle_book_sync_request(&db).await;
+
+        assert!(
+            response.get("avatar_config").is_some(),
+            "book_sync_request response must include avatar_config for relay sync"
+        );
+        assert_eq!(
+            response["avatar_config"]["style"].as_str(),
+            Some("lorelei"),
+            "avatar_config style must match what was stored"
+        );
+        assert_eq!(
+            response["library_name"].as_str(),
+            Some("My Library"),
+            "book_sync_request response must include library_name"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn book_sync_response_without_avatar_omits_avatar_field() {
+        let db = setup_test_db().await;
+        // init_db seeds installation_profile with no avatar_config (NULL)
+        let response = handle_book_sync_request(&db).await;
+        assert!(
+            response.get("avatar_config").is_none(),
+            "avatar_config must be absent when installation_profile has no avatar set"
+        );
+        // library_config is seeded with "My Library" - library_name must always be present
+        assert!(
+            response.get("library_name").is_some(),
+            "library_name must be present (seeded by init_db)"
+        );
     }
 }
