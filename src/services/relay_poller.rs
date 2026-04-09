@@ -126,7 +126,42 @@ pub async fn start_relay_polling(state: AppState, interval: Duration) {
 /// `source` indicates which subsystem triggered this cycle (timer, WS nudge, manual).
 /// It is forwarded to the nudge event bus so Flutter UI consumers can distinguish
 /// fast-path (WebSocket) from fallback-path (Polling) updates.
+///
+/// Uses `try_lock()` on `AppState::relay_poll_lock` to prevent concurrent executions.
+/// If another cycle is already running, returns `Ok(())` immediately — the running
+/// cycle will fetch and ack all pending messages, so no messages are lost.
+///
+/// Callers that must not drop their trigger (e.g. the WS nudge `poll_worker`) should
+/// use `poll_once_wait()` instead, which blocks until the lock is free.
 pub async fn poll_once(state: &AppState, source: NudgeSource) -> Result<(), String> {
+    // Prevent double-processing: timer, WS nudge, poll_now, and peer.rs can all call
+    // poll_once() concurrently. Without this guard they would each fetch the same
+    // relay messages before acks go through, leading to duplicate processing.
+    let _poll_guard = match state.relay_poll_lock().try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::debug!("poll_once({source:?}): another cycle is already running, skipping");
+            return Ok(());
+        }
+    };
+    poll_inner(state, source).await
+}
+
+/// Like `poll_once`, but waits for the lock instead of skipping if another cycle is running.
+///
+/// Used exclusively by the WS nudge `poll_worker` to guarantee that every WS nudge
+/// triggers a poll cycle. Other callers (timer, `poll_now`, peer.rs) use `poll_once()`
+/// (skip-if-busy) so the double-processing guard is still effective — only one cycle
+/// runs at a time and all others are safely discarded.
+pub(crate) async fn poll_once_wait(state: &AppState, source: NudgeSource) -> Result<(), String> {
+    // Wait for any in-progress cycle to finish, then run our own.
+    // lock().await (not try_lock) ensures WS nudges are never silently dropped.
+    let _poll_guard = state.relay_poll_lock().lock().await;
+    poll_inner(state, source).await
+}
+
+/// Inner poll logic, called with the relay poll lock already held.
+async fn poll_inner(state: &AppState, source: NudgeSource) -> Result<(), String> {
     let db = state.db();
 
     // 1. Load my relay config
@@ -203,7 +238,10 @@ pub async fn poll_once(state: &AppState, source: NudgeSource) -> Result<(), Stri
             )
             .await
         {
-            tracing::warn!("Relay poller: Failed to ack raw message {msg_id}: {e}");
+            tracing::error!(
+                "Relay poller: Failed to ack raw message {msg_id}: {e} \
+                 (message remains in mailbox, sidecar will re-nudge)"
+            );
         }
     }
 
@@ -245,6 +283,16 @@ pub async fn poll_once(state: &AppState, source: NudgeSource) -> Result<(), Stri
         tracing::warn!(
             "Relay poller: No known E2EE peers or linked devices, cannot process encrypted messages"
         );
+        // Raw blobs were already processed and acked in step 4a.
+        // Emit nudge so Flutter refreshes for those (e.g. a connection_request
+        // that just created a new peer entry), even though encrypted messages
+        // are deferred to the next cycle. Mirrors the crypto-not-ready path in 4b.
+        if !raw_blobs.is_empty() {
+            nudge_events::bus().emit(NudgeEvent {
+                mailbox_id: config.mailbox_uuid.clone(),
+                source,
+            });
+        }
         return Ok(());
     }
 
@@ -276,7 +324,10 @@ pub async fn poll_once(state: &AppState, source: NudgeSource) -> Result<(), Stri
             )
             .await
         {
-            tracing::warn!("Relay poller: Failed to ack message {message_id}: {e}");
+            tracing::error!(
+                "Relay poller: Failed to ack message {message_id}: {e} \
+                 (message remains in mailbox - risk of double processing on next nudge)"
+            );
         }
     }
 

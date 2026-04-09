@@ -245,13 +245,16 @@ impl RelayTransport {
             .map_err(|e| E2eeTransportError::Network(format!("relay DELETE failed: {e}")))?;
 
         let status = response.status().as_u16();
-        if status >= 400 {
+        // Require a 2xx response. Checking only >= 400 would silently treat
+        // 3xx redirects (e.g. HTTP->HTTPS redirect on the hub) as success,
+        // leaving the message in the mailbox undeleted.
+        if !(200..=299).contains(&status) {
             let body = response.text().await.unwrap_or_default();
-            tracing::warn!("Relay: ack message failed: HTTP {status}");
+            tracing::warn!("Relay: ack message {message_id} failed: HTTP {status}: {body}");
             return Err(E2eeTransportError::PeerError(status, body));
         }
 
-        tracing::debug!("Relay: Acked message successfully");
+        tracing::debug!("Relay: Acked message {message_id} successfully");
         Ok(())
     }
 

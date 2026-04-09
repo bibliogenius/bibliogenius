@@ -1,10 +1,5 @@
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, Statement};
 
-#[derive(Clone)]
-pub struct AppState {
-    pub conn: DatabaseConnection,
-}
-
 pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     let db = Database::connect(database_url).await?;
 

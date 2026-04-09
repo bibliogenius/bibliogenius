@@ -31,6 +31,12 @@ type PendingRelayRequests =
 /// Entries older than [`PEER_UNREACHABLE_TTL`] are treated as expired.
 type PeerDirectFailures = Arc<dashmap::DashMap<i32, std::time::Instant>>;
 
+/// Guard against concurrent `poll_once()` executions.
+/// Multiple callers (timer, WS nudge, poll_now endpoint, peer.rs) could overlap
+/// and fetch the same relay messages before acks go through, causing double processing.
+/// `try_lock()` in `poll_once()` skips any cycle that races an already-running one.
+type RelayPollLock = Arc<tokio::sync::Mutex<()>>;
+
 /// How long a peer stays in the "unreachable via direct" cache before we retry.
 const PEER_UNREACHABLE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
@@ -72,6 +78,8 @@ pub struct AppState {
     /// Cache of peers whose direct LAN connection recently failed.
     /// Used by `try_send_e2ee` to skip direct and go straight to relay.
     peer_direct_failures: PeerDirectFailures,
+    /// Relay poll lock — prevents concurrent `poll_once()` from double-processing messages.
+    relay_poll_lock: RelayPollLock,
 }
 
 impl AppState {
@@ -130,6 +138,7 @@ impl AppState {
             pending_relay_requests: Arc::new(dashmap::DashMap::new()),
             hub_directory: Arc::new(HubDirectoryService::new()),
             peer_direct_failures: Arc::new(dashmap::DashMap::new()),
+            relay_poll_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -229,6 +238,17 @@ impl AppState {
     /// Clear the "unreachable" mark for a peer (e.g. when direct succeeds).
     pub fn clear_peer_direct_failed(&self, peer_id: i32) {
         self.peer_direct_failures.remove(&peer_id);
+    }
+
+    // ── Relay poll deduplication ────────────────────────────────────
+
+    /// Return the relay poll lock.
+    ///
+    /// `poll_once()` uses `try_lock()` on this to ensure only one poll cycle
+    /// runs at a time. Callers that race an already-running cycle are silently
+    /// skipped — the running poll will process all pending messages.
+    pub fn relay_poll_lock(&self) -> &RelayPollLock {
+        &self.relay_poll_lock
     }
 
     /// Get the database connection (for backward compatibility during migration)
