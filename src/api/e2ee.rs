@@ -238,7 +238,7 @@ pub async fn dispatch_clear_message(
             )
         }
 
-        "loan_confirmation" => handle_loan_confirmation(db, clear_message).await,
+        "loan_confirmation" => handle_loan_confirmation(db, clear_message, sender_peer).await,
 
         "book_sync_request" => {
             let response_payload = handle_book_sync_request(db).await;
@@ -260,7 +260,7 @@ pub async fn dispatch_clear_message(
             )
         }
 
-        "status_update" => handle_status_update(db, clear_message).await,
+        "status_update" => handle_status_update(db, clear_message, sender_peer).await,
 
         "device_sync_request" => {
             let response_payload = handle_device_sync_request(db, clear_message, sender_peer).await;
@@ -570,6 +570,7 @@ pub async fn handle_loan_request_for_relay(
 async fn handle_loan_confirmation(
     db: &DatabaseConnection,
     msg: &ClearMessage,
+    sender_peer: &peer::Model,
 ) -> axum::response::Response {
     use crate::models::{book, copy, p2p_outgoing_request};
 
@@ -846,6 +847,18 @@ async fn handle_loan_confirmation(
                 }
             }
 
+            crate::services::notification_service::emit(
+                db,
+                crate::domain::CreateNotification {
+                    event_type: crate::domain::NotificationEventType::BorrowAccepted,
+                    title: title.to_string(),
+                    body: Some(sender_peer.name.clone()),
+                    ref_type: Some("loan".to_string()),
+                    ref_id: requester_request_id.clone().or(lender_request_id.clone()),
+                },
+            )
+            .await;
+
             (
                 StatusCode::OK,
                 Json(json!({
@@ -913,6 +926,7 @@ pub async fn handle_search_request(
 async fn handle_status_update(
     db: &DatabaseConnection,
     msg: &ClearMessage,
+    sender_peer: &peer::Model,
 ) -> axum::response::Response {
     use crate::models::{contact, copy, loan, p2p_outgoing_request, p2p_request, peer};
 
@@ -941,6 +955,7 @@ async fn handle_status_update(
         .await
     {
         let book_isbn = req.book_isbn.clone();
+        let book_title = req.book_title.clone();
         let mut active: p2p_outgoing_request::ActiveModel = req.into();
         active.status = Set(status.to_string());
         active.updated_at = Set(chrono::Utc::now().to_rfc3339());
@@ -993,13 +1008,28 @@ async fn handle_status_update(
                 }
             }
 
-            // Emit book_returned notification on borrower side
+            // Emit book_reclaimed notification on borrower side (lender took the book back)
             crate::services::notification_service::emit(
                 db,
                 crate::domain::CreateNotification {
-                    event_type: crate::domain::NotificationEventType::BookReturned,
+                    event_type: crate::domain::NotificationEventType::BookReclaimed,
                     title: bk.title.clone(),
-                    body: None, // Lender name not easily available here
+                    body: Some(sender_peer.name.clone()),
+                    ref_type: Some("loan".to_string()),
+                    ref_id: Some(loan_id.to_string()),
+                },
+            )
+            .await;
+        }
+
+        // Emit borrow_rejected notification on borrower side
+        if status == "rejected" {
+            crate::services::notification_service::emit(
+                db,
+                crate::domain::CreateNotification {
+                    event_type: crate::domain::NotificationEventType::BorrowRejected,
+                    title: book_title.clone(),
+                    body: Some(sender_peer.name.clone()),
                     ref_type: Some("loan".to_string()),
                     ref_id: Some(loan_id.to_string()),
                 },

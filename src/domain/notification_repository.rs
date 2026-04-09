@@ -55,7 +55,9 @@ pub enum NotificationEventType {
     // Loans
     BorrowRequest,
     BorrowAccepted,
+    BorrowRejected,
     BookReturned,
+    BookReclaimed,
     // Discoveries
     NewBooks,
     WishlistMatch,
@@ -72,7 +74,9 @@ impl NotificationEventType {
             Self::FollowRequest => "follow_request",
             Self::BorrowRequest => "borrow_request",
             Self::BorrowAccepted => "borrow_accepted",
+            Self::BorrowRejected => "borrow_rejected",
             Self::BookReturned => "book_returned",
+            Self::BookReclaimed => "book_reclaimed",
             Self::NewBooks => "new_books",
             Self::WishlistMatch => "wishlist_match",
             Self::Welcome => "welcome",
@@ -85,9 +89,11 @@ impl NotificationEventType {
             | Self::ConnectionAccepted
             | Self::NewFollower
             | Self::FollowRequest => NotificationCategory::Connections,
-            Self::BorrowRequest | Self::BorrowAccepted | Self::BookReturned => {
-                NotificationCategory::Loans
-            }
+            Self::BorrowRequest
+            | Self::BorrowAccepted
+            | Self::BorrowRejected
+            | Self::BookReturned
+            | Self::BookReclaimed => NotificationCategory::Loans,
             Self::NewBooks | Self::WishlistMatch => NotificationCategory::Discoveries,
             Self::Welcome => NotificationCategory::System,
         }
@@ -101,7 +107,9 @@ impl NotificationEventType {
             "follow_request" => Some(Self::FollowRequest),
             "borrow_request" => Some(Self::BorrowRequest),
             "borrow_accepted" => Some(Self::BorrowAccepted),
+            "borrow_rejected" => Some(Self::BorrowRejected),
             "book_returned" => Some(Self::BookReturned),
+            "book_reclaimed" => Some(Self::BookReclaimed),
             "new_books" => Some(Self::NewBooks),
             "wishlist_match" => Some(Self::WishlistMatch),
             "welcome" => Some(Self::Welcome),
@@ -208,7 +216,9 @@ mod tests {
             NotificationEventType::FollowRequest,
             NotificationEventType::BorrowRequest,
             NotificationEventType::BorrowAccepted,
+            NotificationEventType::BorrowRejected,
             NotificationEventType::BookReturned,
+            NotificationEventType::BookReclaimed,
             NotificationEventType::NewBooks,
             NotificationEventType::WishlistMatch,
         ];
