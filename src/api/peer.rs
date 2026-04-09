@@ -3942,12 +3942,9 @@ pub async fn sync_peer_by_url(
     let peer_id = peer.id;
     let url_changed = effective_url != peer.url;
     // Fall back to E2EE-sourced metadata when peer was unreachable via direct HTTP (5G)
-    let final_updated_name = updated_name.or_else(|| {
-        e2ee_library_name.filter(|n| n != &peer.name)
-    });
-    let final_updated_avatar = updated_avatar.or_else(|| {
-        e2ee_avatar.filter(|a| Some(a.as_str()) != peer.avatar_config.as_deref())
-    });
+    let final_updated_name = updated_name.or_else(|| e2ee_library_name.filter(|n| n != &peer.name));
+    let final_updated_avatar = updated_avatar
+        .or_else(|| e2ee_avatar.filter(|a| Some(a.as_str()) != peer.avatar_config.as_deref()));
     let mut active_peer: peer::ActiveModel = peer.into();
     if url_changed {
         active_peer.url = Set(effective_url);

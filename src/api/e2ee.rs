@@ -1825,7 +1825,10 @@ mod tests {
             .expect("Default profile missing");
         let mut active = profile.into_active_model();
         active.avatar_config = Set(Some(avatar_json.to_string()));
-        active.save(db).await.expect("Failed to update avatar_config");
+        active
+            .save(db)
+            .await
+            .expect("Failed to update avatar_config");
     }
 
     #[tokio::test(flavor = "multi_thread")]
