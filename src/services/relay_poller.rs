@@ -782,8 +782,8 @@ pub async fn update_peer_relay_from_reply_to(
         }
         Ok(None) => {
             // Linked-device peer or unknown id — no peers row to update.
-            tracing::debug!(
-                "Relay poller: peer {peer_id} not found in peers table, skipping credential update"
+            tracing::info!(
+                "Relay poller: peer {peer_id} not found in peers table (linked device?), relay credentials NOT stored"
             );
         }
         Err(e) => {

@@ -223,6 +223,11 @@ pub(crate) async fn sync_all_peer_scores(state: &AppState) {
         .await
         .unwrap_or_default();
 
+    tracing::info!(
+        "sliding_puzzle leaderboard sync: {} accepted peer(s) found",
+        peers.len()
+    );
+
     if peers.is_empty() {
         return;
     }
@@ -252,12 +257,26 @@ pub(crate) async fn sync_all_peer_scores(state: &AppState) {
 
         if peer_has_sliding_puzzle.is_none() {
             // Direct unreachable - try relay (ADR-022).
+            tracing::info!(
+                "sliding_puzzle sync: peer '{}' unreachable via LAN (key_exchange_done={}, relay_creds={})",
+                peer.name,
+                peer.key_exchange_done,
+                peer.mailbox_id.is_some() && peer.relay_write_token.is_some(),
+            );
             // ensure_relay_credentials refreshes missing write_token from hub when needed.
             if let Some(ready) =
                 crate::utils::leaderboard_relay::ensure_relay_credentials(db, peer).await
             {
+                tracing::info!(
+                    "sliding_puzzle sync: peer '{}' queued for relay sync",
+                    peer.name
+                );
                 relay_peers.push(ready);
             } else {
+                tracing::warn!(
+                    "sliding_puzzle sync: no relay credentials for peer '{}', skipping relay sync",
+                    peer.name
+                );
                 sync_peer_puzzle_scores(db, peer.id, &peer.url, &peer.name, &client, None).await;
             }
         } else {

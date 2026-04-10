@@ -159,27 +159,39 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
     install_panic_hook();
 
     // Initialize tracing for FFI mode (debug builds only).
-    // Release builds produce no log file to avoid leaking sensitive data.
+    // Release builds produce no log output to avoid leaking sensitive data.
     // Filter targets the lib crate name "rust_lib_app", not the package name.
+    //
+    // macOS FFI: writes to /tmp/bibliogenius-rust.log (tail -f to follow).
+    // iOS FFI:   /tmp is sandboxed and not writable; falls back to stderr
+    //            which appears in Xcode Console.
     static TRACING_INIT: std::sync::Once = std::sync::Once::new();
     TRACING_INIT.call_once(|| {
-        if cfg!(debug_assertions)
-            && let Ok(file) = std::fs::OpenOptions::new()
+        if cfg!(debug_assertions) {
+            let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "rust_lib_app=info".into());
+
+            // Try file first (macOS FFI path)
+            if let Ok(file) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open("/tmp/bibliogenius-rust.log")
-        {
-            let _ = tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "rust_lib_app=info".into()),
-                )
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_writer(std::sync::Mutex::new(file))
-                        .with_ansi(false),
-                )
-                .try_init();
+            {
+                let _ = tracing_subscriber::registry()
+                    .with(filter)
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_writer(std::sync::Mutex::new(file))
+                            .with_ansi(false),
+                    )
+                    .try_init();
+            } else {
+                // Fallback to stderr (iOS FFI — visible in Xcode Console)
+                let _ = tracing_subscriber::registry()
+                    .with(filter)
+                    .with(tracing_subscriber::fmt::layer().with_ansi(false))
+                    .try_init();
+            }
         }
     });
 
@@ -2237,6 +2249,33 @@ pub async fn memory_game_leaderboard() -> Result<Vec<FrbMemoryLeaderboardEntry>,
     Ok(entries)
 }
 
+/// Return a debug summary of all peers and their relay credential state.
+///
+/// Used to diagnose leaderboard relay issues (ADR-022). Returns one line per peer
+/// with name, connection_status, key_exchange_done, and whether relay credentials
+/// are present. Call from Flutter and log with debugPrint.
+pub async fn peers_relay_debug_info() -> Result<String, String> {
+    use sea_orm::EntityTrait;
+    let db = db().ok_or("Database not initialized")?;
+    let peers = crate::models::peer::Entity::find()
+        .all(db)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut lines = vec![format!("Total peers: {}", peers.len())];
+    for p in &peers {
+        lines.push(format!(
+            "  [{status}] '{name}' kx={kx} relay_url={ru} mailbox={mb} write_token={wt}",
+            status = p.connection_status,
+            name = p.name,
+            kx = p.key_exchange_done,
+            ru = p.relay_url.is_some(),
+            mb = p.mailbox_id.is_some(),
+            wt = p.relay_write_token.is_some(),
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
 /// Refresh the network memory game leaderboard by syncing with all accepted peers.
 /// Fetches each peer's /api/game/memory/public-best, upserts into peer_memory_scores,
 /// then returns the merged leaderboard.
@@ -2257,6 +2296,12 @@ pub async fn memory_game_refresh_leaderboard() -> Result<Vec<FrbMemoryLeaderboar
         }
         _ => true, // Default to enabled if no profile (dev mode)
     };
+
+    tracing::info!(
+        "memory_game_refresh_leaderboard: local_enabled={}, app_state={}",
+        local_enabled,
+        global_app_state().is_some(),
+    );
 
     if local_enabled {
         // Sync via direct HTTP + relay fallback (ADR-022). Requires AppState for relay.
