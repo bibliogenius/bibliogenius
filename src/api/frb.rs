@@ -13,6 +13,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // Global database connection (initialized once on app start)
 static DB: OnceLock<DatabaseConnection> = OnceLock::new();
+/// Global AppState — set once in `initBackend`, read by FFI handlers that need
+/// services not available as individual statics (e.g. catalog notifications).
+static GLOBAL_APP_STATE: OnceLock<crate::infrastructure::AppState> = OnceLock::new();
 #[allow(dead_code)]
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
@@ -62,6 +65,11 @@ fn install_panic_hook() {
 /// Get the database connection (must be initialized first)
 fn db() -> Option<&'static DatabaseConnection> {
     DB.get()
+}
+
+/// Get the global AppState (must be initialized first via `initBackend`).
+fn global_app_state() -> Option<&'static crate::infrastructure::AppState> {
+    GLOBAL_APP_STATE.get()
 }
 
 /// Load the Google Books API key from the installation profile.
@@ -603,6 +611,14 @@ pub async fn create_book(book: FrbBook) -> Result<FrbBook, String> {
                 )
                 .await
             };
+            // Notify peers that our catalog changed. Fire-and-forget, debounced.
+            // In FFI mode the HTTP handler in books.rs is bypassed, so we trigger
+            // the notification here instead.
+            if let Some(state) = global_app_state() {
+                crate::services::catalog_notification::schedule_catalog_changed_notification(
+                    state.clone(),
+                );
+            }
             Ok(FrbBook::from(created_book))
         }
         Err(crate::services::book_service::ServiceError::InvalidInput(msg)) => Err(msg),
@@ -667,7 +683,15 @@ pub async fn delete_book(id: i32) -> Result<(), String> {
     let db = db().ok_or("Database not initialized")?;
 
     match crate::services::book_service::delete_book(db, id).await {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // Notify peers that our catalog changed (same as create_book — HTTP handler bypassed).
+            if let Some(state) = global_app_state() {
+                crate::services::catalog_notification::schedule_catalog_changed_notification(
+                    state.clone(),
+                );
+            }
+            Ok(())
+        }
         Err(e) => Err(format!("{:?}", e)),
     }
 }
@@ -1373,7 +1397,13 @@ pub async fn return_loan(id: i32) -> Result<String, String> {
     let db = db().ok_or("Database not initialized")?;
 
     match crate::services::loan_service::return_loan(db, id).await {
-        Ok(_) => Ok("Loan returned successfully".to_string()),
+        Ok(_) => {
+            // Dismiss any pending due-date reminders for this loan
+            use crate::domain::NotificationRepository;
+            let notif_repo = crate::infrastructure::SeaOrmNotificationRepository::new(db.clone());
+            let _ = notif_repo.dismiss_by_ref("loan", &id.to_string()).await;
+            Ok("Loan returned successfully".to_string())
+        }
         Err(crate::services::loan_service::ServiceError::NotFound) => {
             Err("Loan not found".to_string())
         }
@@ -1389,6 +1419,7 @@ pub async fn return_loan(id: i32) -> Result<String, String> {
 pub struct FrbLoanSettings {
     pub default_loan_duration_days: i32,
     pub per_book_duration_enabled: bool,
+    pub reminder_days_before_due: i32,
 }
 
 /// Get the current loan settings
@@ -1401,6 +1432,7 @@ pub async fn get_loan_settings() -> Result<FrbLoanSettings, String> {
     Ok(FrbLoanSettings {
         default_loan_duration_days: settings.default_loan_duration_days,
         per_book_duration_enabled: settings.per_book_duration_enabled,
+        reminder_days_before_due: settings.reminder_days_before_due,
     })
 }
 
@@ -1408,6 +1440,7 @@ pub async fn get_loan_settings() -> Result<FrbLoanSettings, String> {
 pub async fn update_loan_settings(
     default_loan_duration_days: i32,
     per_book_duration_enabled: bool,
+    reminder_days_before_due: i32,
 ) -> Result<FrbLoanSettings, String> {
     let db = db().ok_or("Database not initialized")?;
     let repo = crate::infrastructure::SeaOrmLoanSettingsRepository::new(db.clone());
@@ -1417,6 +1450,7 @@ pub async fn update_loan_settings(
         .update_settings(crate::domain::LoanSettings {
             default_loan_duration_days,
             per_book_duration_enabled,
+            reminder_days_before_due,
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -1424,7 +1458,186 @@ pub async fn update_loan_settings(
     Ok(FrbLoanSettings {
         default_loan_duration_days: updated.default_loan_duration_days,
         per_book_duration_enabled: updated.per_book_duration_enabled,
+        reminder_days_before_due: updated.reminder_days_before_due,
     })
+}
+
+/// Check active loans for upcoming due dates and emit reminder notifications.
+///
+/// Emits:
+/// - `LoanDueReminder` when `0 < days_until_due <= reminder_days_before_due`
+/// - `LoanDueToday` when `days_until_due <= 0` (due today or overdue)
+///
+/// Deduplication is enforced: no duplicate notification per loan per type.
+/// Returns the number of new notifications created.
+pub async fn check_loan_reminders(language: String) -> Result<i32, String> {
+    use crate::domain::notification_repository::{CreateNotification, NotificationEventType};
+    use crate::domain::{LoanSettingsRepository, NotificationRepository};
+    use crate::infrastructure::{SeaOrmLoanSettingsRepository, SeaOrmNotificationRepository};
+    use crate::services::loan_service::{LoanFilter, list_loans};
+    use chrono::{Local, NaiveDate};
+
+    let db = db().ok_or("Database not initialized")?;
+
+    let settings_repo = SeaOrmLoanSettingsRepository::new(db.clone());
+    let settings = settings_repo
+        .get_settings()
+        .await
+        .map_err(|e| e.to_string())?;
+    let reminder_days = settings.reminder_days_before_due;
+
+    let loans = list_loans(
+        db,
+        LoanFilter {
+            status: Some("active".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| format!("{:?}", e))?;
+
+    let notif_repo = SeaOrmNotificationRepository::new(db.clone());
+    let today = Local::now().date_naive();
+    let lang = language.as_str();
+    let mut created = 0i32;
+
+    for loan in loans {
+        // Parse due date (stored as "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS")
+        let due_date_str = loan.due_date.get(..10).unwrap_or(&loan.due_date);
+        let due_date = match NaiveDate::parse_from_str(due_date_str, "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let days_left = (due_date - today).num_days();
+        let ref_id = loan.id.to_string();
+
+        if days_left <= 0 {
+            // Due today or overdue — emit LoanDueToday if not already present
+            let already = notif_repo
+                .exists(
+                    NotificationEventType::LoanDueToday.as_str(),
+                    "loan",
+                    &ref_id,
+                )
+                .await
+                .unwrap_or(true);
+            if !already {
+                let (title, body) = loan_due_today_text(lang, &loan.book_title, &loan.contact_name);
+                if notif_repo
+                    .create(CreateNotification {
+                        event_type: NotificationEventType::LoanDueToday,
+                        title,
+                        body: Some(body),
+                        ref_type: Some("loan".to_string()),
+                        ref_id: Some(ref_id),
+                    })
+                    .await
+                    .is_ok()
+                {
+                    created += 1;
+                }
+            }
+        } else if days_left <= reminder_days as i64 {
+            // Approaching due date — emit LoanDueReminder if not already present
+            let already = notif_repo
+                .exists(
+                    NotificationEventType::LoanDueReminder.as_str(),
+                    "loan",
+                    &ref_id,
+                )
+                .await
+                .unwrap_or(true);
+            if !already {
+                let (title, body) = loan_due_reminder_text(
+                    lang,
+                    &loan.book_title,
+                    &loan.contact_name,
+                    days_left as i32,
+                );
+                if notif_repo
+                    .create(CreateNotification {
+                        event_type: NotificationEventType::LoanDueReminder,
+                        title,
+                        body: Some(body),
+                        ref_type: Some("loan".to_string()),
+                        ref_id: Some(ref_id),
+                    })
+                    .await
+                    .is_ok()
+                {
+                    created += 1;
+                }
+            }
+        }
+    }
+
+    Ok(created)
+}
+
+fn loan_due_today_text(lang: &str, title: &str, borrower: &str) -> (String, String) {
+    match lang {
+        "fr" => (
+            "Retour prévu aujourd'hui".to_string(),
+            format!("«{}» doit être rendu aujourd'hui — {}", title, borrower),
+        ),
+        "es" => (
+            "Devolución prevista hoy".to_string(),
+            format!("«{}» debe devolverse hoy — {}", title, borrower),
+        ),
+        "de" => (
+            "Rückgabe heute fällig".to_string(),
+            format!("«{}» · Heute fällig — {}", title, borrower),
+        ),
+        _ => (
+            "Return due today".to_string(),
+            format!("«{}» · Due today — {}", title, borrower),
+        ),
+    }
+}
+
+fn loan_due_reminder_text(lang: &str, title: &str, borrower: &str, days: i32) -> (String, String) {
+    match lang {
+        "fr" => (
+            "Rappel de prêt".to_string(),
+            format!(
+                "«{}» · Retour dans {} jour{} — {}",
+                title,
+                days,
+                if days > 1 { "s" } else { "" },
+                borrower
+            ),
+        ),
+        "es" => (
+            "Recordatorio de préstamo".to_string(),
+            format!(
+                "«{}» · Vence en {} día{} — {}",
+                title,
+                days,
+                if days > 1 { "s" } else { "" },
+                borrower
+            ),
+        ),
+        "de" => (
+            "Leih-Erinnerung".to_string(),
+            format!(
+                "«{}» · Fällig in {} Tag{} — {}",
+                title,
+                days,
+                if days > 1 { "en" } else { "" },
+                borrower
+            ),
+        ),
+        _ => (
+            "Loan reminder".to_string(),
+            format!(
+                "«{}» · Due in {} day{} — {}",
+                title,
+                days,
+                if days > 1 { "s" } else { "" },
+                borrower
+            ),
+        ),
+    }
 }
 
 /// Get the effective loan duration for a specific book (in days).
@@ -1601,6 +1814,9 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                     std::sync::Arc::new(shared_id_svc.clone()),
                 );
                 state.set_server_port(actual_port);
+                // Store globally so FFI handlers (create_book, delete_book) can
+                // trigger catalog-change notifications without going through HTTP.
+                let _ = GLOBAL_APP_STATE.set(state.clone());
 
                 // Spawn relay poller (checks relay hub for incoming messages)
                 let poller_state = state.clone();

@@ -73,7 +73,7 @@ async fn notify_peers_catalog_changed(state: AppState) {
     let crypto_service = match state.crypto_service() {
         Some(svc) => svc.clone(),
         None => {
-            tracing::debug!("Catalog notify: skipped — crypto service not ready");
+            tracing::warn!("Catalog notify: skipped — crypto service not ready");
             return;
         }
     };
@@ -106,7 +106,7 @@ async fn notify_peers_catalog_changed(state: AppState) {
     };
 
     if peers.is_empty() {
-        tracing::debug!("Catalog notify: no eligible peers");
+        tracing::info!("Catalog notify: no eligible peers (key_exchange_done=true + accepted)");
         return;
     }
 
@@ -126,8 +126,8 @@ async fn notify_peers_catalog_changed(state: AppState) {
         let (Some(relay_url), Some(mailbox_id), Some(write_token)) =
             (&p.relay_url, &p.mailbox_id, &p.relay_write_token)
         else {
-            tracing::debug!(
-                "Catalog notify: peer {} has no relay credentials, skipping",
+            tracing::warn!(
+                "Catalog notify: peer {} has no relay credentials (relay_url/mailbox_id/write_token), skipping",
                 p.name
             );
             continue;
@@ -135,7 +135,7 @@ async fn notify_peers_catalog_changed(state: AppState) {
 
         // Parse peer's X25519 public key for encryption.
         let Some(x25519_hex) = &p.x25519_public_key else {
-            tracing::debug!(
+            tracing::warn!(
                 "Catalog notify: peer {} missing x25519 key, skipping",
                 p.name
             );
