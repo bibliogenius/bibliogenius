@@ -2059,6 +2059,65 @@ pub async fn subscribe_relay_nudges(
     Ok(())
 }
 
+// ============ Leaderboard Change Stream (ADR-023) ============
+
+/// FFI-safe view of a leaderboard-change event.
+///
+/// Emitted when a peer sends a `public_stats_push` relay message, indicating
+/// that they beat their personal best in a game or gained a gamification level.
+/// Flutter providers showing network leaderboards should trigger a re-load
+/// on receipt.
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbLeaderboardChangedEvent {
+    /// Local peer row ID from the `peers` table.
+    pub peer_id: i32,
+}
+
+/// Stream of leaderboard-change events from peers (ADR-023).
+///
+/// Each emitted event indicates that a peer pushed updated scores via
+/// `public_stats_push` and the local cache has been updated. Flutter
+/// consumers (game leaderboard screens) should reload network scores.
+///
+/// The stream lives until the Dart side drops the `StreamSink`. Multiple
+/// concurrent subscribers each receive their own independent copy of every
+/// event (broadcast semantics). A slow subscriber lags without blocking
+/// the emitter.
+pub async fn subscribe_leaderboard_changes(
+    sink: crate::frb_generated::StreamSink<FrbLeaderboardChangedEvent>,
+) -> Result<(), String> {
+    let mut rx = crate::services::leaderboard_events::bus().subscribe();
+
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let frb_event = FrbLeaderboardChangedEvent {
+                        peer_id: event.peer_id,
+                    };
+                    if sink.add(frb_event).is_err() {
+                        tracing::debug!(
+                            "Leaderboard change stream: Dart sink closed, ending forwarder"
+                        );
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        "Leaderboard change stream: subscriber lagged, dropped {n} events"
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::error!("Leaderboard change stream: bus sender closed unexpectedly");
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
 // ============ Memory Game (FFI) ============
 
 /// A card in the memory game (FFI-safe)
@@ -2284,30 +2343,22 @@ pub async fn memory_game_refresh_leaderboard() -> Result<Vec<FrbMemoryLeaderboar
     let game_repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
     use crate::modules::memory_game::domain::MemoryGameRepository;
 
-    // Check if memory_game module is enabled locally
-    use sea_orm::EntityTrait;
-    let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
-        .one(db)
-        .await
-    {
-        Ok(Some(p)) => {
-            let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
-            modules.contains(&"memory_game".to_string())
-        }
-        _ => true, // Default to enabled if no profile (dev mode)
-    };
-
+    let has_app_state = global_app_state().is_some();
     tracing::info!(
-        "memory_game_refresh_leaderboard: local_enabled={}, app_state={}",
-        local_enabled,
-        global_app_state().is_some(),
+        "memory_game_refresh_leaderboard: app_state={}",
+        has_app_state,
+    );
+    // stderr diagnostic visible in Xcode Console on iOS
+    eprintln!(
+        "memory_game_refresh_leaderboard: app_state={}",
+        has_app_state,
     );
 
-    if local_enabled {
-        // Sync via direct HTTP + relay fallback (ADR-022). Requires AppState for relay.
-        if let Some(state) = global_app_state() {
-            crate::modules::memory_game::handlers::sync_all_peer_scores(state).await;
-        }
+    // Always sync peer scores on refresh -- the user explicitly requested it.
+    // The local_enabled flag only gates whether we SHARE our own score (in
+    // build_local_stats_bundle), not whether we fetch others' scores.
+    if let Some(state) = global_app_state() {
+        crate::modules::memory_game::handlers::sync_all_peer_scores(state).await;
     }
 
     // Return merged leaderboard (same logic as memory_game_leaderboard)
@@ -2568,24 +2619,9 @@ pub async fn puzzle_game_refresh_leaderboard() -> Result<Vec<FrbPuzzleLeaderboar
         crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
     use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
 
-    // Check if sliding_puzzle module is enabled locally
-    use sea_orm::EntityTrait;
-    let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
-        .one(db)
-        .await
-    {
-        Ok(Some(p)) => {
-            let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
-            modules.contains(&"sliding_puzzle".to_string())
-        }
-        _ => true, // Default to enabled if no profile (dev mode)
-    };
-
-    if local_enabled {
-        // Sync via direct HTTP + relay fallback (ADR-022). Requires AppState for relay.
-        if let Some(state) = global_app_state() {
-            crate::modules::sliding_puzzle::handlers::sync_all_peer_scores(state).await;
-        }
+    // Always sync peer scores on refresh -- the user explicitly requested it.
+    if let Some(state) = global_app_state() {
+        crate::modules::sliding_puzzle::handlers::sync_all_peer_scores(state).await;
     }
 
     // Return merged leaderboard (same logic as puzzle_game_leaderboard)
@@ -2868,23 +2904,9 @@ pub async fn hangman_refresh_leaderboard() -> Result<Vec<FrbHangmanLeaderboardEn
         crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
     use crate::modules::hangman::domain::HangmanRepository;
 
-    use sea_orm::EntityTrait;
-    let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
-        .one(db)
-        .await
-    {
-        Ok(Some(p)) => {
-            let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
-            modules.contains(&"hangman".to_string())
-        }
-        _ => true,
-    };
-
-    if local_enabled {
-        // Sync via direct HTTP + relay fallback (ADR-022). Requires AppState for relay.
-        if let Some(state) = global_app_state() {
-            crate::modules::hangman::handlers::sync_all_peer_scores(state).await;
-        }
+    // Always sync peer scores on refresh -- the user explicitly requested it.
+    if let Some(state) = global_app_state() {
+        crate::modules::hangman::handlers::sync_all_peer_scores(state).await;
     }
 
     let peer_scores = hangman_repo

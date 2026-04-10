@@ -14,6 +14,7 @@ pub mod e2ee_transport;
 pub mod gamification_service;
 pub mod hub_directory_service;
 pub mod identity_service;
+pub mod leaderboard_events;
 pub mod loan_service;
 pub mod lookup_service;
 pub mod mdns;

@@ -176,12 +176,16 @@ impl HangmanRepository for SeaOrmHangmanRepository {
             .await?;
 
         if let Some(existing) = existing {
-            if best_score > existing.best_score {
+            let score_improved = best_score > existing.best_score;
+            let name_changed = existing.library_name != library_name;
+            if score_improved || name_changed {
                 let mut active: PeerScoreActiveModel = existing.into();
                 active.library_name = Set(library_name.to_string());
-                active.best_score = Set(best_score);
-                active.difficulty = Set(difficulty.to_string());
-                active.played_at = Set(played_at.to_string());
+                if score_improved {
+                    active.best_score = Set(best_score);
+                    active.difficulty = Set(difficulty.to_string());
+                    active.played_at = Set(played_at.to_string());
+                }
                 active.synced_at = Set(now);
                 active.update(&self.db).await?;
             }

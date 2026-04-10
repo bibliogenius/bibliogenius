@@ -68,8 +68,21 @@ pub async fn finish_game(
     State(state): State<AppState>,
     Json(result): Json<PuzzleResult>,
 ) -> impl IntoResponse {
-    match service::finish_game(&repo(&state), result).await {
-        Ok(score) => (StatusCode::OK, Json(score)).into_response(),
+    let r = repo(&state);
+    let old_best = r.get_personal_best().await.unwrap_or(None);
+
+    match service::finish_game(&r, result).await {
+        Ok(score) => {
+            // ADR-023: push stats to peers if this is a new personal best
+            let is_new_best = old_best.is_none_or(|old| score.normalized_score > old);
+            if is_new_best {
+                let push_state = state.clone();
+                tokio::spawn(async move {
+                    crate::utils::leaderboard_relay::notify_peers_of_stats_push(&push_state).await;
+                });
+            }
+            (StatusCode::OK, Json(score)).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),
@@ -215,6 +228,7 @@ pub(crate) async fn sync_peer_puzzle_scores(
 /// Called by both the HTTP refresh handler and the FFI path to avoid duplication.
 pub(crate) async fn sync_all_peer_scores(state: &AppState) {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let sync_start = std::time::Instant::now();
     let db = state.db();
 
     let peers = crate::models::peer::Entity::find()
@@ -239,6 +253,8 @@ pub(crate) async fn sync_all_peer_scores(state: &AppState) {
 
     // Phase 1: direct HTTP for all peers
     let mut relay_peers: Vec<crate::models::peer::Model> = Vec::new();
+    let mut direct_ok = 0u32;
+    let mut direct_fail = 0u32;
     for peer in &peers {
         let config_url = format!("{}/api/config", peer.url);
         let peer_has_sliding_puzzle = match client.get(&config_url).send().await {
@@ -256,6 +272,7 @@ pub(crate) async fn sync_all_peer_scores(state: &AppState) {
         };
 
         if peer_has_sliding_puzzle.is_none() {
+            direct_fail += 1;
             // Direct unreachable - try relay (ADR-022).
             tracing::info!(
                 "sliding_puzzle sync: peer '{}' unreachable via LAN (key_exchange_done={}, relay_creds={})",
@@ -280,6 +297,7 @@ pub(crate) async fn sync_all_peer_scores(state: &AppState) {
                 sync_peer_puzzle_scores(db, peer.id, &peer.url, &peer.name, &client, None).await;
             }
         } else {
+            direct_ok += 1;
             sync_peer_puzzle_scores(
                 db,
                 peer.id,
@@ -292,19 +310,34 @@ pub(crate) async fn sync_all_peer_scores(state: &AppState) {
         }
     }
 
+    tracing::info!(
+        "sliding_puzzle sync phase 1 done in {}ms: direct_ok={}, direct_fail={}, relay_queued={}",
+        sync_start.elapsed().as_millis(),
+        direct_ok,
+        direct_fail,
+        relay_peers.len(),
+    );
+
     // Phase 2: relay fallback for non-LAN peers (ADR-022)
+    // Per-peer timeout of 15s: with WS nudge an online peer responds in ~1s.
     if !relay_peers.is_empty() {
+        let relay_start = std::time::Instant::now();
+        let relay_count = relay_peers.len();
+        let per_peer_timeout = std::time::Duration::from_secs(15);
         let relay_futures: Vec<_> = relay_peers
             .iter()
             .map(|peer| {
                 let state = state.clone();
                 let peer = peer.clone();
                 async move {
-                    let bundle =
+                    let bundle = tokio::time::timeout(
+                        per_peer_timeout,
                         crate::utils::leaderboard_relay::fetch_peer_public_stats_via_relay(
                             &state, &peer,
-                        )
-                        .await;
+                        ),
+                    )
+                    .await
+                    .unwrap_or(None);
                     (peer, bundle)
                 }
             })
@@ -312,8 +345,32 @@ pub(crate) async fn sync_all_peer_scores(state: &AppState) {
 
         let relay_results = futures::future::join_all(relay_futures).await;
 
+        let mut relay_ok = 0u32;
+        let mut relay_no_response = 0u32;
         for (peer, bundle) in relay_results {
-            let Some(bundle) = bundle else { continue };
+            let Some(bundle) = bundle else {
+                relay_no_response += 1;
+                tracing::info!(
+                    "sliding_puzzle sync: relay got no response from peer '{}' (id={})",
+                    peer.name,
+                    peer.id,
+                );
+                continue;
+            };
+            relay_ok += 1;
+
+            // Update peer display name in peers table if changed
+            if let Some(ref new_name) = bundle.library_name
+                && !new_name.is_empty()
+                && *new_name != peer.name
+            {
+                use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
+                let mut active = peer.clone().into_active_model();
+                active.name = Set(new_name.clone());
+                active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+                let _ = active.update(db).await;
+            }
+
             if !bundle
                 .enabled_modules
                 .contains(&"sliding_puzzle".to_string())
@@ -352,7 +409,22 @@ pub(crate) async fn sync_all_peer_scores(state: &AppState) {
                 }
             }
         }
+
+        tracing::info!(
+            "sliding_puzzle sync phase 2 done in {}ms: relay_sent={}, relay_ok={}, relay_no_response={}",
+            relay_start.elapsed().as_millis(),
+            relay_count,
+            relay_ok,
+            relay_no_response,
+        );
+    } else {
+        tracing::info!("sliding_puzzle sync: no relay peers queued, skipping phase 2");
     }
+
+    tracing::info!(
+        "sliding_puzzle sync completed in {}ms total",
+        sync_start.elapsed().as_millis(),
+    );
 }
 
 /// POST /api/game/puzzle/refresh-leaderboard

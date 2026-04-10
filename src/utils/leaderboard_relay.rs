@@ -1,13 +1,15 @@
-//! Utility for fetching leaderboard stats from relay peers (ADR-022).
+//! Utility for fetching leaderboard stats from relay peers (ADR-022, ADR-023).
 //!
-//! Provides two entry points:
+//! Provides three entry points:
 //!
 //! - [`build_local_stats_bundle`]: called by the relay responder to assemble
 //!   our own public stats into a `PublicStatsBundle` for the remote peer.
 //! - [`fetch_peer_public_stats_via_relay`]: called by each `refresh_leaderboard`
 //!   handler to request stats from a non-LAN peer via the E2EE relay.
+//! - [`notify_peers_of_stats_push`]: fire-and-forget push to all accepted peers
+//!   when the local user beats their personal best (ADR-023).
 
-use sea_orm::EntityTrait;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -244,6 +246,98 @@ pub async fn fetch_peer_public_stats_via_relay(
                 e
             );
             None
+        }
+    }
+}
+
+/// Send a fire-and-forget `public_stats_push` to all accepted peers via relay (ADR-023).
+///
+/// Builds the local `PublicStatsBundle` and sends it to every accepted peer that has
+/// completed key exchange and has relay credentials. Modeled on
+/// `catalog_notification::notify_peers_catalog_changed`.
+///
+/// Call this from a `tokio::spawn` to avoid blocking the game finish response path.
+pub async fn notify_peers_of_stats_push(state: &AppState) {
+    let db = state.db();
+
+    // Crypto service is required for E2EE sends.
+    let crypto_service = match state.crypto_service() {
+        Some(svc) => svc.clone(),
+        None => {
+            tracing::debug!("Stats push: skipped - crypto service not ready");
+            return;
+        }
+    };
+
+    // Build the local stats bundle (respects sharing flags internally).
+    let bundle_value = build_local_stats_bundle(state).await;
+
+    // Load accepted peers with key exchange done.
+    let peers = match peer::Entity::find()
+        .filter(peer::Column::KeyExchangeDone.eq(true))
+        .filter(peer::Column::ConnectionStatus.eq("accepted"))
+        .all(db)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Stats push: failed to load peers: {e}");
+            return;
+        }
+    };
+
+    if peers.is_empty() {
+        tracing::debug!("Stats push: no eligible peers");
+        return;
+    }
+
+    let message = crate::crypto::envelope::ClearMessage {
+        message_type: "public_stats_push".to_string(),
+        payload: bundle_value,
+        timestamp: chrono::Utc::now().timestamp(),
+        message_id: uuid::Uuid::new_v4().to_string(),
+        correlation_id: None,
+        reply_to_mailbox: None,
+        reply_to_write_token: None,
+    };
+
+    let relay = crate::services::relay_transport::RelayTransport::new(Some(crypto_service));
+
+    for p in &peers {
+        let (Some(relay_url), Some(mailbox_id), Some(write_token)) =
+            (&p.relay_url, &p.mailbox_id, &p.relay_write_token)
+        else {
+            continue;
+        };
+
+        let Some(x25519_hex) = &p.x25519_public_key else {
+            continue;
+        };
+        let Ok(x_bytes) = hex::decode(x25519_hex) else {
+            continue;
+        };
+        if x_bytes.len() != 32 {
+            continue;
+        }
+        let x_arr: [u8; 32] = x_bytes.try_into().unwrap();
+        let peer_x25519 = x25519_dalek::PublicKey::from(x_arr);
+
+        match relay
+            .send(relay_url, mailbox_id, write_token, &peer_x25519, &message)
+            .await
+        {
+            Ok(()) => {
+                tracing::info!("Stats push: notified peer {} ({})", p.name, p.id);
+            }
+            Err(crate::services::e2ee_transport::E2eeTransportError::PeerError(404, _)) => {
+                tracing::info!(
+                    "Stats push: peer {} mailbox expired (404), skipping",
+                    p.name
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Stats push: failed for peer {} ({}): {e}", p.name, p.id);
+            }
         }
     }
 }

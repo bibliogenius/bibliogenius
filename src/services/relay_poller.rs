@@ -404,6 +404,12 @@ async fn process_relay_message(
         return handle_credential_update(db, sender_peer, &clear_message).await;
     }
 
+    // ADR-023: Handle public_stats_push (peer beat their personal best).
+    // Fire-and-forget: upsert scores in local cache, emit on leaderboard event bus.
+    if clear_message.message_type == "public_stats_push" {
+        return handle_public_stats_push(state, sender_peer, &clear_message).await;
+    }
+
     // Handle catalog-changed notifications (peer added or removed a book).
     // Fire-and-forget: emit on the catalog event bus so Flutter screens
     // subscribed via `subscribe_catalog_changes()` can trigger a re-sync.
@@ -792,6 +798,177 @@ pub async fn update_peer_relay_from_reply_to(
             );
         }
     }
+}
+
+/// Handle a `public_stats_push` fire-and-forget message (ADR-023).
+///
+/// A peer has beaten their personal best and is pushing their updated stats bundle.
+/// Upsert scores in local cache (same logic as ADR-022 Phase 2), then emit a
+/// `LeaderboardChangedEvent` so Flutter providers can auto-refresh.
+async fn handle_public_stats_push(
+    state: &AppState,
+    sender_peer: &peer::Model,
+    message: &ClearMessage,
+) -> Result<(), String> {
+    use crate::utils::leaderboard_relay::PublicStatsBundle;
+
+    let bundle: PublicStatsBundle = serde_json::from_value(message.payload.clone())
+        .map_err(|e| format!("invalid public_stats_push payload: {e}"))?;
+
+    let db = state.db();
+    let display_name = bundle.library_name.as_deref().unwrap_or(&sender_peer.name);
+
+    tracing::info!(
+        "Relay poller: public_stats_push from peer {} ({})",
+        sender_peer.name,
+        sender_peer.id
+    );
+
+    // Update peer display name if changed
+    if let Some(ref new_name) = bundle.library_name
+        && !new_name.is_empty()
+        && *new_name != sender_peer.name
+    {
+        let _ = peer::Entity::update_many()
+            .filter(peer::Column::Id.eq(sender_peer.id))
+            .col_expr(
+                peer::Column::Name,
+                sea_orm::sea_query::Expr::value(new_name.to_string()),
+            )
+            .col_expr(
+                peer::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(chrono::Utc::now().to_rfc3339()),
+            )
+            .exec(db)
+            .await;
+    }
+
+    // Upsert memory game score
+    if bundle.enabled_modules.contains(&"memory_game".to_string())
+        && let Some(entry) = &bundle.memory_game
+        && entry.best_score > 0.0
+    {
+        use crate::modules::memory_game::domain::MemoryGameRepository;
+        use crate::modules::memory_game::repository::SeaOrmGameRepository;
+        let repo = SeaOrmGameRepository::new(db.clone());
+        if let Err(e) = repo
+            .upsert_peer_score(
+                sender_peer.id,
+                display_name,
+                entry.best_score,
+                &entry.difficulty,
+                &entry.played_at,
+            )
+            .await
+        {
+            tracing::warn!(
+                "Stats push: failed to upsert memory score for peer {}: {}",
+                sender_peer.id,
+                e
+            );
+        }
+    }
+
+    // Upsert sliding puzzle score
+    if bundle
+        .enabled_modules
+        .contains(&"sliding_puzzle".to_string())
+        && let Some(entry) = &bundle.sliding_puzzle
+        && entry.best_score > 0.0
+    {
+        use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
+        use crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository;
+        let repo = SeaOrmPuzzleRepository::new(db.clone());
+        if let Err(e) = repo
+            .upsert_peer_score(
+                sender_peer.id,
+                display_name,
+                entry.best_score,
+                &entry.difficulty,
+                &entry.played_at,
+            )
+            .await
+        {
+            tracing::warn!(
+                "Stats push: failed to upsert puzzle score for peer {}: {}",
+                sender_peer.id,
+                e
+            );
+        }
+    }
+
+    // Upsert hangman score
+    if bundle.enabled_modules.contains(&"hangman".to_string())
+        && let Some(entry) = &bundle.hangman
+        && entry.best_score > 0.0
+    {
+        use crate::modules::hangman::domain::HangmanRepository;
+        use crate::modules::hangman::repository::SeaOrmHangmanRepository;
+        let repo = SeaOrmHangmanRepository::new(db.clone());
+        if let Err(e) = repo
+            .upsert_peer_score(
+                sender_peer.id,
+                display_name,
+                entry.best_score,
+                &entry.difficulty,
+                &entry.played_at,
+            )
+            .await
+        {
+            tracing::warn!(
+                "Stats push: failed to upsert hangman score for peer {}: {}",
+                sender_peer.id,
+                e
+            );
+        }
+    }
+
+    // Upsert gamification stats
+    if bundle.share_gamification_stats
+        && let Some(stats) = &bundle.gamification
+    {
+        use crate::models::peer_gamification_stats;
+
+        let _ = peer_gamification_stats::Entity::delete_many()
+            .filter(peer_gamification_stats::Column::PeerId.eq(sender_peer.id))
+            .exec(db)
+            .await;
+
+        let entry = peer_gamification_stats::ActiveModel {
+            peer_id: Set(sender_peer.id),
+            library_name: Set(stats.library_name.clone()),
+            collector_level: Set(stats.collector.level),
+            collector_current: Set(stats.collector.current as i32),
+            reader_level: Set(stats.reader.level),
+            reader_current: Set(stats.reader.current as i32),
+            lender_level: Set(stats.lender.level),
+            lender_current: Set(stats.lender.current as i32),
+            cataloguer_level: Set(stats.cataloguer.level),
+            cataloguer_current: Set(stats.cataloguer.current as i32),
+            synced_at: Set(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        };
+
+        if let Err(e) = peer_gamification_stats::Entity::insert(entry)
+            .exec(db)
+            .await
+        {
+            tracing::warn!(
+                "Stats push: failed to save gamification stats for peer {}: {}",
+                sender_peer.id,
+                e
+            );
+        }
+    }
+
+    // Emit on leaderboard event bus so Flutter providers can auto-refresh
+    crate::services::leaderboard_events::bus().emit(
+        crate::services::leaderboard_events::LeaderboardChangedEvent {
+            peer_id: sender_peer.id,
+        },
+    );
+
+    Ok(())
 }
 
 /// Handle a `relay_credential_update` message from a peer who recreated their mailbox.
