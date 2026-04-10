@@ -172,15 +172,13 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
                 Some(config.share_gamification_stats),
             )
             .await;
-        } else {
-            // Peer unreachable via direct HTTP - try relay if credentials are available (ADR-022)
-            if let Some(peer_model) = peers.iter().find(|p| p.id == peer_id)
-                && peer_model.relay_url.is_some()
-                && peer_model.mailbox_id.is_some()
-                && peer_model.relay_write_token.is_some()
-            {
-                relay_peers.push(peer_model.clone());
-            }
+        } else if let Some(peer_model) = peers.iter().find(|p| p.id == peer_id)
+            && let Some(ready) =
+                crate::utils::leaderboard_relay::ensure_relay_credentials(db, peer_model).await
+        {
+            // Peer unreachable via direct HTTP - try relay (ADR-022).
+            // ensure_relay_credentials refreshes missing write_token from hub when needed.
+            relay_peers.push(ready);
         }
     }
 

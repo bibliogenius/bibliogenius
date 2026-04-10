@@ -148,6 +148,42 @@ pub async fn build_local_stats_bundle(state: &AppState) -> serde_json::Value {
     })
 }
 
+/// Ensure a peer has complete relay credentials before a leaderboard relay sync.
+///
+/// Fast path: credentials already present → `Some(peer)` unchanged.
+///
+/// Slow path: `relay_write_token` is missing (peer connected before relay was
+/// configured, or credentials never refreshed). Calls
+/// [`crate::api::peer::refresh_peer_relay_credentials`] which tries LAN first
+/// then falls back to the hub directory. On success the credentials are persisted
+/// to the DB (so subsequent calls take the fast path) and the updated peer model
+/// is returned.
+///
+/// Returns `None` when neither LAN nor hub can supply credentials.
+pub async fn ensure_relay_credentials(
+    db: &sea_orm::DatabaseConnection,
+    peer: &peer::Model,
+) -> Option<peer::Model> {
+    // Fast path: already complete
+    if peer.relay_url.is_some() && peer.mailbox_id.is_some() && peer.relay_write_token.is_some() {
+        return Some(peer.clone());
+    }
+    // Missing write_token — attempt refresh.
+    // refresh_peer_relay_credentials persists the result to the DB so future calls
+    // take the fast path without a network round-trip.
+    tracing::info!(
+        "Leaderboard relay: peer '{}' missing relay_write_token, attempting credential refresh",
+        peer.name
+    );
+    let (relay_url, mailbox_id, write_token) =
+        crate::api::peer::refresh_peer_relay_credentials(db, peer).await?;
+    let mut refreshed = peer.clone();
+    refreshed.relay_url = Some(relay_url);
+    refreshed.mailbox_id = Some(mailbox_id);
+    refreshed.relay_write_token = Some(write_token);
+    Some(refreshed)
+}
+
 /// Request leaderboard stats from a relay peer via the ADR-012 reply-to protocol.
 ///
 /// Sends `public_stats_request` to the peer's relay mailbox. The relay poller

@@ -265,12 +265,16 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
             _ => None,
         };
 
-        if peer_has_hangman.is_none()
-            && peer.relay_url.is_some()
-            && peer.mailbox_id.is_some()
-            && peer.relay_write_token.is_some()
-        {
-            relay_peers.push(peer.clone());
+        if peer_has_hangman.is_none() {
+            // Direct unreachable - try relay (ADR-022).
+            // ensure_relay_credentials refreshes missing write_token from hub when needed.
+            if let Some(ready) =
+                crate::utils::leaderboard_relay::ensure_relay_credentials(db, peer).await
+            {
+                relay_peers.push(ready);
+            } else {
+                sync_peer_hangman_scores(db, peer.id, &peer.url, &peer.name, &client, None).await;
+            }
         } else {
             sync_peer_hangman_scores(
                 db,

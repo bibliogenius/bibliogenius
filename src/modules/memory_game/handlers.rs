@@ -266,13 +266,17 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
             _ => None,
         };
 
-        if peer_has_memory_game.is_none()
-            && peer.relay_url.is_some()
-            && peer.mailbox_id.is_some()
-            && peer.relay_write_token.is_some()
-        {
-            // Direct unreachable but relay available - handle in phase 2
-            relay_peers.push(peer.clone());
+        if peer_has_memory_game.is_none() {
+            // Direct unreachable - try relay (ADR-022).
+            // ensure_relay_credentials refreshes missing write_token from hub when needed.
+            if let Some(ready) =
+                crate::utils::leaderboard_relay::ensure_relay_credentials(db, peer).await
+            {
+                relay_peers.push(ready);
+            } else {
+                // No relay credentials available - preserve cached scores
+                sync_peer_memory_scores(db, peer.id, &peer.url, &peer.name, &client, None).await;
+            }
         } else {
             sync_peer_memory_scores(
                 db,
