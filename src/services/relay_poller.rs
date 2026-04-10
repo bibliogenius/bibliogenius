@@ -351,6 +351,7 @@ const REQUEST_RESPONSE_TYPES: &[&str] = &[
     "library_page_request",
     "library_search_request",
     "loan_request",
+    "public_stats_request", // ADR-022: leaderboard relay sync
 ];
 
 /// Response message types (correlation targets, ADR-012).
@@ -361,6 +362,7 @@ const RESPONSE_TYPES: &[&str] = &[
     "loan_request_response",
     "request_status_response",
     "book_sync_response",
+    "public_stats_response", // ADR-022: leaderboard relay sync
 ];
 
 /// Process a single relay message through the existing E2EE pipeline.
@@ -559,6 +561,11 @@ async fn handle_relay_request_response(
         "request_status_query" => (
             "request_status_response",
             crate::api::e2ee::handle_request_status_query(db, clear_message).await,
+        ),
+        // ADR-022: leaderboard relay sync - bundle all four leaderboard stats in one round-trip
+        "public_stats_request" => (
+            "public_stats_response",
+            crate::utils::leaderboard_relay::build_local_stats_bundle(state).await,
         ),
         _ => {
             // For other request-response types, fall back to standard dispatch

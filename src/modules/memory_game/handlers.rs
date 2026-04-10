@@ -212,6 +212,7 @@ pub(crate) async fn sync_peer_memory_scores(
 
 /// POST /api/game/memory/refresh-leaderboard
 /// Fetches each accepted peer's memory game score and upserts into cache.
+/// Falls back to relay (ADR-022) for peers unreachable via direct HTTP.
 /// Returns the combined leaderboard.
 pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResponse {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -250,6 +251,8 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
         .build()
         .unwrap_or_default();
 
+    // Phase 1: direct HTTP for all peers
+    let mut relay_peers: Vec<crate::models::peer::Model> = Vec::new();
     for peer in &peers {
         // Fetch peer config to check enabled_modules
         let config_url = format!("{}/api/config", peer.url);
@@ -263,15 +266,86 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
             _ => None,
         };
 
-        sync_peer_memory_scores(
-            db,
-            peer.id,
-            &peer.url,
-            &peer.name,
-            &client,
-            peer_has_memory_game,
-        )
-        .await;
+        if peer_has_memory_game.is_none()
+            && peer.relay_url.is_some()
+            && peer.mailbox_id.is_some()
+            && peer.relay_write_token.is_some()
+        {
+            // Direct unreachable but relay available - handle in phase 2
+            relay_peers.push(peer.clone());
+        } else {
+            sync_peer_memory_scores(
+                db,
+                peer.id,
+                &peer.url,
+                &peer.name,
+                &client,
+                peer_has_memory_game,
+            )
+            .await;
+        }
+    }
+
+    // Phase 2: relay fallback for non-LAN peers (ADR-022)
+    if !relay_peers.is_empty() {
+        let relay_futures: Vec<_> = relay_peers
+            .iter()
+            .map(|peer| {
+                let state = state.clone();
+                let peer = peer.clone();
+                async move {
+                    let bundle =
+                        crate::utils::leaderboard_relay::fetch_peer_public_stats_via_relay(
+                            &state, &peer,
+                        )
+                        .await;
+                    (peer, bundle)
+                }
+            })
+            .collect();
+
+        let relay_results = futures::future::join_all(relay_futures).await;
+
+        for (peer, bundle) in relay_results {
+            let Some(bundle) = bundle else {
+                // No response - preserve cached scores (same as direct timeout)
+                continue;
+            };
+            if !bundle.enabled_modules.contains(&"memory_game".to_string()) {
+                // Remote peer has disabled the module - clear cached scores
+                let game_repo = SeaOrmGameRepository::new(db.clone());
+                let _ = game_repo.delete_peer_scores(peer.id).await;
+                continue;
+            }
+            let Some(entry) = bundle.memory_game else {
+                continue;
+            };
+            if entry.best_score > 0.0 {
+                let game_repo = SeaOrmGameRepository::new(db.clone());
+                let display_name = bundle.library_name.as_deref().unwrap_or(&peer.name);
+                if let Err(e) = game_repo
+                    .upsert_peer_score(
+                        peer.id,
+                        display_name,
+                        entry.best_score,
+                        &entry.difficulty,
+                        &entry.played_at,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "Leaderboard relay: failed to upsert memory score for peer {}: {}",
+                        peer.id,
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "Leaderboard relay: memory score synced for peer {} via relay",
+                        peer.id
+                    );
+                }
+            }
+        }
     }
 
     // Return combined leaderboard

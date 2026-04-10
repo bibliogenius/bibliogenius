@@ -215,6 +215,7 @@ pub(crate) async fn sync_peer_hangman_scores(
 }
 
 /// POST /api/game/hangman/refresh-leaderboard
+/// Falls back to relay (ADR-022) for peers unreachable via direct HTTP.
 pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResponse {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -250,6 +251,8 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
         .build()
         .unwrap_or_default();
 
+    // Phase 1: direct HTTP for all peers
+    let mut relay_peers: Vec<crate::models::peer::Model> = Vec::new();
     for peer in &peers {
         let config_url = format!("{}/api/config", peer.url);
         let peer_has_hangman = match client.get(&config_url).send().await {
@@ -262,15 +265,82 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
             _ => None,
         };
 
-        sync_peer_hangman_scores(
-            db,
-            peer.id,
-            &peer.url,
-            &peer.name,
-            &client,
-            peer_has_hangman,
-        )
-        .await;
+        if peer_has_hangman.is_none()
+            && peer.relay_url.is_some()
+            && peer.mailbox_id.is_some()
+            && peer.relay_write_token.is_some()
+        {
+            relay_peers.push(peer.clone());
+        } else {
+            sync_peer_hangman_scores(
+                db,
+                peer.id,
+                &peer.url,
+                &peer.name,
+                &client,
+                peer_has_hangman,
+            )
+            .await;
+        }
+    }
+
+    // Phase 2: relay fallback for non-LAN peers (ADR-022)
+    if !relay_peers.is_empty() {
+        let relay_futures: Vec<_> = relay_peers
+            .iter()
+            .map(|peer| {
+                let state = state.clone();
+                let peer = peer.clone();
+                async move {
+                    let bundle =
+                        crate::utils::leaderboard_relay::fetch_peer_public_stats_via_relay(
+                            &state, &peer,
+                        )
+                        .await;
+                    (peer, bundle)
+                }
+            })
+            .collect();
+
+        let relay_results = futures::future::join_all(relay_futures).await;
+
+        for (peer, bundle) in relay_results {
+            let Some(bundle) = bundle else { continue };
+            if !bundle.enabled_modules.contains(&"hangman".to_string()) {
+                // Remote peer has disabled the module - clear cached scores
+                let hangman_repo = SeaOrmHangmanRepository::new(db.clone());
+                let _ = hangman_repo.delete_peer_scores(peer.id).await;
+                continue;
+            }
+            let Some(entry) = bundle.hangman else {
+                continue;
+            };
+            if entry.best_score > 0.0 {
+                let hangman_repo = SeaOrmHangmanRepository::new(db.clone());
+                let display_name = bundle.library_name.as_deref().unwrap_or(&peer.name);
+                if let Err(e) = hangman_repo
+                    .upsert_peer_score(
+                        peer.id,
+                        display_name,
+                        entry.best_score,
+                        &entry.difficulty,
+                        &entry.played_at,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "Leaderboard relay: failed to upsert hangman score for peer {}: {}",
+                        peer.id,
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "Leaderboard relay: hangman score synced for peer {} via relay",
+                        peer.id
+                    );
+                }
+            }
+        }
     }
 
     get_leaderboard(State(state)).await.into_response()

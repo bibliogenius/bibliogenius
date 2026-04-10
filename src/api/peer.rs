@@ -299,7 +299,7 @@ pub(crate) async fn perform_loan_acceptance(
 /// ADR-012: All message types now support relay fallback. Request-response messages
 /// (search_request, book_sync_request, library_*) attach reply_to fields so the
 /// responder can deposit the answer in our mailbox.
-async fn try_send_e2ee(
+pub(crate) async fn try_send_e2ee(
     state: &crate::infrastructure::AppState,
     peer: &peer::Model,
     message_type: &str,
@@ -432,6 +432,7 @@ async fn try_send_e2ee(
                     "library_page_request",
                     "library_search_request",
                     "request_status_query",
+                    "public_stats_request", // ADR-022: leaderboard relay sync
                 ];
                 let needs_response = RELAY_AWAIT_RESPONSE.contains(&message_type);
 
