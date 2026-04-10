@@ -214,37 +214,23 @@ pub(crate) async fn sync_peer_hangman_scores(
     }
 }
 
-/// POST /api/game/hangman/refresh-leaderboard
-/// Falls back to relay (ADR-022) for peers unreachable via direct HTTP.
-pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResponse {
+/// Sync hangman scores from all accepted peers.
+///
+/// Phase 1: direct HTTP (LAN). Phase 2: relay fallback for non-LAN peers (ADR-022).
+/// Called by both the HTTP refresh handler and the FFI path to avoid duplication.
+pub(crate) async fn sync_all_peer_scores(state: &AppState) {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
     let db = state.db();
-
-    let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
-        .one(db)
-        .await
-    {
-        Ok(Some(p)) => {
-            let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
-            modules.contains(&"hangman".to_string())
-        }
-        _ => false,
-    };
-
-    if !local_enabled {
-        return (
-            StatusCode::OK,
-            Json(json!({"personal_best": null, "peers": []})),
-        )
-            .into_response();
-    }
 
     let peers = crate::models::peer::Entity::find()
         .filter(crate::models::peer::Column::ConnectionStatus.eq("accepted"))
         .all(db)
         .await
         .unwrap_or_default();
+
+    if peers.is_empty() {
+        return;
+    }
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -346,6 +332,35 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
             }
         }
     }
+}
+
+/// POST /api/game/hangman/refresh-leaderboard
+/// Falls back to relay (ADR-022) for peers unreachable via direct HTTP.
+pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResponse {
+    use sea_orm::EntityTrait;
+
+    let db = state.db();
+
+    let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
+        .one(db)
+        .await
+    {
+        Ok(Some(p)) => {
+            let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
+            modules.contains(&"hangman".to_string())
+        }
+        _ => false,
+    };
+
+    if !local_enabled {
+        return (
+            StatusCode::OK,
+            Json(json!({"personal_best": null, "peers": []})),
+        )
+            .into_response();
+    }
+
+    sync_all_peer_scores(&state).await;
 
     get_leaderboard(State(state)).await.into_response()
 }

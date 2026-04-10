@@ -210,41 +210,23 @@ pub(crate) async fn sync_peer_memory_scores(
     }
 }
 
-/// POST /api/game/memory/refresh-leaderboard
-/// Fetches each accepted peer's memory game score and upserts into cache.
-/// Falls back to relay (ADR-022) for peers unreachable via direct HTTP.
-/// Returns the combined leaderboard.
-pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResponse {
+/// Sync memory game scores from all accepted peers.
+///
+/// Phase 1: direct HTTP (LAN). Phase 2: relay fallback for non-LAN peers (ADR-022).
+/// Called by both the HTTP refresh handler and the FFI path to avoid duplication.
+pub(crate) async fn sync_all_peer_scores(state: &AppState) {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
     let db = state.db();
 
-    // Check if memory_game module is enabled locally
-    let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
-        .one(db)
-        .await
-    {
-        Ok(Some(p)) => {
-            let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
-            modules.contains(&"memory_game".to_string())
-        }
-        _ => false,
-    };
-
-    if !local_enabled {
-        return (
-            StatusCode::OK,
-            Json(json!({"personal_best": null, "peers": []})),
-        )
-            .into_response();
-    }
-
-    // Get all accepted peers
     let peers = crate::models::peer::Entity::find()
         .filter(crate::models::peer::Column::ConnectionStatus.eq("accepted"))
         .all(db)
         .await
         .unwrap_or_default();
+
+    if peers.is_empty() {
+        return;
+    }
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -254,7 +236,6 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
     // Phase 1: direct HTTP for all peers
     let mut relay_peers: Vec<crate::models::peer::Model> = Vec::new();
     for peer in &peers {
-        // Fetch peer config to check enabled_modules
         let config_url = format!("{}/api/config", peer.url);
         let peer_has_memory_game = match client.get(&config_url).send().await {
             Ok(res) if res.status().is_success() => {
@@ -351,6 +332,38 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
             }
         }
     }
+}
+
+/// POST /api/game/memory/refresh-leaderboard
+/// Fetches each accepted peer's memory game score and upserts into cache.
+/// Falls back to relay (ADR-022) for peers unreachable via direct HTTP.
+/// Returns the combined leaderboard.
+pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResponse {
+    use sea_orm::EntityTrait;
+
+    let db = state.db();
+
+    // Check if memory_game module is enabled locally
+    let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
+        .one(db)
+        .await
+    {
+        Ok(Some(p)) => {
+            let modules: Vec<String> = serde_json::from_str(&p.enabled_modules).unwrap_or_default();
+            modules.contains(&"memory_game".to_string())
+        }
+        _ => false,
+    };
+
+    if !local_enabled {
+        return (
+            StatusCode::OK,
+            Json(json!({"personal_best": null, "peers": []})),
+        )
+            .into_response();
+    }
+
+    sync_all_peer_scores(&state).await;
 
     // Return combined leaderboard
     get_leaderboard(State(state)).await.into_response()

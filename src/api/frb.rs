@@ -2246,7 +2246,7 @@ pub async fn memory_game_refresh_leaderboard() -> Result<Vec<FrbMemoryLeaderboar
     use crate::modules::memory_game::domain::MemoryGameRepository;
 
     // Check if memory_game module is enabled locally
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use sea_orm::EntityTrait;
     let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
         .one(db)
         .await
@@ -2259,50 +2259,9 @@ pub async fn memory_game_refresh_leaderboard() -> Result<Vec<FrbMemoryLeaderboar
     };
 
     if local_enabled {
-        // Fetch all accepted peers
-        let peers = crate::models::peer::Entity::find()
-            .filter(crate::models::peer::Column::ConnectionStatus.eq("accepted"))
-            .all(db)
-            .await
-            .unwrap_or_default();
-
-        if !peers.is_empty() {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap_or_default();
-
-            for peer in &peers {
-                // Validate peer URL before making outbound request (SSRF protection)
-                if crate::api::peer::validate_url(&peer.url).is_err() {
-                    tracing::warn!("Skipping peer {} with invalid URL: {}", peer.id, peer.name);
-                    continue;
-                }
-
-                // Fetch peer config to check enabled_modules
-                let config_url = format!("{}/api/config", peer.url);
-                let peer_has_memory_game = match client.get(&config_url).send().await {
-                    Ok(res) if res.status().is_success() => {
-                        match res.json::<crate::api::setup::ConfigResponse>().await {
-                            Ok(config) => {
-                                Some(config.enabled_modules.contains(&"memory_game".to_string()))
-                            }
-                            Err(_) => None,
-                        }
-                    }
-                    _ => None,
-                };
-
-                crate::modules::memory_game::handlers::sync_peer_memory_scores(
-                    db,
-                    peer.id,
-                    &peer.url,
-                    &peer.name,
-                    &client,
-                    peer_has_memory_game,
-                )
-                .await;
-            }
+        // Sync via direct HTTP + relay fallback (ADR-022). Requires AppState for relay.
+        if let Some(state) = global_app_state() {
+            crate::modules::memory_game::handlers::sync_all_peer_scores(state).await;
         }
     }
 
@@ -2565,7 +2524,7 @@ pub async fn puzzle_game_refresh_leaderboard() -> Result<Vec<FrbPuzzleLeaderboar
     use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
 
     // Check if sliding_puzzle module is enabled locally
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use sea_orm::EntityTrait;
     let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
         .one(db)
         .await
@@ -2578,52 +2537,9 @@ pub async fn puzzle_game_refresh_leaderboard() -> Result<Vec<FrbPuzzleLeaderboar
     };
 
     if local_enabled {
-        // Fetch all accepted peers
-        let peers = crate::models::peer::Entity::find()
-            .filter(crate::models::peer::Column::ConnectionStatus.eq("accepted"))
-            .all(db)
-            .await
-            .unwrap_or_default();
-
-        if !peers.is_empty() {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap_or_default();
-
-            for peer in &peers {
-                // Validate peer URL before making outbound request (SSRF protection)
-                if crate::api::peer::validate_url(&peer.url).is_err() {
-                    tracing::warn!("Skipping peer {} with invalid URL: {}", peer.id, peer.name);
-                    continue;
-                }
-
-                // Fetch peer config to check enabled_modules
-                let config_url = format!("{}/api/config", peer.url);
-                let peer_has_sliding_puzzle = match client.get(&config_url).send().await {
-                    Ok(res) if res.status().is_success() => {
-                        match res.json::<crate::api::setup::ConfigResponse>().await {
-                            Ok(config) => Some(
-                                config
-                                    .enabled_modules
-                                    .contains(&"sliding_puzzle".to_string()),
-                            ),
-                            Err(_) => None,
-                        }
-                    }
-                    _ => None,
-                };
-
-                crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
-                    db,
-                    peer.id,
-                    &peer.url,
-                    &peer.name,
-                    &client,
-                    peer_has_sliding_puzzle,
-                )
-                .await;
-            }
+        // Sync via direct HTTP + relay fallback (ADR-022). Requires AppState for relay.
+        if let Some(state) = global_app_state() {
+            crate::modules::sliding_puzzle::handlers::sync_all_peer_scores(state).await;
         }
     }
 
@@ -2907,7 +2823,7 @@ pub async fn hangman_refresh_leaderboard() -> Result<Vec<FrbHangmanLeaderboardEn
         crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
     use crate::modules::hangman::domain::HangmanRepository;
 
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use sea_orm::EntityTrait;
     let local_enabled = match crate::models::installation_profile::Entity::find_by_id(1)
         .one(db)
         .await
@@ -2920,47 +2836,9 @@ pub async fn hangman_refresh_leaderboard() -> Result<Vec<FrbHangmanLeaderboardEn
     };
 
     if local_enabled {
-        let peers = crate::models::peer::Entity::find()
-            .filter(crate::models::peer::Column::ConnectionStatus.eq("accepted"))
-            .all(db)
-            .await
-            .unwrap_or_default();
-
-        if !peers.is_empty() {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap_or_default();
-
-            for peer in &peers {
-                if crate::api::peer::validate_url(&peer.url).is_err() {
-                    tracing::warn!("Skipping peer {} with invalid URL: {}", peer.id, peer.name);
-                    continue;
-                }
-
-                let config_url = format!("{}/api/config", peer.url);
-                let peer_has_hangman = match client.get(&config_url).send().await {
-                    Ok(res) if res.status().is_success() => {
-                        match res.json::<crate::api::setup::ConfigResponse>().await {
-                            Ok(config) => {
-                                Some(config.enabled_modules.contains(&"hangman".to_string()))
-                            }
-                            Err(_) => None,
-                        }
-                    }
-                    _ => None,
-                };
-
-                crate::modules::hangman::handlers::sync_peer_hangman_scores(
-                    db,
-                    peer.id,
-                    &peer.url,
-                    &peer.name,
-                    &client,
-                    peer_has_hangman,
-                )
-                .await;
-            }
+        // Sync via direct HTTP + relay fallback (ADR-022). Requires AppState for relay.
+        if let Some(state) = global_app_state() {
+            crate::modules::hangman::handlers::sync_all_peer_scores(state).await;
         }
     }
 
