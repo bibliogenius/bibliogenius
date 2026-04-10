@@ -1713,6 +1713,23 @@ pub struct FrbNudgeEvent {
     pub source: String,
 }
 
+/// FFI-safe view of a peer catalog-change event.
+///
+/// Emitted when a peer sends a `catalog_changed` relay message, indicating
+/// that they added or deleted a book. Flutter screens showing that peer's
+/// library should trigger a re-sync on receipt.
+///
+/// Match by `peer_id` (local SQLite row ID) or `peer_library_uuid` (remote
+/// UUID from the message payload). Both are provided so callers can use
+/// whichever is available in their context.
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbCatalogChangedEvent {
+    /// Remote peer's library UUID (from the message payload).
+    pub peer_library_uuid: String,
+    /// Local peer row ID from the `peers` table. Zero if the lookup failed.
+    pub peer_id: i32,
+}
+
 fn nudge_source_label(source: crate::services::nudge_events::NudgeSource) -> String {
     use crate::services::nudge_events::NudgeSource;
     match source {
@@ -1731,6 +1748,52 @@ fn nudge_source_label(source: crate::services::nudge_events::NudgeSource) -> Str
 ///
 /// The function returns immediately after spawning a forwarding task. The
 /// task lives until the Dart side drops the StreamSink.
+/// Subscribe to the catalog-change event stream.
+///
+/// Each emitted event indicates that a peer added or deleted a book and
+/// their catalog is now different from what the local device has cached.
+/// Flutter consumers (typically `PeerBookListScreen`) should trigger a
+/// re-sync when they receive an event matching the displayed peer.
+///
+/// The stream lives until the Dart side drops the `StreamSink`. Multiple
+/// concurrent subscribers each receive their own independent copy of every
+/// event (broadcast semantics). A slow subscriber lags without blocking
+/// the emitter.
+pub async fn subscribe_catalog_changes(
+    sink: crate::frb_generated::StreamSink<FrbCatalogChangedEvent>,
+) -> Result<(), String> {
+    let mut rx = crate::services::catalog_events::bus().subscribe();
+
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let frb_event = FrbCatalogChangedEvent {
+                        peer_library_uuid: event.peer_library_uuid,
+                        peer_id: event.peer_id,
+                    };
+                    if sink.add(frb_event).is_err() {
+                        tracing::debug!(
+                            "Catalog change stream: Dart sink closed, ending forwarder"
+                        );
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Catalog change stream: subscriber lagged, dropped {n} events");
+                    // Recoverable: next recv() returns the oldest buffered event.
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::error!("Catalog change stream: bus sender closed unexpectedly");
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
 pub async fn subscribe_relay_nudges(
     sink: crate::frb_generated::StreamSink<FrbNudgeEvent>,
 ) -> Result<(), String> {

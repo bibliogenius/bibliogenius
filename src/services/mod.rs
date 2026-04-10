@@ -4,6 +4,8 @@
 //! Services can be called directly via FFI or through Axum handlers.
 
 pub mod book_service;
+pub mod catalog_events;
+pub mod catalog_notification;
 pub mod contact_service;
 pub mod crypto_service;
 pub mod device_pairing_service;

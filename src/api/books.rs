@@ -179,6 +179,13 @@ pub async fn create_book(
 
             let _ = crate::sync::log_operation(db, "book", book_id, "INSERT", None).await;
 
+            // Notify accepted peers that our catalog changed (fire-and-forget,
+            // debounced — safe to call on every book creation including bulk
+            // imports where only 1 notification per 5s window is sent).
+            crate::services::catalog_notification::schedule_catalog_changed_notification(
+                state.clone(),
+            );
+
             // Create default copy only if owned
             if owned && let Ok(lib_id) = crate::utils::library_helpers::resolve_library_id(db).await
             {
@@ -242,6 +249,10 @@ pub async fn delete_book(
     match state.book_repo.delete(id).await {
         Ok(()) | Err(DomainError::NotFound) => {
             let _ = crate::sync::log_operation(state.db(), "book", id, "DELETE", None).await;
+            // Notify accepted peers that our catalog changed (debounced).
+            crate::services::catalog_notification::schedule_catalog_changed_notification(
+                state.clone(),
+            );
             (
                 StatusCode::OK,
                 Json(json!({"message": "Book deleted successfully"})),

@@ -83,6 +83,7 @@ use crate::api::relay::get_my_relay_config;
 use crate::crypto::envelope::ClearMessage;
 use crate::infrastructure::AppState;
 use crate::models::peer;
+use crate::services::catalog_events::{self, CatalogChangedEvent};
 use crate::services::e2ee_transport::E2eeTransportError;
 use crate::services::nudge_events::{self, NudgeEvent, NudgeSource};
 use crate::services::relay_transport::{RelayBlob, RelayTransport};
@@ -401,6 +402,29 @@ async fn process_relay_message(
     // Handle relay credential updates (peer recreated their mailbox)
     if clear_message.message_type == "relay_credential_update" {
         return handle_credential_update(db, sender_peer, &clear_message).await;
+    }
+
+    // Handle catalog-changed notifications (peer added or removed a book).
+    // Fire-and-forget: emit on the catalog event bus so Flutter screens
+    // subscribed via `subscribe_catalog_changes()` can trigger a re-sync.
+    if clear_message.message_type == "catalog_changed" {
+        let peer_library_uuid = clear_message
+            .payload
+            .get("library_uuid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        tracing::info!(
+            "Relay poller: catalog changed from peer {} ({}, library_uuid={:?})",
+            sender_peer.name,
+            sender_peer.id,
+            peer_library_uuid
+        );
+        catalog_events::bus().emit(CatalogChangedEvent {
+            peer_library_uuid,
+            peer_id: sender_peer.id,
+        });
+        return Ok(());
     }
 
     // ADR-012: Check if this is a response with a correlation_id
