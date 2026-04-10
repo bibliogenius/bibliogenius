@@ -228,4 +228,16 @@ impl NotificationRepository for SeaOrmNotificationRepository {
             .await?;
         Ok(count > 0)
     }
+
+    async fn dismiss_by_ref(&self, ref_type: &str, ref_id: &str) -> Result<i64, DomainError> {
+        let result = self
+            .db
+            .execute(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "DELETE FROM notifications WHERE ref_type = $1 AND ref_id = $2",
+                [ref_type.into(), ref_id.into()],
+            ))
+            .await?;
+        Ok(result.rows_affected() as i64)
+    }
 }

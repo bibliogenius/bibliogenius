@@ -1581,6 +1581,15 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 066: Add reminder_days_before_due to loan_settings.
+    // Controls how many days before the due date the first loan reminder is sent.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE loan_settings ADD COLUMN reminder_days_before_due INTEGER NOT NULL DEFAULT 2".to_owned(),
+        ))
+        .await;
+
     // Migration 065: Deactivate stale Library contacts.
     // Library-type contacts are auto-created when a peer lends/borrows a book.
     // They were not cleaned up when their associated peer was deleted, causing them

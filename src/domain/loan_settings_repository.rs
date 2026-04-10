@@ -9,6 +9,7 @@ use super::DomainError;
 pub struct LoanSettings {
     pub default_loan_duration_days: i32,
     pub per_book_duration_enabled: bool,
+    pub reminder_days_before_due: i32,
 }
 
 /// Repository trait for loan duration settings

@@ -334,6 +334,12 @@ pub async fn return_loan(
 pub struct UpdateLoanSettingsPayload {
     pub default_loan_duration_days: i32,
     pub per_book_duration_enabled: bool,
+    #[serde(default = "default_reminder_days")]
+    pub reminder_days_before_due: i32,
+}
+
+fn default_reminder_days() -> i32 {
+    2
 }
 
 pub async fn get_loan_settings(
@@ -349,6 +355,7 @@ pub async fn get_loan_settings(
     Ok(Json(json!({
         "default_loan_duration_days": settings.default_loan_duration_days,
         "per_book_duration_enabled": settings.per_book_duration_enabled,
+        "reminder_days_before_due": settings.reminder_days_before_due,
     })))
 }
 
@@ -363,6 +370,7 @@ pub async fn update_loan_settings(
         .update_settings(LoanSettings {
             default_loan_duration_days: payload.default_loan_duration_days,
             per_book_duration_enabled: payload.per_book_duration_enabled,
+            reminder_days_before_due: payload.reminder_days_before_due,
         })
         .await
         .map_err(|e| {
@@ -375,6 +383,7 @@ pub async fn update_loan_settings(
     Ok(Json(json!({
         "default_loan_duration_days": updated.default_loan_duration_days,
         "per_book_duration_enabled": updated.per_book_duration_enabled,
+        "reminder_days_before_due": updated.reminder_days_before_due,
     })))
 }
 

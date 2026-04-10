@@ -342,6 +342,7 @@ mod tests {
                 settings: Mutex::new(LoanSettings {
                     default_loan_duration_days: default_days,
                     per_book_duration_enabled: per_book_enabled,
+                    reminder_days_before_due: 2,
                 }),
                 book_durations: Mutex::new(std::collections::HashMap::new()),
             }
@@ -365,6 +366,7 @@ mod tests {
             let clamped = LoanSettings {
                 default_loan_duration_days: settings.default_loan_duration_days.clamp(1, 365),
                 per_book_duration_enabled: settings.per_book_duration_enabled,
+                reminder_days_before_due: settings.reminder_days_before_due.clamp(1, 10),
             };
             *self.settings.lock().unwrap() = clamped.clone();
             Ok(clamped)
@@ -439,6 +441,7 @@ mod tests {
             .update_settings(LoanSettings {
                 default_loan_duration_days: 0,
                 per_book_duration_enabled: false,
+                reminder_days_before_due: 2,
             })
             .await
             .unwrap();
@@ -448,6 +451,7 @@ mod tests {
             .update_settings(LoanSettings {
                 default_loan_duration_days: 500,
                 per_book_duration_enabled: false,
+                reminder_days_before_due: 2,
             })
             .await
             .unwrap();

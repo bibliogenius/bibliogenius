@@ -24,7 +24,7 @@ impl LoanSettingsRepository for SeaOrmLoanSettingsRepository {
             .db
             .query_one(Statement::from_string(
                 self.db.get_database_backend(),
-                "SELECT default_loan_duration_days, per_book_duration_enabled FROM loan_settings WHERE id = 1".to_owned(),
+                "SELECT default_loan_duration_days, per_book_duration_enabled, reminder_days_before_due FROM loan_settings WHERE id = 1".to_owned(),
             ))
             .await
             .map_err(|e| DomainError::Database(e.to_string()))?
@@ -37,10 +37,14 @@ impl LoanSettingsRepository for SeaOrmLoanSettingsRepository {
             .try_get_by_index::<i32>(1)
             .map(|v| v != 0)
             .map_err(|e| DomainError::Database(e.to_string()))?;
+        let reminder_days: i32 = row
+            .try_get_by_index(2)
+            .map_err(|e| DomainError::Database(e.to_string()))?;
 
         Ok(LoanSettings {
             default_loan_duration_days: days,
             per_book_duration_enabled: per_book,
+            reminder_days_before_due: reminder_days,
         })
     }
 
@@ -51,13 +55,14 @@ impl LoanSettingsRepository for SeaOrmLoanSettingsRepository {
         } else {
             0
         };
+        let reminder = settings.reminder_days_before_due.clamp(1, 10);
 
         self.db
             .execute(Statement::from_string(
                 self.db.get_database_backend(),
                 format!(
-                    "UPDATE loan_settings SET default_loan_duration_days = {}, per_book_duration_enabled = {} WHERE id = 1",
-                    days, per_book,
+                    "UPDATE loan_settings SET default_loan_duration_days = {}, per_book_duration_enabled = {}, reminder_days_before_due = {} WHERE id = 1",
+                    days, per_book, reminder,
                 ),
             ))
             .await
@@ -66,6 +71,7 @@ impl LoanSettingsRepository for SeaOrmLoanSettingsRepository {
         Ok(LoanSettings {
             default_loan_duration_days: days,
             per_book_duration_enabled: settings.per_book_duration_enabled,
+            reminder_days_before_due: reminder,
         })
     }
 
@@ -136,6 +142,7 @@ mod tests {
         let settings = repo.get_settings().await.unwrap();
         assert_eq!(settings.default_loan_duration_days, 21);
         assert!(!settings.per_book_duration_enabled);
+        assert_eq!(settings.reminder_days_before_due, 2);
     }
 
     #[tokio::test]
@@ -143,20 +150,23 @@ mod tests {
         let db = setup_test_db().await;
         let repo = SeaOrmLoanSettingsRepository::new(db);
 
-        // Update to 40 days
+        // Update to 40 days, reminder 5 days
         let updated = repo
             .update_settings(LoanSettings {
                 default_loan_duration_days: 40,
                 per_book_duration_enabled: true,
+                reminder_days_before_due: 5,
             })
             .await
             .unwrap();
         assert_eq!(updated.default_loan_duration_days, 40);
         assert!(updated.per_book_duration_enabled);
+        assert_eq!(updated.reminder_days_before_due, 5);
 
-        // Read back -- must be 40, not 21
+        // Read back -- must be 40/true/5, not 21/false/2
         let reloaded = repo.get_settings().await.unwrap();
         assert_eq!(reloaded.default_loan_duration_days, 40);
         assert!(reloaded.per_book_duration_enabled);
+        assert_eq!(reloaded.reminder_days_before_due, 5);
     }
 }

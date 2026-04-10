@@ -58,6 +58,8 @@ pub enum NotificationEventType {
     BorrowRejected,
     BookReturned,
     BookReclaimed,
+    LoanDueReminder,
+    LoanDueToday,
     // Discoveries
     NewBooks,
     WishlistMatch,
@@ -77,6 +79,8 @@ impl NotificationEventType {
             Self::BorrowRejected => "borrow_rejected",
             Self::BookReturned => "book_returned",
             Self::BookReclaimed => "book_reclaimed",
+            Self::LoanDueReminder => "loan_due_reminder",
+            Self::LoanDueToday => "loan_due_today",
             Self::NewBooks => "new_books",
             Self::WishlistMatch => "wishlist_match",
             Self::Welcome => "welcome",
@@ -93,7 +97,9 @@ impl NotificationEventType {
             | Self::BorrowAccepted
             | Self::BorrowRejected
             | Self::BookReturned
-            | Self::BookReclaimed => NotificationCategory::Loans,
+            | Self::BookReclaimed
+            | Self::LoanDueReminder
+            | Self::LoanDueToday => NotificationCategory::Loans,
             Self::NewBooks | Self::WishlistMatch => NotificationCategory::Discoveries,
             Self::Welcome => NotificationCategory::System,
         }
@@ -110,6 +116,8 @@ impl NotificationEventType {
             "borrow_rejected" => Some(Self::BorrowRejected),
             "book_returned" => Some(Self::BookReturned),
             "book_reclaimed" => Some(Self::BookReclaimed),
+            "loan_due_reminder" => Some(Self::LoanDueReminder),
+            "loan_due_today" => Some(Self::LoanDueToday),
             "new_books" => Some(Self::NewBooks),
             "wishlist_match" => Some(Self::WishlistMatch),
             "welcome" => Some(Self::Welcome),
@@ -183,6 +191,10 @@ pub trait NotificationRepository: Send + Sync {
         ref_type: &str,
         ref_id: &str,
     ) -> Result<bool, DomainError>;
+
+    /// Dismiss (hard delete) all notifications with the given ref_type and ref_id.
+    /// Returns count of deleted rows. Used to clean up loan reminders on return.
+    async fn dismiss_by_ref(&self, ref_type: &str, ref_id: &str) -> Result<i64, DomainError>;
 }
 
 #[cfg(test)]
@@ -219,6 +231,8 @@ mod tests {
             NotificationEventType::BorrowRejected,
             NotificationEventType::BookReturned,
             NotificationEventType::BookReclaimed,
+            NotificationEventType::LoanDueReminder,
+            NotificationEventType::LoanDueToday,
             NotificationEventType::NewBooks,
             NotificationEventType::WishlistMatch,
         ];
@@ -256,6 +270,14 @@ mod tests {
             NotificationCategory::Loans
         );
         assert_eq!(
+            NotificationEventType::LoanDueReminder.category(),
+            NotificationCategory::Loans
+        );
+        assert_eq!(
+            NotificationEventType::LoanDueToday.category(),
+            NotificationCategory::Loans
+        );
+        assert_eq!(
             NotificationEventType::NewBooks.category(),
             NotificationCategory::Discoveries
         );
@@ -270,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_event_types_have_10_variants() {
+    fn test_all_event_types_have_12_variants() {
         // Ensure new variants are covered by tests
         let all = [
             "connection_request",
@@ -283,6 +305,8 @@ mod tests {
             "new_books",
             "wishlist_match",
             "welcome",
+            "loan_due_reminder",
+            "loan_due_today",
         ];
         for s in all {
             assert!(
@@ -291,6 +315,6 @@ mod tests {
                 s
             );
         }
-        assert_eq!(all.len(), 10);
+        assert_eq!(all.len(), 12);
     }
 }
