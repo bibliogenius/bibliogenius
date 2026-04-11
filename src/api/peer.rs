@@ -293,6 +293,415 @@ pub(crate) async fn perform_loan_acceptance(
     })
 }
 
+// ============ SHARED HELPERS: BORROWED COPY CREATION ============
+
+/// Parameters for creating a borrowed copy on the borrower side.
+pub(crate) struct BorrowedCopyParams<'a> {
+    pub title: &'a str,
+    pub isbn: Option<&'a str>,
+    pub author: Option<&'a str>,
+    pub cover_url: Option<&'a str>,
+    pub lender_name: &'a str,
+    pub due_date: &'a str,
+}
+
+/// Result of creating a borrowed copy.
+pub(crate) struct BorrowedCopyResult {
+    pub book_id: i32,
+    pub copy_id: i32,
+    /// `true` if an identical borrowed copy already existed (idempotency).
+    pub already_existed: bool,
+}
+
+/// Find or create a book and its borrowed temporary copy on the borrower side.
+///
+/// Shared by `receive_loan_confirmation`, `handle_loan_confirmation` (e2ee.rs),
+/// and the `loan_offer` handlers. Callers handle outgoing-request updates and
+/// notifications themselves.
+pub(crate) async fn create_borrowed_copy(
+    db: &DatabaseConnection,
+    params: &BorrowedCopyParams<'_>,
+) -> Result<BorrowedCopyResult, (StatusCode, serde_json::Value)> {
+    use crate::models::{book, copy};
+
+    // 1. Find or create book
+    let existing_book = if let Some(isbn_val) = params.isbn {
+        book::Entity::find()
+            .filter(book::Column::Isbn.eq(isbn_val))
+            .one(db)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        book::Entity::find()
+            .filter(book::Column::Title.eq(params.title))
+            .one(db)
+            .await
+            .ok()
+            .flatten()
+    };
+
+    let book_id = match existing_book {
+        Some(b) => {
+            tracing::info!("Borrowed copy: book already exists id={}", b.id);
+            b.id
+        }
+        None => {
+            let now = Utc::now().to_rfc3339();
+            let summary_text = params.author.map(|a| format!("Auteur: {a}"));
+            let new_book = book::ActiveModel {
+                title: Set(params.title.to_string()),
+                isbn: Set(params.isbn.map(|s| s.to_string())),
+                summary: Set(summary_text),
+                cover_url: Set(params.cover_url.map(|s| s.to_string())),
+                owned: Set(false),
+                created_at: Set(now.clone()),
+                updated_at: Set(now),
+                ..Default::default()
+            };
+            match new_book.insert(db).await {
+                Ok(b) => {
+                    tracing::info!("Borrowed copy: created book id={}", b.id);
+                    b.id
+                }
+                Err(e) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        json!({ "error": format!("Failed to create book: {e}") }),
+                    ));
+                }
+            }
+        }
+    };
+
+    // 2. Idempotency: skip if a borrowed temporary copy already exists
+    let existing_borrowed = copy::Entity::find()
+        .filter(copy::Column::BookId.eq(book_id))
+        .filter(copy::Column::Status.eq("borrowed"))
+        .filter(copy::Column::IsTemporary.eq(true))
+        .one(db)
+        .await
+        .ok()
+        .flatten();
+
+    if let Some(existing) = existing_borrowed {
+        tracing::info!(
+            "Borrowed copy already exists (id={}) for book_id={}, skipping",
+            existing.id,
+            book_id
+        );
+        return Ok(BorrowedCopyResult {
+            book_id,
+            copy_id: existing.id,
+            already_existed: true,
+        });
+    }
+
+    // 3. Create borrowed temporary copy
+    let lib_id = crate::utils::library_helpers::resolve_library_id(db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({ "error": format!("No library: {e}") }),
+            )
+        })?;
+
+    let now = Utc::now().to_rfc3339();
+    let new_copy = copy::ActiveModel {
+        book_id: Set(book_id),
+        library_id: Set(lib_id),
+        status: Set("borrowed".to_string()),
+        is_temporary: Set(true),
+        notes: Set(Some(format!(
+            "Emprunté de {} jusqu'au {}",
+            params.lender_name, params.due_date
+        ))),
+        acquisition_date: Set(Some(now.clone())),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+
+    match new_copy.insert(db).await {
+        Ok(c) => {
+            tracing::info!("Created borrowed copy id={} for book_id={}", c.id, book_id);
+            Ok(BorrowedCopyResult {
+                book_id,
+                copy_id: c.id,
+                already_existed: false,
+            })
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({ "error": format!("Failed to create copy: {e}") }),
+        )),
+    }
+}
+
+// ============ LENDER-INITIATED LOAN TO PEER ============
+
+#[derive(Debug, Deserialize)]
+pub struct OfferLoanRequest {
+    pub book_id: Option<i32>,
+    pub book_isbn: Option<String>,
+}
+
+/// POST /api/peers/:id/offer-loan
+///
+/// Lender initiates a loan to a connected peer. Creates the loan locally and
+/// notifies the peer via E2EE (with relay fallback) so a borrowed copy appears
+/// on the borrower's device.
+pub async fn offer_loan(
+    State(state): State<crate::infrastructure::AppState>,
+    Path(peer_id): Path<i32>,
+    Json(payload): Json<OfferLoanRequest>,
+) -> impl IntoResponse {
+    use crate::models::{book, contact, copy, library, loan};
+
+    let db = state.db();
+
+    // 1. Find peer and verify connection status
+    let peer = match peer::Entity::find_by_id(peer_id).one(db).await {
+        Ok(Some(p)) => p,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "Peer not found" })),
+            )
+                .into_response();
+        }
+    };
+    if peer.connection_status != "accepted" {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "Peer not connected" })),
+        )
+            .into_response();
+    }
+
+    // 2. Find book by ID or ISBN
+    let book = if let Some(book_id) = payload.book_id {
+        book::Entity::find_by_id(book_id)
+            .one(db)
+            .await
+            .ok()
+            .flatten()
+    } else if let Some(ref isbn) = payload.book_isbn {
+        book::Entity::find()
+            .filter(book::Column::Isbn.eq(isbn))
+            .one(db)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let book = match book {
+        Some(b) => b,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "Book not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    // 3. Find available copy (no auto-creation)
+    let available_copy = copy::Entity::find()
+        .filter(copy::Column::BookId.eq(book.id))
+        .filter(copy::Column::Status.eq("available"))
+        .one(db)
+        .await
+        .ok()
+        .flatten();
+    let available_copy = match available_copy {
+        Some(c) => c,
+        None => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "No available copies" })),
+            )
+                .into_response();
+        }
+    };
+
+    // 4. Find or create Library contact for peer
+    let peer_contact = match contact::Entity::find()
+        .filter(contact::Column::Name.eq(&peer.name))
+        .filter(contact::Column::Type.eq("Library"))
+        .one(db)
+        .await
+    {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            let lib_id = match crate::utils::library_helpers::resolve_library_id(db).await {
+                Ok(id) => id,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("No library: {e}") })),
+                    )
+                        .into_response();
+                }
+            };
+            let new_contact = contact::ActiveModel {
+                r#type: Set("Library".to_string()),
+                name: Set(peer.name.clone()),
+                library_owner_id: Set(lib_id),
+                is_active: Set(true),
+                created_at: Set(Utc::now().to_rfc3339()),
+                updated_at: Set(Utc::now().to_rfc3339()),
+                ..Default::default()
+            };
+            match new_contact.insert(db).await {
+                Ok(c) => c,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("Failed to create contact: {e}") })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("DB error: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    // 5. Calculate loan duration and create loan
+    let duration_days = resolve_loan_duration_days(db, book.id).await;
+    let due = Utc::now() + chrono::Duration::days(duration_days);
+    let due_date_str = due.format("%Y-%m-%d").to_string();
+
+    let lib_id = match crate::utils::library_helpers::resolve_library_id(db).await {
+        Ok(id) => id,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("No library: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let new_loan = loan::ActiveModel {
+        copy_id: Set(available_copy.id),
+        contact_id: Set(peer_contact.id),
+        library_id: Set(lib_id),
+        loan_date: Set(Utc::now().to_rfc3339()),
+        due_date: Set(due.to_rfc3339()),
+        status: Set("active".to_string()),
+        created_at: Set(Utc::now().to_rfc3339()),
+        updated_at: Set(Utc::now().to_rfc3339()),
+        ..Default::default()
+    };
+    let loan_insert = match loan::Entity::insert(new_loan).exec(db).await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Failed to create loan: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    // 6. Update copy status to "loaned"
+    let mut active_copy: copy::ActiveModel = available_copy.into();
+    active_copy.status = Set("loaned".to_string());
+    if let Err(e) = active_copy.update(db).await {
+        tracing::warn!("Failed to update copy status: {e}");
+    }
+
+    // 7. Create p2p_request so the return flow can find the loan
+    let request_id = uuid::Uuid::new_v4().to_string();
+    {
+        use crate::models::p2p_request;
+        let req = p2p_request::ActiveModel {
+            id: Set(request_id.clone()),
+            from_peer_id: Set(peer.id),
+            book_isbn: Set(book.isbn.clone().unwrap_or_default()),
+            book_title: Set(book.title.clone()),
+            status: Set("accepted".to_string()),
+            requester_request_id: Set(None),
+            created_at: Set(Utc::now().to_rfc3339()),
+            updated_at: Set(Utc::now().to_rfc3339()),
+        };
+        if let Err(e) = p2p_request::Entity::insert(req).exec(db).await {
+            tracing::warn!("Failed to create p2p_request for offer_loan: {e}");
+        }
+    }
+
+    // 8. Build loan_offer payload and notify peer
+    let lender_name = match library::Entity::find_by_id(1).one(db).await {
+        Ok(Some(lib)) => lib.name,
+        _ => "Unknown Library".to_string(),
+    };
+
+    let offer_payload = json!({
+        "isbn": book.isbn,
+        "title": book.title,
+        "cover_url": book.cover_url,
+        "lender_name": lender_name,
+        "due_date": due_date_str,
+        "request_id": request_id,
+    });
+
+    let mut notification_sent = false;
+
+    match try_send_e2ee(&state, &peer, "loan_offer", offer_payload.clone()).await {
+        Ok(Some(_)) => {
+            tracing::info!("E2EE: loan_offer sent to {} (encrypted)", peer.name);
+            notification_sent = true;
+        }
+        Err(e) => {
+            tracing::warn!("E2EE: loan_offer error (no plaintext fallback): {e}");
+        }
+        Ok(None) => {
+            // E2EE not available -- fall back to plaintext
+            if let Ok(validated) = validate_url(&peer.url) {
+                let client = get_safe_client();
+                match client
+                    .post(format!("{validated}/api/peers/loans/offer"))
+                    .json(&offer_payload)
+                    .send()
+                    .await
+                {
+                    Ok(resp) => {
+                        tracing::info!(
+                            "loan_offer plaintext sent to {}: {}",
+                            peer.name,
+                            resp.status()
+                        );
+                        notification_sent = resp.status().is_success();
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to send plaintext loan_offer to {}: {e}", peer.name);
+                    }
+                }
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "message": "Loan created",
+            "loan_id": loan_insert.last_insert_id,
+            "contact_id": peer_contact.id,
+            "due_date": due_date_str,
+            "notification_sent": notification_sent,
+        })),
+    )
+        .into_response()
+}
+
 /// Try to send a message to a peer via E2EE. Returns Ok(Some(response)) if E2EE succeeded,
 /// Ok(None) if E2EE is not available for this peer (caller should fall back to plaintext).
 ///
@@ -918,6 +1327,24 @@ pub async fn setup_relay(
     match config.insert(db).await {
         Ok(_) => {
             tracing::info!("Relay: Mailbox registered");
+
+            // Keep HUB_URL in sync so hub_directory_service uses the same hub.
+            // SAFETY: single-threaded write path (same pattern as set_hub_url_ffi).
+            unsafe { std::env::set_var("HUB_URL", &relay_url_for_notify) };
+
+            // Invalidate directory config: write_token is bound to the previous hub.
+            // This forces ensureRegistered() to re-register on the new hub.
+            let _ = db
+                .execute(sea_orm::Statement::from_string(
+                    db.get_database_backend(),
+                    "DELETE FROM hub_directory_config".to_owned(),
+                ))
+                .await;
+            tracing::info!(
+                "Relay: HUB_URL updated to {}, directory config invalidated",
+                &relay_url_for_notify
+            );
+
             // Proactively notify all E2EE peers of the new mailbox credentials.
             // This prevents the window where peers have stale relay info after a hub switch.
             let state_clone = state.clone();
@@ -3839,21 +4266,24 @@ pub async fn sync_peer_by_url(
 
         let peer_id = peer.id;
         let url_changed = effective_url != peer.url;
-        let mut active_peer: peer::ActiveModel = peer.into();
-        if url_changed {
-            active_peer.url = Set(effective_url);
-            tracing::info!("Port discovery: persisted new URL for peer {}", peer_id);
+        // Re-read peer from DB to avoid overwriting concurrent changes
+        if let Ok(Some(fresh_peer)) = peer::Entity::find_by_id(peer_id).one(&db).await {
+            let mut active_peer: peer::ActiveModel = fresh_peer.into();
+            if url_changed {
+                active_peer.url = Set(effective_url);
+                tracing::info!("Port discovery: persisted new URL for peer {}", peer_id);
+            }
+            if let Some(ref new_name) = updated_name {
+                active_peer.name = Set(new_name.clone());
+                tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
+            }
+            if let Some(ref avatar) = updated_avatar {
+                active_peer.avatar_config = Set(Some(avatar.clone()));
+            }
+            active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
+            active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
+            let _ = active_peer.update(&db).await;
         }
-        if let Some(ref new_name) = updated_name {
-            active_peer.name = Set(new_name.clone());
-            tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
-        }
-        if let Some(ref avatar) = updated_avatar {
-            active_peer.avatar_config = Set(Some(avatar.clone()));
-        }
-        active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
-        active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
-        let _ = active_peer.update(&db).await;
 
         return (
             StatusCode::OK,
@@ -3961,27 +4391,31 @@ pub async fn sync_peer_by_url(
     .await;
 
     // 7. Update peer's last_seen (and name/URL/avatar if changed)
+    // Re-read the peer from DB to avoid overwriting concurrent changes
+    // (the `peer` variable was loaded at the start of this function and is stale).
     let peer_id = peer.id;
     let url_changed = effective_url != peer.url;
     // Fall back to E2EE-sourced metadata when peer was unreachable via direct HTTP (5G)
     let final_updated_name = updated_name.or_else(|| e2ee_library_name.filter(|n| n != &peer.name));
     let final_updated_avatar = updated_avatar
         .or_else(|| e2ee_avatar.filter(|a| Some(a.as_str()) != peer.avatar_config.as_deref()));
-    let mut active_peer: peer::ActiveModel = peer.into();
-    if url_changed {
-        active_peer.url = Set(effective_url);
-        tracing::info!("Port discovery: persisted new URL for peer {}", peer_id);
+    if let Ok(Some(fresh_peer)) = peer::Entity::find_by_id(peer_id).one(&db).await {
+        let mut active_peer: peer::ActiveModel = fresh_peer.into();
+        if url_changed {
+            active_peer.url = Set(effective_url);
+            tracing::info!("Port discovery: persisted new URL for peer {}", peer_id);
+        }
+        if let Some(ref new_name) = final_updated_name {
+            active_peer.name = Set(new_name.clone());
+            tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
+        }
+        if let Some(ref avatar) = final_updated_avatar {
+            active_peer.avatar_config = Set(Some(avatar.clone()));
+        }
+        active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
+        active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        let _ = active_peer.update(&db).await;
     }
-    if let Some(ref new_name) = final_updated_name {
-        active_peer.name = Set(new_name.clone());
-        tracing::info!("Updated peer {} name to '{}'", peer_id, new_name);
-    }
-    if let Some(ref avatar) = final_updated_avatar {
-        active_peer.avatar_config = Set(Some(avatar.clone()));
-    }
-    active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
-    active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
-    let _ = active_peer.update(&db).await;
 
     (
         StatusCode::OK,
@@ -6765,8 +7199,7 @@ pub async fn receive_loan_confirmation(
     State(db): State<DatabaseConnection>,
     Json(payload): Json<LoanConfirmation>,
 ) -> impl IntoResponse {
-    use crate::models::{book, copy, p2p_outgoing_request};
-    use chrono::Utc;
+    use crate::models::p2p_outgoing_request;
 
     tracing::info!(
         "📚 Received loan confirmation: '{}' from {} (requester_request_id={:?})",
@@ -6818,222 +7251,179 @@ pub async fn receive_loan_confirmation(
             .into_response();
     }
 
-    // 1. Find or create book
-    let existing_book = if let Some(ref isbn) = payload.isbn {
-        book::Entity::find()
-            .filter(book::Column::Isbn.eq(isbn))
-            .one(&db)
-            .await
-            .ok()
-            .flatten()
-    } else {
-        book::Entity::find()
-            .filter(book::Column::Title.eq(&payload.title))
-            .one(&db)
-            .await
-            .ok()
-            .flatten()
+    // Create borrowed copy via shared helper
+    let params = BorrowedCopyParams {
+        title: &payload.title,
+        isbn: payload.isbn.as_deref(),
+        author: payload.author.as_deref(),
+        cover_url: payload.cover_url.as_deref(),
+        lender_name: &payload.lender_name,
+        due_date: &payload.due_date,
     };
 
-    let book_id = match existing_book {
-        Some(b) => {
-            tracing::info!("Book already exists: id={}", b.id);
-            b.id
-        }
-        None => {
-            // Create new book
-            let now = Utc::now().to_rfc3339();
-            // Note: author is a relation, not a direct field on books table
-            // Store author info in summary for now
-            let summary_text = payload.author.clone().map(|a| format!("Auteur: {}", a));
-            let new_book = book::ActiveModel {
-                title: Set(payload.title.clone()),
-                isbn: Set(payload.isbn.clone()),
-                summary: Set(summary_text),
-                cover_url: Set(payload.cover_url.clone()),
-                owned: Set(false), // It's a borrowed book, not owned
-                created_at: Set(now.clone()),
-                updated_at: Set(now),
-                ..Default::default()
-            };
-
-            match new_book.insert(&db).await {
-                Ok(b) => {
-                    tracing::info!("Created new book: id={}", b.id);
-                    b.id
-                }
-                Err(e) => {
-                    tracing::error!("Failed to create book: {}", e);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": format!("Failed to create book: {}", e) })),
-                    )
-                        .into_response();
-                }
-            }
+    let result = match create_borrowed_copy(&db, &params).await {
+        Ok(r) => r,
+        Err((status, err_json)) => {
+            return (status, Json(err_json)).into_response();
         }
     };
 
-    // 2. Idempotency: skip if a borrowed temporary copy already exists for this book
-    let existing_borrowed = copy::Entity::find()
-        .filter(copy::Column::BookId.eq(book_id))
-        .filter(copy::Column::Status.eq("borrowed"))
-        .filter(copy::Column::IsTemporary.eq(true))
-        .one(&db)
-        .await
-        .ok()
-        .flatten();
-
-    if let Some(existing) = existing_borrowed {
-        tracing::info!(
-            "📚 Borrowed copy already exists (id={}) for book_id={}, skipping duplicate",
-            existing.id,
-            book_id
-        );
-        // Still update outgoing request if needed
-        if let Some(ref lender_req_id) = payload.request_id {
-            let outgoing = if let Some(ref rr_id) = payload.requester_request_id {
-                p2p_outgoing_request::Entity::find_by_id(rr_id)
-                    .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
-                    .one(&db)
-                    .await
-                    .ok()
-                    .flatten()
-            } else {
-                let isbn_filter = payload.isbn.clone().unwrap_or_default();
-                p2p_outgoing_request::Entity::find()
-                    .filter(p2p_outgoing_request::Column::BookIsbn.eq(&isbn_filter))
-                    .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
-                    .one(&db)
-                    .await
-                    .ok()
-                    .flatten()
-            };
-            if let Some(outgoing) = outgoing {
-                let mut active: p2p_outgoing_request::ActiveModel = outgoing.into();
-                active.lender_request_id = Set(Some(lender_req_id.clone()));
-                active.status = Set("accepted".to_string());
-                active.updated_at = Set(Utc::now().to_rfc3339());
-                let _ = active.update(&db).await;
+    // Update outgoing request with lender_request_id (both for idempotent and new copies)
+    if let Some(ref lender_req_id) = payload.request_id {
+        let outgoing = if let Some(ref rr_id) = payload.requester_request_id {
+            p2p_outgoing_request::Entity::find_by_id(rr_id)
+                .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
+                .one(&db)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            let isbn_filter = payload.isbn.clone().unwrap_or_default();
+            p2p_outgoing_request::Entity::find()
+                .filter(p2p_outgoing_request::Column::BookIsbn.eq(&isbn_filter))
+                .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
+                .one(&db)
+                .await
+                .ok()
+                .flatten()
+        };
+        if let Some(outgoing) = outgoing {
+            let mut active: p2p_outgoing_request::ActiveModel = outgoing.into();
+            active.lender_request_id = Set(Some(lender_req_id.clone()));
+            active.status = Set("accepted".to_string());
+            active.updated_at = Set(Utc::now().to_rfc3339());
+            if let Err(e) = active.update(&db).await {
+                tracing::warn!("Failed to update outgoing request: {e}");
             }
         }
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "message": "Loan already confirmed",
-                "book_id": book_id,
-                "copy_id": existing.id
-            })),
-        )
-            .into_response();
     }
 
-    // Create borrowed copy
-    let now = Utc::now().to_rfc3339();
-    let new_copy = copy::ActiveModel {
-        book_id: Set(book_id),
-        library_id: Set(
-            match crate::utils::library_helpers::resolve_library_id(&db).await {
-                Ok(id) => id,
-                Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": format!("No library: {}", e) })),
-                    )
-                        .into_response();
-                }
+    // Emit notification only for newly created copies
+    if !result.already_existed {
+        crate::services::notification_service::emit(
+            &db,
+            crate::domain::CreateNotification {
+                event_type: crate::domain::NotificationEventType::BorrowAccepted,
+                title: payload.title.clone(),
+                body: Some(payload.lender_name.clone()),
+                ref_type: Some("peer".to_string()),
+                ref_id: Some(result.copy_id.to_string()),
             },
-        ),
-        status: Set("borrowed".to_string()),
-        is_temporary: Set(true),
-        notes: Set(Some(format!(
-            "Emprunté de {} jusqu'au {}",
-            payload.lender_name, payload.due_date
-        ))),
-        acquisition_date: Set(Some(now.clone())),
-        created_at: Set(now.clone()),
-        updated_at: Set(now),
-        ..Default::default()
+        )
+        .await;
+    }
+
+    let msg = if result.already_existed {
+        "Loan already confirmed"
+    } else {
+        "Loan confirmed"
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "message": msg,
+            "book_id": result.book_id,
+            "copy_id": result.copy_id
+        })),
+    )
+        .into_response()
+}
+
+// ============ P2P LOAN OFFER (lender-initiated) ============
+
+#[derive(Debug, Deserialize)]
+pub struct LoanOffer {
+    pub isbn: Option<String>,
+    pub title: String,
+    pub author: Option<String>,
+    pub cover_url: Option<String>,
+    pub lender_name: String,
+    pub due_date: String,
+    /// Lender's p2p_request ID, needed for the return flow.
+    pub request_id: Option<String>,
+}
+
+/// POST /api/peers/loans/offer -- Plaintext endpoint for receiving a loan offer.
+///
+/// Called when a lender initiates a loan to us (no prior borrow request).
+/// Unlike `receive_loan_confirmation`, this does NOT require a matching
+/// `p2p_outgoing_request` since the borrower never requested the loan.
+pub async fn receive_loan_offer(
+    State(db): State<DatabaseConnection>,
+    Json(payload): Json<LoanOffer>,
+) -> impl IntoResponse {
+    tracing::info!(
+        "Received loan offer: '{}' from {}",
+        payload.title,
+        payload.lender_name
+    );
+
+    let params = BorrowedCopyParams {
+        title: &payload.title,
+        isbn: payload.isbn.as_deref(),
+        author: payload.author.as_deref(),
+        cover_url: payload.cover_url.as_deref(),
+        lender_name: &payload.lender_name,
+        due_date: &payload.due_date,
     };
 
-    match new_copy.insert(&db).await {
-        Ok(c) => {
-            tracing::info!(
-                "✅ Created borrowed copy: id={} for book_id={}",
-                c.id,
-                book_id
-            );
+    let result = match create_borrowed_copy(&db, &params).await {
+        Ok(r) => r,
+        Err((status, err_json)) => {
+            return (status, Json(err_json)).into_response();
+        }
+    };
 
-            // Emit borrow_accepted notification
-            crate::services::notification_service::emit(
-                &db,
-                crate::domain::CreateNotification {
-                    event_type: crate::domain::NotificationEventType::BorrowAccepted,
-                    title: payload.title.clone(),
-                    body: Some(payload.lender_name.clone()),
-                    ref_type: Some("peer".to_string()),
-                    ref_id: Some(c.id.to_string()),
-                },
-            )
-            .await;
-
-            // Store lender_request_id on the matching outgoing request
-            if let Some(ref lender_req_id) = payload.request_id {
-                let outgoing = if let Some(ref rr_id) = payload.requester_request_id {
-                    p2p_outgoing_request::Entity::find_by_id(rr_id)
-                        .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
-                        .one(&db)
-                        .await
-                        .ok()
-                        .flatten()
-                } else {
-                    let isbn_filter = payload.isbn.clone().unwrap_or_default();
-                    p2p_outgoing_request::Entity::find()
-                        .filter(p2p_outgoing_request::Column::BookIsbn.eq(&isbn_filter))
-                        .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
-                        .one(&db)
-                        .await
-                        .ok()
-                        .flatten()
-                };
-                if let Some(outgoing) = outgoing {
-                    let mut active: p2p_outgoing_request::ActiveModel = outgoing.into();
-                    active.lender_request_id = Set(Some(lender_req_id.clone()));
-                    active.status = Set("accepted".to_string());
-                    active.updated_at = Set(Utc::now().to_rfc3339());
-                    if let Err(e) = active.update(&db).await {
-                        tracing::warn!(
-                            "Failed to update outgoing request with lender_request_id: {}",
-                            e
-                        );
-                    } else {
-                        tracing::info!(
-                            "✅ Outgoing request accepted, lender_request_id={}",
-                            lender_req_id
-                        );
-                    }
-                }
+    // Create p2p_outgoing_request so return_borrowed_book can notify the lender
+    if !result.already_existed {
+        if let Some(ref lender_req_id) = payload.request_id {
+            use crate::models::p2p_outgoing_request;
+            let outgoing_id = uuid::Uuid::new_v4().to_string();
+            let outgoing = p2p_outgoing_request::ActiveModel {
+                id: Set(outgoing_id),
+                to_peer_id: Set(0), // unknown in plaintext path
+                book_isbn: Set(payload.isbn.clone().unwrap_or_default()),
+                book_title: Set(payload.title.clone()),
+                status: Set("accepted".to_string()),
+                lender_request_id: Set(Some(lender_req_id.clone())),
+                created_at: Set(Utc::now().to_rfc3339()),
+                updated_at: Set(Utc::now().to_rfc3339()),
+            };
+            if let Err(e) = p2p_outgoing_request::Entity::insert(outgoing)
+                .exec(&db)
+                .await
+            {
+                tracing::warn!("Failed to create p2p_outgoing_request for loan_offer: {e}");
             }
+        }
 
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "message": "Loan confirmed",
-                    "book_id": book_id,
-                    "copy_id": c.id
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to create borrowed copy: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": format!("Failed to create copy: {}", e) })),
-            )
-                .into_response()
-        }
+        crate::services::notification_service::emit(
+            &db,
+            crate::domain::CreateNotification {
+                event_type: crate::domain::NotificationEventType::BorrowAccepted,
+                title: payload.title.clone(),
+                body: Some(payload.lender_name.clone()),
+                ref_type: Some("peer".to_string()),
+                ref_id: Some(result.copy_id.to_string()),
+            },
+        )
+        .await;
     }
+
+    let msg = if result.already_existed {
+        "Loan offer already processed"
+    } else {
+        "Loan offer accepted"
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "message": msg,
+            "book_id": result.book_id,
+            "copy_id": result.copy_id
+        })),
+    )
+        .into_response()
 }
 
 /// Save pre-fetched books to the local peer_books cache.

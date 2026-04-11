@@ -187,6 +187,7 @@ fn build_routes() -> Router<AppState> {
         .route("/peers/proxy_search", post(peer::proxy_search))
         .route("/peers/return_book", post(peer::return_borrowed_book)) // Borrower-initiated return
         .route("/peers/request_by_url", post(peer::request_book_by_url)) // Send request by URL
+        .route("/peers/:id/offer-loan", post(peer::offer_loan)) // Lender-initiated loan to peer
         .route("/peers/:id/request", post(peer::request_book)) // Send request
         .route("/peers/request", post(peer::receive_request)) // Receive request
         .route("/peers/requests", get(peer::list_requests)) // List incoming requests
@@ -195,6 +196,7 @@ fn build_routes() -> Router<AppState> {
             "/peers/loans/confirm",
             post(peer::receive_loan_confirmation),
         ) // Receive loan confirmation from lender
+        .route("/peers/loans/offer", post(peer::receive_loan_offer)) // Receive lender-initiated loan offer
         .route(
             "/peers/requests/outgoing",
             get(peer::list_outgoing_requests).post(peer::create_outgoing_request),
