@@ -1597,11 +1597,32 @@ async fn upsert_peer_books_cache(
     );
 
     // 1. Load existing cached books for this peer
-    let existing = peer_book::Entity::find()
+    let mut existing = peer_book::Entity::find()
         .filter(peer_book::Column::PeerId.eq(peer_id))
         .all(db)
         .await
         .unwrap_or_default();
+
+    // Migration: a previous bug in Book.toJson() omitted the id field, causing
+    // all cached entries to have remote_book_id=0. When incoming books now carry
+    // real IDs, purge the corrupted rows so the upsert treats this as an initial
+    // sync (first_seen_at=NULL, no spurious "new" badge).
+    let zero_id_count = existing.iter().filter(|e| e.remote_book_id == 0).count();
+    let incoming_have_real_ids = books.iter().any(|b| matches!(b.id, Some(id) if id != 0));
+    if zero_id_count > 1 && incoming_have_real_ids {
+        tracing::info!(
+            "upsert_peer_books_cache: peer_id={} - purging {} corrupted entries \
+             (remote_book_id=0) from previous toJson bug",
+            peer_id,
+            zero_id_count,
+        );
+        let _ = peer_book::Entity::delete_many()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .filter(peer_book::Column::RemoteBookId.eq(0))
+            .exec(db)
+            .await;
+        existing.retain(|e| e.remote_book_id != 0);
+    }
 
     let existing_map: std::collections::HashMap<i32, peer_book::Model> = existing
         .into_iter()
