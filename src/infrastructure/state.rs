@@ -80,6 +80,8 @@ pub struct AppState {
     peer_direct_failures: PeerDirectFailures,
     /// Relay poll lock — prevents concurrent `poll_once()` from double-processing messages.
     relay_poll_lock: RelayPollLock,
+    /// Leaderboard sync lock — prevents concurrent `sync_all_leaderboards()` runs.
+    leaderboard_sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -139,6 +141,7 @@ impl AppState {
             hub_directory: Arc::new(HubDirectoryService::new()),
             peer_direct_failures: Arc::new(dashmap::DashMap::new()),
             relay_poll_lock: Arc::new(tokio::sync::Mutex::new(())),
+            leaderboard_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -249,6 +252,14 @@ impl AppState {
     /// skipped — the running poll will process all pending messages.
     pub fn relay_poll_lock(&self) -> &RelayPollLock {
         &self.relay_poll_lock
+    }
+
+    /// Return the leaderboard sync lock.
+    ///
+    /// `sync_all_leaderboards()` awaits this lock so concurrent refresh
+    /// requests coalesce instead of triggering duplicate relay round-trips.
+    pub fn leaderboard_sync_lock(&self) -> &Arc<tokio::sync::Mutex<()>> {
+        &self.leaderboard_sync_lock
     }
 
     /// Get the database connection (for backward compatibility during migration)

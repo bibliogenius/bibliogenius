@@ -250,6 +250,357 @@ pub async fn fetch_peer_public_stats_via_relay(
     }
 }
 
+/// Apply a [`PublicStatsBundle`] to all local game + gamification caches.
+///
+/// Upserts scores for enabled modules, optionally deletes cached scores for
+/// disabled modules (set `clear_disabled` for the refresh path; leave false
+/// for push notifications where the absence of a module just means "no update").
+///
+/// Also updates `peers.name` if the bundle carries a different display name.
+///
+/// Called by:
+/// - [`sync_all_leaderboards`] (relay Phase 2 results)
+/// - `handle_public_stats_push` in relay_poller (incoming push notifications)
+pub async fn apply_stats_bundle_to_caches(
+    db: &sea_orm::DatabaseConnection,
+    peer_id: i32,
+    peer_name: &str,
+    bundle: &PublicStatsBundle,
+    clear_disabled: bool,
+) {
+    let display_name = bundle.library_name.as_deref().unwrap_or(peer_name);
+
+    // Update peer display name if changed
+    if let Some(ref new_name) = bundle.library_name
+        && !new_name.is_empty()
+        && *new_name != peer_name
+    {
+        let _ = peer::Entity::update_many()
+            .filter(peer::Column::Id.eq(peer_id))
+            .col_expr(
+                peer::Column::Name,
+                sea_orm::sea_query::Expr::value(new_name.to_string()),
+            )
+            .col_expr(
+                peer::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(chrono::Utc::now().to_rfc3339()),
+            )
+            .exec(db)
+            .await;
+    }
+
+    // Memory game
+    if bundle.enabled_modules.contains(&"memory_game".to_string()) {
+        if let Some(entry) = &bundle.memory_game
+            && entry.best_score > 0.0
+        {
+            use crate::modules::memory_game::domain::MemoryGameRepository;
+            let repo =
+                crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+            let _ = repo
+                .upsert_peer_score(
+                    peer_id,
+                    display_name,
+                    entry.best_score,
+                    &entry.difficulty,
+                    &entry.played_at,
+                )
+                .await;
+        }
+    } else if clear_disabled {
+        use crate::modules::memory_game::domain::MemoryGameRepository;
+        let repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+        let _ = repo.delete_peer_scores(peer_id).await;
+    }
+
+    // Sliding puzzle
+    if bundle
+        .enabled_modules
+        .contains(&"sliding_puzzle".to_string())
+    {
+        if let Some(entry) = &bundle.sliding_puzzle
+            && entry.best_score > 0.0
+        {
+            use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
+            let repo =
+                crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
+            let _ = repo
+                .upsert_peer_score(
+                    peer_id,
+                    display_name,
+                    entry.best_score,
+                    &entry.difficulty,
+                    &entry.played_at,
+                )
+                .await;
+        }
+    } else if clear_disabled {
+        use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
+        let repo =
+            crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
+        let _ = repo.delete_peer_scores(peer_id).await;
+    }
+
+    // Hangman
+    if bundle.enabled_modules.contains(&"hangman".to_string()) {
+        if let Some(entry) = &bundle.hangman
+            && entry.best_score > 0.0
+        {
+            use crate::modules::hangman::domain::HangmanRepository;
+            let repo =
+                crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
+            let _ = repo
+                .upsert_peer_score(
+                    peer_id,
+                    display_name,
+                    entry.best_score,
+                    &entry.difficulty,
+                    &entry.played_at,
+                )
+                .await;
+        }
+    } else if clear_disabled {
+        use crate::modules::hangman::domain::HangmanRepository;
+        let repo = crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
+        let _ = repo.delete_peer_scores(peer_id).await;
+    }
+
+    // Gamification
+    if bundle.share_gamification_stats {
+        if let Some(stats) = &bundle.gamification {
+            use crate::models::peer_gamification_stats;
+
+            let _ = peer_gamification_stats::Entity::delete_many()
+                .filter(peer_gamification_stats::Column::PeerId.eq(peer_id))
+                .exec(db)
+                .await;
+
+            let entry = peer_gamification_stats::ActiveModel {
+                peer_id: sea_orm::Set(peer_id),
+                library_name: sea_orm::Set(stats.library_name.clone()),
+                collector_level: sea_orm::Set(stats.collector.level),
+                collector_current: sea_orm::Set(stats.collector.current as i32),
+                reader_level: sea_orm::Set(stats.reader.level),
+                reader_current: sea_orm::Set(stats.reader.current as i32),
+                lender_level: sea_orm::Set(stats.lender.level),
+                lender_current: sea_orm::Set(stats.lender.current as i32),
+                cataloguer_level: sea_orm::Set(stats.cataloguer.level),
+                cataloguer_current: sea_orm::Set(stats.cataloguer.current as i32),
+                synced_at: sea_orm::Set(chrono::Utc::now().to_rfc3339()),
+                ..Default::default()
+            };
+
+            let _ = peer_gamification_stats::Entity::insert(entry)
+                .exec(db)
+                .await;
+        }
+    } else if clear_disabled {
+        use crate::models::peer_gamification_stats;
+        let _ = peer_gamification_stats::Entity::delete_many()
+            .filter(peer_gamification_stats::Column::PeerId.eq(peer_id))
+            .exec(db)
+            .await;
+    }
+}
+
+/// Sync leaderboard scores from all accepted peers for ALL games at once.
+///
+/// This is the single entry point for leaderboard refresh. Instead of each game
+/// module syncing independently (3 relay round-trips per peer), this function
+/// fetches one `PublicStatsBundle` per peer and distributes scores to all caches.
+///
+/// - `skip_direct`: skip Phase 1 direct HTTP (set `true` on cellular where LAN
+///   peers are unreachable). Phase 2 relay is always attempted.
+///
+/// Uses a `try_lock` guard on `AppState` to skip if another sync is running
+/// (the in-progress sync already populates all caches).
+pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
+    // Skip if another sync is already in progress (it will populate all caches).
+    let _guard = match state.leaderboard_sync_lock().try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::debug!("leaderboard sync: skipped (another sync in progress)");
+            return;
+        }
+    };
+
+    let sync_start = std::time::Instant::now();
+    let db = state.db();
+
+    let peers = peer::Entity::find()
+        .filter(peer::Column::ConnectionStatus.eq("accepted"))
+        .all(db)
+        .await
+        .unwrap_or_default();
+
+    tracing::info!(
+        "leaderboard sync: {} accepted peer(s), skip_direct={}",
+        peers.len(),
+        skip_direct,
+    );
+
+    if peers.is_empty() {
+        return;
+    }
+
+    // ── Phase 1: parallel direct HTTP ──────────────────────────────
+    let mut relay_peers: Vec<crate::models::peer::Model> = Vec::new();
+    let mut direct_ok = 0u32;
+
+    if !skip_direct {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
+
+        // Parallel config check for all peers
+        let phase1_futures: Vec<_> = peers
+            .iter()
+            .map(|p| {
+                let client = client.clone();
+                let peer = p.clone();
+                async move {
+                    // Skip peers already known to be unreachable
+                    if state.is_peer_direct_unreachable(peer.id) {
+                        return (peer, None);
+                    }
+                    let config_url = format!("{}/api/config", peer.url);
+                    match client.get(&config_url).send().await {
+                        Ok(res) if res.status().is_success() => {
+                            match res.json::<crate::api::setup::ConfigResponse>().await {
+                                Ok(config) => (peer, Some(config)),
+                                Err(_) => (peer, None),
+                            }
+                        }
+                        _ => (peer, None),
+                    }
+                }
+            })
+            .collect();
+
+        let phase1_results = futures::future::join_all(phase1_futures).await;
+
+        // For reachable peers, fetch all game scores via direct HTTP
+        for (peer, config) in &phase1_results {
+            if let Some(config) = config {
+                direct_ok += 1;
+                crate::modules::memory_game::handlers::sync_peer_memory_scores(
+                    db,
+                    peer.id,
+                    &peer.url,
+                    &peer.name,
+                    &client,
+                    Some(config.enabled_modules.contains(&"memory_game".to_string())),
+                )
+                .await;
+                crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
+                    db,
+                    peer.id,
+                    &peer.url,
+                    &peer.name,
+                    &client,
+                    Some(
+                        config
+                            .enabled_modules
+                            .contains(&"sliding_puzzle".to_string()),
+                    ),
+                )
+                .await;
+                crate::modules::hangman::handlers::sync_peer_hangman_scores(
+                    db,
+                    peer.id,
+                    &peer.url,
+                    &peer.name,
+                    &client,
+                    Some(config.enabled_modules.contains(&"hangman".to_string())),
+                )
+                .await;
+                crate::api::peer::sync_peer_gamification_stats(
+                    db,
+                    peer.id,
+                    &peer.url,
+                    &client,
+                    Some(config.share_gamification_stats),
+                )
+                .await;
+            }
+        }
+
+        // Queue unreachable peers for relay
+        for (peer, config) in phase1_results {
+            if config.is_none()
+                && let Some(ready) = ensure_relay_credentials(db, &peer).await
+            {
+                relay_peers.push(ready);
+            }
+        }
+    } else {
+        // Skip direct entirely -- queue all peers with relay credentials
+        for peer in &peers {
+            if let Some(ready) = ensure_relay_credentials(db, peer).await {
+                relay_peers.push(ready);
+            }
+        }
+    }
+
+    tracing::info!(
+        "leaderboard sync phase 1 done in {}ms: direct_ok={}, relay_queued={}",
+        sync_start.elapsed().as_millis(),
+        direct_ok,
+        relay_peers.len(),
+    );
+
+    // ── Phase 2: relay fallback (parallel, 15s per-peer timeout) ───
+    if !relay_peers.is_empty() {
+        let relay_start = std::time::Instant::now();
+        let relay_count = relay_peers.len();
+        let per_peer_timeout = std::time::Duration::from_secs(15);
+
+        let relay_futures: Vec<_> = relay_peers
+            .iter()
+            .map(|peer| {
+                let state = state.clone();
+                let peer = peer.clone();
+                async move {
+                    let bundle = tokio::time::timeout(
+                        per_peer_timeout,
+                        fetch_peer_public_stats_via_relay(&state, &peer),
+                    )
+                    .await
+                    .unwrap_or(None);
+                    (peer, bundle)
+                }
+            })
+            .collect();
+
+        let relay_results = futures::future::join_all(relay_futures).await;
+
+        let mut relay_ok = 0u32;
+        let mut relay_no_response = 0u32;
+        for (peer, bundle) in relay_results {
+            let Some(bundle) = bundle else {
+                relay_no_response += 1;
+                continue;
+            };
+            relay_ok += 1;
+            apply_stats_bundle_to_caches(db, peer.id, &peer.name, &bundle, true).await;
+        }
+
+        tracing::info!(
+            "leaderboard sync phase 2 done in {}ms: relay_sent={}, relay_ok={}, relay_no_response={}",
+            relay_start.elapsed().as_millis(),
+            relay_count,
+            relay_ok,
+            relay_no_response,
+        );
+    }
+
+    tracing::info!(
+        "leaderboard sync completed in {}ms total",
+        sync_start.elapsed().as_millis(),
+    );
+}
+
 /// Send a fire-and-forget `public_stats_push` to all accepted peers via relay (ADR-023).
 ///
 /// Builds the local `PublicStatsBundle` and sends it to every accepted peer that has

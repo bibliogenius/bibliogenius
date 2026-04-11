@@ -2335,30 +2335,28 @@ pub async fn peers_relay_debug_info() -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
+/// Refresh ALL leaderboard caches (memory, puzzle, hangman, gamification) in one pass.
+///
+/// A single relay round-trip per peer populates all game caches. When `skip_direct`
+/// is true, Phase 1 direct HTTP is skipped (use on cellular where LAN peers are
+/// unreachable). Called by Flutter at startup (pre-warm) and by per-game refresh.
+pub async fn refresh_all_leaderboards(skip_direct: bool) -> Result<(), String> {
+    if let Some(state) = global_app_state() {
+        crate::utils::leaderboard_relay::sync_all_leaderboards(state, skip_direct).await;
+    }
+    Ok(())
+}
+
 /// Refresh the network memory game leaderboard by syncing with all accepted peers.
-/// Fetches each peer's /api/game/memory/public-best, upserts into peer_memory_scores,
-/// then returns the merged leaderboard.
+/// Uses the unified sync that populates all game caches in one relay pass.
 pub async fn memory_game_refresh_leaderboard() -> Result<Vec<FrbMemoryLeaderboardEntry>, String> {
     let db = db().ok_or("Database not initialized")?;
     let game_repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
     use crate::modules::memory_game::domain::MemoryGameRepository;
 
-    let has_app_state = global_app_state().is_some();
-    tracing::info!(
-        "memory_game_refresh_leaderboard: app_state={}",
-        has_app_state,
-    );
-    // stderr diagnostic visible in Xcode Console on iOS
-    eprintln!(
-        "memory_game_refresh_leaderboard: app_state={}",
-        has_app_state,
-    );
-
-    // Always sync peer scores on refresh -- the user explicitly requested it.
-    // The local_enabled flag only gates whether we SHARE our own score (in
-    // build_local_stats_bundle), not whether we fetch others' scores.
+    // Unified sync: one relay round-trip populates all game caches.
     if let Some(state) = global_app_state() {
-        crate::modules::memory_game::handlers::sync_all_peer_scores(state).await;
+        crate::utils::leaderboard_relay::sync_all_leaderboards(state, false).await;
     }
 
     // Return merged leaderboard (same logic as memory_game_leaderboard)
@@ -2621,7 +2619,7 @@ pub async fn puzzle_game_refresh_leaderboard() -> Result<Vec<FrbPuzzleLeaderboar
 
     // Always sync peer scores on refresh -- the user explicitly requested it.
     if let Some(state) = global_app_state() {
-        crate::modules::sliding_puzzle::handlers::sync_all_peer_scores(state).await;
+        crate::utils::leaderboard_relay::sync_all_leaderboards(state, false).await;
     }
 
     // Return merged leaderboard (same logic as puzzle_game_leaderboard)
@@ -2906,7 +2904,7 @@ pub async fn hangman_refresh_leaderboard() -> Result<Vec<FrbHangmanLeaderboardEn
 
     // Always sync peer scores on refresh -- the user explicitly requested it.
     if let Some(state) = global_app_state() {
-        crate::modules::hangman::handlers::sync_all_peer_scores(state).await;
+        crate::utils::leaderboard_relay::sync_all_leaderboards(state, false).await;
     }
 
     let peer_scores = hangman_repo
@@ -4194,6 +4192,7 @@ pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), St
         .into_iter()
         .map(|isbn| CatalogEntry {
             isbn,
+            book_id: None,
             title: String::new(),
             author: None,
             cover_url: None,
@@ -4205,8 +4204,40 @@ pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), St
         .map_err(|e| e.to_string())
 }
 
-/// Reads all books with ISBNs from the local database, collects title and
-/// first author, and pushes the enriched catalog to the hub.
+/// Resizes a local cover image to a thumbnail and uploads it to the hub.
+/// Returns the public hub URL for the uploaded thumbnail.
+async fn resize_and_upload_cover(
+    db: &sea_orm::DatabaseConnection,
+    svc: &crate::services::hub_directory_service::HubDirectoryService,
+    book_id: i32,
+    path: &str,
+) -> Result<String, String> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| format!("read {path}: {e}"))?;
+
+    // Resize in a blocking task (image decoding is CPU-bound)
+    let jpeg_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let img = image::load_from_memory(&bytes).map_err(|e| format!("decode: {e}"))?;
+        let thumb = img.thumbnail(150, 200);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        thumb
+            .write_to(&mut buf, image::ImageFormat::Jpeg)
+            .map_err(|e| format!("encode: {e}"))?;
+        Ok(buf.into_inner())
+    })
+    .await
+    .map_err(|e| format!("spawn: {e}"))??;
+
+    svc.upload_cover(db, book_id, jpeg_bytes)
+        .await
+        .map_err(|e| format!("upload: {e}"))
+}
+
+/// Reads all owned books from the local database, collects title, author,
+/// and cover data, and pushes the enriched catalog to the hub.
+/// Books without ISBN are included using book_id as an alternative key.
+/// Local cover images are resized and uploaded as thumbnails (best-effort).
 /// Returns the number of entries pushed.
 pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
     use crate::models::book::{Column as BookColumn, Entity as BookEntity};
@@ -4225,54 +4256,99 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
         .await
         .map_err(|e| format!("count_books: {e:?}"))?;
 
-    // Collect books with their authors (2 queries via find_with_related).
+    // Collect ALL owned books with their authors (no ISBN filter).
     let books_with_authors: Vec<(
         crate::models::book::Model,
         Vec<crate::models::author::Model>,
     )> = BookEntity::find()
-        .filter(BookColumn::Isbn.is_not_null())
         .filter(BookColumn::Owned.eq(true))
         .find_with_related(crate::models::author::Entity)
         .all(db)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-    let entries: Vec<CatalogEntry> = books_with_authors
-        .into_iter()
-        .filter_map(|(book, authors)| {
-            let isbn = book.isbn.filter(|s| !s.is_empty())?;
-            let author = if authors.is_empty() {
-                None
-            } else {
-                Some(
-                    authors
-                        .into_iter()
-                        .map(|a| a.name)
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                )
-            };
-            // S5: only HTTP/HTTPS cover URLs go to the hub catalog.
-            // Local file paths (e.g. /var/mobile/...) are useless to
-            // other peers and leak internal directory structure.
-            let cover_url = book
-                .cover_url
-                .filter(|u| u.starts_with("http://") || u.starts_with("https://"));
+    let svc = hub_directory_svc();
 
-            Some(CatalogEntry {
-                isbn,
-                title: book.title,
-                author,
-                cover_url,
-            })
-        })
-        .collect();
+    let mut entries: Vec<CatalogEntry> = Vec::new();
+    // Map book_id -> entry index for updating cover URLs after upload
+    let mut id_to_index: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+    let mut local_covers: Vec<(i32, String)> = Vec::new();
+
+    for (book, authors) in books_with_authors {
+        let isbn = book
+            .isbn
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("")
+            .to_string();
+        let book_id_val = book.id;
+        // For no-ISBN books, include book_id as alternative key
+        let book_id = if isbn.is_empty() {
+            Some(book_id_val)
+        } else {
+            None
+        };
+
+        // Skip books with neither ISBN nor title (unusable entries)
+        if isbn.is_empty() && book.title.is_empty() {
+            continue;
+        }
+
+        let author = if authors.is_empty() {
+            None
+        } else {
+            Some(
+                authors
+                    .into_iter()
+                    .map(|a| a.name)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        };
+
+        // S5: only HTTP/HTTPS cover URLs go to the hub catalog directly.
+        // Local file paths are collected for thumbnail upload.
+        let cover_url_raw = book.cover_url.unwrap_or_default();
+        let cover_url =
+            if cover_url_raw.starts_with("http://") || cover_url_raw.starts_with("https://") {
+                Some(cover_url_raw)
+            } else if !cover_url_raw.is_empty() {
+                // Local file path: schedule for thumbnail upload
+                local_covers.push((book_id_val, cover_url_raw));
+                None // Will be updated after upload
+            } else {
+                None
+            };
+
+        let idx = entries.len();
+        entries.push(CatalogEntry {
+            isbn,
+            book_id,
+            title: book.title,
+            author,
+            cover_url,
+        });
+        id_to_index.insert(book_id_val, idx);
+    }
+
+    // Upload local cover thumbnails to the hub (best-effort).
+    for (bid, path) in &local_covers {
+        match resize_and_upload_cover(db, svc, *bid, path).await {
+            Ok(hub_url) => {
+                if let Some(&idx) = id_to_index.get(bid) {
+                    entries[idx].cover_url = Some(hub_url);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("cover upload failed for book {bid}: {e}");
+            }
+        }
+    }
 
     let count = entries.len() as i32;
 
     // Always push: even with an empty catalog, book_count must reach the hub.
-    hub_directory_svc()
-        .push_catalog(db, &entries, book_count)
+    svc.push_catalog(db, &entries, book_count)
         .await
         .map_err(|e| e.to_string())?;
 
