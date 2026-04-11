@@ -721,13 +721,20 @@ impl HubDirectoryService {
         Ok(page.items)
     }
 
-    pub async fn get_profile(&self, node_id: &str) -> Result<HubProfile, HubDirectoryError> {
+    pub async fn get_profile(
+        &self,
+        db: &DatabaseConnection,
+        node_id: &str,
+    ) -> Result<HubProfile, HubDirectoryError> {
         let hub_url = Self::hub_base_url()?;
-        let response = self
+        let mut req = self
             .http_client
-            .get(format!("{hub_url}/api/directory/{node_id}"))
-            .send()
-            .await?;
+            .get(format!("{hub_url}/api/directory/{node_id}"));
+        // Attach Bearer token so non-listed profiles are accessible
+        if let Some(cfg) = Self::get_config(db).await.ok().flatten() {
+            req = req.header("Authorization", format!("Bearer {}", cfg.write_token));
+        }
+        let response = req.send().await?;
 
         let status = response.status().as_u16();
         if status >= 400 {

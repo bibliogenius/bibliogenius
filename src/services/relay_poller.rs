@@ -65,7 +65,7 @@ async fn sync_follower_views(db: &sea_orm::DatabaseConnection) {
 
     // 2. Fetch our own profile from the hub (includes view_count)
     let svc = HubDirectoryService::new();
-    match svc.get_profile(&config.node_id).await {
+    match svc.get_profile(db, &config.node_id).await {
         Ok(profile) => {
             if let Some(count) = profile.view_count
                 && let Err(e) = crate::api::view_counter::record_follower_views(db, count).await
