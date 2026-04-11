@@ -111,6 +111,7 @@ zstd = "0.13"
 rmp-serde = "1"
 hex = "0.4"
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 [profile.release]
 strip = true

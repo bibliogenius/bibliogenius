@@ -1,8 +1,8 @@
 #![allow(clippy::needless_update)] // SeaORM ActiveModels require ..Default::default()
 use axum::{
     extract::{Json, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use serde_json::{Value, json};
@@ -79,6 +79,16 @@ pub async fn list_books(
     );
 
     let mut book_dtos = result.books;
+
+    // Rewrite local file paths to relative API URLs so peers can fetch covers
+    for book in &mut book_dtos {
+        if let Some(ref url) = book.cover_url
+            && !url.starts_with("http")
+            && !url.starts_with("/api")
+        {
+            book.cover_url = book.id.map(|id| format!("/api/books/{}/cover", id));
+        }
+    }
 
     // Apply in-memory author sorting only if no pagination (full dataset)
     // Author sorting at DB level requires complex joins not yet implemented
@@ -534,6 +544,48 @@ pub async fn get_book(
         )
             .into_response(),
     }
+}
+
+/// Serves a book's cover image as binary (for books with local file covers).
+/// Peers call this endpoint to fetch covers that were stored as local file paths.
+pub async fn get_book_cover(
+    State(state): State<crate::infrastructure::AppState>,
+    axum::extract::Path(id): axum::extract::Path<i32>,
+) -> Result<Response, StatusCode> {
+    // Fetch only the cover_url column for efficiency
+    let book = crate::models::book::Entity::find_by_id(id)
+        .one(state.db())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let cover_path = book
+        .cover_url
+        .as_deref()
+        .filter(|url| !url.is_empty() && !url.starts_with("http"))
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let bytes = tokio::fs::read(cover_path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    // Detect content type from magic bytes
+    let content_type = if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        "image/png"
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "application/octet-stream"
+    };
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(axum::body::Body::from(bytes))
+        .unwrap())
 }
 
 #[derive(serde::Deserialize)]

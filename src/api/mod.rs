@@ -113,6 +113,7 @@ fn build_routes() -> Router<AppState> {
                 .put(books::update_book)
                 .delete(books::delete_book),
         )
+        .route("/books/:id/cover", get(books::get_book_cover))
         .route("/books/reorder", axum::routing::patch(books::reorder_books))
         .route(
             "/books/:id/collections",

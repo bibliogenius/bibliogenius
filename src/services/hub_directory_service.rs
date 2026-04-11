@@ -136,9 +136,12 @@ pub struct HubCatalog {
 }
 
 /// A single entry in the enriched catalog (ISBN + title + author + optional cover).
+/// Books without ISBN use `book_id` as an alternative key.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CatalogEntry {
     pub isbn: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub book_id: Option<i32>,
     pub title: String,
     pub author: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -586,6 +589,43 @@ impl HubDirectoryService {
         Ok(())
     }
 
+    /// Uploads a cover thumbnail to the hub.
+    ///
+    /// Returns the public URL where the cover can be fetched.
+    pub async fn upload_cover(
+        &self,
+        db: &DatabaseConnection,
+        book_id: i32,
+        jpeg_bytes: Vec<u8>,
+    ) -> Result<String, HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let url = format!("{hub_url}/api/directory/{}/covers/{book_id}", cfg.node_id);
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .header("Content-Type", "image/jpeg")
+            .body(jpeg_bytes)
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        Ok(format!(
+            "{hub_url}/api/directory/{}/covers/{book_id}",
+            cfg.node_id
+        ))
+    }
+
     /// Fetches the catalog of a public or approved library from the hub.
     ///
     /// Returns enriched entries if available, otherwise falls back to ISBN-only entries.
@@ -631,6 +671,7 @@ impl HubDirectoryService {
             .into_iter()
             .map(|isbn| CatalogEntry {
                 isbn,
+                book_id: None,
                 title: String::new(),
                 author: None,
                 cover_url: None,
