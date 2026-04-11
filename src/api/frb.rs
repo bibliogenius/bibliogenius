@@ -2381,6 +2381,30 @@ pub async fn peers_relay_debug_info() -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
+/// Reset all local memory game scores.
+pub async fn memory_game_reset_scores() -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+    use crate::modules::memory_game::domain::MemoryGameRepository;
+    let repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+    repo.delete_all_scores().await.map_err(|e| e.to_string())
+}
+
+/// Reset all local sliding puzzle scores.
+pub async fn puzzle_game_reset_scores() -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+    use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
+    let repo = crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
+    repo.delete_all_scores().await.map_err(|e| e.to_string())
+}
+
+/// Reset all local hangman scores.
+pub async fn hangman_reset_scores() -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+    use crate::modules::hangman::domain::HangmanRepository;
+    let repo = crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
+    repo.delete_all_scores().await.map_err(|e| e.to_string())
+}
+
 /// Refresh ALL leaderboard caches (memory, puzzle, hangman, gamification) in one pass.
 ///
 /// A single relay round-trip per peer populates all game caches. When `skip_direct`
@@ -4501,8 +4525,9 @@ pub async fn hub_directory_list(
 
 /// Gets a specific library profile from the hub directory.
 pub async fn hub_directory_get_profile(node_id: String) -> Result<FrbHubProfile, String> {
+    let db = hub_db()?;
     hub_directory_svc()
-        .get_profile(&node_id)
+        .get_profile(db, &node_id)
         .await
         .map(FrbHubProfile::from)
         .map_err(|e| e.to_string())

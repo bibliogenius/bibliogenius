@@ -94,4 +94,7 @@ pub trait SlidingPuzzleRepository: Send + Sync {
 
     /// Get all peer scores for leaderboard display
     async fn get_peer_scores(&self) -> Result<Vec<PeerPuzzleScoreRow>, DomainError>;
+
+    /// Delete all local scores (reset personal history)
+    async fn delete_all_scores(&self) -> Result<(), DomainError>;
 }

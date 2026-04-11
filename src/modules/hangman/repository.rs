@@ -222,4 +222,9 @@ impl HangmanRepository for SeaOrmHangmanRepository {
             })
             .collect())
     }
+
+    async fn delete_all_scores(&self) -> Result<(), DomainError> {
+        ScoreEntity::delete_many().exec(&self.db).await?;
+        Ok(())
+    }
 }
