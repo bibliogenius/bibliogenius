@@ -221,9 +221,42 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
 /// Pass the hub URL from Flutter to the Rust process environment.
 /// Must be called once after init_backend, before any hub_directory calls.
 /// Rust reads HUB_URL via std::env::var — it cannot see Flutter's dotenv map.
+///
+/// The .env value is only a default: if a relay has been configured (persisted
+/// in `my_relay_config`), its URL takes precedence so the hub directory and
+/// relay always point to the same hub.
 pub async fn set_hub_url_ffi(hub_url: String) -> Result<(), String> {
+    // Prioritize persisted relay URL over .env default.
+    let effective_url = if let Ok(db_ref) = hub_db() {
+        crate::api::relay::get_my_relay_config(db_ref)
+            .await
+            .map(|c| c.relay_url)
+            .unwrap_or_else(|| hub_url.clone())
+    } else {
+        hub_url.clone()
+    };
+
+    // If the relay URL overrides the .env default, the directory config
+    // (write_token) was issued by the .env hub and is invalid on the
+    // relay hub. Invalidate so ensureRegistered() re-registers.
+    if effective_url != hub_url
+        && let Ok(db_ref) = hub_db()
+    {
+        use sea_orm::ConnectionTrait;
+        let _ = db_ref
+            .execute(sea_orm::Statement::from_string(
+                db_ref.get_database_backend(),
+                "DELETE FROM hub_directory_config".to_owned(),
+            ))
+            .await;
+        tracing::info!(
+            "Hub URL differs from .env ({hub_url} -> {effective_url}), directory config invalidated"
+        );
+    }
+
     // SAFETY: single-threaded init path, same pattern as DATABASE_URL above.
-    unsafe { std::env::set_var("HUB_URL", hub_url) };
+    unsafe { std::env::set_var("HUB_URL", &effective_url) };
+    tracing::info!("HUB_URL set to {effective_url}");
     Ok(())
 }
 
@@ -2275,12 +2308,9 @@ pub async fn memory_game_leaderboard() -> Result<Vec<FrbMemoryLeaderboardEntry>,
         })
         .collect();
 
-    // Add local user's best score
-    let top_scores = game_repo
-        .get_top_scores(1)
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Some(best) = top_scores.first() {
+    // Add local user's best score PER DIFFICULTY
+    {
+        use sea_orm::{ConnectionTrait, Statement};
         let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
         use crate::domain::GamificationRepository;
         let library_name = gamification_repo
@@ -2288,14 +2318,30 @@ pub async fn memory_game_leaderboard() -> Result<Vec<FrbMemoryLeaderboardEntry>,
             .await
             .unwrap_or_else(|_| "My Library".to_string());
 
-        entries.push(FrbMemoryLeaderboardEntry {
-            peer_id: 0,
-            library_name,
-            best_score: best.normalized_score,
-            difficulty: best.difficulty.clone(),
-            played_at: best.played_at.clone(),
-            is_self: true,
-        });
+        let rows = db
+            .query_all(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT difficulty, MAX(normalized_score) as best, played_at FROM memory_game_scores GROUP BY difficulty".to_owned(),
+            ))
+            .await
+            .unwrap_or_default();
+
+        for row in rows {
+            if let (Ok(difficulty), Ok(best_score), Ok(played_at)) = (
+                row.try_get::<String>("", "difficulty"),
+                row.try_get::<f64>("", "best"),
+                row.try_get::<String>("", "played_at"),
+            ) {
+                entries.push(FrbMemoryLeaderboardEntry {
+                    peer_id: 0,
+                    library_name: library_name.clone(),
+                    best_score,
+                    difficulty,
+                    played_at,
+                    is_self: true,
+                });
+            }
+        }
     }
 
     // Sort by best_score descending
@@ -2376,12 +2422,10 @@ pub async fn memory_game_refresh_leaderboard() -> Result<Vec<FrbMemoryLeaderboar
         })
         .collect();
 
-    // Add local user's best score
-    let top_scores = game_repo
-        .get_top_scores(1)
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Some(best) = top_scores.first() {
+    // Add local user's best score PER DIFFICULTY so the user appears in
+    // every difficulty filter they've played, not just their overall best.
+    {
+        use sea_orm::{ConnectionTrait, Statement};
         let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
         use crate::domain::GamificationRepository;
         let library_name = gamification_repo
@@ -2389,14 +2433,30 @@ pub async fn memory_game_refresh_leaderboard() -> Result<Vec<FrbMemoryLeaderboar
             .await
             .unwrap_or_else(|_| "My Library".to_string());
 
-        entries.push(FrbMemoryLeaderboardEntry {
-            peer_id: 0,
-            library_name,
-            best_score: best.normalized_score,
-            difficulty: best.difficulty.clone(),
-            played_at: best.played_at.clone(),
-            is_self: true,
-        });
+        let rows = db
+            .query_all(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT difficulty, MAX(normalized_score) as best, played_at FROM memory_game_scores GROUP BY difficulty".to_owned(),
+            ))
+            .await
+            .unwrap_or_default();
+
+        for row in rows {
+            if let (Ok(difficulty), Ok(best_score), Ok(played_at)) = (
+                row.try_get::<String>("", "difficulty"),
+                row.try_get::<f64>("", "best"),
+                row.try_get::<String>("", "played_at"),
+            ) {
+                entries.push(FrbMemoryLeaderboardEntry {
+                    peer_id: 0,
+                    library_name: library_name.clone(),
+                    best_score,
+                    difficulty,
+                    played_at,
+                    is_self: true,
+                });
+            }
+        }
     }
 
     entries.sort_by(|a, b| {
@@ -2576,12 +2636,9 @@ pub async fn puzzle_game_leaderboard() -> Result<Vec<FrbPuzzleLeaderboardEntry>,
         })
         .collect();
 
-    // Add local user's best score
-    let top_scores = puzzle_repo
-        .get_top_scores(1)
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Some(best) = top_scores.first() {
+    // Add local user's best score PER DIFFICULTY
+    {
+        use sea_orm::{ConnectionTrait, Statement};
         let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
         use crate::domain::GamificationRepository;
         let library_name = gamification_repo
@@ -2589,14 +2646,30 @@ pub async fn puzzle_game_leaderboard() -> Result<Vec<FrbPuzzleLeaderboardEntry>,
             .await
             .unwrap_or_else(|_| "My Library".to_string());
 
-        entries.push(FrbPuzzleLeaderboardEntry {
-            peer_id: 0,
-            library_name,
-            best_score: best.normalized_score,
-            difficulty: best.difficulty.clone(),
-            played_at: best.played_at.clone(),
-            is_self: true,
-        });
+        let rows = db
+            .query_all(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT difficulty, MAX(normalized_score) as best, played_at FROM sliding_puzzle_scores GROUP BY difficulty".to_owned(),
+            ))
+            .await
+            .unwrap_or_default();
+
+        for row in rows {
+            if let (Ok(difficulty), Ok(best_score), Ok(played_at)) = (
+                row.try_get::<String>("", "difficulty"),
+                row.try_get::<f64>("", "best"),
+                row.try_get::<String>("", "played_at"),
+            ) {
+                entries.push(FrbPuzzleLeaderboardEntry {
+                    peer_id: 0,
+                    library_name: library_name.clone(),
+                    best_score,
+                    difficulty,
+                    played_at,
+                    is_self: true,
+                });
+            }
+        }
     }
 
     entries.sort_by(|a, b| {
@@ -2639,12 +2712,9 @@ pub async fn puzzle_game_refresh_leaderboard() -> Result<Vec<FrbPuzzleLeaderboar
         })
         .collect();
 
-    // Add local user's best score
-    let top_scores = puzzle_repo
-        .get_top_scores(1)
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Some(best) = top_scores.first() {
+    // Add local user's best score PER DIFFICULTY
+    {
+        use sea_orm::{ConnectionTrait, Statement};
         let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
         use crate::domain::GamificationRepository;
         let library_name = gamification_repo
@@ -2652,14 +2722,30 @@ pub async fn puzzle_game_refresh_leaderboard() -> Result<Vec<FrbPuzzleLeaderboar
             .await
             .unwrap_or_else(|_| "My Library".to_string());
 
-        entries.push(FrbPuzzleLeaderboardEntry {
-            peer_id: 0,
-            library_name,
-            best_score: best.normalized_score,
-            difficulty: best.difficulty.clone(),
-            played_at: best.played_at.clone(),
-            is_self: true,
-        });
+        let rows = db
+            .query_all(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT difficulty, MAX(normalized_score) as best, played_at FROM sliding_puzzle_scores GROUP BY difficulty".to_owned(),
+            ))
+            .await
+            .unwrap_or_default();
+
+        for row in rows {
+            if let (Ok(difficulty), Ok(best_score), Ok(played_at)) = (
+                row.try_get::<String>("", "difficulty"),
+                row.try_get::<f64>("", "best"),
+                row.try_get::<String>("", "played_at"),
+            ) {
+                entries.push(FrbPuzzleLeaderboardEntry {
+                    peer_id: 0,
+                    library_name: library_name.clone(),
+                    best_score,
+                    difficulty,
+                    played_at,
+                    is_self: true,
+                });
+            }
+        }
     }
 
     entries.sort_by(|a, b| {
@@ -2864,11 +2950,9 @@ pub async fn hangman_leaderboard() -> Result<Vec<FrbHangmanLeaderboardEntry>, St
         })
         .collect();
 
-    let top_scores = hangman_repo
-        .get_top_scores(1)
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Some(best) = top_scores.first() {
+    // Add local user's best score PER DIFFICULTY
+    {
+        use sea_orm::{ConnectionTrait, Statement};
         let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
         use crate::domain::GamificationRepository;
         let library_name = gamification_repo
@@ -2876,14 +2960,30 @@ pub async fn hangman_leaderboard() -> Result<Vec<FrbHangmanLeaderboardEntry>, St
             .await
             .unwrap_or_else(|_| "My Library".to_string());
 
-        entries.push(FrbHangmanLeaderboardEntry {
-            peer_id: 0,
-            library_name,
-            best_score: best.normalized_score,
-            difficulty: best.difficulty.clone(),
-            played_at: best.played_at.clone(),
-            is_self: true,
-        });
+        let rows = db
+            .query_all(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT difficulty, MAX(normalized_score) as best, played_at FROM hangman_scores GROUP BY difficulty".to_owned(),
+            ))
+            .await
+            .unwrap_or_default();
+
+        for row in rows {
+            if let (Ok(difficulty), Ok(best_score), Ok(played_at)) = (
+                row.try_get::<String>("", "difficulty"),
+                row.try_get::<f64>("", "best"),
+                row.try_get::<String>("", "played_at"),
+            ) {
+                entries.push(FrbHangmanLeaderboardEntry {
+                    peer_id: 0,
+                    library_name: library_name.clone(),
+                    best_score,
+                    difficulty,
+                    played_at,
+                    is_self: true,
+                });
+            }
+        }
     }
 
     entries.sort_by(|a, b| {
@@ -2923,11 +3023,9 @@ pub async fn hangman_refresh_leaderboard() -> Result<Vec<FrbHangmanLeaderboardEn
         })
         .collect();
 
-    let top_scores = hangman_repo
-        .get_top_scores(1)
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Some(best) = top_scores.first() {
+    // Add local user's best score PER DIFFICULTY
+    {
+        use sea_orm::{ConnectionTrait, Statement};
         let gamification_repo = crate::infrastructure::repositories::gamification_repository::SeaOrmGamificationRepository::new(db.clone());
         use crate::domain::GamificationRepository;
         let library_name = gamification_repo
@@ -2935,14 +3033,30 @@ pub async fn hangman_refresh_leaderboard() -> Result<Vec<FrbHangmanLeaderboardEn
             .await
             .unwrap_or_else(|_| "My Library".to_string());
 
-        entries.push(FrbHangmanLeaderboardEntry {
-            peer_id: 0,
-            library_name,
-            best_score: best.normalized_score,
-            difficulty: best.difficulty.clone(),
-            played_at: best.played_at.clone(),
-            is_self: true,
-        });
+        let rows = db
+            .query_all(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT difficulty, MAX(normalized_score) as best, played_at FROM hangman_scores GROUP BY difficulty".to_owned(),
+            ))
+            .await
+            .unwrap_or_default();
+
+        for row in rows {
+            if let (Ok(difficulty), Ok(best_score), Ok(played_at)) = (
+                row.try_get::<String>("", "difficulty"),
+                row.try_get::<f64>("", "best"),
+                row.try_get::<String>("", "played_at"),
+            ) {
+                entries.push(FrbHangmanLeaderboardEntry {
+                    peer_id: 0,
+                    library_name: library_name.clone(),
+                    best_score,
+                    difficulty,
+                    played_at,
+                    is_self: true,
+                });
+            }
+        }
     }
 
     entries.sort_by(|a, b| {
@@ -4143,6 +4257,22 @@ pub async fn hub_directory_import_write_token(
     HubDirectoryService::import_write_token(db, &node_id, &write_token)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Purges the local hub_directory_config row, forcing a fresh registration
+/// on the next ensureRegistered() call. Used for 401 recovery when the
+/// stored write_token is no longer valid on the hub.
+pub async fn hub_directory_purge_config() -> Result<(), String> {
+    let db = hub_db()?;
+    use sea_orm::ConnectionTrait;
+    db.execute(sea_orm::Statement::from_string(
+        db.get_database_backend(),
+        "DELETE FROM hub_directory_config".to_owned(),
+    ))
+    .await
+    .map_err(|e| format!("Failed to purge hub_directory_config: {e}"))?;
+    tracing::info!("hub_directory_config purged for 401 recovery");
+    Ok(())
 }
 
 /// Returns the locally stored recovery code for display in settings.
