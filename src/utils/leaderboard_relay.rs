@@ -412,17 +412,10 @@ pub async fn apply_stats_bundle_to_caches(
 /// - `skip_direct`: skip Phase 1 direct HTTP (set `true` on cellular where LAN
 ///   peers are unreachable). Phase 2 relay is always attempted.
 ///
-/// Uses a `try_lock` guard on `AppState` to skip if another sync is running
-/// (the in-progress sync already populates all caches).
+/// Waits for any in-progress sync to finish before running. This ensures
+/// manual refresh always returns fresh data (unlike try_lock which would skip).
 pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
-    // Skip if another sync is already in progress (it will populate all caches).
-    let _guard = match state.leaderboard_sync_lock().try_lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            tracing::debug!("leaderboard sync: skipped (another sync in progress)");
-            return;
-        }
-    };
+    let _guard = state.leaderboard_sync_lock().lock().await;
 
     let sync_start = std::time::Instant::now();
     let db = state.db();
