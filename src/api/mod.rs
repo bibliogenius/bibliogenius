@@ -183,6 +183,7 @@ fn build_routes() -> Router<AppState> {
             "/peers/cleanup_stale_cache",
             post(peer::cleanup_stale_peer_books),
         ) // TTL cleanup for privacy
+        .route("/peers/cover-proxy", get(peer::cover_proxy))
         .route("/peers/search", post(peer::search_local))
         .route("/peers/proxy_search", post(peer::proxy_search))
         .route("/peers/return_book", post(peer::return_borrowed_book)) // Borrower-initiated return

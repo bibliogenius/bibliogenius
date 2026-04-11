@@ -262,9 +262,7 @@ impl Book {
     /// Builds the hub cover URL prefix (`{hub_url}/api/directory/{node_id}/covers`)
     /// from the current hub configuration.  Returns `None` when the hub is not
     /// configured or the node is not registered.
-    pub async fn hub_cover_prefix(
-        db: &sea_orm::DatabaseConnection,
-    ) -> Option<String> {
+    pub async fn hub_cover_prefix(db: &sea_orm::DatabaseConnection) -> Option<String> {
         let hub_url = std::env::var("HUB_URL").ok()?;
         let hub_url = hub_url.trim_end_matches('/');
         let cfg = crate::services::hub_directory_service::HubDirectoryService::get_config(db)

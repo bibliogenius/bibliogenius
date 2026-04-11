@@ -96,6 +96,67 @@ pub(crate) fn get_safe_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
+/// Query params for the cover-proxy endpoint.
+#[derive(Deserialize)]
+pub struct CoverProxyQuery {
+    pub peer_url: String,
+    pub book_id: i32,
+}
+
+/// GET /api/peers/cover-proxy?peer_url={url}&book_id={id}
+///
+/// Proxies a cover image fetch through the local Rust backend so that
+/// Flutter does not make direct HTTP calls to the peer (which fail on
+/// iOS/macOS due to firewall, ATS, or NAT issues).
+pub async fn cover_proxy(
+    axum::extract::Query(params): axum::extract::Query<CoverProxyQuery>,
+) -> Result<axum::response::Response, StatusCode> {
+    let peer_url = validate_url(&params.peer_url).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let peer_url = peer_url.trim_end_matches('/');
+    let url = format!("{}/api/books/{}/cover", peer_url, params.book_id);
+
+    let client = get_safe_client();
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    if !resp.status().is_success() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let content_type = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    // Cap response size at 10 MB to prevent memory exhaustion from a
+    // malicious or misconfigured peer streaming an oversized payload.
+    const MAX_COVER_BYTES: usize = 10 * 1024 * 1024;
+
+    if let Some(cl) = resp.content_length()
+        && cl as usize > MAX_COVER_BYTES
+    {
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+
+    let bytes = resp.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    if bytes.len() > MAX_COVER_BYTES {
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, content_type)
+        .header(axum::http::header::CACHE_CONTROL, "public, max-age=3600")
+        .body(axum::body::Body::from(bytes))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 /// Translate localhost URLs to Docker service names for inter-container communication
 /// Examples:
 /// - http://localhost:8001 -> http://bibliogenius-a:8000
@@ -349,6 +410,30 @@ pub(crate) async fn create_borrowed_copy(
     let book_id = match existing_book {
         Some(b) => {
             tracing::info!("Borrowed copy: book already exists id={}", b.id);
+
+            // Update cover_url if the incoming one is HTTP and the existing
+            // one is missing or a local file path (legacy borrowed books).
+            if let Some(new_cover) = params.cover_url {
+                let needs_update = new_cover.starts_with("http")
+                    && !b
+                        .cover_url
+                        .as_deref()
+                        .is_some_and(|u| u.starts_with("http"));
+                if needs_update {
+                    let mut active: book::ActiveModel = b.clone().into();
+                    active.cover_url = Set(Some(new_cover.to_string()));
+                    active.updated_at = Set(Utc::now().to_rfc3339());
+                    if let Err(e) = active.update(db).await {
+                        tracing::warn!("Failed to update cover_url for book id={}: {e}", b.id);
+                    } else {
+                        tracing::info!(
+                            "Updated cover_url for borrowed book id={} to HTTP URL",
+                            b.id
+                        );
+                    }
+                }
+            }
+
             b.id
         }
         None => {
@@ -5973,7 +6058,11 @@ pub async fn update_request_status(
         let book_isbn = book.isbn.clone();
         let book_title = book.title.clone();
         let hub_prefix = crate::models::Book::hub_cover_prefix(&db).await;
-        let book_cover = crate::models::Book::safe_cover_url(book.cover_url.as_deref(), book.id, hub_prefix.as_deref());
+        let book_cover = crate::models::Book::safe_cover_url(
+            book.cover_url.as_deref(),
+            book.id,
+            hub_prefix.as_deref(),
+        );
         let due_date = (chrono::Utc::now()
             + chrono::Duration::days(resolve_loan_duration_days(&db, book.id).await))
         .format("%Y-%m-%d")
