@@ -225,7 +225,9 @@ impl HubDirectoryService {
     }
 
     // -----------------------------------------------------------------------
-    // Hub URL (single source of truth via env var — CLAUDE.md Hub URL Policy)
+    // Hub URL: reads HUB_URL env var, which is kept in sync with
+    // my_relay_config.relay_url (set at startup and on relay setup).
+    // The .env value is only used as initial default before relay is configured.
     // -----------------------------------------------------------------------
 
     pub(crate) fn hub_base_url() -> Result<String, HubDirectoryError> {

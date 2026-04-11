@@ -216,6 +216,64 @@ impl Book {
             .to_owned()
     }
 
+    /// Rewrites local file-system cover paths so peers can fetch covers.
+    ///
+    /// When `hub_cover_prefix` is provided (e.g. `https://hub.../api/directory/{nodeId}/covers`),
+    /// local paths become absolute hub URLs that work for both LAN and relay peers.
+    /// Without it, falls back to relative `/api/books/{id}/cover` (LAN only).
+    /// HTTP URLs and paths already starting with `/api` are left untouched.
+    pub fn rewrite_local_cover_urls(books: &mut [Book], hub_cover_prefix: Option<&str>) {
+        for book in books {
+            if let Some(ref url) = book.cover_url
+                && !url.starts_with("http")
+                && !url.starts_with("/api")
+            {
+                book.cover_url = book.id.map(|id| {
+                    if let Some(prefix) = hub_cover_prefix {
+                        format!("{}/{}", prefix, id)
+                    } else {
+                        format!("/api/books/{}/cover", id)
+                    }
+                });
+            }
+        }
+    }
+
+    /// Rewrites a single cover_url from a SeaORM entity model.
+    /// Same logic as `rewrite_local_cover_urls` but for individual books.
+    pub fn safe_cover_url(
+        cover_url: Option<&str>,
+        book_id: i32,
+        hub_cover_prefix: Option<&str>,
+    ) -> Option<String> {
+        match cover_url {
+            Some(url) if url.starts_with("http") || url.starts_with("/api") => {
+                Some(url.to_string())
+            }
+            Some(_) => Some(if let Some(prefix) = hub_cover_prefix {
+                format!("{}/{}", prefix, book_id)
+            } else {
+                format!("/api/books/{}/cover", book_id)
+            }),
+            None => None,
+        }
+    }
+
+    /// Builds the hub cover URL prefix (`{hub_url}/api/directory/{node_id}/covers`)
+    /// from the current hub configuration.  Returns `None` when the hub is not
+    /// configured or the node is not registered.
+    pub async fn hub_cover_prefix(
+        db: &sea_orm::DatabaseConnection,
+    ) -> Option<String> {
+        let hub_url = std::env::var("HUB_URL").ok()?;
+        let hub_url = hub_url.trim_end_matches('/');
+        let cfg = crate::services::hub_directory_service::HubDirectoryService::get_config(db)
+            .await
+            .ok()
+            .flatten()?;
+        Some(format!("{}/api/directory/{}/covers", hub_url, cfg.node_id))
+    }
+
     /// Convert book models to DTOs with author names and available copy counts populated.
     pub async fn populate_authors(
         db: &sea_orm::DatabaseConnection,

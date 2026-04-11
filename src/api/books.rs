@@ -80,15 +80,9 @@ pub async fn list_books(
 
     let mut book_dtos = result.books;
 
-    // Rewrite local file paths to relative API URLs so peers can fetch covers
-    for book in &mut book_dtos {
-        if let Some(ref url) = book.cover_url
-            && !url.starts_with("http")
-            && !url.starts_with("/api")
-        {
-            book.cover_url = book.id.map(|id| format!("/api/books/{}/cover", id));
-        }
-    }
+    // Rewrite local file paths to relative API URLs so peers can fetch covers.
+    // HTTP handler = LAN peer, relative path is fine (no hub prefix needed).
+    Book::rewrite_local_cover_urls(&mut book_dtos, None);
 
     // Apply in-memory author sorting only if no pagination (full dataset)
     // Author sorting at DB level requires complex joins not yet implemented

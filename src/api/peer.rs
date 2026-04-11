@@ -284,12 +284,17 @@ pub(crate) async fn perform_loan_acceptance(
         _ => "Unknown Library".to_string(),
     };
 
+    let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
     Ok(LoanAcceptResult {
         lender_name,
         due_date: due.format("%Y-%m-%d").to_string(),
         book_isbn: book.isbn,
         book_title: book.title,
-        book_cover_url: book.cover_url,
+        book_cover_url: crate::models::Book::safe_cover_url(
+            book.cover_url.as_deref(),
+            book.id,
+            hub_prefix.as_deref(),
+        ),
     })
 }
 
@@ -644,10 +649,11 @@ pub async fn offer_loan(
         _ => "Unknown Library".to_string(),
     };
 
+    let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
     let offer_payload = json!({
         "isbn": book.isbn,
         "title": book.title,
-        "cover_url": book.cover_url,
+        "cover_url": crate::models::Book::safe_cover_url(book.cover_url.as_deref(), book.id, hub_prefix.as_deref()),
         "lender_name": lender_name,
         "due_date": due_date_str,
         "request_id": request_id,
@@ -3629,7 +3635,8 @@ pub async fn search_local(
         .await
         .unwrap_or(vec![]);
 
-    let book_dtos = crate::models::Book::populate_authors(&db, books).await;
+    let mut book_dtos = crate::models::Book::populate_authors(&db, books).await;
+    crate::models::Book::rewrite_local_cover_urls(&mut book_dtos, None);
     (StatusCode::OK, Json(book_dtos)).into_response()
 }
 
@@ -5965,7 +5972,8 @@ pub async fn update_request_status(
         let peer_url = peer.url.clone();
         let book_isbn = book.isbn.clone();
         let book_title = book.title.clone();
-        let book_cover = book.cover_url.clone();
+        let hub_prefix = crate::models::Book::hub_cover_prefix(&db).await;
+        let book_cover = crate::models::Book::safe_cover_url(book.cover_url.as_deref(), book.id, hub_prefix.as_deref());
         let due_date = (chrono::Utc::now()
             + chrono::Duration::days(resolve_loan_duration_days(&db, book.id).await))
         .format("%Y-%m-%d")
