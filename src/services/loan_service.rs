@@ -149,7 +149,7 @@ pub async fn create_loan(
         .await?
         .ok_or(ServiceError::NotFound)?;
 
-    if copy.status == "borrowed" || copy.status == "lost" {
+    if copy.status != "available" {
         return Err(ServiceError::InvalidState(format!(
             "Copy is currently {}",
             copy.status

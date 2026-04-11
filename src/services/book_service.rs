@@ -123,14 +123,11 @@ pub async fn list_books(
             if c.status == "available" {
                 *available_map.entry(c.book_id).or_insert(0) += 1;
             }
-            if c.status == "borrowed" {
-                if c.is_temporary {
-                    // Temporary copy borrowed = I borrowed this from someone
-                    borrowed_set.insert(c.book_id);
-                } else {
-                    // My own copy is lent out
-                    lent_set.insert(c.book_id);
-                }
+            if c.status == "loaned" {
+                lent_set.insert(c.book_id);
+            }
+            if c.status == "borrowed" && c.is_temporary {
+                borrowed_set.insert(c.book_id);
             }
         }
     }

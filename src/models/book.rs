@@ -227,6 +227,7 @@ impl Book {
         // Batch-fetch copy info for all book IDs
         let book_ids: Vec<i32> = models.iter().map(|m| m.id).collect();
         let mut available_map: HashMap<i32, i32> = HashMap::new();
+        let mut lent_set: std::collections::HashSet<i32> = std::collections::HashSet::new();
         let mut borrowed_set: std::collections::HashSet<i32> = std::collections::HashSet::new();
         if !book_ids.is_empty()
             && let Ok(copies) = super::copy::Entity::find()
@@ -237,6 +238,9 @@ impl Book {
             for c in &copies {
                 if c.status == "available" {
                     *available_map.entry(c.book_id).or_insert(0) += 1;
+                }
+                if c.status == "loaned" {
+                    lent_set.insert(c.book_id);
                 }
                 if c.status == "borrowed" && c.is_temporary {
                     borrowed_set.insert(c.book_id);
@@ -256,9 +260,11 @@ impl Book {
                 dto.authors = Some(names);
             }
             dto.available_copies = Some(*available_map.get(&book_id).unwrap_or(&0));
-            // Override reading_status for books with a borrowed temporary copy
+            // Override reading_status based on copy status
             if borrowed_set.contains(&book_id) {
                 dto.reading_status = Some("borrowed".to_string());
+            } else if lent_set.contains(&book_id) {
+                dto.reading_status = Some("lent".to_string());
             }
             dtos.push(dto);
         }

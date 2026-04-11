@@ -123,7 +123,7 @@ pub async fn create_loan(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Copy not found".to_string()))?;
 
-    if copy.status == "borrowed" || copy.status == "lost" {
+    if copy.status != "available" {
         return Err((
             StatusCode::BAD_REQUEST,
             format!("Copy is currently {}", copy.status),
@@ -150,9 +150,9 @@ pub async fn create_loan(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // 3. Update Copy status to 'borrowed'
+    // 3. Update Copy status to 'loaned'
     let mut copy_active: copy::ActiveModel = copy.into();
-    copy_active.status = Set("borrowed".to_owned());
+    copy_active.status = Set("loaned".to_owned());
     copy_active
         .update(&db)
         .await
