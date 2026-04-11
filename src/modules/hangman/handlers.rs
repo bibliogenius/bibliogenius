@@ -321,7 +321,7 @@ pub(crate) async fn sync_all_peer_scores(state: &AppState) {
     if !relay_peers.is_empty() {
         let relay_start = std::time::Instant::now();
         let relay_count = relay_peers.len();
-        let per_peer_timeout = std::time::Duration::from_secs(15);
+        let per_peer_timeout = std::time::Duration::from_secs(30);
         let relay_futures: Vec<_> = relay_peers
             .iter()
             .map(|peer| {

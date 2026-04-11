@@ -554,7 +554,10 @@ pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
     if !relay_peers.is_empty() {
         let relay_start = std::time::Instant::now();
         let relay_count = relay_peers.len();
-        let per_peer_timeout = std::time::Duration::from_secs(15);
+        // 30s covers one full relay poll cycle (20s) + processing + response.
+        // With WS nudge active, responses arrive in ~1s. Without nudge,
+        // the remote peer polls every 20s so we need at least 25s.
+        let per_peer_timeout = std::time::Duration::from_secs(30);
 
         let relay_futures: Vec<_> = relay_peers
             .iter()
