@@ -4494,10 +4494,22 @@ pub async fn sync_peer_by_url(
     // 4. Fetch remote books — try E2EE first, then plaintext fallback
     // When the peer is unreachable via direct HTTP (e.g. on 5G), avatar_config and
     // library_name are also piggy-backed on the E2EE response as a fallback.
+    //
+    // Diff-based: send the catalog_hash we cached on the peer row last time.
+    // The responder (handle_book_sync_request) returns a tiny "unchanged"
+    // payload when its current hash matches, saving the ~95 KB book list on
+    // every uneventful poll.
     let mut e2ee_avatar: Option<String> = None;
     let mut e2ee_library_name: Option<String> = None;
+    let mut sync_unchanged: bool = false;
+    let mut new_catalog_hash: Option<String> = None;
+    let cached_catalog_hash = peer.catalog_hash.clone();
+    let request_payload = match cached_catalog_hash.as_deref() {
+        Some(h) => json!({ "catalog_hash": h }),
+        None => json!({}),
+    };
     let books: Vec<crate::models::Book> =
-        match try_send_e2ee(&state, &peer, "book_sync_request", json!({})).await {
+        match try_send_e2ee(&state, &peer, "book_sync_request", request_payload).await {
             Ok(Some(Some(response_msg))) => {
                 // Extract avatar and library name for relay-only sync (5G fallback)
                 e2ee_avatar = response_msg
@@ -4509,15 +4521,28 @@ pub async fn sync_peer_by_url(
                     .payload
                     .get("library_name")
                     .and_then(|v| v.as_str().map(|s| s.to_string()));
-                // Got encrypted book list
-                serde_json::from_value(
-                    response_msg
-                        .payload
-                        .get("books")
-                        .cloned()
-                        .unwrap_or(json!([])),
-                )
-                .unwrap_or_default()
+                new_catalog_hash = response_msg
+                    .payload
+                    .get("catalog_hash")
+                    .and_then(|v| v.as_str().map(|s| s.to_string()));
+
+                let status = response_msg.payload.get("status").and_then(|v| v.as_str());
+                if status == Some("unchanged") {
+                    // Catalog unchanged: keep the previous local cache
+                    // entries intact and skip the (now redundant) upsert.
+                    sync_unchanged = true;
+                    Vec::new()
+                } else {
+                    // Got encrypted book list
+                    serde_json::from_value(
+                        response_msg
+                            .payload
+                            .get("books")
+                            .cloned()
+                            .unwrap_or(json!([])),
+                    )
+                    .unwrap_or_default()
+                }
             }
             Ok(Some(None)) => {
                 // E2EE sent but no response body (unexpected for sync)
@@ -4556,8 +4581,19 @@ pub async fn sync_peer_by_url(
             }
         };
 
-    // 5. Upsert books cache (preserves first_seen_at)
-    let count = upsert_peer_books_cache(&db, peer.id, None, books).await;
+    // 5. Upsert books cache (preserves first_seen_at).
+    // Skip when the responder reported "unchanged": the cache already has
+    // the correct entries from the previous successful sync, and re-running
+    // the upsert with an empty `books` would mistakenly delete them.
+    let count = if sync_unchanged {
+        crate::models::peer_book::Entity::find()
+            .filter(crate::models::peer_book::Column::PeerId.eq(peer.id))
+            .count(&db)
+            .await
+            .unwrap_or(0) as usize
+    } else {
+        upsert_peer_books_cache(&db, peer.id, None, books).await
+    };
 
     // 6. Sync gamification stats
     sync_peer_gamification_stats(&db, peer.id, &effective_url, &client, shares_gamification).await;
@@ -4605,6 +4641,14 @@ pub async fn sync_peer_by_url(
         }
         if let Some(ref avatar) = final_updated_avatar {
             active_peer.avatar_config = Set(Some(avatar.clone()));
+        }
+        // Persist the catalog hash returned by the responder so the next
+        // book_sync_request can short-circuit to "unchanged" when the peer
+        // catalog is still the same. Only update when we actually got a
+        // hash back (avoid clobbering with None on transport errors).
+        if let Some(ref hash) = new_catalog_hash {
+            active_peer.catalog_hash = Set(Some(hash.clone()));
+            active_peer.last_catalog_sync = Set(Some(chrono::Utc::now().to_rfc3339()));
         }
         active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
         active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());

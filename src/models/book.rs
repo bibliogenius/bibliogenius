@@ -265,6 +265,38 @@ impl Book {
         }
     }
 
+    /// Computes a strong, order-independent hash of the local catalog state.
+    ///
+    /// Used as a "no-op canary" for sync flows: a peer that has the same
+    /// catalog hash as ours can skip re-fetching the full book list. The
+    /// hash is over `(book_id, updated_at)` pairs sorted by id, which
+    /// covers any meaningful change (insert, delete, edit) as long as
+    /// `updated_at` is bumped on edit (an invariant enforced by the API
+    /// layer for create/update/delete handlers).
+    ///
+    /// Returns a 64-char lowercase hex SHA-256 string. On DB error the
+    /// returned hash is the empty-catalog hash, which is safe: the peer
+    /// will never match it for a non-empty catalog and we'll just fall
+    /// back to a full sync.
+    pub async fn compute_catalog_hash(db: &sea_orm::DatabaseConnection) -> String {
+        use sea_orm::EntityTrait;
+        use sha2::{Digest, Sha256};
+
+        let books = super::book::Entity::find()
+            .all(db)
+            .await
+            .unwrap_or_default();
+        let mut pairs: Vec<(i32, String)> =
+            books.into_iter().map(|b| (b.id, b.updated_at)).collect();
+        pairs.sort_by_key(|(id, _)| *id);
+
+        let mut hasher = Sha256::new();
+        for (id, updated_at) in &pairs {
+            hasher.update(format!("{id}:{updated_at}"));
+        }
+        hex::encode(hasher.finalize())
+    }
+
     /// Builds the hub cover URL prefix (`{hub_url}/api/directory/{node_id}/covers`)
     /// from the current hub configuration.  Returns `None` when the hub is not
     /// configured or the node is not registered.

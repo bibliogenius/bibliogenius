@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::models::Book;
 use crate::models::book::Entity as BookEntity;
@@ -45,7 +45,8 @@ pub struct BookFilter {
 pub async fn list_books(
     State(state): State<crate::infrastructure::AppState>,
     axum::extract::Query(filter): axum::extract::Query<BookFilter>,
-) -> Result<Json<Value>, StatusCode> {
+    headers: axum::http::HeaderMap,
+) -> Result<Response, StatusCode> {
     tracing::info!(
         "List books request - Filters: status={:?}, title={:?}, tag={:?}",
         filter.status,
@@ -101,10 +102,35 @@ pub async fn list_books(
         });
     }
 
-    Ok(Json(json!({
+    let body = serde_json::to_vec(&json!({
         "books": book_dtos,
-        "total": result.total
-    })))
+        "total": result.total,
+    }))
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Strong ETag over the full serialized body. Any field change (books,
+    // authors, cover URLs, totals) produces a fresh tag. See
+    // `utils/etag.rs` for the shared hash helpers.
+    let etag = crate::utils::etag::strong_etag(&body);
+
+    if let Some(inm) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        && crate::utils::etag::if_none_match_matches(inm, &etag)
+    {
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, &etag)
+            .body(axum::body::Body::empty())
+            .unwrap());
+    }
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ETAG, &etag)
+        .body(axum::body::Body::from(body))
+        .unwrap())
 }
 
 #[utoipa::path(
@@ -540,13 +566,16 @@ pub async fn get_book(
     }
 }
 
-/// Serves a book's cover image as binary (for books with local file covers).
-/// Peers call this endpoint to fetch covers that were stored as local file paths.
+/// Serves a book's cover image as a resized JPEG thumbnail.
+///
+/// Output is always 300x450 JPEG (quality 85, ~50 KB cap). Resizing happens
+/// on every request so Flutter's HTTP cache (and Cache-Control below) does
+/// the heavy lifting across clients; encoding is CPU-bound but quick on a
+/// 300x450 target.
 pub async fn get_book_cover(
     State(state): State<crate::infrastructure::AppState>,
     axum::extract::Path(id): axum::extract::Path<i32>,
 ) -> Result<Response, StatusCode> {
-    // Fetch only the cover_url column for efficiency
     let book = crate::models::book::Entity::find_by_id(id)
         .one(state.db())
         .await
@@ -559,26 +588,41 @@ pub async fn get_book_cover(
         .filter(|url| !url.is_empty() && !url.starts_with("http"))
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let bytes = tokio::fs::read(cover_path)
+    // Defense-in-depth against path traversal: reject any relative segment.
+    // cover_url is written by our own Flutter app (absolute path from
+    // getApplicationSupportDirectory), but the DB is mutable and this is
+    // a peer-facing endpoint.
+    if cover_path.split(['/', '\\']).any(|seg| seg == "..") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let raw = tokio::fs::read(cover_path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    // Detect content type from magic bytes
-    let content_type = if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        "image/png"
-    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        "image/jpeg"
-    } else if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
-        "image/webp"
-    } else {
-        "application/octet-stream"
-    };
+    // Decode + resize is CPU-bound; keep the async runtime free.
+    let jpeg = tokio::task::spawn_blocking(move || {
+        crate::utils::cover_image::resize_to_jpeg_thumbnail(&raw)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| {
+        tracing::warn!("cover {id}: resize failed: {e}");
+        StatusCode::UNPROCESSABLE_ENTITY
+    })?;
 
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::CACHE_CONTROL, "public, max-age=3600")
-        .body(axum::body::Body::from(bytes))
+        .header(header::CONTENT_TYPE, "image/jpeg")
+        // Covers change rarely but can change (user re-uploads). Short TTL
+        // keeps staleness bounded; must-revalidate forces a fresh check
+        // after expiry. A proper ETag/If-None-Match pass will land with
+        // task #7 if we extend it to cover endpoints.
+        .header(
+            header::CACHE_CONTROL,
+            "public, max-age=3600, must-revalidate",
+        )
+        .body(axum::body::Body::from(jpeg))
         .unwrap())
 }
 

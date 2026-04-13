@@ -576,10 +576,16 @@ async fn handle_relay_request_response(
             "library_search_response",
             crate::api::e2ee::handle_library_search_via_relay(db, clear_message).await,
         ),
-        "book_sync_request" => (
-            "book_sync_response",
-            crate::api::e2ee::handle_book_sync_request(db).await,
-        ),
+        "book_sync_request" => {
+            let client_hash = clear_message
+                .payload
+                .get("catalog_hash")
+                .and_then(|v| v.as_str());
+            (
+                "book_sync_response",
+                crate::api::e2ee::handle_book_sync_request(db, client_hash).await,
+            )
+        }
         "search_request" => (
             "search_response",
             crate::api::e2ee::handle_search_request(db, clear_message).await,

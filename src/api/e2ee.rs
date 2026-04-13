@@ -243,7 +243,11 @@ pub async fn dispatch_clear_message(
         "loan_offer" => handle_loan_offer(db, clear_message, sender_peer).await,
 
         "book_sync_request" => {
-            let response_payload = handle_book_sync_request(db).await;
+            let client_hash = clear_message
+                .payload
+                .get("catalog_hash")
+                .and_then(|v| v.as_str());
+            let response_payload = handle_book_sync_request(db, client_hash).await;
             seal_response(
                 crypto_service,
                 &known_peers[peer_index],
@@ -877,8 +881,25 @@ async fn handle_loan_offer(
 /// Also includes `avatar_config` and `library_name` so relay-only peers (e.g. on 5G
 /// where the LAN /api/config call would fail) can still update the peer's avatar and
 /// display name from the relay response.
-pub async fn handle_book_sync_request(db: &DatabaseConnection) -> serde_json::Value {
+pub async fn handle_book_sync_request(
+    db: &DatabaseConnection,
+    client_catalog_hash: Option<&str>,
+) -> serde_json::Value {
     use crate::models::book;
+
+    // Canary first: if the requester is already in sync, send a tiny
+    // "unchanged" payload (~80 bytes) instead of the full catalog (~95 KB
+    // for a 110-book library). Sender side will skip its local cache
+    // upsert when it sees this status.
+    let current_hash = crate::models::Book::compute_catalog_hash(db).await;
+    if let Some(client_hash) = client_catalog_hash
+        && client_hash == current_hash
+    {
+        return json!({
+            "status": "unchanged",
+            "catalog_hash": current_hash,
+        });
+    }
 
     let books = book::Entity::find().all(db).await.unwrap_or_default();
     let mut book_dtos = crate::models::Book::populate_authors(db, books).await;
@@ -901,7 +922,11 @@ pub async fn handle_book_sync_request(db: &DatabaseConnection) -> serde_json::Va
         .flatten()
         .map(|c| c.name);
 
-    let mut payload = json!({ "books": book_dtos });
+    let mut payload = json!({
+        "status": "updated",
+        "books": book_dtos,
+        "catalog_hash": current_hash,
+    });
     if let Some(avatar) = avatar_config {
         payload["avatar_config"] = avatar;
     }
@@ -1260,22 +1285,14 @@ pub async fn handle_library_manifest_request(
     library_uuid: Option<&str>,
 ) -> serde_json::Value {
     use crate::models::book;
-    use sha2::{Digest, Sha256};
 
     let books = book::Entity::find().all(db).await.unwrap_or_default();
 
     let total_books = books.len();
 
-    // Compute catalog_hash: SHA-256 of sorted (id, updated_at) pairs
-    let mut pairs: Vec<(i32, String)> =
-        books.iter().map(|b| (b.id, b.updated_at.clone())).collect();
-    pairs.sort_by_key(|(id, _)| *id);
-
-    let mut hasher = Sha256::new();
-    for (id, updated_at) in &pairs {
-        hasher.update(format!("{id}:{updated_at}"));
-    }
-    let hash = hex::encode(hasher.finalize());
+    // Shared with `handle_book_sync_request` so manifest preview and full
+    // sync agree on what "current catalog" means.
+    let hash = crate::models::Book::compute_catalog_hash(db).await;
 
     let last_updated = books
         .iter()
@@ -1824,7 +1841,7 @@ mod tests {
         let avatar_json = r#"{"style":"lorelei","seed":"alice"}"#;
         set_avatar_config(&db, avatar_json).await;
 
-        let response = handle_book_sync_request(&db).await;
+        let response = handle_book_sync_request(&db, None).await;
 
         assert!(
             response.get("avatar_config").is_some(),
@@ -1846,7 +1863,7 @@ mod tests {
     async fn book_sync_response_without_avatar_omits_avatar_field() {
         let db = setup_test_db().await;
         // init_db seeds installation_profile with no avatar_config (NULL)
-        let response = handle_book_sync_request(&db).await;
+        let response = handle_book_sync_request(&db, None).await;
         assert!(
             response.get("avatar_config").is_none(),
             "avatar_config must be absent when installation_profile has no avatar set"
@@ -1855,6 +1872,61 @@ mod tests {
         assert!(
             response.get("library_name").is_some(),
             "library_name must be present (seeded by init_db)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn book_sync_response_includes_catalog_hash_on_full_sync() {
+        let db = setup_test_db().await;
+        let response = handle_book_sync_request(&db, None).await;
+        let hash = response
+            .get("catalog_hash")
+            .and_then(|v| v.as_str())
+            .expect("catalog_hash must be present on a full response");
+        assert_eq!(hash.len(), 64, "expected lowercase hex SHA-256 (64 chars)");
+        assert_eq!(
+            response.get("status").and_then(|v| v.as_str()),
+            Some("updated"),
+            "full response must report status=updated",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn book_sync_response_short_circuits_when_client_hash_matches() {
+        let db = setup_test_db().await;
+        // Capture the current hash exactly as the responder computes it.
+        let current_hash = crate::models::Book::compute_catalog_hash(&db).await;
+
+        let response = handle_book_sync_request(&db, Some(&current_hash)).await;
+
+        assert_eq!(
+            response.get("status").and_then(|v| v.as_str()),
+            Some("unchanged"),
+            "matching hash must return status=unchanged",
+        );
+        assert_eq!(
+            response.get("catalog_hash").and_then(|v| v.as_str()),
+            Some(current_hash.as_str()),
+            "unchanged response must echo the current catalog_hash",
+        );
+        assert!(
+            response.get("books").is_none(),
+            "unchanged response must not embed the book list (the whole point)",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn book_sync_response_does_full_sync_when_client_hash_stale() {
+        let db = setup_test_db().await;
+        let response = handle_book_sync_request(&db, Some("stale-hash-from-yesterday")).await;
+        assert_eq!(
+            response.get("status").and_then(|v| v.as_str()),
+            Some("updated"),
+            "non-matching hash must trigger a full sync",
+        );
+        assert!(
+            response.get("books").is_some(),
+            "full sync must include the book list",
         );
     }
 }

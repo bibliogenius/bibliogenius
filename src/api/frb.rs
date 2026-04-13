@@ -4361,6 +4361,9 @@ pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), St
 
 /// Resizes a local cover image to a thumbnail and uploads it to the hub.
 /// Returns the public hub URL for the uploaded thumbnail.
+///
+/// Uses the shared `utils::cover_image` pipeline so LAN peer responses and
+/// hub-stored covers stay pixel-for-pixel identical.
 async fn resize_and_upload_cover(
     db: &sea_orm::DatabaseConnection,
     svc: &crate::services::hub_directory_service::HubDirectoryService,
@@ -4371,15 +4374,8 @@ async fn resize_and_upload_cover(
         .await
         .map_err(|e| format!("read {path}: {e}"))?;
 
-    // Resize in a blocking task (image decoding is CPU-bound)
-    let jpeg_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        let img = image::load_from_memory(&bytes).map_err(|e| format!("decode: {e}"))?;
-        let thumb = img.thumbnail(150, 200);
-        let mut buf = std::io::Cursor::new(Vec::new());
-        thumb
-            .write_to(&mut buf, image::ImageFormat::Jpeg)
-            .map_err(|e| format!("encode: {e}"))?;
-        Ok(buf.into_inner())
+    let jpeg_bytes = tokio::task::spawn_blocking(move || {
+        crate::utils::cover_image::resize_to_jpeg_thumbnail(&bytes)
     })
     .await
     .map_err(|e| format!("spawn: {e}"))??;
