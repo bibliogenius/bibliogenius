@@ -17,9 +17,11 @@ ignore = [
     "RUSTSEC-2024-0436",
     # proc-macro-error unmaintained — transitive dep from sea-orm 0.12 / utoipa 4.2.
     "RUSTSEC-2024-0370",
-    # rustls-webpki 0.101.7 CRL distribution point matching flaw — transitive dep from sqlx 0.7 / rustls 0.21.
-    # Low impact (requires compromised CA). Fix requires rustls-webpki >= 0.103.10 → sqlx 0.8+ → sea-orm 1.x.
-    "RUSTSEC-2026-0049",
+    # rand 0.8.5 unsoundness with ThreadRng + custom log::Logger calling rand::rng().
+    # Not exploitable here: crypto uses OsRng, and our only thread_rng() call
+    # (relay_poller jitter) is not reachable from a custom logger. Transitive pin
+    # via tungstenite 0.24 would require a tokio-tungstenite major bump to remove.
+    "RUSTSEC-2026-0097",
     # NOTE: All above will be resolved by upgrading sea-orm to 1.x.
 ]
 
