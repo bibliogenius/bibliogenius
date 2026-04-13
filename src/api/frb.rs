@@ -576,6 +576,7 @@ impl From<FrbBook> for crate::models::Book {
             private: Some(frb_book.private),
             page_count: frb_book.page_count,
             loan_duration_days: None,
+            first_seen_at: None,
         }
     }
 }

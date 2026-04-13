@@ -38,3 +38,45 @@ impl Related<super::peer::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+/// Convert a cached peer book row into the Book DTO returned by the API.
+/// `id` becomes `remote_book_id` so cached and live responses share the same
+/// id space (the peer's book id), and `first_seen_at` is propagated for the
+/// "new" badge.
+impl From<Model> for super::Book {
+    fn from(pb: Model) -> Self {
+        super::Book {
+            id: Some(pb.remote_book_id),
+            title: pb.title,
+            isbn: pb.isbn,
+            summary: pb.summary,
+            publisher: None,
+            publication_year: None,
+            dewey_decimal: None,
+            lcc: None,
+            subjects: None,
+            marc_record: None,
+            cataloguing_notes: None,
+            source_data: None,
+            shelf_position: None,
+            reading_status: None,
+            finished_reading_at: None,
+            started_reading_at: None,
+            source: None,
+            author: pb.author,
+            authors: None,
+            cover_url: pb.cover_url,
+            large_cover_url: None,
+            user_rating: None,
+            owned: None,
+            price: None,
+            language: None,
+            digital_formats: None,
+            available_copies: None,
+            private: None,
+            page_count: None,
+            loan_duration_days: None,
+            first_seen_at: pb.first_seen_at,
+        }
+    }
+}
