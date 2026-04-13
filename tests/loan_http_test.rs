@@ -8,7 +8,7 @@ use axum::{
     Router,
     body::Body,
     http::{Request, StatusCode},
-    routing::{get, post, put},
+    routing::{get, put},
 };
 use rust_lib_app::api::loan;
 use rust_lib_app::db;
