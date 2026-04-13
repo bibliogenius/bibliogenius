@@ -7822,4 +7822,63 @@ mod first_seen_at_tests {
         assert_eq!(books[1].first_seen_at, None);
         assert_eq!(books[2].first_seen_at, None);
     }
+
+    /// Migration 067 must NULL all peer_books.first_seen_at exactly once and
+    /// leave subsequently inserted rows alone on re-init.
+    #[tokio::test]
+    async fn migration_067_resets_first_seen_at_idempotently() {
+        use sea_orm::ConnectionTrait;
+
+        let db = setup().await;
+        let peer_id = insert_peer(&db).await;
+        // Mimic post-056 state: backfilled first_seen_at on existing rows. The
+        // initial run_migrations during setup() already wrote the 067 marker on
+        // an empty cache, so wipe the marker to simulate a device that ran 056
+        // (with content) but never 067.
+        db.execute(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM _migration_log WHERE name = '067_reset_peer_books_first_seen_at'"
+                .to_owned(),
+        ))
+        .await
+        .unwrap();
+        insert_peer_book(&db, peer_id, 1, "old A", Some("2026-04-01T00:00:00Z")).await;
+        insert_peer_book(&db, peer_id, 2, "old B", Some("2026-04-02T00:00:00Z")).await;
+
+        // Re-run migrations: 067 should fire and NULL both rows.
+        crate::infrastructure::db::run_migrations(&db)
+            .await
+            .unwrap();
+
+        let after_first = peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .all(&db)
+            .await
+            .unwrap();
+        for r in &after_first {
+            assert_eq!(
+                r.first_seen_at, None,
+                "row {} should be NULL",
+                r.remote_book_id
+            );
+        }
+
+        // A new book inserted AFTER the migration must keep its first_seen_at
+        // even when run_migrations is invoked again.
+        insert_peer_book(&db, peer_id, 3, "fresh", Some("2026-04-13T08:30:00Z")).await;
+        crate::infrastructure::db::run_migrations(&db)
+            .await
+            .unwrap();
+        let fresh = peer_book::Entity::find()
+            .filter(peer_book::Column::RemoteBookId.eq(3))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fresh.first_seen_at.as_deref(),
+            Some("2026-04-13T08:30:00Z"),
+            "migration must not re-fire on subsequent init"
+        );
+    }
 }

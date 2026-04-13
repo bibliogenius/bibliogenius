@@ -1608,6 +1608,53 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 067: Reset peer_books.first_seen_at populated by migration 056.
+    // 056 backfilled `first_seen_at = synced_at` as a "best approximation",
+    // tagging every pre-existing peer book as "new" for 7 days. Backfilled rows
+    // and fresh inserts cannot be distinguished after subsequent syncs, so this
+    // migration NULLs every row — equivalent to a "first display" reset. Only
+    // books inserted AFTER this migration runs will get a first_seen_at and
+    // therefore the "new" badge.
+    //
+    // Idempotency via _migration_log so the reset doesn't reapply on every
+    // app start (which would wipe legitimate first_seen_at on new inserts).
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE TABLE IF NOT EXISTS _migration_log (\
+                name TEXT PRIMARY KEY,\
+                applied_at TEXT NOT NULL\
+             )"
+            .to_owned(),
+        ))
+        .await;
+    let already_applied = db
+        .query_one(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT name FROM _migration_log WHERE name = '067_reset_peer_books_first_seen_at'"
+                .to_owned(),
+        ))
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if !already_applied {
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                "UPDATE peer_books SET first_seen_at = NULL".to_owned(),
+            ))
+            .await;
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                "INSERT INTO _migration_log (name, applied_at) \
+                 VALUES ('067_reset_peer_books_first_seen_at', datetime('now'))"
+                    .to_owned(),
+            ))
+            .await;
+    }
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;
