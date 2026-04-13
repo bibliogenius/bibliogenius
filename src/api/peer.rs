@@ -3119,6 +3119,30 @@ pub async fn update_peer_url(
     }
 }
 
+/// Removes cached hub directory catalog entries (peer_id = 0 sentinel) for a
+/// given library_uuid. See ADR-024: the cache is owned by the peer relationship,
+/// so deletion must invalidate it to prevent stale reads on re-add.
+async fn purge_hub_catalog_cache(db: &DatabaseConnection, library_uuid: &str) {
+    use crate::models::peer_book;
+    match peer_book::Entity::delete_many()
+        .filter(peer_book::Column::NodeId.eq(library_uuid))
+        .filter(peer_book::Column::PeerId.eq(0))
+        .exec(db)
+        .await
+    {
+        Ok(res) => tracing::info!(
+            "Purged {} hub catalog cache entries for library_uuid={}",
+            res.rows_affected,
+            library_uuid
+        ),
+        Err(e) => tracing::warn!(
+            "Failed to purge hub catalog cache for library_uuid={}: {}",
+            library_uuid,
+            e
+        ),
+    }
+}
+
 pub async fn delete_peer(
     State(state): State<crate::infrastructure::AppState>,
     Path(peer_id): Path<i32>,
@@ -3171,6 +3195,11 @@ pub async fn delete_peer(
                 )
                 .exec(db)
                 .await;
+            // ADR-024: purge the hub directory catalog cache for this peer's
+            // library_uuid so re-adding the same peer does not serve stale entries.
+            if let Some(ref uuid) = peer_model.library_uuid {
+                purge_hub_catalog_cache(db, uuid).await;
+            }
             tracing::info!("🗑️ Peer {} ({}) deleted", peer_id, peer_model.name);
             (StatusCode::OK, Json(json!({ "message": "Peer deleted" }))).into_response()
         }
@@ -7880,5 +7909,89 @@ mod first_seen_at_tests {
             Some("2026-04-13T08:30:00Z"),
             "migration must not re-fire on subsequent init"
         );
+    }
+}
+
+#[cfg(test)]
+mod hub_catalog_cache_tests {
+    use super::*;
+    use crate::db;
+    use crate::models::peer_book;
+    use sea_orm::{ConnectionTrait, Set, Statement};
+
+    async fn setup_cache_db() -> DatabaseConnection {
+        let db = db::init_db("sqlite::memory:").await.expect("init db");
+        // Directory cache uses peer_id = 0 sentinel (no matching peer row), same
+        // workaround as upsert_directory_catalog_cache in frb.rs.
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "PRAGMA foreign_keys = OFF".to_owned(),
+        ))
+        .await
+        .unwrap();
+        db
+    }
+
+    async fn insert_cache_entry(db: &DatabaseConnection, node_id: &str, isbn: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let pb = peer_book::ActiveModel {
+            peer_id: Set(0), // sentinel for directory entries
+            remote_book_id: Set(0),
+            title: Set(format!("Book {}", isbn)),
+            isbn: Set(Some(isbn.to_string())),
+            author: Set(None),
+            cover_url: Set(None),
+            summary: Set(None),
+            synced_at: Set(now),
+            node_id: Set(Some(node_id.to_string())),
+            first_seen_at: Set(None),
+            notified_at: Set(None),
+            ..Default::default()
+        };
+        peer_book::Entity::insert(pb).exec(db).await.unwrap();
+    }
+
+    /// ADR-024: purging the cache for a library_uuid must drop all sentinel
+    /// directory entries for that node_id, and only those.
+    #[tokio::test]
+    async fn purge_hub_catalog_cache_removes_only_matching_node_id() {
+        let db = setup_cache_db().await;
+        let target = "41610ad0-d659-4b09-8303-faacf9e6aa36";
+        let other = "26e4b4d9-acff-42cb-8b25-0bf32457a232";
+
+        insert_cache_entry(&db, target, "978-target-1").await;
+        insert_cache_entry(&db, target, "978-target-2").await;
+        insert_cache_entry(&db, other, "978-other-1").await;
+
+        purge_hub_catalog_cache(&db, target).await;
+
+        let remaining = peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(0))
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "only the other node's entry should remain"
+        );
+        assert_eq!(remaining[0].node_id.as_deref(), Some(other));
+    }
+
+    /// Purge must be a no-op when there is nothing to remove for the given uuid.
+    #[tokio::test]
+    async fn purge_hub_catalog_cache_no_op_when_empty() {
+        let db = setup_cache_db().await;
+        let other = "26e4b4d9-acff-42cb-8b25-0bf32457a232";
+        insert_cache_entry(&db, other, "978-other-1").await;
+
+        purge_hub_catalog_cache(&db, "unknown-uuid").await;
+
+        let remaining = peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(0))
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
     }
 }
