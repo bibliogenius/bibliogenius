@@ -1655,6 +1655,17 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
             .await;
     }
 
+    // Migration 068: Add last_catalog_hash to hub_directory_config.
+    // Stores the SHA-256 of the last successful catalog push so the client
+    // can short-circuit identical re-pushes without a network round-trip
+    // (ADR-027).
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE hub_directory_config ADD COLUMN last_catalog_hash TEXT".to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

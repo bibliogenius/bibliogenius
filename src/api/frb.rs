@@ -4359,6 +4359,7 @@ pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), St
     hub_directory_svc()
         .push_catalog(db, &entries, book_count)
         .await
+        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
@@ -4502,9 +4503,19 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
     let count = entries.len() as i32;
 
     // Always push: even with an empty catalog, book_count must reach the hub.
-    svc.push_catalog(db, &entries, book_count)
+    // push_catalog short-circuits when the catalog hasn't changed (ADR-027);
+    // we log the outcome but keep returning the entry count so the Flutter
+    // provider clears its `_catalogDirty` flag either way.
+    let outcome = svc
+        .push_catalog(db, &entries, book_count)
         .await
         .map_err(|e| e.to_string())?;
+    tracing::info!(
+        target: "hub_directory",
+        outcome = ?outcome,
+        count = count,
+        "hub catalog sync outcome"
+    );
 
     Ok(count)
 }

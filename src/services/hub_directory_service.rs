@@ -148,6 +148,43 @@ pub struct CatalogEntry {
     pub cover_url: Option<String>,
 }
 
+/// Result of `push_catalog`: whether the catalog was actually sent or the
+/// push was skipped because the hub already has the same content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushCatalogOutcome {
+    /// The catalog was sent and accepted (HTTP 200).
+    Pushed,
+    /// The push was short-circuited because the catalog hash matched the
+    /// last successful push (no network round-trip).
+    SkippedLocal,
+    /// The catalog was sent but the hub returned 304 Not Modified (its
+    /// stored catalog matches). The local hash is refreshed.
+    SkippedRemote,
+}
+
+/// Compute a deterministic SHA-256 of the canonical catalog payload.
+///
+/// Returns a 64-char lowercase hex digest (unquoted) suitable for the
+/// `catalog_hash` body field.
+///
+/// The inputs are length-prefixed to make the hash unambiguous regardless
+/// of payload content (separators, null bytes, valid JSON strings that
+/// happen to look like each other). Callers must pass the exact
+/// `isbn_payload` / `catalog_payload` strings that will be POSTed and
+/// must sort catalog entries beforehand to keep the digest stable
+/// across calls.
+pub fn compute_catalog_hash(isbn_payload: &str, catalog_payload: &str, book_count: i64) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let fields: [&[u8]; 2] = [isbn_payload.as_bytes(), catalog_payload.as_bytes()];
+    for field in fields {
+        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(field);
+    }
+    hasher.update(book_count.to_le_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 /// A hub-mediated borrow request (ADR-018).
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct HubBorrowRequest {
@@ -203,6 +240,10 @@ pub struct DirectoryConfig {
     pub accept_from: String,
     pub allow_borrowing: bool,
     pub recovery_code: Option<String>,
+    /// SHA-256 hex digest of the last catalog payload successfully
+    /// pushed to (or confirmed by) the hub. Used to skip redundant
+    /// uploads (ADR-027). None until the first successful push.
+    pub last_catalog_hash: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +290,7 @@ impl HubDirectoryService {
         let result = db
             .query_one(Statement::from_string(
                 backend,
-                "SELECT node_id, write_token, is_listed, requires_approval, accept_from, allow_borrowing
+                "SELECT node_id, write_token, is_listed, requires_approval, accept_from, allow_borrowing, recovery_code, last_catalog_hash
                  FROM hub_directory_config WHERE id = 1"
                     .to_owned(),
             ))
@@ -267,6 +308,7 @@ impl HubDirectoryService {
             accept_from: row.try_get("", "accept_from")?,
             allow_borrowing: row.try_get::<i32>("", "allow_borrowing").unwrap_or(1) != 0,
             recovery_code: row.try_get::<String>("", "recovery_code").ok(),
+            last_catalog_hash: row.try_get::<String>("", "last_catalog_hash").ok(),
         }))
     }
 
@@ -301,6 +343,35 @@ impl HubDirectoryService {
                     .map(|c| format!("'{}'", c.replace('\'', "''")))
                     .unwrap_or_else(|| "NULL".to_string()),
                 now              = now,
+            ),
+        ))
+        .await?;
+        Ok(())
+    }
+
+    /// Persist the hash of the last catalog push so the next sync can
+    /// skip the HTTP round-trip when the catalog is unchanged.
+    ///
+    /// Passing `None` resets the hash, which forces the next sync to
+    /// re-push unconditionally (used after recovery where the hub's
+    /// cached catalog may have been lost).
+    pub(crate) async fn update_last_catalog_hash(
+        db: &DatabaseConnection,
+        hash: Option<&str>,
+    ) -> Result<(), HubDirectoryError> {
+        let backend = db.get_database_backend();
+        let value = match hash {
+            Some(h) => format!("'{}'", h.replace('\'', "''")),
+            None => "NULL".to_string(),
+        };
+        db.execute(Statement::from_string(
+            backend,
+            format!(
+                "UPDATE hub_directory_config
+                 SET last_catalog_hash = {value},
+                     updated_at = '{now}'
+                 WHERE id = 1",
+                now = chrono::Utc::now().to_rfc3339()
             ),
         ))
         .await?;
@@ -460,6 +531,7 @@ impl HubDirectoryService {
             accept_from: params.accept_from,
             allow_borrowing: params.allow_borrowing,
             recovery_code: profile.recovery_code,
+            last_catalog_hash: existing.as_ref().and_then(|c| c.last_catalog_hash.clone()),
         };
 
         Self::save_config(db, &config).await?;
@@ -526,8 +598,12 @@ impl HubDirectoryService {
             accept_from: "everyone".to_string(),
             allow_borrowing: true,
             recovery_code: None,
+            last_catalog_hash: None,
         });
 
+        // On recovery the hub's cached catalog may have been dropped or
+        // drifted; clear the local hash so the next sync re-pushes
+        // unconditionally (ADR-027).
         let config = DirectoryConfig {
             node_id: node_id.to_string(),
             write_token,
@@ -536,9 +612,14 @@ impl HubDirectoryService {
             accept_from: existing.accept_from,
             allow_borrowing: existing.allow_borrowing,
             recovery_code: profile.recovery_code,
+            last_catalog_hash: None,
         };
 
         Self::save_config(db, &config).await?;
+        // save_config preserves existing columns that aren't in its SET list;
+        // last_catalog_hash is one of them. Force a reset here so the next
+        // sync re-pushes (hub's CachedCatalog may have been lost/expired).
+        Self::update_last_catalog_hash(db, None).await?;
         tracing::info!("Hub: profile recovered via recovery code");
         Ok(config)
     }
@@ -551,25 +632,49 @@ impl HubDirectoryService {
     ///
     /// Sends both the legacy ISBN list and enriched catalog entries (ISBN + title + author).
     /// Only meaningful for open libraries (requires_approval=false).
+    ///
+    /// Entries are sorted by `(isbn, book_id)` before serialization so the
+    /// SHA-256 digest used for skip detection is stable across calls with
+    /// the same logical content (ADR-027). The sorted order is also what
+    /// gets sent to the hub, so peers always see a deterministic layout.
+    ///
+    /// Returns [`PushCatalogOutcome`] indicating whether the hub was
+    /// actually contacted or the push was short-circuited.
     pub async fn push_catalog(
         &self,
         db: &DatabaseConnection,
         entries: &[CatalogEntry],
         book_count: i64,
-    ) -> Result<(), HubDirectoryError> {
+    ) -> Result<PushCatalogOutcome, HubDirectoryError> {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
         let hub_url = Self::hub_base_url()?;
 
+        // Sort entries for hash determinism. Cheap on typical library sizes
+        // (<1000 books). Cloning Strings is avoided by sorting a Vec of refs.
+        let mut sorted: Vec<&CatalogEntry> = entries.iter().collect();
+        sorted.sort_by(|a, b| a.isbn.cmp(&b.isbn).then_with(|| a.book_id.cmp(&b.book_id)));
+
         // Legacy field: plain ISBN list for backward-compatible hubs
-        let isbn_list: Vec<&str> = entries.iter().map(|e| e.isbn.as_str()).collect();
+        let isbn_list: Vec<&str> = sorted.iter().map(|e| e.isbn.as_str()).collect();
         let isbn_payload = serde_json::to_string(&isbn_list)
             .map_err(|e| HubDirectoryError::Config(e.to_string()))?;
 
         // Enriched field: full catalog entries
         let catalog_payload =
-            serde_json::to_string(entries).map_err(|e| HubDirectoryError::Config(e.to_string()))?;
+            serde_json::to_string(&sorted).map_err(|e| HubDirectoryError::Config(e.to_string()))?;
+
+        let catalog_hash = compute_catalog_hash(&isbn_payload, &catalog_payload, book_count);
+
+        // Fast path: same hash as last successful push → no round-trip.
+        if cfg.last_catalog_hash.as_deref() == Some(catalog_hash.as_str()) {
+            tracing::debug!(
+                target: "hub_directory",
+                "push_catalog: skipped (local hash match)"
+            );
+            return Ok(PushCatalogOutcome::SkippedLocal);
+        }
 
         let response = self
             .http_client
@@ -579,16 +684,32 @@ impl HubDirectoryService {
                 "isbn_payload": isbn_payload,
                 "catalog_payload": catalog_payload,
                 "book_count": book_count,
+                "catalog_hash": catalog_hash,
             }))
             .send()
             .await?;
 
         let status = response.status().as_u16();
+
+        // 304 Not Modified: hub's stored catalog already matches this hash.
+        // Persist it locally so subsequent pushes can short-circuit.
+        if status == 304 {
+            Self::update_last_catalog_hash(db, Some(&catalog_hash)).await?;
+            tracing::debug!(
+                target: "hub_directory",
+                "push_catalog: skipped (hub returned 304)"
+            );
+            return Ok(PushCatalogOutcome::SkippedRemote);
+        }
+
         if status >= 400 {
             let msg = response.text().await.unwrap_or_default();
             return Err(HubDirectoryError::Hub(status, msg));
         }
-        Ok(())
+
+        // 2xx success: persist the hash so the next identical push skips.
+        Self::update_last_catalog_hash(db, Some(&catalog_hash)).await?;
+        Ok(PushCatalogOutcome::Pushed)
     }
 
     /// Uploads a cover thumbnail to the hub.
@@ -1184,5 +1305,100 @@ impl HubDirectoryService {
 impl Default for HubDirectoryService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod catalog_hash_tests {
+    use super::*;
+
+    fn entry(isbn: &str, title: &str, author: Option<&str>) -> CatalogEntry {
+        CatalogEntry {
+            isbn: isbn.to_string(),
+            book_id: None,
+            title: title.to_string(),
+            author: author.map(str::to_string),
+            cover_url: None,
+        }
+    }
+
+    fn payloads(entries: &[CatalogEntry]) -> (String, String) {
+        let isbns: Vec<&str> = entries.iter().map(|e| e.isbn.as_str()).collect();
+        (
+            serde_json::to_string(&isbns).unwrap(),
+            serde_json::to_string(entries).unwrap(),
+        )
+    }
+
+    #[test]
+    fn hash_is_64_char_lowercase_hex() {
+        let (i, c) = payloads(&[entry("978A", "t", None)]);
+        let h = compute_catalog_hash(&i, &c, 1);
+        assert_eq!(h.len(), 64);
+        assert!(
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+        assert!(!h.contains('"'));
+    }
+
+    #[test]
+    fn hash_is_deterministic_for_identical_inputs() {
+        let e = vec![entry("9781", "Title", Some("Auth"))];
+        let (i, c) = payloads(&e);
+        assert_eq!(
+            compute_catalog_hash(&i, &c, 42),
+            compute_catalog_hash(&i, &c, 42),
+        );
+    }
+
+    #[test]
+    fn hash_differs_when_book_count_changes() {
+        let (i, c) = payloads(&[entry("9781", "Title", None)]);
+        assert_ne!(
+            compute_catalog_hash(&i, &c, 1),
+            compute_catalog_hash(&i, &c, 2),
+        );
+    }
+
+    #[test]
+    fn hash_differs_when_catalog_payload_changes() {
+        let (i1, c1) = payloads(&[entry("9781", "Old", None)]);
+        let (i2, c2) = payloads(&[entry("9781", "New", None)]);
+        // ISBN list unchanged, but enriched payload differs.
+        assert_eq!(i1, i2);
+        assert_ne!(c1, c2);
+        assert_ne!(
+            compute_catalog_hash(&i1, &c1, 1),
+            compute_catalog_hash(&i2, &c2, 1),
+        );
+    }
+
+    #[test]
+    fn hash_differs_when_isbn_payload_changes() {
+        let (i1, c1) = payloads(&[entry("9781", "T", None)]);
+        let (i2, c2) = payloads(&[entry("9782", "T", None)]);
+        assert_ne!(
+            compute_catalog_hash(&i1, &c1, 1),
+            compute_catalog_hash(&i2, &c2, 1),
+        );
+    }
+
+    #[test]
+    fn hash_is_unambiguous_against_field_boundary_collision() {
+        // Without length-prefixing, moving bytes across the isbn/catalog
+        // boundary could collide. Length-prefixing prevents that.
+        let h1 = compute_catalog_hash("[\"A\"]", "[{\"isbn\":\"B\"}]", 1);
+        let h2 = compute_catalog_hash("[\"A\"][{\"isbn\":\"B\"}]", "", 1);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn outcome_pushed_differs_from_skipped() {
+        assert_ne!(PushCatalogOutcome::Pushed, PushCatalogOutcome::SkippedLocal);
+        assert_ne!(
+            PushCatalogOutcome::SkippedLocal,
+            PushCatalogOutcome::SkippedRemote,
+        );
     }
 }

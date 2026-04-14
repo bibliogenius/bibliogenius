@@ -14,9 +14,18 @@ use sha2::{Digest, Sha256};
 /// Returns a string including the surrounding double-quotes, suitable for
 /// emission as an HTTP `ETag` header or comparison against `If-None-Match`.
 pub fn strong_etag(bytes: &[u8]) -> String {
+    format!("\"{}\"", hex_sha256(bytes))
+}
+
+/// Compute an unquoted hex SHA-256 of the given bytes.
+///
+/// Used where the raw 64-hex-char digest is needed (e.g. in JSON request
+/// bodies or as a value for a `catalog_hash` field). For HTTP ETag headers,
+/// use [`strong_etag`] which adds the required RFC 7232 quotes.
+pub fn hex_sha256(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("\"{:x}\"", hasher.finalize())
+    format!("{:x}", hasher.finalize())
 }
 
 /// Return true when an `If-None-Match` header value matches [etag].
@@ -99,5 +108,20 @@ mod tests {
     #[test]
     fn empty_header_value_does_not_match() {
         assert!(!if_none_match_matches("", "\"abc\""));
+    }
+
+    #[test]
+    fn hex_sha256_is_unquoted_64_chars() {
+        let hex = hex_sha256(b"hello");
+        assert_eq!(hex.len(), 64);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!hex.contains('"'));
+    }
+
+    #[test]
+    fn strong_etag_wraps_hex_sha256_in_quotes() {
+        let hex = hex_sha256(b"payload");
+        let etag = strong_etag(b"payload");
+        assert_eq!(etag, format!("\"{hex}\""));
     }
 }
