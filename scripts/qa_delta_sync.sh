@@ -152,27 +152,25 @@ if [[ "$shape_ok" == "1" ]]; then
   info "operations count = $ops_count, latest_cursor = $latest"
 fi
 
-# ---- scenario 3: cursor advances after a mutation --------------------------
+# ---- scenario 3: real book INSERT -> delta upsert with resolved DTO --------
 
-section "3. New INSERT op advances the cursor (delta contains 1 op)"
+section "3. Adding a real book yields an upsert with the resolved book DTO"
 if [[ -z "$DB_PATH" ]]; then
-  skip "needs DB_PATH to inject an operation_log row"
+  skip "needs DB_PATH to inject a book row + op log entry"
 else
-  # Capture current latest_cursor.
   prev=$(curl -sS "$BASE_URL/api/books?since=0" | jq -r '.latest_cursor')
   info "cursor before mutation = $prev"
 
-  # Insert a synthetic local INSERT row. We reference a book id that most
-  # likely does NOT exist in the live table (1000000+) so the upsert side
-  # of the delta produces zero rows (the book_repo.find_by_id returns None
-  # and we skip silently). What we want to assert is only that the cursor
-  # advances, not that the book resolves. This keeps the QA script from
-  # needing a JWT to actually POST /api/books.
-  stamp=$(date +%s)
-  fake_book_id=$((1000000 + stamp % 1000))
-  sqlite3 "$DB_PATH" "INSERT INTO operation_log (entity_type, entity_id, operation, source, status, created_at) VALUES ('book', $fake_book_id, 'INSERT', 'local', 'applied', datetime('now'));" \
-    && ok "injected INSERT op on book id=$fake_book_id" \
-    || { ko "SQL insert failed"; exit 1; }
+  # Insert a book directly via SQL (no JWT needed) so the upsert resolves
+  # to the current book state, and log the matching INSERT op so the delta
+  # endpoint picks it up. Title is unique enough to detect in the response.
+  marker="QA-Delta-$(date +%s)"
+  sqlite3 "$DB_PATH" "INSERT INTO books (title, owned, private, created_at, updated_at) VALUES ('$marker', 1, 0, datetime('now'), datetime('now'));"
+  book_id=$(sqlite3 "$DB_PATH" "SELECT id FROM books WHERE title='$marker';")
+  if [[ -z "$book_id" ]]; then ko "book insert failed"; else ok "inserted book id=$book_id title=$marker"; fi
+
+  sqlite3 "$DB_PATH" "INSERT INTO operation_log (entity_type, entity_id, operation, source, status, created_at) VALUES ('book', $book_id, 'INSERT', 'local', 'applied', datetime('now'));"
+  ok "logged INSERT op for book $book_id"
 
   new_body=$(curl -sS "$BASE_URL/api/books?since=$prev")
   new_cursor=$(echo "$new_body" | jq -r '.latest_cursor')
@@ -184,10 +182,57 @@ else
     ko "cursor did not advance"
   fi
 
-  # The op count can legitimately be 0 (the fake book id has no backing
-  # row, upsert is dropped) OR 1 (if another local mutation happened in
-  # parallel). Either way we only care the cursor moved.
-  info "new window had $(echo "$new_body" | jq '.operations | length') op(s)"
+  ops_count=$(echo "$new_body" | jq '.operations | length')
+  if [[ "$ops_count" == "1" ]]; then
+    ok "delta window contains exactly 1 operation"
+  else
+    ko "expected 1 op, got $ops_count"
+  fi
+
+  op_kind=$(echo "$new_body" | jq -r '.operations[0].op')
+  if [[ "$op_kind" == "upsert" ]]; then
+    ok "op is upsert"
+  else
+    ko "op is '$op_kind' (expected upsert)"
+  fi
+
+  resolved_title=$(echo "$new_body" | jq -r '.operations[0].book.title')
+  if [[ "$resolved_title" == "$marker" ]]; then
+    ok "resolved DTO has the expected title"
+  else
+    ko "title mismatch (got '$resolved_title', expected '$marker')"
+  fi
+
+  # Save values for scenario 3b below.
+  upsert_cursor=$new_cursor
+  upsert_book_id=$book_id
+fi
+
+# ---- scenario 3b: DELETE -> delta tombstone --------------------------------
+
+section "3b. Deleting a book yields a delete tombstone in the next delta"
+if [[ -z "$DB_PATH" || -z "${upsert_book_id:-}" ]]; then
+  skip "scenario 3 did not run or was skipped"
+else
+  sqlite3 "$DB_PATH" "DELETE FROM books WHERE id=$upsert_book_id;"
+  sqlite3 "$DB_PATH" "INSERT INTO operation_log (entity_type, entity_id, operation, source, status, created_at) VALUES ('book', $upsert_book_id, 'DELETE', 'local', 'applied', datetime('now'));"
+  ok "deleted book $upsert_book_id + logged DELETE op"
+
+  del_body=$(curl -sS "$BASE_URL/api/books?since=$upsert_cursor")
+  del_count=$(echo "$del_body" | jq '.operations | length')
+  if [[ "$del_count" == "1" ]]; then
+    ok "delta window contains 1 operation"
+  else
+    ko "expected 1 op, got $del_count"
+  fi
+
+  op_kind=$(echo "$del_body" | jq -r '.operations[0].op')
+  op_id=$(echo "$del_body" | jq -r '.operations[0].book_id')
+  if [[ "$op_kind" == "delete" && "$op_id" == "$upsert_book_id" ]]; then
+    ok "tombstone matches (op=delete, book_id=$op_id)"
+  else
+    ko "tombstone mismatch (op=$op_kind, book_id=$op_id)"
+  fi
 fi
 
 # ---- scenario 4: stale cursor -> 410 Gone ----------------------------------
