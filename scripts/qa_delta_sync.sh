@@ -23,6 +23,28 @@
 
 set -u
 
+# Auto-detect the backend port from the file the Rust binary writes on
+# startup. Layout mirrors `src/main.rs::get_port_file_path`:
+#   macOS: ~/Library/Caches/BiblioGenius/backend_port.txt
+#   Linux: ~/.cache/bibliogenius/backend_port.txt
+# The env override still wins when set.
+detect_port_file() {
+  case "$(uname -s)" in
+    Darwin) echo "$HOME/Library/Caches/BiblioGenius/backend_port.txt" ;;
+    Linux)  echo "$HOME/.cache/bibliogenius/backend_port.txt" ;;
+    *)      echo "" ;;
+  esac
+}
+
+if [[ -z "${BASE_URL:-}" ]]; then
+  port_file=$(detect_port_file)
+  if [[ -n "$port_file" && -r "$port_file" ]]; then
+    port=$(tr -d '[:space:]' < "$port_file")
+    if [[ -n "$port" ]]; then
+      BASE_URL="http://localhost:$port"
+    fi
+  fi
+fi
 BASE_URL="${BASE_URL:-http://localhost:8000}"
 DB_PATH="${DB_PATH:-}"
 
@@ -71,7 +93,7 @@ need curl
 need jq
 info "BASE_URL=$BASE_URL"
 
-status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$BASE_URL/api/books?limit=1" || echo 000)
+status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$BASE_URL/api/books?limit=1" 2>/dev/null) || status=000
 if [[ "$status" != "200" ]]; then
   ko "backend unreachable (status $status). Start the Rust server first."
   exit 1
