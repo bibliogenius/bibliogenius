@@ -133,6 +133,9 @@ async fn main() {
         rust_lib_app::sync::processor::run_processor(processor_db).await;
     });
 
+    // [Delta sync] Hybrid retention pruner for operation_log (ADR-028 D5).
+    rust_lib_app::services::oplog_pruner::spawn(db.clone());
+
     // Build API router with explicit AppState (needed for relay poller)
     let state = rust_lib_app::infrastructure::AppState::new(db);
     let api_router = api::api_router_with_state(state.clone());

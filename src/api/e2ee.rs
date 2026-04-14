@@ -203,6 +203,7 @@ pub fn build_known_peers_with_devices(
             avatar_config: None,
             catalog_hash: None,
             last_catalog_sync: None,
+            last_delta_cursor: None,
             created_at: d.created_at.clone(),
             updated_at: d.created_at.clone(),
         });

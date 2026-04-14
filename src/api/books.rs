@@ -23,7 +23,17 @@ pub struct BookFilter {
     /// When true, only return books the user owns (excludes borrowed/wishlist).
     /// Used by peers to avoid exposing non-owned books.
     pub owned_only: Option<bool>,
+    /// Delta sync cursor (ADR-028). When set, the endpoint returns the
+    /// operations applied since this `operation_log.id` instead of the
+    /// full catalog. Absent means full catalog (ETag-equipped) as before.
+    pub since: Option<i64>,
 }
+
+/// Default raw-row scan budget for one delta window. Collapsed output is
+/// usually smaller. The hard cap (max parameter the client may pass) is
+/// kept conservative to bound worst-case memory.
+const DELTA_DEFAULT_LIMIT: i64 = 500;
+const DELTA_MAX_LIMIT: i64 = 2000;
 
 #[utoipa::path(
     get,
@@ -48,6 +58,13 @@ pub async fn list_books(
     headers: axum::http::HeaderMap,
     claims: Option<crate::auth::Claims>,
 ) -> Result<Response, StatusCode> {
+    // Delta sync branch (ADR-028). Routed before the full-catalog code path
+    // so the existing ETag / 304 contract stays unchanged when `?since=`
+    // is absent.
+    if let Some(since) = filter.since {
+        return list_books_delta(state, filter, since, claims).await;
+    }
+
     tracing::info!(
         "List books request - Filters: status={:?}, title={:?}, tag={:?}",
         filter.status,
@@ -131,6 +148,14 @@ pub async fn list_books(
     // `utils/etag.rs` for the shared hash helpers.
     let etag = crate::utils::etag::strong_etag(&body);
 
+    // Companion cursor header so a peer that just performed a full GET can
+    // adopt a starting cursor for the next pull (ADR-028). Lives in the
+    // header — not the body — so it does not invalidate the ETag when the
+    // catalog itself is unchanged but unrelated operations advanced the log.
+    let cursor_value = crate::services::delta_service::oldest_or_latest_cursor(state.db())
+        .await
+        .unwrap_or(0);
+
     if let Some(inm) = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
@@ -139,6 +164,7 @@ pub async fn list_books(
         return Ok(Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(header::ETAG, &etag)
+            .header("x-catalog-cursor", cursor_value.to_string())
             .body(axum::body::Body::empty())
             .unwrap());
     }
@@ -147,6 +173,107 @@ pub async fn list_books(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ETAG, &etag)
+        .header("x-catalog-cursor", cursor_value.to_string())
+        .body(axum::body::Body::from(body))
+        .unwrap())
+}
+
+/// Delta sync handler for `GET /api/books?since=<cursor>` (ADR-028).
+///
+/// Resolves operation_log rows into the book DTOs the peer would have seen
+/// from the full endpoint, applying the same E1 privacy pipeline (filter
+/// `private = true` for non-owner callers, `redact_for_peer` on survivors).
+/// Returns `410 Gone` when the cursor is older than the oldest retained log
+/// row so the client can fall back to a full GET.
+async fn list_books_delta(
+    state: crate::infrastructure::AppState,
+    filter: BookFilter,
+    since: i64,
+    claims: Option<crate::auth::Claims>,
+) -> Result<Response, StatusCode> {
+    use crate::services::delta_service::{self, DeltaOp};
+
+    let is_owner = claims.is_some();
+    let limit = filter
+        .limit
+        .map(|n| (n as i64).clamp(1, DELTA_MAX_LIMIT))
+        .unwrap_or(DELTA_DEFAULT_LIMIT);
+
+    let window = delta_service::fetch_delta(state.db(), "book", Some(since), limit)
+        .await
+        .map_err(|e| {
+            tracing::error!("delta_service: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if window.reset_required {
+        let oldest = delta_service::oldest_retained_cursor(state.db())
+            .await
+            .map_err(|e| {
+                tracing::error!("oldest_retained_cursor: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .unwrap_or(0);
+        let body = serde_json::to_vec(&json!({
+            "error": "cursor_too_old",
+            "oldest_available_cursor": oldest,
+            "hint": "Perform a full GET /api/books to rebuild state.",
+        }))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(Response::builder()
+            .status(StatusCode::GONE)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap());
+    }
+
+    let mut operations: Vec<serde_json::Value> = Vec::with_capacity(window.operations.len());
+    for op in &window.operations {
+        match op.op {
+            DeltaOp::Delete => {
+                operations.push(json!({ "op": "delete", "book_id": op.entity_id }));
+            }
+            DeltaOp::Upsert => {
+                let resolved = state
+                    .book_repo
+                    .find_by_id(op.entity_id)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("delta resolve book {}: {e}", op.entity_id);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?;
+                let Some(mut book) = resolved else {
+                    // Book existed at log time but has since been hard-deleted
+                    // outside the log (rare). Skip silently — the peer cannot
+                    // act on a row that no longer exists.
+                    continue;
+                };
+                if !is_owner {
+                    if book.private.unwrap_or(false) {
+                        // Per ADR-028 D6: omit operations whose current state
+                        // is private rather than leak the id via a tombstone.
+                        continue;
+                    }
+                    book.redact_for_peer();
+                }
+                let mut wrap = vec![book];
+                Book::rewrite_local_cover_urls(&mut wrap, None);
+                let book = wrap.into_iter().next().unwrap();
+                operations.push(json!({ "op": "upsert", "book": book }));
+            }
+        }
+    }
+
+    let body = serde_json::to_vec(&json!({
+        "operations": operations,
+        "latest_cursor": window.latest_cursor,
+        "has_more": window.has_more,
+    }))
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
         .body(axum::body::Body::from(body))
         .unwrap())
 }

@@ -8,6 +8,7 @@ pub mod catalog_events;
 pub mod catalog_notification;
 pub mod contact_service;
 pub mod crypto_service;
+pub mod delta_service;
 pub mod device_pairing_service;
 pub mod device_sync_service;
 pub mod e2ee_transport;
@@ -20,6 +21,7 @@ pub mod lookup_service;
 pub mod mdns;
 pub mod notification_service;
 pub mod nudge_events;
+pub mod oplog_pruner;
 pub mod relay_poller;
 pub mod relay_transport;
 pub mod sale_service; // Service de vente pour profil Libraire

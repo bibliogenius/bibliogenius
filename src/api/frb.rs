@@ -1889,6 +1889,9 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                     crate::sync::processor::run_processor(processor_db).await;
                 });
 
+                // Spawn delta sync retention pruner (ADR-028 D5)
+                crate::services::oplog_pruner::spawn(state.db().clone());
+
                 let api = crate::api::api_router_with_state(state);
                 // Allow CORS for all origins/methods/headers for P2P ease
                 let cors = CorsLayer::new()

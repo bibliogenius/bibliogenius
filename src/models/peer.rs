@@ -39,6 +39,10 @@ pub struct Model {
     pub last_catalog_sync: Option<String>,
     /// JSON avatar configuration from the remote peer's profile
     pub avatar_config: Option<String>,
+    /// Last `operation_log.id` we successfully applied from this peer
+    /// (ADR-028 delta sync). NULL means no successful sync yet — the next
+    /// pull will be a full GET.
+    pub last_delta_cursor: Option<i32>,
     pub created_at: String,
     pub updated_at: String,
 }

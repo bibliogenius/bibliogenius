@@ -1666,6 +1666,29 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
+    // Migration 069: Composite index on operation_log(entity_type, id).
+    // Backs the delta sync endpoint (ADR-028): every peer pull issues a
+    // `WHERE entity_type = ? AND id > ? ORDER BY id` query that would
+    // otherwise scan the full log as it grows past the 90-day / 10k-row
+    // retention floor.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE INDEX IF NOT EXISTS idx_operation_log_entity_id ON operation_log(entity_type, id)".to_owned(),
+        ))
+        .await;
+
+    // Migration 070: Per-peer delta sync cursor (ADR-028). Stores the last
+    // `operation_log.id` we successfully applied from this peer, used as
+    // `?since=<cursor>` on the next pull. NULL means "no successful sync
+    // yet" — the next pull will be a full GET.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peers ADD COLUMN last_delta_cursor INTEGER".to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

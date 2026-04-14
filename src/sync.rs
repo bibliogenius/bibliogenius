@@ -5,8 +5,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Maximum number of regular (non-pinned) operation log entries to keep.
 /// Configurable at runtime via `set_max_operation_log_entries`.
-/// Default: 500 entries.
-static MAX_LOG_ENTRIES: AtomicU32 = AtomicU32::new(500);
+///
+/// Default: 100_000 entries. The legacy inline pruner now serves as a
+/// runaway safety net only — actual retention is enforced by
+/// `crate::services::oplog_pruner` (ADR-028 D5: max(90 days, 10k rows)).
+/// Lowering this via `set_max_operation_log_entries` is still supported
+/// for tests that exercise the inline pruner path.
+static MAX_LOG_ENTRIES: AtomicU32 = AtomicU32::new(100_000);
 
 /// Maximum number of pinned milestone entries.
 /// Protects against unbounded growth even for milestones.

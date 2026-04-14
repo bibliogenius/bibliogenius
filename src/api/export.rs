@@ -447,6 +447,7 @@ pub async fn import_data(
                 avatar_config: Set(None),
                 catalog_hash: Set(None),
                 last_catalog_sync: Set(None),
+                last_delta_cursor: Set(None),
                 created_at: Set(p.created_at),
                 updated_at: Set(now.clone()),
             };
