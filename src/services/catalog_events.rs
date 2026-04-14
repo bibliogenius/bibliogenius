@@ -21,6 +21,11 @@ const CHANNEL_CAPACITY: usize = 16;
 /// `peer_library_uuid` is the remote peer's library UUID (from the message
 /// payload). `peer_id` is the local SQLite row ID for that peer.
 /// Either field can be used for matching on the Flutter side.
+///
+/// `delta_applied`: always `false` at emit time today — reserved for a
+/// future auto-trigger pathway (ADR-029 IN11). Flutter currently drives
+/// the delta attempt via `try_peer_catalog_delta` after receiving this
+/// event and decides the fallback itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogChangedEvent {
     /// The peer's library UUID as sent in the `catalog_changed` payload.
@@ -28,6 +33,9 @@ pub struct CatalogChangedEvent {
     pub peer_library_uuid: String,
     /// Local peer row ID (from the `peers` table). Zero if lookup failed.
     pub peer_id: i32,
+    /// True when the Rust side already applied a delta window before
+    /// emitting (ADR-029, reserved for future auto-trigger).
+    pub delta_applied: bool,
 }
 
 /// Process-wide catalog-change event bus.
@@ -68,6 +76,7 @@ mod tests {
         CatalogChangedEvent {
             peer_library_uuid: uuid.to_string(),
             peer_id,
+            delta_applied: false,
         }
     }
 

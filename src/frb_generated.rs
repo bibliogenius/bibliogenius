@@ -26,7 +26,7 @@
 // Section: imports
 
 use flutter_rust_bridge::for_generated::byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
-use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
+use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
 use flutter_rust_bridge::{Handler, IntoIntoDart};
 
 // Section: boilerplate
@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1309149498;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 666946554;
 
 // Section: executor
 
@@ -5556,6 +5556,44 @@ fn wire__crate__api__frb__subscribe_relay_nudges_impl(
         },
     )
 }
+fn wire__crate__api__frb__try_peer_catalog_delta_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "try_peer_catalog_delta",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_peer_id = <i32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let output_ok = Result::<_, ()>::Ok(
+                            crate::api::frb::try_peer_catalog_delta(api_peer_id).await,
+                        )?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__frb__update_book_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -6003,9 +6041,11 @@ impl SseDecode for crate::api::frb::FrbCatalogChangedEvent {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_peerLibraryUuid = <String>::sse_decode(deserializer);
         let mut var_peerId = <i32>::sse_decode(deserializer);
+        let mut var_deltaApplied = <bool>::sse_decode(deserializer);
         return crate::api::frb::FrbCatalogChangedEvent {
             peer_library_uuid: var_peerLibraryUuid,
             peer_id: var_peerId,
+            delta_applied: var_deltaApplied,
         };
     }
 }
@@ -7845,17 +7885,20 @@ fn pde_ffi_dispatcher_primary_impl(
         149 => {
             wire__crate__api__frb__subscribe_relay_nudges_impl(port, ptr, rust_vec_len, data_len)
         }
-        150 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
-        151 => {
+        150 => {
+            wire__crate__api__frb__try_peer_catalog_delta_impl(port, ptr, rust_vec_len, data_len)
+        }
+        151 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
+        152 => {
             wire__crate__api__frb__update_book_collections_impl(port, ptr, rust_vec_len, data_len)
         }
-        152 => wire__crate__api__frb__update_book_note_impl(port, ptr, rust_vec_len, data_len),
-        153 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
-        154 => {
+        153 => wire__crate__api__frb__update_book_note_impl(port, ptr, rust_vec_len, data_len),
+        154 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
+        155 => {
             wire__crate__api__frb__update_library_name_ffi_impl(port, ptr, rust_vec_len, data_len)
         }
-        155 => wire__crate__api__frb__update_loan_settings_impl(port, ptr, rust_vec_len, data_len),
-        156 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
+        156 => wire__crate__api__frb__update_loan_settings_impl(port, ptr, rust_vec_len, data_len),
+        157 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -7969,6 +8012,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbCatalogChangedEvent {
         [
             self.peer_library_uuid.into_into_dart().into_dart(),
             self.peer_id.into_into_dart().into_dart(),
+            self.delta_applied.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -9147,6 +9191,7 @@ impl SseEncode for crate::api::frb::FrbCatalogChangedEvent {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.peer_library_uuid, serializer);
         <i32>::sse_encode(self.peer_id, serializer);
+        <bool>::sse_encode(self.delta_applied, serializer);
     }
 }
 
@@ -10140,7 +10185,7 @@ mod io {
     use flutter_rust_bridge::for_generated::byteorder::{
         NativeEndian, ReadBytesExt, WriteBytesExt,
     };
-    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
+    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate
@@ -10164,7 +10209,7 @@ mod web {
     };
     use flutter_rust_bridge::for_generated::wasm_bindgen;
     use flutter_rust_bridge::for_generated::wasm_bindgen::prelude::*;
-    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
+    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate

@@ -1996,6 +1996,12 @@ pub struct FrbCatalogChangedEvent {
     pub peer_library_uuid: String,
     /// Local peer row ID from the `peers` table. Zero if the lookup failed.
     pub peer_id: i32,
+    /// True when the Rust side already applied a delta window to
+    /// `peer_books` before emitting this event (ADR-029). Flutter should
+    /// skip the legacy `relay_library_request("manifest")` full-catalog
+    /// pull and simply re-read the local cache. False when the delta path
+    /// was not taken and the legacy flow must run.
+    pub delta_applied: bool,
 }
 
 fn nudge_source_label(source: crate::services::nudge_events::NudgeSource) -> String {
@@ -2027,6 +2033,50 @@ fn nudge_source_label(source: crate::services::nudge_events::NudgeSource) -> Str
 /// concurrent subscribers each receive their own independent copy of every
 /// event (broadcast semantics). A slow subscriber lags without blocking
 /// the emitter.
+/// Attempt a delta sync against a peer via E2EE (ADR-029).
+///
+/// Returns `true` when a delta window was successfully fetched and applied
+/// to `peer_books` — the caller should SKIP the legacy
+/// `relay_library_request("manifest")` loop and simply re-read the local
+/// cache. Returns `false` on any non-applied outcome
+/// (`ResetRequired`, `FallbackRequired`, `E2eeUnavailable`, transport
+/// error) — the caller should run the legacy full-catalog flow as before.
+///
+/// Designed to be called from the Flutter `subscribe_catalog_changes`
+/// handler before triggering a full sync, so the delta path replaces the
+/// full pull whenever it succeeds.
+pub async fn try_peer_catalog_delta(peer_id: i32) -> bool {
+    use crate::services::peer_delta_sync::{self, DeltaSyncOutcome};
+
+    let Some(state) = global_app_state() else {
+        tracing::warn!("try_peer_catalog_delta: AppState not initialized");
+        return false;
+    };
+
+    match peer_delta_sync::fetch_and_apply_peer_delta(state, peer_id).await {
+        Ok(DeltaSyncOutcome::Applied {
+            operations_applied,
+            latest_cursor,
+            has_more,
+        }) => {
+            tracing::info!(
+                "ADR-029 delta: peer {peer_id} applied={operations_applied} cursor={latest_cursor} has_more={has_more}"
+            );
+            true
+        }
+        Ok(outcome) => {
+            tracing::info!(
+                "ADR-029 delta: peer {peer_id} non-applied ({outcome:?}), caller should fall back"
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!("ADR-029 delta: peer {peer_id} transport error: {e}");
+            false
+        }
+    }
+}
+
 pub async fn subscribe_catalog_changes(
     sink: crate::frb_generated::StreamSink<FrbCatalogChangedEvent>,
 ) -> Result<(), String> {
@@ -2039,6 +2089,7 @@ pub async fn subscribe_catalog_changes(
                     let frb_event = FrbCatalogChangedEvent {
                         peer_library_uuid: event.peer_library_uuid,
                         peer_id: event.peer_id,
+                        delta_applied: event.delta_applied,
                     };
                     if sink.add(frb_event).is_err() {
                         tracing::debug!(

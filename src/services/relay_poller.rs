@@ -415,6 +415,12 @@ async fn process_relay_message(
     // Handle catalog-changed notifications (peer added or removed a book).
     // Fire-and-forget: emit on the catalog event bus so Flutter screens
     // subscribed via `subscribe_catalog_changes()` can trigger a re-sync.
+    //
+    // ADR-029: the delta attempt is driven Flutter-side via the
+    // `try_peer_catalog_delta` FRB binding. Keeping the trigger there rather
+    // than spawning inside the poller avoids propagating `Send` bounds into
+    // the `process_relay_message` future and keeps a single owner of the
+    // "delta then fallback" decision.
     if clear_message.message_type == "catalog_changed" {
         let peer_library_uuid = clear_message
             .payload
@@ -431,6 +437,11 @@ async fn process_relay_message(
         catalog_events::bus().emit(CatalogChangedEvent {
             peer_library_uuid,
             peer_id: sender_peer.id,
+            // `delta_applied` is always false at emit time — the Flutter
+            // handler calls `try_peer_catalog_delta` and branches on its
+            // return value. This field is reserved for a future auto-trigger
+            // pathway (see ADR-029 IN11).
+            delta_applied: false,
         });
         return Ok(());
     }
