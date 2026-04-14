@@ -87,6 +87,45 @@ pub fn validate_url(url_str: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
+/// Ensure `url` refers to a peer already registered in the local DB.
+///
+/// SSRF defense for peer-proxy endpoints: validate_url() blocks loopback and
+/// link-local, but RFC1918 ranges are allowed for LAN peer discovery. Without
+/// this second check, a caller could proxy through cover_proxy to probe any
+/// service reachable on the local network (router admin, NAS, printers).
+/// Requiring a DB match constrains peer_url to URLs vetted by the user via
+/// pairing.
+///
+/// Matches both trailing-slash variants because peer URLs are stored raw
+/// (not normalized) at pairing time.
+pub async fn ensure_registered_peer(
+    db: &DatabaseConnection,
+    url: &str,
+) -> Result<peer::Model, StatusCode> {
+    let trimmed = url.trim_end_matches('/').to_string();
+    let with_slash = format!("{trimmed}/");
+    let found = peer::Entity::find()
+        .filter(
+            Condition::any()
+                .add(peer::Column::Url.eq(&trimmed))
+                .add(peer::Column::Url.eq(&with_slash)),
+        )
+        .one(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match found {
+        Some(p) => Ok(p),
+        None => {
+            let safe: String = url.chars().take(128).collect();
+            tracing::warn!(
+                target: "ssrf",
+                "peer-proxy rejected: peer not registered (url={safe})"
+            );
+            Err(StatusCode::FORBIDDEN)
+        }
+    }
+}
+
 /// Create a safe HTTP client with restricted redirects and timeouts
 pub(crate) fn get_safe_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -109,9 +148,11 @@ pub struct CoverProxyQuery {
 /// Flutter does not make direct HTTP calls to the peer (which fail on
 /// iOS/macOS due to firewall, ATS, or NAT issues).
 pub async fn cover_proxy(
+    State(db): State<DatabaseConnection>,
     axum::extract::Query(params): axum::extract::Query<CoverProxyQuery>,
 ) -> Result<axum::response::Response, StatusCode> {
     let peer_url = validate_url(&params.peer_url).map_err(|_| StatusCode::BAD_REQUEST)?;
+    ensure_registered_peer(&db, &peer_url).await?;
     let peer_url = peer_url.trim_end_matches('/');
     let url = format!("{}/api/books/{}/cover", peer_url, params.book_id);
 
