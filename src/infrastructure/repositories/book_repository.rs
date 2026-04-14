@@ -21,6 +21,19 @@ impl SeaOrmBookRepository {
     }
 }
 
+/// Treat whitespace-only / empty ISBN strings as "no ISBN". Storing `""`
+/// breaks dedup queries that assume a single canonical "missing" value.
+fn normalize_isbn(isbn: Option<String>) -> Option<String> {
+    isbn.and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 #[async_trait]
 impl BookRepository for SeaOrmBookRepository {
     async fn find_all(&self, filter: BookFilter) -> Result<PaginatedBooks, DomainError> {
@@ -127,7 +140,7 @@ impl BookRepository for SeaOrmBookRepository {
 
         let new_book = ActiveModel {
             title: Set(book.title.clone()),
-            isbn: Set(book.isbn),
+            isbn: Set(normalize_isbn(book.isbn)),
             summary: Set(book.summary),
             publisher: Set(book.publisher),
             publication_year: Set(book.publication_year),
@@ -176,7 +189,7 @@ impl BookRepository for SeaOrmBookRepository {
 
         let mut active: ActiveModel = existing.into();
         active.title = Set(book.title);
-        active.isbn = Set(book.isbn);
+        active.isbn = Set(normalize_isbn(book.isbn));
         active.summary = Set(book.summary);
         active.publisher = Set(book.publisher);
         active.publication_year = Set(book.publication_year);

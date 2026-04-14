@@ -9,7 +9,7 @@ pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     Ok(db)
 }
 
-pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
+pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // Create books table (new schema without author field)
     db.execute(Statement::from_string(
         db.get_database_backend(),
@@ -1305,9 +1305,20 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
     // (copies, collection_books, book_authors, book_tags) to the kept entry,
     // then deletes the duplicate rows.
     //
-    // The subquery pattern:
-    //   "duplicate ids" = books whose isbn appears more than once AND whose id
-    //   is NOT the MIN(id) for that isbn.
+    // Books without an ISBN (NULL or empty string) are NEVER considered
+    // duplicates of each other — ISBN is optional (self-published, rare,
+    // ancient, personal publications) and grouping by empty ISBN would
+    // silently delete legitimately distinct books. Every query below must
+    // filter `isbn IS NOT NULL AND isbn <> ''`.
+    //
+    // First, normalise any legacy rows where `isbn = ''` to NULL so the
+    // SeaORM layer and all subsequent queries see a single "no ISBN" value.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "UPDATE books SET isbn = NULL WHERE isbn IS NOT NULL AND trim(isbn) = ''".to_owned(),
+        ))
+        .await;
 
     // Reassign copies to the kept book
     let _ = db
@@ -1317,14 +1328,15 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
             UPDATE copies SET book_id = (
                 SELECT MIN(b2.id) FROM books b2
                 WHERE b2.isbn = (SELECT isbn FROM books WHERE id = copies.book_id)
-                  AND b2.isbn IS NOT NULL
+                  AND b2.isbn IS NOT NULL AND b2.isbn <> ''
             )
             WHERE book_id IN (
                 SELECT id FROM books WHERE isbn IN (
-                    SELECT isbn FROM books WHERE isbn IS NOT NULL
+                    SELECT isbn FROM books WHERE isbn IS NOT NULL AND isbn <> ''
                     GROUP BY isbn HAVING COUNT(*) > 1
                 ) AND id NOT IN (
-                    SELECT MIN(id) FROM books WHERE isbn IS NOT NULL GROUP BY isbn
+                    SELECT MIN(id) FROM books
+                    WHERE isbn IS NOT NULL AND isbn <> '' GROUP BY isbn
                 )
             )
             "#
@@ -1340,14 +1352,15 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
             UPDATE collection_books SET book_id = (
                 SELECT MIN(b2.id) FROM books b2
                 WHERE b2.isbn = (SELECT isbn FROM books WHERE id = collection_books.book_id)
-                  AND b2.isbn IS NOT NULL
+                  AND b2.isbn IS NOT NULL AND b2.isbn <> ''
             )
             WHERE book_id IN (
                 SELECT id FROM books WHERE isbn IN (
-                    SELECT isbn FROM books WHERE isbn IS NOT NULL
+                    SELECT isbn FROM books WHERE isbn IS NOT NULL AND isbn <> ''
                     GROUP BY isbn HAVING COUNT(*) > 1
                 ) AND id NOT IN (
-                    SELECT MIN(id) FROM books WHERE isbn IS NOT NULL GROUP BY isbn
+                    SELECT MIN(id) FROM books
+                    WHERE isbn IS NOT NULL AND isbn <> '' GROUP BY isbn
                 )
             )
             "#
@@ -1363,15 +1376,16 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
             INSERT OR IGNORE INTO book_authors (book_id, author_id)
             SELECT (SELECT MIN(b2.id) FROM books b2
                     WHERE b2.isbn = (SELECT isbn FROM books WHERE id = book_authors.book_id)
-                      AND b2.isbn IS NOT NULL),
+                      AND b2.isbn IS NOT NULL AND b2.isbn <> ''),
                    author_id
             FROM book_authors
             WHERE book_id IN (
                 SELECT id FROM books WHERE isbn IN (
-                    SELECT isbn FROM books WHERE isbn IS NOT NULL
+                    SELECT isbn FROM books WHERE isbn IS NOT NULL AND isbn <> ''
                     GROUP BY isbn HAVING COUNT(*) > 1
                 ) AND id NOT IN (
-                    SELECT MIN(id) FROM books WHERE isbn IS NOT NULL GROUP BY isbn
+                    SELECT MIN(id) FROM books
+                    WHERE isbn IS NOT NULL AND isbn <> '' GROUP BY isbn
                 )
             )
             "#
@@ -1384,10 +1398,11 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
             r#"
             DELETE FROM book_authors WHERE book_id IN (
                 SELECT id FROM books WHERE isbn IN (
-                    SELECT isbn FROM books WHERE isbn IS NOT NULL
+                    SELECT isbn FROM books WHERE isbn IS NOT NULL AND isbn <> ''
                     GROUP BY isbn HAVING COUNT(*) > 1
                 ) AND id NOT IN (
-                    SELECT MIN(id) FROM books WHERE isbn IS NOT NULL GROUP BY isbn
+                    SELECT MIN(id) FROM books
+                    WHERE isbn IS NOT NULL AND isbn <> '' GROUP BY isbn
                 )
             )
             "#
@@ -1403,15 +1418,16 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
             INSERT OR IGNORE INTO book_tags (book_id, tag_id)
             SELECT (SELECT MIN(b2.id) FROM books b2
                     WHERE b2.isbn = (SELECT isbn FROM books WHERE id = book_tags.book_id)
-                      AND b2.isbn IS NOT NULL),
+                      AND b2.isbn IS NOT NULL AND b2.isbn <> ''),
                    tag_id
             FROM book_tags
             WHERE book_id IN (
                 SELECT id FROM books WHERE isbn IN (
-                    SELECT isbn FROM books WHERE isbn IS NOT NULL
+                    SELECT isbn FROM books WHERE isbn IS NOT NULL AND isbn <> ''
                     GROUP BY isbn HAVING COUNT(*) > 1
                 ) AND id NOT IN (
-                    SELECT MIN(id) FROM books WHERE isbn IS NOT NULL GROUP BY isbn
+                    SELECT MIN(id) FROM books
+                    WHERE isbn IS NOT NULL AND isbn <> '' GROUP BY isbn
                 )
             )
             "#
@@ -1424,10 +1440,11 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
             r#"
             DELETE FROM book_tags WHERE book_id IN (
                 SELECT id FROM books WHERE isbn IN (
-                    SELECT isbn FROM books WHERE isbn IS NOT NULL
+                    SELECT isbn FROM books WHERE isbn IS NOT NULL AND isbn <> ''
                     GROUP BY isbn HAVING COUNT(*) > 1
                 ) AND id NOT IN (
-                    SELECT MIN(id) FROM books WHERE isbn IS NOT NULL GROUP BY isbn
+                    SELECT MIN(id) FROM books
+                    WHERE isbn IS NOT NULL AND isbn <> '' GROUP BY isbn
                 )
             )
             "#
@@ -1448,13 +1465,17 @@ pub(crate) async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr>
         ))
         .await;
 
-    // Delete the duplicate book rows (keep oldest per ISBN)
+    // Delete the duplicate book rows (keep oldest per ISBN). The
+    // `isbn <> ''` guard is load-bearing: without it, SQLite treats every
+    // ISBN-less row as belonging to the same group and silently deletes all
+    // but one on every app start.
     let _ = db
         .execute(Statement::from_string(
             db.get_database_backend(),
             r#"
-            DELETE FROM books WHERE isbn IS NOT NULL AND id NOT IN (
-                SELECT MIN(id) FROM books GROUP BY isbn
+            DELETE FROM books WHERE isbn IS NOT NULL AND isbn <> '' AND id NOT IN (
+                SELECT MIN(id) FROM books
+                WHERE isbn IS NOT NULL AND isbn <> '' GROUP BY isbn
             )
             "#
             .to_owned(),
