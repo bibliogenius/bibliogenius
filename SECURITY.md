@@ -44,15 +44,26 @@ The `/api/setup` endpoint defaults to `admin:admin` when credentials are not pro
 
 ### 3. SSRF in P2P
 
-**Severity**: Low (Mitigated)
-**Location**: `src/api/peer.rs` (`connect`, `proxy_search`)
+**Severity**: Low (Mitigated — two-tier defense)
+**Location**: `src/api/peer.rs` (`cover_proxy`, `proxy_search`, `request_book_by_url`, `connect`)
 
-URL validation now blocks loopback, link-local, and cloud metadata addresses. Redirects are disabled.
+Peer-proxy endpoints apply three layers of defense before making any outgoing HTTP call driven by a caller-provided URL:
+
+1. **`validate_url`** — rejects non-HTTP(S) schemes, loopback, link-local (including 169.254.169.254 AWS metadata), multicast, unspecified, and broadcast addresses. RFC1918 ranges remain allowed for LAN peer discovery.
+2. **`ensure_registered_peer`** (strict) — requires the URL to match a row in the `peers` table. Used by `cover_proxy`, which fetches arbitrary binary payloads and cannot afford a permissive fallback.
+3. **`ensure_registered_peer_or_mdns`** (strict-or-mDNS) — used by `proxy_search` and `request_book_by_url` with `allow_unregistered_lan=true`. Unknown URLs are allowed through but logged on the `ssrf:mdns` tracing target for audit. This preserves the product UX "preview a neighbor's library before pairing". Rationale and tradeoffs: see `bibliogenius-docs/docs/technical/adr/ADR-026-ssrf-mdns-fallback.md`.
+
+All peer-proxy endpoints also use `get_safe_client` (timeout 5s, redirects disabled).
+
+`connect` and `setup_relay` are pairing/registration boundaries and legitimately accept URLs from payloads; they are not peer-proxy endpoints.
 
 **Mitigation**:
 
-- [x] Blocked dangerous IP ranges via `validate_url`.
-- [x] `get_safe_client` disables redirects.
+- [x] `validate_url` blocks dangerous IP ranges.
+- [x] `get_safe_client` disables redirects and enforces a 5s timeout.
+- [x] `ensure_registered_peer` (strict): cover_proxy rejects unknown URLs with 403.
+- [x] `ensure_registered_peer_or_mdns` (audited fallback): proxy_search and request_book_by_url log every mDNS traversal on `ssrf:mdns`.
+- [ ] TOFU on `receive_loan_request` / `receive_connection_request` (ticket F-ter, deferred post-E): unauthenticated payload can still pre-register an arbitrary URL in the `peers` table, which would defeat `ensure_registered_peer`. Expected to close naturally once ticket E introduces peer-facing authentication.
 
 ---
 

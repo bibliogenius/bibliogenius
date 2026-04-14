@@ -87,7 +87,27 @@ pub fn validate_url(url_str: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
-/// Ensure `url` refers to a peer already registered in the local DB.
+/// Look up a peer by URL, tolerating the trailing-slash discrepancy between
+/// how URLs are stored at pairing time (raw, un-normalized) and how they are
+/// presented by callers (sometimes slash, sometimes not).
+async fn find_peer_by_url(
+    db: &DatabaseConnection,
+    url: &str,
+) -> Result<Option<peer::Model>, StatusCode> {
+    let trimmed = url.trim_end_matches('/').to_string();
+    let with_slash = format!("{trimmed}/");
+    peer::Entity::find()
+        .filter(
+            Condition::any()
+                .add(peer::Column::Url.eq(&trimmed))
+                .add(peer::Column::Url.eq(&with_slash)),
+        )
+        .one(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Ensure `url` refers to a peer already registered in the local DB — strict.
 ///
 /// SSRF defense for peer-proxy endpoints: validate_url() blocks loopback and
 /// link-local, but RFC1918 ranges are allowed for LAN peer discovery. Without
@@ -96,32 +116,60 @@ pub fn validate_url(url_str: &str) -> Result<String, String> {
 /// Requiring a DB match constrains peer_url to URLs vetted by the user via
 /// pairing.
 ///
-/// Matches both trailing-slash variants because peer URLs are stored raw
-/// (not normalized) at pairing time.
+/// Use this variant for endpoints that have no legitimate "unsaved mDNS peer"
+/// flow (e.g. cover_proxy, which fetches binary payloads from a URL that must
+/// be user-approved). For endpoints with a legitimate mDNS fallback (browse a
+/// neighbor's library before pairing), use `ensure_registered_peer_or_mdns`.
 pub async fn ensure_registered_peer(
     db: &DatabaseConnection,
     url: &str,
 ) -> Result<peer::Model, StatusCode> {
-    let trimmed = url.trim_end_matches('/').to_string();
-    let with_slash = format!("{trimmed}/");
-    let found = peer::Entity::find()
-        .filter(
-            Condition::any()
-                .add(peer::Column::Url.eq(&trimmed))
-                .add(peer::Column::Url.eq(&with_slash)),
-        )
-        .one(db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    match found {
+    match ensure_registered_peer_or_mdns(db, url, false).await? {
         Some(p) => Ok(p),
         None => {
-            let safe: String = url.chars().take(128).collect();
-            tracing::warn!(
-                target: "ssrf",
-                "peer-proxy rejected: peer not registered (url={safe})"
-            );
+            // Unreachable: allow_unregistered_lan=false forces Err on absent.
             Err(StatusCode::FORBIDDEN)
+        }
+    }
+}
+
+/// Ensure `url` refers to a peer already registered, with optional mDNS
+/// fallback for endpoints that must accept unsaved LAN peers (ADR-026).
+///
+/// Returns:
+/// - `Ok(Some(peer))` when the URL matches a registered peer row.
+/// - `Ok(None)` when the URL is unknown AND `allow_unregistered_lan=true`.
+///   A `warn!(target = "ssrf:mdns", ...)` entry is emitted so the audit
+///   trail captures every fallback traversal.
+/// - `Err(StatusCode::FORBIDDEN)` when the URL is unknown AND
+///   `allow_unregistered_lan=false` (strict mode, matches the original
+///   `ensure_registered_peer` contract).
+///
+/// Callers receiving `Ok(None)` MUST treat the peer as untrusted: skip
+/// outgoing-request tracking, cache enrichment, and any operation that
+/// relies on a stable peer identity.
+pub async fn ensure_registered_peer_or_mdns(
+    db: &DatabaseConnection,
+    url: &str,
+    allow_unregistered_lan: bool,
+) -> Result<Option<peer::Model>, StatusCode> {
+    match find_peer_by_url(db, url).await? {
+        Some(p) => Ok(Some(p)),
+        None => {
+            let safe: String = url.chars().take(128).collect();
+            if allow_unregistered_lan {
+                tracing::warn!(
+                    target: "ssrf:mdns",
+                    "peer-proxy fallback: unregistered URL allowed via mDNS path (url={safe})"
+                );
+                Ok(None)
+            } else {
+                tracing::warn!(
+                    target: "ssrf",
+                    "peer-proxy rejected: peer not registered (url={safe})"
+                );
+                Err(StatusCode::FORBIDDEN)
+            }
         }
     }
 }
@@ -4046,7 +4094,12 @@ pub async fn proxy_search(
         .await;
     }
 
-    // Peer not in DB but URL provided (e.g. unsaved mDNS peer): direct plaintext fetch
+    // Peer not in DB but URL provided (e.g. unsaved mDNS peer): direct plaintext fetch.
+    // SSRF defense (ADR-026): route through ensure_registered_peer_or_mdns with
+    // allow_unregistered_lan=true so the traversal is logged on the ssrf:mdns
+    // tracing target. ensure_* also reconciles the trailing-slash discrepancy
+    // with the peer lookup above, so a DB hit via helper still routes through
+    // the enriched path instead of the unsaved branch.
     if let Some(ref url) = payload.peer_url {
         if let Err(e) = validate_url(url) {
             return (
@@ -4055,9 +4108,30 @@ pub async fn proxy_search(
             )
                 .into_response();
         }
-        // No peer row → no first_seen_at available, skip enrichment.
-        return plaintext_proxy_search(url, &payload.query, payload.page, payload.limit, None)
-            .await;
+        match ensure_registered_peer_or_mdns(db, url, true).await {
+            Ok(Some(matched)) => {
+                return plaintext_proxy_search(
+                    &matched.url,
+                    &payload.query,
+                    payload.page,
+                    payload.limit,
+                    Some((db, matched.id)),
+                )
+                .await;
+            }
+            Ok(None) => {
+                // No peer row → no first_seen_at available, skip enrichment.
+                return plaintext_proxy_search(
+                    url,
+                    &payload.query,
+                    payload.page,
+                    payload.limit,
+                    None,
+                )
+                .await;
+            }
+            Err(status) => return status.into_response(),
+        }
     }
 
     (
@@ -5226,7 +5300,12 @@ pub async fn request_book_by_url(
         }
     };
 
-    // Unsaved mDNS peer: skip outgoing request tracking, send plaintext directly
+    // Unsaved mDNS peer: skip outgoing request tracking, send plaintext directly.
+    // SSRF defense (ADR-026): route through ensure_registered_peer_or_mdns so
+    // the fallback traversal is logged on the ssrf:mdns target. With
+    // allow_unregistered_lan=true, a missing peer row yields Ok(None) and the
+    // plaintext request proceeds; registered peers are handled on the main
+    // branch above, so only Ok(None) is expected here in practice.
     if peer.is_none() {
         if let Err(e) = validate_url(&docker_url) {
             return (
@@ -5234,6 +5313,9 @@ pub async fn request_book_by_url(
                 Json(json!({ "error": format!("Invalid peer URL: {}", e) })),
             )
                 .into_response();
+        }
+        if let Err(status) = ensure_registered_peer_or_mdns(db, &docker_url, true).await {
+            return status.into_response();
         }
 
         let my_config = match crate::models::library_config::Entity::find().one(db).await {

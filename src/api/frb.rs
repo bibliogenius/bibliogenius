@@ -168,8 +168,11 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
     static TRACING_INIT: std::sync::Once = std::sync::Once::new();
     TRACING_INIT.call_once(|| {
         if cfg!(debug_assertions) {
+            // Also enable the `ssrf` target family (ADR-026) so SSRF audit
+            // events are always visible in debug builds — they live outside
+            // the `rust_lib_app` namespace so they would otherwise be dropped.
             let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "rust_lib_app=info".into());
+                .unwrap_or_else(|_| "rust_lib_app=info,ssrf=warn".into());
 
             // Try file first (macOS FFI path)
             if let Ok(file) = std::fs::OpenOptions::new()

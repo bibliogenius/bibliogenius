@@ -73,11 +73,13 @@ fn get_port_file_path(profile: &str) -> PathBuf {
 #[tokio::main]
 async fn main() {
     // Initialize tracing
-    // Filter targets the lib crate name "rust_lib_app" (not the package name "bibliogenius")
+    // Filter targets the lib crate name "rust_lib_app" (not the package name "bibliogenius").
+    // The `ssrf` target family (ADR-026) is explicitly included so SSRF audit events
+    // are always emitted — they live outside the `rust_lib_app` namespace.
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "rust_lib_app=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "rust_lib_app=debug,tower_http=debug,ssrf=warn".into()),
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
