@@ -22,6 +22,7 @@ pub mod mdns;
 pub mod notification_service;
 pub mod nudge_events;
 pub mod oplog_pruner;
+pub mod peer_delta_sync;
 pub mod relay_poller;
 pub mod relay_transport;
 pub mod sale_service; // Service de vente pour profil Libraire

@@ -1021,7 +1021,8 @@ pub(crate) async fn try_send_e2ee(
                     "library_page_request",
                     "library_search_request",
                     "request_status_query",
-                    "public_stats_request", // ADR-022: leaderboard relay sync
+                    "public_stats_request",  // ADR-022: leaderboard relay sync
+                    "catalog_delta_request", // ADR-029: delta sync over relay
                 ];
                 let needs_response = RELAY_AWAIT_RESPONSE.contains(&message_type);
 

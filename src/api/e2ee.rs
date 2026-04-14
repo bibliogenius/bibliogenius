@@ -103,7 +103,7 @@ pub async fn receive_encrypted_message(
     // 5. Dispatch by message_type
     let our_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
     dispatch_clear_message(
-        db,
+        &state,
         &crypto_service,
         &clear_message,
         &known_peers,
@@ -215,7 +215,7 @@ pub fn build_known_peers_with_devices(
 /// Dispatch a decrypted ClearMessage to the appropriate handler.
 /// Shared by both the HTTP endpoint and the relay poller.
 pub async fn dispatch_clear_message(
-    db: &sea_orm::DatabaseConnection,
+    state: &crate::infrastructure::AppState,
     crypto_service: &std::sync::Arc<
         crate::services::crypto_service::CryptoService<
             crate::infrastructure::nonce_store::SqliteNonceStore,
@@ -227,6 +227,7 @@ pub async fn dispatch_clear_message(
     sender_peer: &peer::Model,
     our_library_uuid: Option<&str>,
 ) -> axum::response::Response {
+    let db = state.db();
     match clear_message.message_type.as_str() {
         "loan_request" => {
             let response_payload =
@@ -334,12 +335,24 @@ pub async fn dispatch_clear_message(
             )
         }
 
+        // ── Delta sync via relay (ADR-029) ───────────────────────────
+        "catalog_delta_request" => {
+            let response_payload = handle_catalog_delta_request(state, clear_message).await;
+            seal_response(
+                crypto_service,
+                &known_peers[peer_index],
+                "catalog_delta_response",
+                response_payload,
+            )
+        }
+
         // Response message types - these are handled by correlation matching
         // in the relay poller, not dispatched to handlers.
         "library_manifest_response"
         | "library_page_response"
         | "library_search_response"
-        | "library_browse_response" => {
+        | "library_browse_response"
+        | "catalog_delta_response" => {
             tracing::debug!(
                 "E2EE: Received '{}' (handled by correlation)",
                 clear_message.message_type
@@ -1273,6 +1286,69 @@ async fn handle_peer_disconnect(
             )
                 .into_response()
         }
+    }
+}
+
+// ── Delta sync handler (ADR-029) ──────────────────────────────────────
+
+/// Handle a `catalog_delta_request` over E2EE (direct LAN or relay).
+///
+/// Mirrors the HTTP `list_books_delta` path: reuses `build_book_delta_response`
+/// so any privacy / redaction change lands on both transports at once.
+///
+/// The response payload always carries `reset_required` (boolean) so the
+/// requester can branch without inspecting envelope-level status codes. When
+/// `reset_required=true`, `operations` is empty and `latest_cursor` echoes
+/// the caller's cursor unchanged — the requester MUST fall back to the full
+/// `library_manifest_request` loop (ADR-012) to rebuild state.
+pub async fn handle_catalog_delta_request(
+    state: &crate::infrastructure::AppState,
+    msg: &ClearMessage,
+) -> serde_json::Value {
+    use crate::api::books::BookDeltaOutcome;
+    use crate::api::books::{DELTA_DEFAULT_LIMIT, DELTA_MAX_LIMIT};
+
+    let since = msg.payload.get("since").and_then(|v| v.as_i64());
+    let limit = msg
+        .payload
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .map(|n| n.clamp(1, DELTA_MAX_LIMIT))
+        .unwrap_or(DELTA_DEFAULT_LIMIT);
+
+    // Peer callers are never "owner" — the E1 privacy pipeline must run.
+    let outcome =
+        match crate::api::books::build_book_delta_response(state, since, limit, false).await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::error!("catalog_delta_request: build_book_delta_response failed: {e}");
+                return json!({
+                    "operations": [],
+                    "latest_cursor": since.unwrap_or(0),
+                    "has_more": false,
+                    "reset_required": false,
+                    "error": "internal",
+                });
+            }
+        };
+
+    match outcome {
+        BookDeltaOutcome::ResetRequired { .. } => json!({
+            "operations": [],
+            "latest_cursor": since.unwrap_or(0),
+            "has_more": false,
+            "reset_required": true,
+        }),
+        BookDeltaOutcome::Delta {
+            operations,
+            latest_cursor,
+            has_more,
+        } => json!({
+            "operations": operations,
+            "latest_cursor": latest_cursor,
+            "has_more": has_more,
+            "reset_required": false,
+        }),
     }
 }
 

@@ -352,7 +352,8 @@ const REQUEST_RESPONSE_TYPES: &[&str] = &[
     "library_page_request",
     "library_search_request",
     "loan_request",
-    "public_stats_request", // ADR-022: leaderboard relay sync
+    "public_stats_request",  // ADR-022: leaderboard relay sync
+    "catalog_delta_request", // ADR-029: delta sync over relay
 ];
 
 /// Response message types (correlation targets, ADR-012).
@@ -363,7 +364,8 @@ const RESPONSE_TYPES: &[&str] = &[
     "loan_request_response",
     "request_status_response",
     "book_sync_response",
-    "public_stats_response", // ADR-022: leaderboard relay sync
+    "public_stats_response",  // ADR-022: leaderboard relay sync
+    "catalog_delta_response", // ADR-029: delta sync over relay
 ];
 
 /// Process a single relay message through the existing E2EE pipeline.
@@ -504,7 +506,7 @@ async fn process_relay_message(
     // Standard dispatch (fire-and-forget messages, or request-response without reply_to)
     let our_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
     let response = dispatch_clear_message(
-        db,
+        state,
         crypto_service,
         &clear_message,
         known_peers,
@@ -603,11 +605,16 @@ async fn handle_relay_request_response(
             "public_stats_response",
             crate::utils::leaderboard_relay::build_local_stats_bundle(state).await,
         ),
+        // ADR-029: delta sync over E2EE relay
+        "catalog_delta_request" => (
+            "catalog_delta_response",
+            crate::api::e2ee::handle_catalog_delta_request(state, clear_message).await,
+        ),
         _ => {
             // For other request-response types, fall back to standard dispatch
             let our_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
             let response = dispatch_clear_message(
-                db,
+                state,
                 crypto_service,
                 clear_message,
                 known_peers,

@@ -32,8 +32,8 @@ pub struct BookFilter {
 /// Default raw-row scan budget for one delta window. Collapsed output is
 /// usually smaller. The hard cap (max parameter the client may pass) is
 /// kept conservative to bound worst-case memory.
-const DELTA_DEFAULT_LIMIT: i64 = 500;
-const DELTA_MAX_LIMIT: i64 = 2000;
+pub const DELTA_DEFAULT_LIMIT: i64 = 500;
+pub const DELTA_MAX_LIMIT: i64 = 2000;
 
 #[utoipa::path(
     get,
@@ -178,53 +178,49 @@ pub async fn list_books(
         .unwrap())
 }
 
-/// Delta sync handler for `GET /api/books?since=<cursor>` (ADR-028).
+/// Transport-agnostic outcome of a book delta pull.
 ///
-/// Resolves operation_log rows into the book DTOs the peer would have seen
-/// from the full endpoint, applying the same E1 privacy pipeline (filter
-/// `private = true` for non-owner callers, `redact_for_peer` on survivors).
-/// Returns `410 Gone` when the cursor is older than the oldest retained log
-/// row so the client can fall back to a full GET.
-async fn list_books_delta(
-    state: crate::infrastructure::AppState,
-    filter: BookFilter,
-    since: i64,
-    claims: Option<crate::auth::Claims>,
-) -> Result<Response, StatusCode> {
+/// Shared between the HTTP path (`GET /api/books?since=`, ADR-028) and the
+/// E2EE relay path (`catalog_delta_request`, ADR-029). The two transports
+/// serialise this outcome differently (HTTP 410 vs in-payload
+/// `reset_required`), but the delta construction, privacy pipeline and
+/// cover-URL rewriting are identical.
+pub enum BookDeltaOutcome {
+    Delta {
+        operations: Vec<serde_json::Value>,
+        latest_cursor: i64,
+        has_more: bool,
+    },
+    ResetRequired {
+        oldest_available_cursor: i64,
+    },
+}
+
+/// Build a book delta window honouring the same privacy pipeline as the
+/// full-catalog endpoint: drops `private=true` books for non-owner callers
+/// and applies `redact_for_peer` on survivors.
+///
+/// `since = None` means "from the oldest retained operation_log row" (first
+/// sync). `limit` caps the raw-row scan and is clamped to
+/// `[1, DELTA_MAX_LIMIT]`.
+pub async fn build_book_delta_response(
+    state: &crate::infrastructure::AppState,
+    since: Option<i64>,
+    limit: i64,
+    is_owner: bool,
+) -> Result<BookDeltaOutcome, crate::domain::DomainError> {
     use crate::services::delta_service::{self, DeltaOp};
 
-    let is_owner = claims.is_some();
-    let limit = filter
-        .limit
-        .map(|n| (n as i64).clamp(1, DELTA_MAX_LIMIT))
-        .unwrap_or(DELTA_DEFAULT_LIMIT);
-
-    let window = delta_service::fetch_delta(state.db(), "book", Some(since), limit)
-        .await
-        .map_err(|e| {
-            tracing::error!("delta_service: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let limit = limit.clamp(1, DELTA_MAX_LIMIT);
+    let window = delta_service::fetch_delta(state.db(), "book", since, limit).await?;
 
     if window.reset_required {
         let oldest = delta_service::oldest_retained_cursor(state.db())
-            .await
-            .map_err(|e| {
-                tracing::error!("oldest_retained_cursor: {e}");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
+            .await?
             .unwrap_or(0);
-        let body = serde_json::to_vec(&json!({
-            "error": "cursor_too_old",
-            "oldest_available_cursor": oldest,
-            "hint": "Perform a full GET /api/books to rebuild state.",
-        }))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        return Ok(Response::builder()
-            .status(StatusCode::GONE)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(axum::body::Body::from(body))
-            .unwrap());
+        return Ok(BookDeltaOutcome::ResetRequired {
+            oldest_available_cursor: oldest,
+        });
     }
 
     let mut operations: Vec<serde_json::Value> = Vec::with_capacity(window.operations.len());
@@ -234,15 +230,7 @@ async fn list_books_delta(
                 operations.push(json!({ "op": "delete", "book_id": op.entity_id }));
             }
             DeltaOp::Upsert => {
-                let resolved = state
-                    .book_repo
-                    .find_by_id(op.entity_id)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("delta resolve book {}: {e}", op.entity_id);
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?;
-                let Some(mut book) = resolved else {
+                let Some(mut book) = state.book_repo.find_by_id(op.entity_id).await? else {
                     // Book existed at log time but has since been hard-deleted
                     // outside the log (rare). Skip silently — the peer cannot
                     // act on a row that no longer exists.
@@ -264,18 +252,70 @@ async fn list_books_delta(
         }
     }
 
-    let body = serde_json::to_vec(&json!({
-        "operations": operations,
-        "latest_cursor": window.latest_cursor,
-        "has_more": window.has_more,
-    }))
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(BookDeltaOutcome::Delta {
+        operations,
+        latest_cursor: window.latest_cursor,
+        has_more: window.has_more,
+    })
+}
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .unwrap())
+/// Delta sync handler for `GET /api/books?since=<cursor>` (ADR-028).
+///
+/// Thin HTTP wrapper around `build_book_delta_response`: maps
+/// `ResetRequired` to `410 Gone` and the delta payload to `200 OK`.
+async fn list_books_delta(
+    state: crate::infrastructure::AppState,
+    filter: BookFilter,
+    since: i64,
+    claims: Option<crate::auth::Claims>,
+) -> Result<Response, StatusCode> {
+    let is_owner = claims.is_some();
+    let limit = filter
+        .limit
+        .map(|n| (n as i64).clamp(1, DELTA_MAX_LIMIT))
+        .unwrap_or(DELTA_DEFAULT_LIMIT);
+
+    let outcome = build_book_delta_response(&state, Some(since), limit, is_owner)
+        .await
+        .map_err(|e| {
+            tracing::error!("build_book_delta_response: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    match outcome {
+        BookDeltaOutcome::ResetRequired {
+            oldest_available_cursor,
+        } => {
+            let body = serde_json::to_vec(&json!({
+                "error": "cursor_too_old",
+                "oldest_available_cursor": oldest_available_cursor,
+                "hint": "Perform a full GET /api/books to rebuild state.",
+            }))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok(Response::builder()
+                .status(StatusCode::GONE)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap())
+        }
+        BookDeltaOutcome::Delta {
+            operations,
+            latest_cursor,
+            has_more,
+        } => {
+            let body = serde_json::to_vec(&json!({
+                "operations": operations,
+                "latest_cursor": latest_cursor,
+                "has_more": has_more,
+            }))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap())
+        }
+    }
 }
 
 #[utoipa::path(
