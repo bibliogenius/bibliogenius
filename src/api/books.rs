@@ -46,6 +46,7 @@ pub async fn list_books(
     State(state): State<crate::infrastructure::AppState>,
     axum::extract::Query(filter): axum::extract::Query<BookFilter>,
     headers: axum::http::HeaderMap,
+    claims: Option<crate::auth::Claims>,
 ) -> Result<Response, StatusCode> {
     tracing::info!(
         "List books request - Filters: status={:?}, title={:?}, tag={:?}",
@@ -53,6 +54,8 @@ pub async fn list_books(
         filter.title,
         filter.tag
     );
+
+    let is_owner = claims.is_some();
 
     // Convert API filter to domain filter
     let domain_filter = crate::domain::BookFilter {
@@ -80,6 +83,21 @@ pub async fn list_books(
     );
 
     let mut book_dtos = result.books;
+    let mut total = result.total;
+
+    // Peer-facing privacy (E1): filter private books and redact personal
+    // annotations when no owner JWT is present. Post-query in-memory
+    // filtering is acceptable for the project's catalog sizes (<1k books);
+    // `total` is adjusted so paginated clients see the filtered count.
+    if !is_owner {
+        let before = book_dtos.len() as u64;
+        book_dtos.retain(|b| !b.private.unwrap_or(false));
+        let removed = before - book_dtos.len() as u64;
+        total = total.saturating_sub(removed);
+        for b in &mut book_dtos {
+            b.redact_for_peer();
+        }
+    }
 
     // Rewrite local file paths to relative API URLs so peers can fetch covers.
     // HTTP handler = LAN peer, relative path is fine (no hub prefix needed).
@@ -104,7 +122,7 @@ pub async fn list_books(
 
     let body = serde_json::to_vec(&json!({
         "books": book_dtos,
-        "total": result.total,
+        "total": total,
     }))
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -550,9 +568,25 @@ pub async fn list_tags(
 pub async fn get_book(
     State(state): State<crate::infrastructure::AppState>,
     axum::extract::Path(id): axum::extract::Path<i32>,
+    claims: Option<crate::auth::Claims>,
 ) -> impl IntoResponse {
+    let is_owner = claims.is_some();
     match state.book_repo.find_by_id(id).await {
-        Ok(Some(book_dto)) => (StatusCode::OK, Json(book_dto)).into_response(),
+        Ok(Some(mut book_dto)) => {
+            if !is_owner {
+                // Hide private books behind a 404 rather than a 403 so an
+                // anonymous caller can't confirm their existence.
+                if book_dto.private.unwrap_or(false) {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({"error": "Book not found"})),
+                    )
+                        .into_response();
+                }
+                book_dto.redact_for_peer();
+            }
+            (StatusCode::OK, Json(book_dto)).into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "Book not found"})),

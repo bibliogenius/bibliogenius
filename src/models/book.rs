@@ -245,6 +245,32 @@ impl Book {
         }
     }
 
+    /// Strip fields that must not leak to unauthenticated peer callers.
+    ///
+    /// The HTTP catalog endpoints (`/api/books`, `/api/books/:id`) are
+    /// reachable without a JWT so peers can browse a library before
+    /// pairing (ADR-026 mDNS fallback). That flow must expose bibliographic
+    /// metadata (title, author, ISBN, summary, cover…) but NEVER the
+    /// owner's personal annotations: reading status, rating, notes,
+    /// purchase info, physical organisation.
+    ///
+    /// Callers in the handler layer invoke this on every Book DTO before
+    /// serialisation when no valid Claims was extracted. Fields set to
+    /// `None` here are dropped from the JSON output thanks to
+    /// `#[serde(skip_serializing_if = "Option::is_none")]`.
+    pub fn redact_for_peer(&mut self) {
+        self.cataloguing_notes = None;
+        self.source_data = None;
+        self.shelf_position = None;
+        self.reading_status = None;
+        self.finished_reading_at = None;
+        self.started_reading_at = None;
+        self.user_rating = None;
+        self.price = None;
+        self.private = None;
+        self.first_seen_at = None;
+    }
+
     /// Rewrites a single cover_url from a SeaORM entity model.
     /// Same logic as `rewrite_local_cover_urls` but for individual books.
     pub fn safe_cover_url(

@@ -67,6 +67,25 @@ All peer-proxy endpoints also use `get_safe_client` (timeout 5s, redirects disab
 
 ---
 
+### 3bis. Personal Data Leak via Unauthenticated Catalog Endpoints
+
+**Severity**: Medium (Mitigated — E1)
+**Location**: `src/api/books.rs` (`list_books`, `get_book`)
+
+`GET /api/books` and `GET /api/books/:id` are reachable from the LAN without a JWT so peers can browse a library before pairing (intentional, preserves the mDNS discovery UX per ADR-026). Before E1, every such response included the owner's personal annotations alongside the bibliographic data — user_rating, reading_status, cataloguing_notes, shelf_position, price, source_data, started/finished_reading_at — effectively leaking private information to any stranger on the same WiFi.
+
+Threat examples: a neighbor on a shared residential WiFi, a stranger in a café/airport/hotel/Airbnb, a guest given the WiFi password. They could `curl http://<host>:8000/api/books` and retrieve the full library with personal annotations, with zero log trace.
+
+**Mitigation (E1 — DTO privacy split)**:
+
+- [x] `Book::redact_for_peer` (`src/models/book.rs`) strips personal fields before serialisation. `#[serde(skip_serializing_if = "Option::is_none")]` drops them from the JSON.
+- [x] Handlers extract `Option<Claims>`. When absent (peer or anonymous caller), redaction runs and `private=true` books are filtered out of the response (total adjusted). `get_book` returns 404 for a private book to avoid confirming its existence.
+- [x] Owner access unchanged: a valid JWT (Flutter web, MCP, CLI) keeps the full DTO.
+- [ ] Peer-facing action endpoints (`POST /api/peers/request`, `/api/peers/search`, `/api/peers/requests/incoming`, `/api/peers/verify-disconnect`) are NOT yet authenticated — side-effect actions remain open to strangers on the LAN. Follow-up ticket E2 (HMAC peer-facing auth) will close this; deferred pending usage data and product priorities.
+- [ ] `GET /api/books/:id/cover` remains public (binary image, no personal data in the payload).
+
+---
+
 ### 4. CORS Permissiveness
 
 **Severity**: Low (Mitigated)
