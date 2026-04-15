@@ -652,6 +652,11 @@ async fn handle_relay_request_response(
             "catalog_delta_response",
             crate::api::e2ee::handle_catalog_delta_request(state, clear_message).await,
         ),
+        // ADR-025: avatar + library_name sync over E2EE relay
+        "avatar_sync_request" => (
+            "avatar_sync_response",
+            crate::api::e2ee::handle_avatar_sync_request(state, clear_message).await,
+        ),
         _ => {
             // For other request-response types, fall back to standard dispatch
             let our_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
