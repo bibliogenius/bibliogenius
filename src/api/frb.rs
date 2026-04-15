@@ -579,7 +579,7 @@ impl From<FrbBook> for crate::models::Book {
             private: Some(frb_book.private),
             page_count: frb_book.page_count,
             loan_duration_days: None,
-            first_seen_at: None,
+            added_at: None,
         }
     }
 }
@@ -4817,6 +4817,7 @@ async fn upsert_directory_catalog_cache(
                 synced_at: Set(now.clone()),
                 node_id: Set(Some(node_id.to_string())),
                 first_seen_at: Set(first_seen.clone()),
+                added_at: Set(None),
                 notified_at: Set(None),
                 ..Default::default()
             };

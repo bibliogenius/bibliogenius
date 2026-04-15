@@ -748,7 +748,7 @@ pub async fn search_unified(
                 private: None,
                 page_count: None,
                 loan_duration_days: None,
-                first_seen_at: None,
+                added_at: None,
             };
             results.push(book);
         }
@@ -797,7 +797,7 @@ pub async fn search_unified(
                     private: None,
                     page_count: None,
                     loan_duration_days: None,
-                    first_seen_at: None,
+                    added_at: None,
                 };
                 results.push(book);
             }
@@ -887,7 +887,7 @@ pub async fn search_unified(
                     private: None,
                     page_count: None,
                     loan_duration_days: None,
-                    first_seen_at: None,
+                    added_at: None,
                 };
                 results.push(book);
             }

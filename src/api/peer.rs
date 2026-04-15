@@ -2274,11 +2274,10 @@ pub async fn connect(
     (StatusCode::CREATED, Json(json!({ "id": peer_id }))).into_response()
 }
 
-/// Upsert peer books cache: preserves `first_seen_at` for existing entries,
-/// sets it to now for new entries (or NULL on initial sync to suppress the
-/// "new" badge when all books are discovered at once).
-/// Removes books no longer in the fresh list.
-/// Returns the number of books in the fresh list.
+/// Upsert peer books cache: stores `added_at` from the owner peer so the
+/// "new" badge is consistent across all viewers (no longer derived from
+/// the local cache observation time). Removes books no longer in the
+/// fresh list. Returns the number of books in the fresh list.
 async fn upsert_peer_books_cache(
     db: &DatabaseConnection,
     peer_id: i32,
@@ -2303,8 +2302,7 @@ async fn upsert_peer_books_cache(
 
     // Migration: a previous bug in Book.toJson() omitted the id field, causing
     // all cached entries to have remote_book_id=0. When incoming books now carry
-    // real IDs, purge the corrupted rows so the upsert treats this as an initial
-    // sync (first_seen_at=NULL, no spurious "new" badge).
+    // real IDs, purge the corrupted rows so the fresh upsert replaces them.
     let zero_id_count = existing.iter().filter(|e| e.remote_book_id == 0).count();
     let incoming_have_real_ids = books.iter().any(|b| matches!(b.id, Some(id) if id != 0));
     if zero_id_count > 1 && incoming_have_real_ids {
@@ -2341,18 +2339,14 @@ async fn upsert_peer_books_cache(
         return 0;
     }
 
-    // On initial discovery (no existing books for this peer), all books arrive
-    // at once so marking them all as "new" is meaningless noise. Set first_seen_at
-    // to NULL so the badge only appears for books added after the first sync.
-    let is_initial_sync = existing_map.is_empty();
-
     // 2. Upsert each book
     for book in books {
         let remote_id = book.id.unwrap_or(0);
         fresh_ids.insert(remote_id);
 
         if let Some(existing_entry) = existing_map.get(&remote_id) {
-            // UPDATE: preserve first_seen_at and notified_at, refresh other fields
+            // UPDATE: refresh metadata. `added_at` from the peer overrides any
+            // stale local value (the owner is the source of truth).
             let mut active: peer_book::ActiveModel = existing_entry.clone().into();
             active.title = Set(book.title);
             active.isbn = Set(book.isbn);
@@ -2363,7 +2357,10 @@ async fn upsert_peer_books_cache(
             if let Some(nid) = node_id {
                 active.node_id = Set(Some(nid.to_string()));
             }
-            // first_seen_at and notified_at stay unchanged
+            if book.added_at.is_some() {
+                active.added_at = Set(book.added_at);
+            }
+            // notified_at stays unchanged
             let _ = active.update(db).await;
         } else {
             // INSERT: new book (notified_at = NULL - not yet notified)
@@ -2377,11 +2374,8 @@ async fn upsert_peer_books_cache(
                 summary: Set(book.summary),
                 synced_at: Set(now.clone()),
                 node_id: Set(node_id.map(|s| s.to_string())),
-                first_seen_at: Set(if is_initial_sync {
-                    None
-                } else {
-                    Some(now.clone())
-                }),
+                first_seen_at: Set(None),
+                added_at: Set(book.added_at),
                 notified_at: Set(None),
                 ..Default::default()
             };
@@ -3943,55 +3937,16 @@ pub struct ProxySearchRequest {
     limit: Option<u64>,
 }
 
-/// Inject `first_seen_at` into each Book by joining on the local peer_books
-/// cache by (peer_id, remote_book_id). Books with no cache row are left as-is.
-/// Used so live P2P responses carry the same "new" badge data as cached responses.
-async fn enrich_books_with_first_seen(
-    db: &DatabaseConnection,
-    peer_id: i32,
-    books: &mut [crate::models::Book],
-) {
-    use crate::models::peer_book;
-    use sea_orm::QueryFilter;
-
-    if books.is_empty() {
-        return;
-    }
-    let ids: Vec<i32> = books.iter().filter_map(|b| b.id).collect();
-    if ids.is_empty() {
-        return;
-    }
-    let rows = peer_book::Entity::find()
-        .filter(peer_book::Column::PeerId.eq(peer_id))
-        .filter(peer_book::Column::RemoteBookId.is_in(ids))
-        .all(db)
-        .await
-        .unwrap_or_default();
-    let map: std::collections::HashMap<i32, Option<String>> = rows
-        .into_iter()
-        .map(|r| (r.remote_book_id, r.first_seen_at))
-        .collect();
-    for b in books.iter_mut() {
-        if let Some(id) = b.id
-            && let Some(fs) = map.get(&id)
-        {
-            b.first_seen_at = fs.clone();
-        }
-    }
-}
-
 /// Plaintext HTTP proxy: fetch books from a peer URL directly.
 /// When `page`/`limit` are provided, returns `{ "books": [...], "total": N, "has_more": bool }`.
 /// Without pagination params, returns a flat `Vec<Book>` array (legacy).
-/// When `enrich` is `Some((db, peer_id))`, each returned book is enriched with
-/// `first_seen_at` from the local peer_books cache so the "new" badge works
-/// even on the live P2P path.
+/// The peer's response carries `added_at` directly (the owner's
+/// `books.created_at`), so the "new" badge works without local enrichment.
 async fn plaintext_proxy_search(
     peer_url: &str,
     query: &str,
     page: Option<u64>,
     limit: Option<u64>,
-    enrich: Option<(&DatabaseConnection, i32)>,
 ) -> axum::response::Response {
     let client = get_safe_client();
     let res = if query.is_empty() {
@@ -4019,7 +3974,7 @@ async fn plaintext_proxy_search(
 
                 if page.is_some() && query.is_empty() {
                     // Paginated: return envelope with has_more
-                    let mut books: Vec<crate::models::Book> = body
+                    let books: Vec<crate::models::Book> = body
                         .get("books")
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
@@ -4027,9 +3982,6 @@ async fn plaintext_proxy_search(
                     let p = page.unwrap_or(0);
                     let l = limit.unwrap_or(20).min(50);
                     let has_more = ((p + 1) * l) < total;
-                    if let Some((db, peer_id)) = enrich {
-                        enrich_books_with_first_seen(db, peer_id, &mut books).await;
-                    }
                     (
                         StatusCode::OK,
                         Json(json!({
@@ -4041,14 +3993,11 @@ async fn plaintext_proxy_search(
                         .into_response()
                 } else {
                     // Legacy: return flat array
-                    let mut books: Vec<crate::models::Book> = if let Some(arr) = body.get("books") {
+                    let books: Vec<crate::models::Book> = if let Some(arr) = body.get("books") {
                         serde_json::from_value(arr.clone()).unwrap_or_default()
                     } else {
                         serde_json::from_value(body).unwrap_or_default()
                     };
-                    if let Some((db, peer_id)) = enrich {
-                        enrich_books_with_first_seen(db, peer_id, &mut books).await;
-                    }
                     (StatusCode::OK, Json(books)).into_response()
                 }
             } else {
@@ -4113,29 +4062,14 @@ pub async fn proxy_search(
             .await
             {
                 Ok(Some(Some(response_msg))) => {
-                    // Enrich the encrypted browse payload with first_seen_at so
-                    // the "new" badge works on the E2EE path too.
-                    let mut payload = response_msg.payload;
-                    if let Some(books_val) = payload.get_mut("books")
-                        && let Some(arr) = books_val.as_array_mut()
-                    {
-                        let mut books: Vec<crate::models::Book> = arr
-                            .iter()
-                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                            .collect();
-                        enrich_books_with_first_seen(db, peer.id, &mut books).await;
-                        *books_val = serde_json::to_value(&books).unwrap_or(json!([]));
-                    }
-                    return (StatusCode::OK, Json(payload)).into_response();
+                    return (StatusCode::OK, Json(response_msg.payload)).into_response();
                 }
                 Ok(Some(None)) | Ok(None) | Err(_) => {
-                    // E2EE browse not supported or failed — fall back to plaintext paginated
                     return plaintext_proxy_search(
                         &peer.url,
                         &payload.query,
                         payload.page,
                         payload.limit,
-                        Some((db, peer.id)),
                     )
                     .await;
                 }
@@ -4153,7 +4087,7 @@ pub async fn proxy_search(
         {
             Ok(Some(Some(response_msg))) => {
                 // Got encrypted search results
-                let mut results: Vec<crate::models::Book> = serde_json::from_value(
+                let results: Vec<crate::models::Book> = serde_json::from_value(
                     response_msg
                         .payload
                         .get("results")
@@ -4161,7 +4095,6 @@ pub async fn proxy_search(
                         .unwrap_or(json!([])),
                 )
                 .unwrap_or_default();
-                enrich_books_with_first_seen(db, peer.id, &mut results).await;
                 return (StatusCode::OK, Json(results)).into_response();
             }
             Ok(Some(None)) => {
@@ -4175,14 +4108,8 @@ pub async fn proxy_search(
         }
 
         // 2. Legacy plaintext fallback
-        return plaintext_proxy_search(
-            &peer.url,
-            &payload.query,
-            payload.page,
-            payload.limit,
-            Some((db, peer.id)),
-        )
-        .await;
+        return plaintext_proxy_search(&peer.url, &payload.query, payload.page, payload.limit)
+            .await;
     }
 
     // Peer not in DB but URL provided (e.g. unsaved mDNS peer): direct plaintext fetch.
@@ -4206,20 +4133,12 @@ pub async fn proxy_search(
                     &payload.query,
                     payload.page,
                     payload.limit,
-                    Some((db, matched.id)),
                 )
                 .await;
             }
             Ok(None) => {
-                // No peer row → no first_seen_at available, skip enrichment.
-                return plaintext_proxy_search(
-                    url,
-                    &payload.query,
-                    payload.page,
-                    payload.limit,
-                    None,
-                )
-                .await;
+                return plaintext_proxy_search(url, &payload.query, payload.page, payload.limit)
+                    .await;
             }
             Err(status) => return status.into_response(),
         }
@@ -7995,7 +7914,7 @@ pub async fn update_peer_display_name(
 }
 
 #[cfg(test)]
-mod first_seen_at_tests {
+mod added_at_tests {
     use super::*;
     use crate::db;
     use crate::models::{peer, peer_book};
@@ -8027,7 +7946,7 @@ mod first_seen_at_tests {
         peer_id: i32,
         remote_book_id: i32,
         title: &str,
-        first_seen_at: Option<&str>,
+        added_at: Option<&str>,
     ) {
         let now = chrono::Utc::now().to_rfc3339();
         let pb = peer_book::ActiveModel {
@@ -8040,7 +7959,8 @@ mod first_seen_at_tests {
             summary: Set(None),
             synced_at: Set(now),
             node_id: Set(None),
-            first_seen_at: Set(first_seen_at.map(|s| s.to_string())),
+            first_seen_at: Set(None),
+            added_at: Set(added_at.map(|s| s.to_string())),
             notified_at: Set(None),
             ..Default::default()
         };
@@ -8048,9 +7968,10 @@ mod first_seen_at_tests {
     }
 
     /// peer_book::Model → Book mapping must put remote_book_id into Book.id
-    /// and propagate first_seen_at, so cached and live responses agree on id space.
+    /// and propagate `added_at` (the owner's `books.created_at`) so cached
+    /// and live responses agree on both id space and the "new" badge.
     #[tokio::test]
-    async fn from_peer_book_uses_remote_id_and_first_seen() {
+    async fn from_peer_book_uses_remote_id_and_added_at() {
         let pb = peer_book::Model {
             id: 999, // local row PK — must NOT be exposed as Book.id
             peer_id: 1,
@@ -8062,7 +7983,8 @@ mod first_seen_at_tests {
             summary: None,
             synced_at: "2026-04-13T00:00:00Z".to_string(),
             node_id: None,
-            first_seen_at: Some("2026-04-13T08:00:00Z".to_string()),
+            first_seen_at: None,
+            added_at: Some("2026-04-13T08:00:00Z".to_string()),
             notified_at: None,
         };
         let book: crate::models::Book = pb.into();
@@ -8071,101 +7993,89 @@ mod first_seen_at_tests {
             Some(42),
             "Book.id must be remote_book_id, not peer_book.id"
         );
-        assert_eq!(book.first_seen_at.as_deref(), Some("2026-04-13T08:00:00Z"));
+        assert_eq!(book.added_at.as_deref(), Some("2026-04-13T08:00:00Z"));
         assert_eq!(book.title, "Le Livre");
     }
 
-    /// enrich_books_with_first_seen joins live-fetched books (id = remote_book_id,
-    /// first_seen_at = None) against the local peer_books cache.
-    #[tokio::test]
-    async fn enrich_populates_first_seen_from_cache() {
-        let db = setup().await;
-        let peer_id = insert_peer(&db).await;
-        insert_peer_book(&db, peer_id, 10, "Cached A", Some("2026-04-12T00:00:00Z")).await;
-        insert_peer_book(&db, peer_id, 11, "Cached B", None).await;
-
-        let mut books = vec![
-            crate::models::Book {
-                id: Some(10),
-                title: "A".to_string(),
-                ..Default::default()
-            },
-            crate::models::Book {
-                id: Some(11),
-                title: "B".to_string(),
-                ..Default::default()
-            },
-            crate::models::Book {
-                id: Some(99), // not in cache
-                title: "Unknown".to_string(),
-                ..Default::default()
-            },
-        ];
-        enrich_books_with_first_seen(&db, peer_id, &mut books).await;
+    /// `redact_for_peer` strips personal fields but MUST keep `added_at`:
+    /// it is editorial metadata (the owner's `books.created_at`) that
+    /// drives the "new" badge for every viewer.
+    #[test]
+    fn redact_for_peer_preserves_added_at() {
+        let mut book = crate::models::Book {
+            id: Some(1),
+            title: "T".to_string(),
+            user_rating: Some(8),
+            reading_status: Some("read".to_string()),
+            added_at: Some("2026-04-15T10:00:00+00:00".to_string()),
+            ..Default::default()
+        };
+        book.redact_for_peer();
+        assert_eq!(book.user_rating, None, "rating must be redacted");
+        assert_eq!(book.reading_status, None, "reading status must be redacted");
         assert_eq!(
-            books[0].first_seen_at.as_deref(),
-            Some("2026-04-12T00:00:00Z")
+            book.added_at.as_deref(),
+            Some("2026-04-15T10:00:00+00:00"),
+            "added_at is editorial metadata, not personal — must NOT be redacted",
         );
-        assert_eq!(books[1].first_seen_at, None);
-        assert_eq!(books[2].first_seen_at, None);
     }
 
-    /// Migration 067 must NULL all peer_books.first_seen_at exactly once and
-    /// leave subsequently inserted rows alone on re-init.
+    /// Upserting a previously-cached book with a fresh `added_at` from the
+    /// owner must overwrite the local value (owner is source of truth).
     #[tokio::test]
-    async fn migration_067_resets_first_seen_at_idempotently() {
-        use sea_orm::ConnectionTrait;
-
+    async fn upsert_peer_books_cache_refreshes_added_at() {
         let db = setup().await;
         let peer_id = insert_peer(&db).await;
-        // Mimic post-056 state: backfilled first_seen_at on existing rows. The
-        // initial run_migrations during setup() already wrote the 067 marker on
-        // an empty cache, so wipe the marker to simulate a device that ran 056
-        // (with content) but never 067.
-        db.execute(sea_orm::Statement::from_string(
-            db.get_database_backend(),
-            "DELETE FROM _migration_log WHERE name = '067_reset_peer_books_first_seen_at'"
-                .to_owned(),
-        ))
-        .await
-        .unwrap();
-        insert_peer_book(&db, peer_id, 1, "old A", Some("2026-04-01T00:00:00Z")).await;
-        insert_peer_book(&db, peer_id, 2, "old B", Some("2026-04-02T00:00:00Z")).await;
+        insert_peer_book(&db, peer_id, 7, "Cached", Some("2026-01-01T00:00:00+00:00")).await;
 
-        // Re-run migrations: 067 should fire and NULL both rows.
-        crate::infrastructure::db::run_migrations(&db)
-            .await
-            .unwrap();
+        let books = vec![crate::models::Book {
+            id: Some(7),
+            title: "Cached".to_string(),
+            added_at: Some("2026-04-15T12:00:00+00:00".to_string()),
+            ..Default::default()
+        }];
+        upsert_peer_books_cache(&db, peer_id, None, books).await;
 
-        let after_first = peer_book::Entity::find()
+        let row = peer_book::Entity::find()
             .filter(peer_book::Column::PeerId.eq(peer_id))
-            .all(&db)
-            .await
-            .unwrap();
-        for r in &after_first {
-            assert_eq!(
-                r.first_seen_at, None,
-                "row {} should be NULL",
-                r.remote_book_id
-            );
-        }
-
-        // A new book inserted AFTER the migration must keep its first_seen_at
-        // even when run_migrations is invoked again.
-        insert_peer_book(&db, peer_id, 3, "fresh", Some("2026-04-13T08:30:00Z")).await;
-        crate::infrastructure::db::run_migrations(&db)
-            .await
-            .unwrap();
-        let fresh = peer_book::Entity::find()
-            .filter(peer_book::Column::RemoteBookId.eq(3))
+            .filter(peer_book::Column::RemoteBookId.eq(7))
             .one(&db)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(
-            fresh.first_seen_at.as_deref(),
-            Some("2026-04-13T08:30:00Z"),
-            "migration must not re-fire on subsequent init"
+            row.added_at.as_deref(),
+            Some("2026-04-15T12:00:00+00:00"),
+            "owner's added_at must overwrite the local value on upsert",
+        );
+    }
+
+    /// Inserting a brand-new book via the cache upsert must persist its
+    /// `added_at` as broadcast by the owner (not derived from local time).
+    #[tokio::test]
+    async fn upsert_peer_books_cache_persists_added_at_on_insert() {
+        let db = setup().await;
+        let peer_id = insert_peer(&db).await;
+
+        let books = vec![crate::models::Book {
+            id: Some(99),
+            title: "New".to_string(),
+            added_at: Some("2026-04-15T09:30:00+00:00".to_string()),
+            ..Default::default()
+        }];
+        upsert_peer_books_cache(&db, peer_id, None, books).await;
+
+        let row = peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .filter(peer_book::Column::RemoteBookId.eq(99))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.added_at.as_deref(),
+            Some("2026-04-15T09:30:00+00:00"),
+            "owner's added_at must be persisted on first insert",
         );
     }
 }
@@ -8203,6 +8113,7 @@ mod hub_catalog_cache_tests {
             synced_at: Set(now),
             node_id: Set(Some(node_id.to_string())),
             first_seen_at: Set(None),
+            added_at: Set(None),
             notified_at: Set(None),
             ..Default::default()
         };

@@ -1710,6 +1710,19 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 071: Add `added_at` to peer_books. Replaces the per-device
+    // `first_seen_at` for the "new" badge: the owner's `books.created_at`
+    // is now broadcast to peers as `Book.added_at`, so every viewer agrees
+    // on whether a book is recent. `first_seen_at` stays in the schema for
+    // legacy hub-directory cache rows (peer_id = 0) which don't yet carry
+    // an `added_at`.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peer_books ADD COLUMN added_at TEXT".to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

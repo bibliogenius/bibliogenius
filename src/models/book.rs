@@ -136,11 +136,13 @@ pub struct Book {
     pub page_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loan_duration_days: Option<i32>,
-    /// When the local cache first observed this book (peer libraries only).
-    /// Set by the cache layer for "new" badge support; absent for the
-    /// owner's own books and for live network responses with no cache row.
+    /// When this book was added to its owner's library (ISO 8601, maps to
+    /// `books.created_at`). Broadcast to peers so every viewer sees the
+    /// same "new" badge regardless of when they first discovered the book.
+    /// Not redacted by `redact_for_peer`: it is editorial metadata, not
+    /// personal annotation.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub first_seen_at: Option<String>,
+    pub added_at: Option<String>,
 }
 
 impl From<Model> for Book {
@@ -197,7 +199,7 @@ impl From<Model> for Book {
             private: Some(model.private),
             page_count: model.page_count,
             loan_duration_days: model.loan_duration_days,
-            first_seen_at: None,
+            added_at: Some(model.created_at),
         }
     }
 }
@@ -268,7 +270,6 @@ impl Book {
         self.user_rating = None;
         self.price = None;
         self.private = None;
-        self.first_seen_at = None;
     }
 
     /// Rewrites a single cover_url from a SeaORM entity model.

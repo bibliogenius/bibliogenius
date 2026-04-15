@@ -11,8 +11,9 @@
 //! - Shaping the `catalog_delta_request` payload.
 //! - Blocking on the response (LAN direct or relay correlation, handled by
 //!   `try_send_e2ee`).
-//! - Applying the returned operations to `peer_books` while preserving the
-//!   "new book" badge semantics (`first_seen_at`).
+//! - Applying the returned operations to `peer_books`, storing each book's
+//!   owner-supplied `added_at` so the "new book" badge is consistent across
+//!   every viewer of the same library.
 //! - Persisting the fresh cursor only after the apply succeeds, so a failure
 //!   mid-batch never advances past unapplied rows.
 //!
@@ -143,12 +144,7 @@ pub async fn fetch_and_apply_peer_delta(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // On the very first sync, first_seen_at stays NULL to suppress the "new"
-    // badge for the bulk-arriving initial catalog. Subsequent deltas mark
-    // each incoming book with "now" so the UI can highlight recent additions.
-    let is_initial_sync = since.is_none();
-
-    let applied = apply_peer_delta_operations(db, peer_id, &operations, is_initial_sync)
+    let applied = apply_peer_delta_operations(db, peer_id, &operations)
         .await
         .map_err(|e| format!("apply_peer_delta_operations: {e}"))?;
 
@@ -166,8 +162,9 @@ pub async fn fetch_and_apply_peer_delta(
 /// Apply a list of delta operations to the `peer_books` cache.
 ///
 /// - `{ "op": "upsert", "book": { ... } }` upserts the row for
-///   `(peer_id, remote_book_id)`, preserving `first_seen_at` and
-///   `notified_at` on existing rows.
+///   `(peer_id, remote_book_id)`, storing the owner's `added_at` so the
+///   "new" badge reflects the origin library, not local observation time.
+///   `notified_at` is preserved on existing rows.
 /// - `{ "op": "delete", "book_id": N }` removes the row for
 ///   `(peer_id, N)`; absent rows are silent no-ops (idempotent).
 ///
@@ -177,7 +174,6 @@ pub async fn apply_peer_delta_operations(
     db: &DatabaseConnection,
     peer_id: i32,
     operations: &[serde_json::Value],
-    is_initial_sync: bool,
 ) -> Result<usize, sea_orm::DbErr> {
     let now = chrono::Utc::now().to_rfc3339();
     let mut applied = 0usize;
@@ -208,7 +204,7 @@ pub async fn apply_peer_delta_operations(
                     continue;
                 };
 
-                upsert_peer_book_row(db, peer_id, remote_id, &book, &now, is_initial_sync).await?;
+                upsert_peer_book_row(db, peer_id, remote_id, &book, &now).await?;
                 applied += 1;
             }
             "delete" => {
@@ -242,7 +238,6 @@ async fn upsert_peer_book_row(
     remote_id: i32,
     book: &crate::models::Book,
     now: &str,
-    is_initial_sync: bool,
 ) -> Result<(), sea_orm::DbErr> {
     let existing = peer_book::Entity::find()
         .filter(peer_book::Column::PeerId.eq(peer_id))
@@ -258,7 +253,10 @@ async fn upsert_peer_book_row(
         active.cover_url = Set(book.cover_url.clone());
         active.summary = Set(book.summary.clone());
         active.synced_at = Set(now.to_string());
-        // first_seen_at and notified_at intentionally preserved (ADR-029 C2).
+        if book.added_at.is_some() {
+            active.added_at = Set(book.added_at.clone());
+        }
+        // notified_at intentionally preserved.
         active.update(db).await?;
     } else {
         let new_row = peer_book::ActiveModel {
@@ -271,11 +269,8 @@ async fn upsert_peer_book_row(
             summary: Set(book.summary.clone()),
             synced_at: Set(now.to_string()),
             node_id: Set(None),
-            first_seen_at: Set(if is_initial_sync {
-                None
-            } else {
-                Some(now.to_string())
-            }),
+            first_seen_at: Set(None),
+            added_at: Set(book.added_at.clone()),
             notified_at: Set(None),
             ..Default::default()
         };
@@ -336,6 +331,14 @@ mod tests {
     }
 
     fn upsert_op(remote_book_id: i32, title: &str) -> serde_json::Value {
+        upsert_op_with_added_at(remote_book_id, title, Some("2026-04-15T10:00:00+00:00"))
+    }
+
+    fn upsert_op_with_added_at(
+        remote_book_id: i32,
+        title: &str,
+        added_at: Option<&str>,
+    ) -> serde_json::Value {
         json!({
             "op": "upsert",
             "book": {
@@ -347,6 +350,7 @@ mod tests {
                 "summary": null,
                 "owned": true,
                 "private": false,
+                "added_at": added_at,
             }
         })
     }
@@ -357,7 +361,7 @@ mod tests {
         let peer_id = create_peer(&db).await;
 
         let ops = vec![upsert_op(42, "Hello World")];
-        let applied = apply_peer_delta_operations(&db, peer_id, &ops, false)
+        let applied = apply_peer_delta_operations(&db, peer_id, &ops)
             .await
             .unwrap();
         assert_eq!(applied, 1);
@@ -370,73 +374,90 @@ mod tests {
             .unwrap()
             .expect("row exists");
         assert_eq!(row.title, "Hello World");
-        assert!(
-            row.first_seen_at.is_some(),
-            "non-initial sync must stamp first_seen_at",
+        assert_eq!(
+            row.added_at.as_deref(),
+            Some("2026-04-15T10:00:00+00:00"),
+            "added_at must be stored from the owner's payload",
         );
     }
 
     #[tokio::test]
-    async fn initial_sync_leaves_first_seen_at_null() {
+    async fn upsert_refreshes_added_at_from_owner() {
         let db = setup().await;
         let peer_id = create_peer(&db).await;
 
-        let ops = vec![upsert_op(1, "A"), upsert_op(2, "B")];
-        apply_peer_delta_operations(&db, peer_id, &ops, true)
-            .await
-            .unwrap();
+        apply_peer_delta_operations(
+            &db,
+            peer_id,
+            &[upsert_op_with_added_at(
+                10,
+                "Original",
+                Some("2026-01-01T00:00:00+00:00"),
+            )],
+        )
+        .await
+        .unwrap();
 
-        let rows = peer_book::Entity::find()
+        apply_peer_delta_operations(
+            &db,
+            peer_id,
+            &[upsert_op_with_added_at(
+                10,
+                "Renamed",
+                Some("2026-03-01T00:00:00+00:00"),
+            )],
+        )
+        .await
+        .unwrap();
+
+        let row = peer_book::Entity::find()
             .filter(peer_book::Column::PeerId.eq(peer_id))
-            .all(&db)
+            .filter(peer_book::Column::RemoteBookId.eq(10))
+            .one(&db)
             .await
+            .unwrap()
             .unwrap();
-        assert_eq!(rows.len(), 2);
-        for r in rows {
-            assert!(
-                r.first_seen_at.is_none(),
-                "initial sync must suppress 'new' badge via NULL first_seen_at",
-            );
-        }
+        assert_eq!(row.title, "Renamed");
+        assert_eq!(
+            row.added_at.as_deref(),
+            Some("2026-03-01T00:00:00+00:00"),
+            "owner's added_at is the source of truth on every upsert",
+        );
     }
 
     #[tokio::test]
-    async fn apply_upsert_preserves_first_seen_at_on_update() {
+    async fn upsert_without_added_at_preserves_existing() {
         let db = setup().await;
         let peer_id = create_peer(&db).await;
 
-        let ops = vec![upsert_op(10, "Original")];
-        apply_peer_delta_operations(&db, peer_id, &ops, false)
+        apply_peer_delta_operations(
+            &db,
+            peer_id,
+            &[upsert_op_with_added_at(
+                11,
+                "Original",
+                Some("2026-01-01T00:00:00+00:00"),
+            )],
+        )
+        .await
+        .unwrap();
+
+        // Older peer (no added_at) pushes an update: preserve the value.
+        apply_peer_delta_operations(&db, peer_id, &[upsert_op_with_added_at(11, "Edited", None)])
             .await
             .unwrap();
-        let first_pass = peer_book::Entity::find()
+
+        let row = peer_book::Entity::find()
             .filter(peer_book::Column::PeerId.eq(peer_id))
-            .filter(peer_book::Column::RemoteBookId.eq(10))
+            .filter(peer_book::Column::RemoteBookId.eq(11))
             .one(&db)
             .await
             .unwrap()
             .unwrap();
-        let original_first_seen = first_pass.first_seen_at.clone();
-        assert!(original_first_seen.is_some());
-
-        // Second pass with same id but updated title: first_seen_at must be
-        // preserved so the "new" badge does not re-fire.
-        let ops2 = vec![upsert_op(10, "Renamed")];
-        apply_peer_delta_operations(&db, peer_id, &ops2, false)
-            .await
-            .unwrap();
-
-        let second_pass = peer_book::Entity::find()
-            .filter(peer_book::Column::PeerId.eq(peer_id))
-            .filter(peer_book::Column::RemoteBookId.eq(10))
-            .one(&db)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(second_pass.title, "Renamed");
         assert_eq!(
-            second_pass.first_seen_at, original_first_seen,
-            "first_seen_at MUST survive across delta upserts (ADR-029 C2)",
+            row.added_at.as_deref(),
+            Some("2026-01-01T00:00:00+00:00"),
+            "missing added_at must not overwrite a known value",
         );
     }
 
@@ -445,12 +466,12 @@ mod tests {
         let db = setup().await;
         let peer_id = create_peer(&db).await;
 
-        apply_peer_delta_operations(&db, peer_id, &[upsert_op(7, "Doomed")], false)
+        apply_peer_delta_operations(&db, peer_id, &[upsert_op(7, "Doomed")])
             .await
             .unwrap();
 
         let ops = vec![json!({ "op": "delete", "book_id": 7 })];
-        let applied = apply_peer_delta_operations(&db, peer_id, &ops, false)
+        let applied = apply_peer_delta_operations(&db, peer_id, &ops)
             .await
             .unwrap();
         assert_eq!(applied, 1);
@@ -471,7 +492,7 @@ mod tests {
 
         let ops = vec![json!({ "op": "delete", "book_id": 404 })];
         // Must not error even if the row never existed (idempotent replay).
-        let applied = apply_peer_delta_operations(&db, peer_id, &ops, false)
+        let applied = apply_peer_delta_operations(&db, peer_id, &ops)
             .await
             .unwrap();
         assert_eq!(applied, 1, "idempotent delete still counts as applied");
@@ -488,7 +509,7 @@ mod tests {
             json!({ "op": "patch", "book_id": 1 }), // unknown op
             upsert_op(99, "Survivor"),
         ];
-        let applied = apply_peer_delta_operations(&db, peer_id, &ops, false)
+        let applied = apply_peer_delta_operations(&db, peer_id, &ops)
             .await
             .unwrap();
         assert_eq!(applied, 1, "only the well-formed upsert should count");

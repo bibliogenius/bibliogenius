@@ -17,6 +17,10 @@ pub struct Model {
     pub node_id: Option<String>,
     pub first_seen_at: Option<String>,
     pub notified_at: Option<String>,
+    /// `books.created_at` propagated from the owner peer (ADR pending).
+    /// Replaces `first_seen_at` for the "new" badge: source of truth is
+    /// the owner's library, not the local cache observation time.
+    pub added_at: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -41,7 +45,7 @@ impl ActiveModelBehavior for ActiveModel {}
 
 /// Convert a cached peer book row into the Book DTO returned by the API.
 /// `id` becomes `remote_book_id` so cached and live responses share the same
-/// id space (the peer's book id), and `first_seen_at` is propagated for the
+/// id space (the peer's book id), and `added_at` is propagated for the
 /// "new" badge.
 impl From<Model> for super::Book {
     fn from(pb: Model) -> Self {
@@ -76,7 +80,7 @@ impl From<Model> for super::Book {
             private: None,
             page_count: None,
             loan_duration_days: None,
-            first_seen_at: pb.first_seen_at,
+            added_at: pb.added_at,
         }
     }
 }
