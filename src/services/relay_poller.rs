@@ -86,6 +86,7 @@ use crate::models::peer;
 use crate::services::catalog_events::{self, CatalogChangedEvent};
 use crate::services::e2ee_transport::E2eeTransportError;
 use crate::services::nudge_events::{self, NudgeEvent, NudgeSource};
+use crate::services::profile_events::{self, ProfileChangedEvent};
 use crate::services::relay_transport::{RelayBlob, RelayTransport};
 
 /// Start the background relay polling loop.
@@ -354,6 +355,7 @@ const REQUEST_RESPONSE_TYPES: &[&str] = &[
     "loan_request",
     "public_stats_request",  // ADR-022: leaderboard relay sync
     "catalog_delta_request", // ADR-029: delta sync over relay
+    "avatar_sync_request",   // ADR-025: avatar + library_name sync over relay
 ];
 
 /// Response message types (correlation targets, ADR-012).
@@ -366,6 +368,7 @@ const RESPONSE_TYPES: &[&str] = &[
     "book_sync_response",
     "public_stats_response",  // ADR-022: leaderboard relay sync
     "catalog_delta_response", // ADR-029: delta sync over relay
+    "avatar_sync_response",   // ADR-025: avatar + library_name sync over relay
 ];
 
 /// Process a single relay message through the existing E2EE pipeline.
@@ -421,6 +424,34 @@ async fn process_relay_message(
     // than spawning inside the poller avoids propagating `Send` bounds into
     // the `process_relay_message` future and keeps a single owner of the
     // "delta then fallback" decision.
+    // ADR-025: Handle profile_changed nudge (peer edited avatar / library_name / ...).
+    // Flutter drives the pull via `try_peer_avatar_pull(peer_id)` after
+    // receiving this event — keeps `try_send_e2ee` non-Send state off the
+    // poller task (same rationale as `catalog_changed`, ADR-029).
+    if clear_message.message_type == "profile_changed" {
+        let changed: Vec<String> = clear_message
+            .payload
+            .get("changed")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        tracing::info!(
+            "Relay poller: profile_changed from peer {} ({}, changed={:?})",
+            sender_peer.name,
+            sender_peer.id,
+            changed
+        );
+        profile_events::bus().emit(ProfileChangedEvent {
+            peer_id: sender_peer.id,
+            changed,
+        });
+        return Ok(());
+    }
+
     if clear_message.message_type == "catalog_changed" {
         let peer_library_uuid = clear_message
             .payload

@@ -346,13 +346,25 @@ pub async fn dispatch_clear_message(
             )
         }
 
+        // ── Avatar sync via relay (ADR-025) ──────────────────────────
+        "avatar_sync_request" => {
+            let response_payload = handle_avatar_sync_request(state, clear_message).await;
+            seal_response(
+                crypto_service,
+                &known_peers[peer_index],
+                "avatar_sync_response",
+                response_payload,
+            )
+        }
+
         // Response message types - these are handled by correlation matching
         // in the relay poller, not dispatched to handlers.
         "library_manifest_response"
         | "library_page_response"
         | "library_search_response"
         | "library_browse_response"
-        | "catalog_delta_response" => {
+        | "catalog_delta_response"
+        | "avatar_sync_response" => {
             tracing::debug!(
                 "E2EE: Received '{}' (handled by correlation)",
                 clear_message.message_type
@@ -1350,6 +1362,42 @@ pub async fn handle_catalog_delta_request(
             "reset_required": false,
         }),
     }
+}
+
+// ── Avatar sync handler (ADR-025) ─────────────────────────────────────
+
+/// Handle an `avatar_sync_request` over E2EE (direct LAN or relay).
+///
+/// Returns the local `installation_profile.avatar_config` (parsed JSON, or
+/// null if absent / malformed) and `library_config.name` so the requester
+/// can refresh both in a single round-trip. The request payload is empty
+/// (`{}`), so no input validation is required — any shape is tolerated.
+pub async fn handle_avatar_sync_request(
+    state: &crate::infrastructure::AppState,
+    _msg: &ClearMessage,
+) -> serde_json::Value {
+    let db = state.db();
+
+    let avatar_config: Option<serde_json::Value> =
+        crate::models::installation_profile::Entity::find_by_id(1)
+            .one(db)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|p| p.avatar_config)
+            .and_then(|s| serde_json::from_str(&s).ok());
+
+    let library_name: Option<String> = crate::models::library_config::Entity::find_by_id(1)
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.name);
+
+    json!({
+        "avatar_config": avatar_config,
+        "library_name": library_name,
+    })
 }
 
 // ── Library sync handlers (ADR-012) ───────────────────────────────────

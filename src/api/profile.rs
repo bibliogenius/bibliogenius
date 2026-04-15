@@ -1,8 +1,9 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::infrastructure::AppState;
 use crate::models::installation_profile::{ActiveModel, Entity as InstallationProfileEntity};
 
 #[derive(Debug, Deserialize)]
@@ -20,9 +21,10 @@ pub struct UpdateProfileRequest {
 }
 
 pub async fn update_profile(
-    State(db): State<DatabaseConnection>,
+    State(state): State<AppState>,
     Json(req): Json<UpdateProfileRequest>,
 ) -> impl IntoResponse {
+    let db = state.db().clone();
     // Validate profile type if provided
     if let Some(ref profile_type) = req.profile_type
         && profile_type != "individual"
@@ -45,15 +47,18 @@ pub async fn update_profile(
 
     if let Some(existing_profile) = profile {
         let mut active: ActiveModel = existing_profile.clone().into();
+        let mut avatar_changed = false;
 
         if let Some(ref profile_type) = req.profile_type {
             active.profile_type = Set(profile_type.clone());
         }
 
         if let Some(avatar_config) = req.avatar_config {
-            active.avatar_config = Set(Some(
-                serde_json::to_string(&avatar_config).unwrap_or_default(),
-            ));
+            let new_json = serde_json::to_string(&avatar_config).unwrap_or_default();
+            // Only emit a profile_changed nudge when the stored value actually
+            // changes — avoids waking every peer on no-op profile saves.
+            avatar_changed = existing_profile.avatar_config.as_deref() != Some(new_json.as_str());
+            active.avatar_config = Set(Some(new_json));
         }
 
         if let Some(ref api_keys) = req.api_keys {
@@ -139,6 +144,15 @@ pub async fn update_profile(
             let mut active_config: ConfigActiveModel = config.into();
             active_config.show_borrowed_books = Set(Some(profile_type == "individual"));
             let _ = active_config.update(&db).await;
+        }
+
+        // ADR-025: nudge peers so they pull the fresh avatar over E2EE
+        // relay instead of discovering it lazily through book_sync.
+        if avatar_changed {
+            crate::services::profile_notification::schedule_profile_changed_notification(
+                state,
+                vec!["avatar".to_string()],
+            );
         }
 
         (

@@ -1023,6 +1023,7 @@ pub(crate) async fn try_send_e2ee(
                     "request_status_query",
                     "public_stats_request",  // ADR-022: leaderboard relay sync
                     "catalog_delta_request", // ADR-029: delta sync over relay
+                    "avatar_sync_request",   // ADR-025: avatar + library_name sync over relay
                 ];
                 let needs_response = RELAY_AWAIT_RESPONSE.contains(&message_type);
 
@@ -1204,6 +1205,95 @@ pub(crate) async fn try_send_e2ee(
         }
         Err(e) => Err(format!("E2EE send failed: {e}")),
     }
+}
+
+/// Pull a peer's avatar and library name over E2EE (ADR-025).
+///
+/// Sends `avatar_sync_request`, waits for `avatar_sync_response`, persists
+/// `peers.avatar_config` and `peers.name` when they differ from the cached
+/// value. Returns `true` when at least one field changed.
+///
+/// Called from three trigger points:
+///   1. On first-seen of an accepted relay-only peer (no cached avatar).
+///   2. From Flutter after receiving a `profile_changed` WS nudge.
+///   3. Opportunistically during relay poll cycles (at most once per 24h).
+pub(crate) async fn try_pull_avatar_via_relay(
+    state: &crate::infrastructure::AppState,
+    peer_id: i32,
+) -> Result<bool, String> {
+    let db = state.db();
+
+    let peer_model = peer::Entity::find_by_id(peer_id)
+        .one(db)
+        .await
+        .map_err(|e| format!("load peer {peer_id}: {e}"))?
+        .ok_or_else(|| format!("peer {peer_id} not found"))?;
+
+    let send_result = try_send_e2ee(state, &peer_model, "avatar_sync_request", json!({})).await;
+
+    let response = match send_result {
+        Ok(Some(Some(resp))) => resp,
+        Ok(Some(None)) => {
+            tracing::info!(
+                "avatar_sync: peer {} did not respond (likely pre-ADR-025)",
+                peer_model.name
+            );
+            return Ok(false);
+        }
+        Ok(None) => {
+            tracing::debug!(
+                "avatar_sync: peer {} has no E2EE capability",
+                peer_model.name
+            );
+            return Ok(false);
+        }
+        Err(e) => return Err(format!("try_send_e2ee: {e}")),
+    };
+
+    // `avatar_config` is either a JSON object/value or null. Serialize back
+    // to a string for storage (peer.avatar_config is TEXT, matching the
+    // existing piggyback path in sync_peer).
+    let new_avatar: Option<String> = response
+        .payload
+        .get("avatar_config")
+        .filter(|v| !v.is_null())
+        .and_then(|v| serde_json::to_string(v).ok());
+
+    let new_name: Option<String> = response
+        .payload
+        .get("library_name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let avatar_changed = new_avatar.is_some() && new_avatar != peer_model.avatar_config;
+    let name_changed = new_name.as_ref().is_some_and(|n| n != &peer_model.name);
+
+    if !avatar_changed && !name_changed {
+        tracing::debug!("avatar_sync: peer {} already up to date", peer_model.name);
+        return Ok(false);
+    }
+
+    let mut active: peer::ActiveModel = peer_model.clone().into();
+    if avatar_changed {
+        active.avatar_config = Set(new_avatar.clone());
+    }
+    if name_changed {
+        active.name = Set(new_name.clone().unwrap_or_else(|| peer_model.name.clone()));
+    }
+    active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+    active
+        .update(db)
+        .await
+        .map_err(|e| format!("update peer {peer_id}: {e}"))?;
+
+    tracing::info!(
+        "avatar_sync: peer {} updated (avatar_changed={}, name_changed={})",
+        peer_model.name,
+        avatar_changed,
+        name_changed
+    );
+    Ok(true)
 }
 
 /// Attempt to refresh a peer's relay credentials.

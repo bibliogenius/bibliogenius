@@ -2113,6 +2113,94 @@ pub async fn subscribe_catalog_changes(
     Ok(())
 }
 
+// ============ Profile Change Stream (ADR-025) ============
+
+/// FFI-safe view of a peer profile-change event.
+///
+/// Emitted when a peer sends a `profile_changed` relay message after they
+/// edit their avatar (or, in the future, another profile field). Flutter
+/// should call `try_peer_avatar_pull(peer_id)` on receipt to fetch the
+/// fresh values over E2EE and update the local `peers` row.
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbProfileChangedEvent {
+    /// Local peer row ID from the `peers` table.
+    pub peer_id: i32,
+    /// Which profile fields the sender marked as changed
+    /// (`"avatar"`, `"library_name"`, ...). Advisory: the receiver normally
+    /// re-pulls all fields in one round-trip.
+    pub changed: Vec<String>,
+}
+
+/// Subscribe to the profile-change event stream (ADR-025).
+///
+/// Each emitted event indicates that a peer's profile (today: avatar)
+/// changed. Flutter should pull the new values via
+/// `try_peer_avatar_pull(peer_id)`. The subscription is intended to be
+/// registered once at app level (`AvatarSyncService`) so avatars stay
+/// fresh across every screen without per-screen wiring.
+///
+/// The stream lives until the Dart side drops the `StreamSink`.
+pub async fn subscribe_profile_changes(
+    sink: crate::frb_generated::StreamSink<FrbProfileChangedEvent>,
+) -> Result<(), String> {
+    let mut rx = crate::services::profile_events::bus().subscribe();
+
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let frb_event = FrbProfileChangedEvent {
+                        peer_id: event.peer_id,
+                        changed: event.changed,
+                    };
+                    if sink.add(frb_event).is_err() {
+                        tracing::debug!(
+                            "Profile change stream: Dart sink closed, ending forwarder"
+                        );
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Profile change stream: subscriber lagged, dropped {n} events");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::error!("Profile change stream: bus sender closed unexpectedly");
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// Pull a peer's avatar (and `library_name`) over E2EE (ADR-025).
+///
+/// Returns `true` when at least one field changed and was persisted to the
+/// local `peers` row. Returns `false` when the peer is up to date, the
+/// peer did not respond, or E2EE is unavailable. Errors are converted to
+/// `false` and logged (the caller's UI should degrade gracefully to the
+/// cached avatar).
+///
+/// Designed to be called from the Flutter `subscribe_profile_changes`
+/// handler (`AvatarSyncService`) whenever a peer emits a `profile_changed`
+/// nudge. Also safe to call opportunistically on first-seen of a relay-only
+/// peer.
+pub async fn try_peer_avatar_pull(peer_id: i32) -> bool {
+    let Some(state) = global_app_state() else {
+        tracing::warn!("try_peer_avatar_pull: AppState not initialized");
+        return false;
+    };
+
+    match crate::api::peer::try_pull_avatar_via_relay(state, peer_id).await {
+        Ok(changed) => changed,
+        Err(e) => {
+            tracing::warn!("try_peer_avatar_pull: peer {peer_id} error: {e}");
+            false
+        }
+    }
+}
+
 pub async fn subscribe_relay_nudges(
     sink: crate::frb_generated::StreamSink<FrbNudgeEvent>,
 ) -> Result<(), String> {

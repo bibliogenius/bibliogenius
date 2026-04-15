@@ -23,6 +23,8 @@ pub mod notification_service;
 pub mod nudge_events;
 pub mod oplog_pruner;
 pub mod peer_delta_sync;
+pub mod profile_events;
+pub mod profile_notification;
 pub mod relay_poller;
 pub mod relay_transport;
 pub mod sale_service; // Service de vente pour profil Libraire
