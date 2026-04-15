@@ -1448,6 +1448,7 @@ pub async fn handle_library_manifest_request(
                     "author": b.author,
                     "isbn": b.isbn,
                     "cover_url": b.cover_url,
+                    "added_at": b.added_at,
                 })
             })
             .collect()
@@ -1513,7 +1514,8 @@ pub async fn handle_library_page_request(
     let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
     crate::models::Book::rewrite_local_cover_urls(&mut book_dtos, hub_prefix.as_deref());
 
-    // Browse profile: only title, author, isbn, cover_url (~250 bytes/book)
+    // Browse profile: only title, author, isbn, cover_url, added_at
+    // (~270 bytes/book). `added_at` is required for the "new" badge.
     let browse_books: Vec<serde_json::Value> = book_dtos
         .iter()
         .map(|b| {
@@ -1523,6 +1525,7 @@ pub async fn handle_library_page_request(
                 "author": b.author,
                 "isbn": b.isbn,
                 "cover_url": b.cover_url,
+                "added_at": b.added_at,
             })
         })
         .collect();
@@ -1619,7 +1622,7 @@ pub async fn handle_library_search_via_relay(
     let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
     crate::models::Book::rewrite_local_cover_urls(&mut book_dtos, hub_prefix.as_deref());
 
-    // Browse profile
+    // Browse profile (added_at needed for the "new" badge)
     let browse_books: Vec<serde_json::Value> = book_dtos
         .iter()
         .map(|b| {
@@ -1629,6 +1632,7 @@ pub async fn handle_library_search_via_relay(
                 "author": b.author,
                 "isbn": b.isbn,
                 "cover_url": b.cover_url,
+                "added_at": b.added_at,
             })
         })
         .collect();
