@@ -22,6 +22,12 @@ ignore = [
     # (relay_poller jitter) is not reachable from a custom logger. Transitive pin
     # via tungstenite 0.24 would require a tokio-tungstenite major bump to remove.
     "RUSTSEC-2026-0097",
+    # rustls-webpki 0.101.7 name-constraints mis-evaluation (URI + DNS wildcard).
+    # Not exploitable here: sqlx is used for SQLite only (no TLS path), and the
+    # bug requires a misissued certificate with a name-constraints extension.
+    # Transitive pin via sqlx 0.7 → rustls 0.21; fix needs sqlx 0.8 / sea-orm 1.x.
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
     # NOTE: All above will be resolved by upgrading sea-orm to 1.x.
 ]
 
