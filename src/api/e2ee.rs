@@ -1345,11 +1345,17 @@ pub async fn handle_catalog_delta_request(
         };
 
     match outcome {
-        BookDeltaOutcome::ResetRequired { .. } => json!({
+        BookDeltaOutcome::ResetRequired { current_cursor, .. } => json!({
             "operations": [],
             "latest_cursor": since.unwrap_or(0),
             "has_more": false,
             "reset_required": true,
+            // Responder's current `operation_log` max id. The requester MUST
+            // NOT adopt this as its new cursor until it has rebuilt state via
+            // the legacy full-catalog flow; once that succeeds, persisting
+            // this value breaks the reset loop so the next sync is a delta.
+            // Additive field: old clients ignore it.
+            "current_cursor": current_cursor,
         }),
         BookDeltaOutcome::Delta {
             operations,

@@ -208,6 +208,43 @@ async fn stale_cursor_returns_reset_required() {
         "reset_required echoes the caller's cursor unchanged so the client can re-request after fallback",
     );
     assert_eq!(resp["has_more"], false);
+    // The responder MUST surface its current log max so a requester that
+    // runs the legacy full-catalog fallback can adopt the value afterwards
+    // and break out of the reset loop (see ADR-029 IN12 / peer_delta_sync
+    // set_peer_last_delta_cursor).
+    let current_cursor = resp["current_cursor"]
+        .as_i64()
+        .expect("current_cursor must be populated on reset_required");
+    assert_eq!(
+        current_cursor, keep as i64,
+        "current_cursor must be the retained row id (global operation_log max)",
+    );
+}
+
+#[tokio::test]
+async fn reset_required_current_cursor_tracks_latest_op() {
+    // Add more local ops after the stale point and confirm current_cursor
+    // advances accordingly — locking the invariant that current_cursor is
+    // always "oldest_or_latest_cursor()" of the responder at response time.
+    let state = setup().await;
+    let (_, _) = create_book_with_log(state.db(), "A", false, None).await;
+    let (_, keep) = create_book_with_log(state.db(), "B", false, None).await;
+    operation_log::Entity::delete_many()
+        .filter(operation_log::Column::Id.lt(keep))
+        .exec(state.db())
+        .await
+        .unwrap();
+    let (_, latest) = create_book_with_log(state.db(), "C", false, None).await;
+
+    let msg = request_message(json!({ "since": 0, "limit": 500 }));
+    let resp = rust_lib_app::api::e2ee::handle_catalog_delta_request(&state, &msg).await;
+
+    assert_eq!(resp["reset_required"], true);
+    assert_eq!(
+        resp["current_cursor"].as_i64().unwrap(),
+        latest as i64,
+        "current_cursor must be the latest id at response time, not the retained oldest",
+    );
 }
 
 #[tokio::test]

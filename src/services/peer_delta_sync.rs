@@ -44,7 +44,17 @@ pub enum DeltaSyncOutcome {
     },
     /// Responder reported that the cursor predates the oldest retained log
     /// row. The caller must fall back to the legacy full-catalog flow.
-    ResetRequired,
+    ///
+    /// `current_cursor` is the responder's `operation_log` max id at the
+    /// time of the response, when it populated the protocol field. Callers
+    /// MUST NOT persist this as their cursor until the full-catalog flow
+    /// has rebuilt state — persisting beforehand would skip over history
+    /// the client hasn't materialised yet. Once the full flow succeeds, the
+    /// caller should call [`set_peer_last_delta_cursor`] with this value so
+    /// the next sync can resume as a delta rather than trigger the same
+    /// reset loop. `None` when talking to an older responder that did not
+    /// populate the field.
+    ResetRequired { current_cursor: Option<i64> },
     /// Responder did not reply within the transport timeout or sent a
     /// response the orchestrator could not parse. Treat as a fallback
     /// trigger: the peer is likely on an older codebase that does not know
@@ -118,11 +128,16 @@ pub async fn fetch_and_apply_peer_delta(
         .unwrap_or(false);
 
     if reset_required {
+        let current_cursor = response
+            .payload
+            .get("current_cursor")
+            .and_then(|v| v.as_i64());
         tracing::info!(
-            "peer_delta_sync: peer {} reported reset_required (cursor pruned)",
-            peer_model.name
+            "peer_delta_sync: peer {} reported reset_required (cursor pruned, responder current_cursor={:?})",
+            peer_model.name,
+            current_cursor
         );
-        return Ok(DeltaSyncOutcome::ResetRequired);
+        return Ok(DeltaSyncOutcome::ResetRequired { current_cursor });
     }
 
     let operations = response
@@ -298,6 +313,23 @@ async fn persist_peer_cursor(
         .exec(db)
         .await?;
     Ok(())
+}
+
+/// Public wrapper around [`persist_peer_cursor`] exposed to the FFI layer.
+///
+/// Intended use: after a successful legacy `library_manifest_request` +
+/// page loop triggered by a `ResetRequired { current_cursor: Some(N) }`
+/// outcome, the Flutter side calls this with `N` so the next sync resumes
+/// as a delta instead of re-entering the reset loop.
+///
+/// Not called from the delta orchestrator itself, which still writes the
+/// cursor via the private helper on its own success path.
+pub async fn set_peer_last_delta_cursor(
+    db: &DatabaseConnection,
+    peer_id: i32,
+    cursor: i64,
+) -> Result<(), sea_orm::DbErr> {
+    persist_peer_cursor(db, peer_id, cursor).await
 }
 
 #[cfg(test)]
@@ -536,5 +568,48 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(reloaded.last_delta_cursor, Some(12345));
+    }
+
+    #[tokio::test]
+    async fn set_peer_last_delta_cursor_is_idempotent() {
+        // Public helper used by Flutter after a successful legacy full sync
+        // triggered by a `reset_required:<N>` outcome. Writing the same
+        // value twice must be a no-op (idempotent retry).
+        let db = setup().await;
+        let peer_id = create_peer(&db).await;
+
+        set_peer_last_delta_cursor(&db, peer_id, 999)
+            .await
+            .expect("first write succeeds");
+        set_peer_last_delta_cursor(&db, peer_id, 999)
+            .await
+            .expect("second write succeeds (idempotent)");
+
+        let reloaded = peer::Entity::find_by_id(peer_id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.last_delta_cursor, Some(999));
+    }
+
+    #[tokio::test]
+    async fn set_peer_last_delta_cursor_overwrites_existing() {
+        // When a responder reports a newer `current_cursor` than the one
+        // already persisted, the helper must overwrite unconditionally —
+        // the delta orchestrator is the only path that advances the cursor
+        // incrementally; the reset-recovery path always jumps forward.
+        let db = setup().await;
+        let peer_id = create_peer(&db).await;
+
+        persist_peer_cursor(&db, peer_id, 100).await.unwrap();
+        set_peer_last_delta_cursor(&db, peer_id, 500).await.unwrap();
+
+        let reloaded = peer::Entity::find_by_id(peer_id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.last_delta_cursor, Some(500));
     }
 }

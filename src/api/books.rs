@@ -193,6 +193,14 @@ pub enum BookDeltaOutcome {
     },
     ResetRequired {
         oldest_available_cursor: i64,
+        /// Global max `operation_log.id` at the moment of the response.
+        ///
+        /// The requester cannot safely adopt this as its new cursor until
+        /// it has successfully rebuilt state via the legacy full-catalog
+        /// flow — but once that flow succeeds, saving this value breaks the
+        /// "reset_required" loop (next sync becomes a cheap delta). Added
+        /// additively to the protocol so older clients ignore it.
+        current_cursor: i64,
     },
 }
 
@@ -218,8 +226,10 @@ pub async fn build_book_delta_response(
         let oldest = delta_service::oldest_retained_cursor(state.db())
             .await?
             .unwrap_or(0);
+        let current = delta_service::oldest_or_latest_cursor(state.db()).await?;
         return Ok(BookDeltaOutcome::ResetRequired {
             oldest_available_cursor: oldest,
+            current_cursor: current,
         });
     }
 
@@ -285,10 +295,12 @@ async fn list_books_delta(
     match outcome {
         BookDeltaOutcome::ResetRequired {
             oldest_available_cursor,
+            current_cursor,
         } => {
             let body = serde_json::to_vec(&json!({
                 "error": "cursor_too_old",
                 "oldest_available_cursor": oldest_available_cursor,
+                "current_cursor": current_cursor,
                 "hint": "Perform a full GET /api/books to rebuild state.",
             }))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

@@ -13,6 +13,11 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // Global database connection (initialized once on app start)
 static DB: OnceLock<DatabaseConnection> = OnceLock::new();
+/// Path of the debug log file written by the tracing subscriber.
+/// Set once in `init_backend`; read by `get_rust_log_tail` so Flutter can
+/// display backend logs without relying on Xcode Console (stderr is invisible
+/// to the iOS FFI host process).
+static LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 /// Global AppState — set once in `initBackend`, read by FFI handlers that need
 /// services not available as individual statics (e.g. catalog notifications).
 static GLOBAL_APP_STATE: OnceLock<crate::infrastructure::AppState> = OnceLock::new();
@@ -162,9 +167,18 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
     // Release builds produce no log output to avoid leaking sensitive data.
     // Filter targets the lib crate name "rust_lib_app", not the package name.
     //
-    // macOS FFI: writes to /tmp/bibliogenius-rust.log (tail -f to follow).
-    // iOS FFI:   /tmp is sandboxed and not writable; falls back to stderr
-    //            which appears in Xcode Console.
+    // Log file lives next to the SQLite DB (parent of `db_path`):
+    //   macOS: ~/Library/Application Support/com.bibliogenius.app/bibliogenius-rust.log
+    //   iOS:   <app sandbox>/Documents/bibliogenius-rust.log
+    // Both are writable and retrievable via `get_rust_log_tail` FFI.
+    // Truncated at each init so the file does not grow indefinitely across
+    // launches — within a single session tracing keeps appending.
+    let log_path = std::path::Path::new(&db_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("bibliogenius-rust.log");
+    let _ = LOG_PATH.set(log_path.clone());
+
     static TRACING_INIT: std::sync::Once = std::sync::Once::new();
     TRACING_INIT.call_once(|| {
         if cfg!(debug_assertions) {
@@ -174,11 +188,11 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
             let filter = tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "rust_lib_app=info,ssrf=warn".into());
 
-            // Try file first (macOS FFI path)
             if let Ok(file) = std::fs::OpenOptions::new()
                 .create(true)
-                .append(true)
-                .open("/tmp/bibliogenius-rust.log")
+                .write(true)
+                .truncate(true)
+                .open(&log_path)
             {
                 let _ = tracing_subscriber::registry()
                     .with(filter)
@@ -189,7 +203,6 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
                     )
                     .try_init();
             } else {
-                // Fallback to stderr (iOS FFI — visible in Xcode Console)
                 let _ = tracing_subscriber::registry()
                     .with(filter)
                     .with(tracing_subscriber::fmt::layer().with_ansi(false))
@@ -279,6 +292,22 @@ pub fn health_check() -> String {
 #[frb(sync)]
 pub fn get_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Return the last `lines` lines of the Rust tracing log file.
+/// Empty string if the file does not exist, tracing is disabled (release
+/// build), or `init_backend` has not run yet.
+#[frb(sync)]
+pub fn get_rust_log_tail(lines: u32) -> String {
+    let Some(path) = LOG_PATH.get() else {
+        return String::new();
+    };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let all: Vec<&str> = content.lines().collect();
+    let start = all.len().saturating_sub(lines as usize);
+    all[start..].join("\n")
 }
 
 /// Simple greeting function to test the bridge
@@ -2046,11 +2075,30 @@ fn nudge_source_label(source: crate::services::nudge_events::NudgeSource) -> Str
 /// handler before triggering a full sync, so the delta path replaces the
 /// full pull whenever it succeeds.
 pub async fn try_peer_catalog_delta(peer_id: i32) -> bool {
+    try_peer_catalog_delta_detailed(peer_id)
+        .await
+        .starts_with("applied:")
+}
+
+/// Same as [`try_peer_catalog_delta`] but returns a descriptive string so
+/// Flutter can surface the exact outcome without depending on the FFI log
+/// file (invisible on iOS). Format:
+/// - `applied:<ops>:<cursor>:<has_more>`: delta applied.
+/// - `fallback_required`: peer did not respond.
+/// - `e2ee_unavailable`: no E2EE capability.
+/// - `reset_required`: cursor pruned upstream, responder did not populate
+///   `current_cursor` (older codebase).
+/// - `reset_required:<N>`: cursor pruned upstream, responder reports its
+///   current `operation_log` max id as `N`. The caller SHOULD persist `N`
+///   via [`set_peer_delta_cursor`] only after a successful legacy full
+///   sync, to break the reset loop.
+/// - `no_state`: AppState not initialised.
+/// - `error:<message>`: transport or DB error.
+pub async fn try_peer_catalog_delta_detailed(peer_id: i32) -> String {
     use crate::services::peer_delta_sync::{self, DeltaSyncOutcome};
 
     let Some(state) = global_app_state() else {
-        tracing::warn!("try_peer_catalog_delta: AppState not initialized");
-        return false;
+        return "no_state".to_string();
     };
 
     match peer_delta_sync::fetch_and_apply_peer_delta(state, peer_id).await {
@@ -2058,23 +2106,68 @@ pub async fn try_peer_catalog_delta(peer_id: i32) -> bool {
             operations_applied,
             latest_cursor,
             has_more,
-        }) => {
-            tracing::info!(
-                "ADR-029 delta: peer {peer_id} applied={operations_applied} cursor={latest_cursor} has_more={has_more}"
-            );
-            true
-        }
-        Ok(outcome) => {
-            tracing::info!(
-                "ADR-029 delta: peer {peer_id} non-applied ({outcome:?}), caller should fall back"
-            );
-            false
-        }
-        Err(e) => {
-            tracing::warn!("ADR-029 delta: peer {peer_id} transport error: {e}");
-            false
-        }
+        }) => format!("applied:{operations_applied}:{latest_cursor}:{has_more}"),
+        Ok(DeltaSyncOutcome::FallbackRequired) => "fallback_required".to_string(),
+        Ok(DeltaSyncOutcome::E2eeUnavailable) => "e2ee_unavailable".to_string(),
+        Ok(DeltaSyncOutcome::ResetRequired { current_cursor }) => match current_cursor {
+            Some(n) => format!("reset_required:{n}"),
+            None => "reset_required".to_string(),
+        },
+        Err(e) => format!("error:{e}"),
     }
+}
+
+/// Persist `peers.last_delta_cursor` for the given peer.
+///
+/// Flutter calls this after a successful legacy full-catalog sync that was
+/// triggered by a `reset_required:<N>` outcome, passing the responder's
+/// reported `current_cursor`. This breaks the reset loop by letting the
+/// next sync resume as a delta.
+///
+/// Returns `Ok(())` on success, or a descriptive error string on DB
+/// failure / unknown peer id. Safe to call with a cursor of 0 (no-op for
+/// peers that have never had any operations).
+pub async fn set_peer_delta_cursor(peer_id: i32, cursor: i64) -> Result<(), String> {
+    let Some(state) = global_app_state() else {
+        return Err("no_state".to_string());
+    };
+    crate::services::peer_delta_sync::set_peer_last_delta_cursor(state.db(), peer_id, cursor)
+        .await
+        .map_err(|e| format!("set_peer_last_delta_cursor: {e}"))
+}
+
+/// Persist a refreshed `peers.library_uuid` for the given peer (ADR-030).
+///
+/// The E2EE-signed manifest from a peer carries its current `library_uuid`.
+/// When that value diverges from the locally persisted one, the local row
+/// is stale (historical drift from an older pairing code path). This helper
+/// adopts the manifest value so all downstream lookups (hub directory
+/// fallback, event UUID matching on later mounts) see the current identity.
+///
+/// Trust model: only call this with a `new_uuid` read from an ENVELOPE
+/// that successfully verified against `peers.public_key` (ed25519). The
+/// signature check on that path is what binds the uuid to the peer identity
+/// — skipping it would let any relay forwarder inject an arbitrary uuid.
+/// `peer_book` rows are intentionally left untouched: they key on
+/// `peer_id`, not `library_uuid`, and the enclosing manifest sync pass is
+/// already about to refresh them via upsert (a premature purge would flash
+/// an empty library in the UI before the pages arrive).
+///
+/// Idempotent: writing the same uuid twice is a no-op; writing a null or
+/// empty string is rejected to avoid clearing a healthy value by accident.
+///
+/// Returns `Ok(true)` when the stored uuid changed (Flutter may log it),
+/// `Ok(false)` when the value was already current.
+pub async fn update_peer_library_uuid(peer_id: i32, new_uuid: String) -> Result<bool, String> {
+    if new_uuid.trim().is_empty() {
+        return Err("update_peer_library_uuid: refusing empty uuid".to_string());
+    }
+    let Some(state) = global_app_state() else {
+        return Err("no_state".to_string());
+    };
+    crate::services::peer_identity_sync::persist_peer_library_uuid(state.db(), peer_id, &new_uuid)
+        .await
+        .map_err(|e| format!("persist_peer_library_uuid: {e}"))
 }
 
 pub async fn subscribe_catalog_changes(
