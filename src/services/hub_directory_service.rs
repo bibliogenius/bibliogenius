@@ -90,6 +90,9 @@ pub struct HubProfile {
     /// SHA-256 hash of a platform-specific device identifier.
     #[serde(default)]
     pub device_fingerprint: Option<String>,
+    /// Client app version reported at last register/heartbeat (e.g. "0.9.0+422").
+    #[serde(default)]
+    pub app_version: Option<String>,
     /// Relay credentials (returned only to authenticated requesters).
     #[serde(default)]
     pub relay_url: Option<String>,
@@ -221,6 +224,7 @@ pub struct RegisterParams {
     pub website: Option<String>,
     pub device_model: Option<String>,
     pub device_fingerprint: Option<String>,
+    pub app_version: Option<String>,
     pub relay_url: Option<String>,
     pub relay_mailbox_id: Option<String>,
     pub relay_write_token: Option<String>,
@@ -463,6 +467,9 @@ impl HubDirectoryService {
         }
         if let Some(ref fp) = params.device_fingerprint {
             body["device_fingerprint"] = serde_json::Value::String(fp.clone());
+        }
+        if let Some(ref v) = params.app_version {
+            body["app_version"] = serde_json::Value::String(v.clone());
         }
         if let Some(ref url) = params.relay_url {
             body["relay_url"] = serde_json::Value::String(url.clone());

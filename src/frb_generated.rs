@@ -6508,6 +6508,7 @@ impl SseDecode for crate::api::frb::FrbHubProfile {
         let mut var_website = <Option<String>>::sse_decode(deserializer);
         let mut var_deviceModel = <Option<String>>::sse_decode(deserializer);
         let mut var_deviceFingerprint = <Option<String>>::sse_decode(deserializer);
+        let mut var_appVersion = <Option<String>>::sse_decode(deserializer);
         let mut var_avatarConfig = <Option<String>>::sse_decode(deserializer);
         return crate::api::frb::FrbHubProfile {
             node_id: var_nodeId,
@@ -6522,6 +6523,7 @@ impl SseDecode for crate::api::frb::FrbHubProfile {
             website: var_website,
             device_model: var_deviceModel,
             device_fingerprint: var_deviceFingerprint,
+            app_version: var_appVersion,
             avatar_config: var_avatarConfig,
         };
     }
@@ -6937,6 +6939,7 @@ impl SseDecode for crate::api::frb::FrbRegisterParams {
         let mut var_website = <Option<String>>::sse_decode(deserializer);
         let mut var_deviceModel = <Option<String>>::sse_decode(deserializer);
         let mut var_deviceFingerprint = <Option<String>>::sse_decode(deserializer);
+        let mut var_appVersion = <Option<String>>::sse_decode(deserializer);
         let mut var_relayUrl = <Option<String>>::sse_decode(deserializer);
         let mut var_relayMailboxId = <Option<String>>::sse_decode(deserializer);
         let mut var_relayWriteToken = <Option<String>>::sse_decode(deserializer);
@@ -6955,6 +6958,7 @@ impl SseDecode for crate::api::frb::FrbRegisterParams {
             website: var_website,
             device_model: var_deviceModel,
             device_fingerprint: var_deviceFingerprint,
+            app_version: var_appVersion,
             relay_url: var_relayUrl,
             relay_mailbox_id: var_relayMailboxId,
             relay_write_token: var_relayWriteToken,
@@ -8546,6 +8550,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbHubProfile {
             self.website.into_into_dart().into_dart(),
             self.device_model.into_into_dart().into_dart(),
             self.device_fingerprint.into_into_dart().into_dart(),
+            self.app_version.into_into_dart().into_dart(),
             self.avatar_config.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -9067,6 +9072,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbRegisterParams {
             self.website.into_into_dart().into_dart(),
             self.device_model.into_into_dart().into_dart(),
             self.device_fingerprint.into_into_dart().into_dart(),
+            self.app_version.into_into_dart().into_dart(),
             self.relay_url.into_into_dart().into_dart(),
             self.relay_mailbox_id.into_into_dart().into_dart(),
             self.relay_write_token.into_into_dart().into_dart(),
@@ -9556,6 +9562,7 @@ impl SseEncode for crate::api::frb::FrbHubProfile {
         <Option<String>>::sse_encode(self.website, serializer);
         <Option<String>>::sse_encode(self.device_model, serializer);
         <Option<String>>::sse_encode(self.device_fingerprint, serializer);
+        <Option<String>>::sse_encode(self.app_version, serializer);
         <Option<String>>::sse_encode(self.avatar_config, serializer);
     }
 }
@@ -9812,6 +9819,7 @@ impl SseEncode for crate::api::frb::FrbRegisterParams {
         <Option<String>>::sse_encode(self.website, serializer);
         <Option<String>>::sse_encode(self.device_model, serializer);
         <Option<String>>::sse_encode(self.device_fingerprint, serializer);
+        <Option<String>>::sse_encode(self.app_version, serializer);
         <Option<String>>::sse_encode(self.relay_url, serializer);
         <Option<String>>::sse_encode(self.relay_mailbox_id, serializer);
         <Option<String>>::sse_encode(self.relay_write_token, serializer);

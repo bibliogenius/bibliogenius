@@ -4222,6 +4222,7 @@ pub struct FrbHubProfile {
     pub website: Option<String>,
     pub device_model: Option<String>,
     pub device_fingerprint: Option<String>,
+    pub app_version: Option<String>,
     pub avatar_config: Option<String>,
 }
 
@@ -4240,6 +4241,7 @@ impl From<HubProfile> for FrbHubProfile {
             website: p.website,
             device_model: p.device_model,
             device_fingerprint: p.device_fingerprint,
+            app_version: p.app_version,
             avatar_config: p.avatar_config,
         }
     }
@@ -4260,6 +4262,7 @@ pub struct FrbRegisterParams {
     pub website: Option<String>,
     pub device_model: Option<String>,
     pub device_fingerprint: Option<String>,
+    pub app_version: Option<String>,
     pub relay_url: Option<String>,
     pub relay_mailbox_id: Option<String>,
     pub relay_write_token: Option<String>,
@@ -4282,6 +4285,7 @@ impl From<FrbRegisterParams> for RegisterParams {
             website: p.website,
             device_model: p.device_model,
             device_fingerprint: p.device_fingerprint,
+            app_version: p.app_version,
             relay_url: p.relay_url,
             relay_mailbox_id: p.relay_mailbox_id,
             relay_write_token: p.relay_write_token,
