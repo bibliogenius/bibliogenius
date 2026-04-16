@@ -486,13 +486,8 @@ impl HubDirectoryService {
             body["avatar_config"] = val;
         }
 
-        let mut req = self
-            .http_client
-            .post(format!("{hub_url}/api/directory/profile"));
-        let has_auth = existing.is_some();
-        if let Some(ref cfg) = existing {
-            req = req.header("Authorization", format!("Bearer {}", cfg.write_token));
-        }
+        let initial_token = existing.as_ref().map(|c| c.write_token.clone());
+        let has_auth = initial_token.is_some();
 
         tracing::info!(
             "Hub directory: register_or_update node_id={} hub={} auth={} relay_mailbox={}",
@@ -502,13 +497,46 @@ impl HubDirectoryService {
             params.relay_mailbox_id.as_deref().unwrap_or("none"),
         );
 
-        let response = match req.json(&body).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("Hub directory: network error: {e}");
-                return Err(HubDirectoryError::Network(e.to_string()));
+        let response = self
+            .send_profile_upsert(&hub_url, &body, initial_token.as_deref())
+            .await?;
+
+        // Self-heal path: a 401 on an existing profile usually means the
+        // local write_token no longer matches the hub (e.g. the client was
+        // reinstalled, or an older build wiped hub_directory_config during
+        // a same-URL relay re-setup). If a recovery_code is stored locally
+        // (migration 064+), exchange it for a fresh write_token via
+        // /recover and retry the upsert once. All other 4xx/5xx bubble up.
+        let (response, recovered) = if response.status().as_u16() == 401
+            && let Some(ref cfg) = existing
+            && let Some(recovery_code) = cfg.recovery_code.clone()
+        {
+            let _ = response.text().await; // drain for logging hygiene
+            tracing::warn!(
+                "Hub directory: 401 on profile upsert, attempting auto-recovery via stored recovery_code"
+            );
+            match self.recover(db, &params.node_id, &recovery_code).await {
+                Ok(recovered) => {
+                    tracing::info!(
+                        "Hub directory: auto-recovery succeeded, retrying profile upsert"
+                    );
+                    let retry = self
+                        .send_profile_upsert(&hub_url, &body, Some(&recovered.write_token))
+                        .await?;
+                    (retry, Some(recovered))
+                }
+                Err(e) => {
+                    tracing::warn!("Hub directory: auto-recovery failed: {e}");
+                    return Err(HubDirectoryError::Hub(
+                        401,
+                        "Unauthorized; auto-recovery failed".to_string(),
+                    ));
+                }
             }
+        } else {
+            (response, None)
         };
+
         let status = response.status().as_u16();
         if status >= 400 {
             let msg = response.text().await.unwrap_or_default();
@@ -525,10 +553,26 @@ impl HubDirectoryService {
 
         let write_token = profile
             .write_token
+            .or_else(|| recovered.as_ref().map(|c| c.write_token.clone()))
             .or_else(|| existing.as_ref().map(|c| c.write_token.clone()))
             .ok_or_else(|| {
                 HubDirectoryError::Config("Hub did not return write_token".to_string())
             })?;
+
+        // After auto-recovery, keep the fresh recovery_code from /recover if
+        // the profile response didn't supply one; the previous code is now
+        // burned on the hub and must not be re-persisted.
+        let recovery_code = profile
+            .recovery_code
+            .or_else(|| recovered.as_ref().and_then(|c| c.recovery_code.clone()));
+
+        // recover() resets last_catalog_hash to force a fresh push (ADR-027).
+        // Outside the recovery path, keep whatever we had before.
+        let last_catalog_hash = if recovered.is_some() {
+            None
+        } else {
+            existing.as_ref().and_then(|c| c.last_catalog_hash.clone())
+        };
 
         let config = DirectoryConfig {
             node_id: params.node_id,
@@ -537,12 +581,34 @@ impl HubDirectoryService {
             requires_approval: params.requires_approval,
             accept_from: params.accept_from,
             allow_borrowing: params.allow_borrowing,
-            recovery_code: profile.recovery_code,
-            last_catalog_hash: existing.as_ref().and_then(|c| c.last_catalog_hash.clone()),
+            recovery_code,
+            last_catalog_hash,
         };
 
         Self::save_config(db, &config).await?;
         Ok(config)
+    }
+
+    /// POST the profile upsert body to `/api/directory/profile`, optionally
+    /// carrying a Bearer token. Factored out so the 401 auto-recovery path
+    /// can replay the request with fresh credentials without duplicating
+    /// the body construction.
+    async fn send_profile_upsert(
+        &self,
+        hub_url: &str,
+        body: &serde_json::Value,
+        bearer_token: Option<&str>,
+    ) -> Result<reqwest::Response, HubDirectoryError> {
+        let mut req = self
+            .http_client
+            .post(format!("{hub_url}/api/directory/profile"));
+        if let Some(token) = bearer_token {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+        req.json(body).send().await.map_err(|e| {
+            tracing::warn!("Hub directory: network error: {e}");
+            HubDirectoryError::Network(e.to_string())
+        })
     }
 
     /// Returns the locally stored recovery code, if any.

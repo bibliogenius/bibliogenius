@@ -1500,8 +1500,6 @@ pub async fn setup_relay(
     State(state): State<crate::infrastructure::AppState>,
     Json(payload): Json<SetupRelayRequest>,
 ) -> impl IntoResponse {
-    use crate::models::relay_config;
-
     let db = state.db();
 
     // 1. Validate relay URL
@@ -1571,78 +1569,130 @@ pub async fn setup_relay(
             .into_response();
     }
 
-    // 3. Store in my_relay_config (upsert singleton row)
-    use sea_orm::ConnectionTrait;
-    let now = chrono::Utc::now().to_rfc3339();
-
-    // Keep a copy for the post-registration peer notification (payload.relay_url is moved below).
+    // 3. Persist the new mailbox and conditionally invalidate the hub
+    //    directory config. Same-URL re-setups must preserve the write_token,
+    //    otherwise the next heartbeat loops on 401 against the existing hub
+    //    profile that only the purged token could authenticate.
     let relay_url_for_notify = payload.relay_url.clone();
 
-    // Delete existing config if any, then insert
-    let _ = db
-        .execute(sea_orm::Statement::from_string(
-            db.get_database_backend(),
-            "DELETE FROM my_relay_config".to_owned(),
-        ))
-        .await;
-
-    let config = relay_config::ActiveModel {
-        id: Set(1),
-        relay_url: Set(payload.relay_url),
-        mailbox_uuid: Set(mailbox_uuid.clone()),
-        read_token: Set(read_token),
-        write_token: Set(write_token.clone()),
-        created_at: Set(now),
+    let hub_changed = match apply_relay_setup(
+        db,
+        &payload.relay_url,
+        &mailbox_uuid,
+        &read_token,
+        &write_token,
+    )
+    .await
+    {
+        Ok(changed) => changed,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Failed to save relay config: {e}") })),
+            )
+                .into_response();
+        }
     };
 
-    match config.insert(db).await {
-        Ok(_) => {
-            tracing::info!("Relay: Mailbox registered");
+    tracing::info!("Relay: Mailbox registered");
 
-            // Keep HUB_URL in sync so hub_directory_service uses the same hub.
-            // SAFETY: single-threaded write path (same pattern as set_hub_url_ffi).
-            unsafe { std::env::set_var("HUB_URL", &relay_url_for_notify) };
+    // Keep HUB_URL in sync so hub_directory_service uses the same hub.
+    // SAFETY: single-threaded write path (same pattern as set_hub_url_ffi).
+    unsafe { std::env::set_var("HUB_URL", &relay_url_for_notify) };
 
-            // Invalidate directory config: write_token is bound to the previous hub.
-            // This forces ensureRegistered() to re-register on the new hub.
-            let _ = db
-                .execute(sea_orm::Statement::from_string(
-                    db.get_database_backend(),
-                    "DELETE FROM hub_directory_config".to_owned(),
-                ))
-                .await;
-            tracing::info!(
-                "Relay: HUB_URL updated to {}, directory config invalidated",
-                &relay_url_for_notify
-            );
-
-            // Proactively notify all E2EE peers of the new mailbox credentials.
-            // This prevents the window where peers have stale relay info after a hub switch.
-            let state_clone = state.clone();
-            let mailbox_uuid_for_notify = mailbox_uuid.clone();
-            tokio::spawn(async move {
-                crate::services::relay_poller::notify_peers_of_new_credentials(
-                    &state_clone,
-                    &relay_url_for_notify,
-                    &mailbox_uuid_for_notify,
-                )
-                .await;
-            });
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "mailbox_uuid": mailbox_uuid,
-                    "write_token": write_token,
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("Failed to save relay config: {e}") })),
-        )
-            .into_response(),
+    if hub_changed {
+        tracing::info!(
+            "Relay: HUB_URL updated to {}, directory config invalidated (hub changed)",
+            &relay_url_for_notify
+        );
+    } else {
+        tracing::info!(
+            "Relay: HUB_URL set to {}, directory config preserved (hub unchanged)",
+            &relay_url_for_notify
+        );
     }
+
+    // Proactively notify all E2EE peers of the new mailbox credentials.
+    // This prevents the window where peers have stale relay info after a hub switch.
+    let state_clone = state.clone();
+    let mailbox_uuid_for_notify = mailbox_uuid.clone();
+    tokio::spawn(async move {
+        crate::services::relay_poller::notify_peers_of_new_credentials(
+            &state_clone,
+            &relay_url_for_notify,
+            &mailbox_uuid_for_notify,
+        )
+        .await;
+    });
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "mailbox_uuid": mailbox_uuid,
+            "write_token": write_token,
+        })),
+    )
+        .into_response()
+}
+
+/// Persist a freshly-registered relay mailbox and invalidate the hub
+/// directory config only when the hub URL actually changes.
+///
+/// Extracted from `setup_relay` so the DB-level conditional can be tested
+/// without standing up a mock relay server. Returns `true` if the hub URL
+/// differed from the previous config (and `hub_directory_config` was
+/// therefore wiped), `false` otherwise.
+async fn apply_relay_setup(
+    db: &DatabaseConnection,
+    relay_url: &str,
+    mailbox_uuid: &str,
+    read_token: &str,
+    write_token: &str,
+) -> Result<bool, sea_orm::DbErr> {
+    use crate::models::relay_config;
+    use sea_orm::ConnectionTrait;
+
+    let previous_hub_url: Option<String> = relay_config::Entity::find()
+        .one(db)
+        .await?
+        .map(|m| m.relay_url);
+
+    db.execute(sea_orm::Statement::from_string(
+        db.get_database_backend(),
+        "DELETE FROM my_relay_config".to_owned(),
+    ))
+    .await?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    relay_config::ActiveModel {
+        id: Set(1),
+        relay_url: Set(relay_url.to_string()),
+        mailbox_uuid: Set(mailbox_uuid.to_string()),
+        read_token: Set(read_token.to_string()),
+        write_token: Set(write_token.to_string()),
+        created_at: Set(now),
+    }
+    .insert(db)
+    .await?;
+
+    let hub_changed = previous_hub_url
+        .as_deref()
+        .is_some_and(|prev| hub_urls_differ(prev, relay_url));
+
+    if hub_changed {
+        db.execute(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM hub_directory_config".to_owned(),
+        ))
+        .await?;
+    }
+
+    Ok(hub_changed)
+}
+
+/// Compare two hub URLs for equivalence, ignoring a trailing slash.
+fn hub_urls_differ(prev: &str, new: &str) -> bool {
+    prev.trim_end_matches('/') != new.trim_end_matches('/')
 }
 
 /// GET /api/peers/relay/config — Get current relay config (if any).
@@ -8162,5 +8212,132 @@ mod hub_catalog_cache_tests {
             .await
             .unwrap();
         assert_eq!(remaining.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod relay_setup_tests {
+    use super::*;
+    use crate::db;
+    use sea_orm::{ConnectionTrait, Statement};
+
+    async fn setup_db() -> DatabaseConnection {
+        db::init_db("sqlite::memory:").await.expect("init db")
+    }
+
+    async fn seed_directory_config(db: &DatabaseConnection, token: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            format!(
+                "INSERT INTO hub_directory_config
+                     (id, node_id, write_token, is_listed, requires_approval, accept_from, allow_borrowing, recovery_code, created_at, updated_at)
+                 VALUES (1, 'test-node', '{token}', 0, 1, 'everyone', 1, 'rc-1', '{now}', '{now}')"
+            ),
+        ))
+        .await
+        .unwrap();
+    }
+
+    async fn directory_token(db: &DatabaseConnection) -> Option<String> {
+        db.query_one(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT write_token FROM hub_directory_config WHERE id = 1".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .and_then(|row| row.try_get::<String>("", "write_token").ok())
+    }
+
+    #[test]
+    fn hub_urls_differ_ignores_trailing_slash() {
+        assert!(!hub_urls_differ(
+            "https://hub.example.org",
+            "https://hub.example.org/"
+        ));
+        assert!(!hub_urls_differ(
+            "https://hub.example.org/",
+            "https://hub.example.org"
+        ));
+        assert!(hub_urls_differ(
+            "https://hub.example.org",
+            "https://hub-dev.example.org"
+        ));
+    }
+
+    /// Re-registering a mailbox against the **same** hub must keep the
+    /// write_token in hub_directory_config intact. Before the fix, the
+    /// unconditional DELETE wiped the token on every setup, causing the
+    /// next profile heartbeat to hit 401 in a loop (stuck Eve scenario).
+    #[tokio::test]
+    async fn apply_relay_setup_preserves_directory_config_when_hub_unchanged() {
+        let db = setup_db().await;
+
+        apply_relay_setup(&db, "https://hub.example.org", "mbx-1", "rtok-1", "wtok-1")
+            .await
+            .expect("first setup");
+
+        seed_directory_config(&db, "preserved-token").await;
+
+        let changed =
+            apply_relay_setup(&db, "https://hub.example.org/", "mbx-2", "rtok-2", "wtok-2")
+                .await
+                .expect("second setup same hub");
+
+        assert!(!changed, "hub URL should be detected as unchanged");
+        assert_eq!(
+            directory_token(&db).await.as_deref(),
+            Some("preserved-token"),
+            "hub_directory_config must survive a same-URL re-setup",
+        );
+    }
+
+    /// A genuine hub swap still invalidates the directory config, since the
+    /// write_token from the old hub cannot authenticate against the new one.
+    #[tokio::test]
+    async fn apply_relay_setup_wipes_directory_config_when_hub_changes() {
+        let db = setup_db().await;
+
+        apply_relay_setup(
+            &db,
+            "https://hub-a.example.org",
+            "mbx-1",
+            "rtok-1",
+            "wtok-1",
+        )
+        .await
+        .expect("first setup");
+
+        seed_directory_config(&db, "stale-token").await;
+
+        let changed = apply_relay_setup(
+            &db,
+            "https://hub-b.example.org",
+            "mbx-2",
+            "rtok-2",
+            "wtok-2",
+        )
+        .await
+        .expect("second setup new hub");
+
+        assert!(changed, "hub URL change must be detected");
+        assert!(
+            directory_token(&db).await.is_none(),
+            "hub_directory_config must be wiped when the hub actually changes",
+        );
+    }
+
+    /// First-time setup (no previous relay config) is neither a "same hub"
+    /// nor a "hub change" — we simply have nothing to invalidate.
+    #[tokio::test]
+    async fn apply_relay_setup_first_time_reports_no_change() {
+        let db = setup_db().await;
+
+        let changed =
+            apply_relay_setup(&db, "https://hub.example.org", "mbx-1", "rtok-1", "wtok-1")
+                .await
+                .expect("first setup");
+
+        assert!(!changed, "no previous hub means no change to signal");
     }
 }
