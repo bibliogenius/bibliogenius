@@ -186,6 +186,15 @@ pub async fn ensure_relay_credentials(
     Some(refreshed)
 }
 
+/// Overall timeout for a single `public_stats_request` relay round-trip.
+///
+/// Covers one full remote poller cycle (20s) plus ~5s for our local poll
+/// to pick up the response. With ADR-017 WS nudge active the typical
+/// response arrives in ~1-3s, so this cap mostly bounds the worst case
+/// when a peer is offline or WS is unavailable. Shorter than the 90s
+/// default to keep the leaderboard refresh spinner under ~30s.
+const LEADERBOARD_RELAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+
 /// Request leaderboard stats from a relay peer via the ADR-012 reply-to protocol.
 ///
 /// Sends `public_stats_request` to the peer's relay mailbox. The relay poller
@@ -194,7 +203,7 @@ pub async fn ensure_relay_credentials(
 /// Returns `None` if:
 /// - The peer has no relay credentials
 /// - The relay send fails (expired mailbox, etc.)
-/// - The response times out (90 seconds)
+/// - The response times out ([`LEADERBOARD_RELAY_TIMEOUT`])
 pub async fn fetch_peer_public_stats_via_relay(
     state: &AppState,
     peer: &peer::Model,
@@ -203,8 +212,14 @@ pub async fn fetch_peer_public_stats_via_relay(
     // We call this function only for peers whose direct HTTP already failed.
     state.mark_peer_direct_failed(peer.id);
 
-    let result =
-        crate::api::peer::try_send_e2ee(state, peer, "public_stats_request", json!({})).await;
+    let result = crate::api::peer::try_send_e2ee_with_timeout(
+        state,
+        peer,
+        "public_stats_request",
+        json!({}),
+        LEADERBOARD_RELAY_TIMEOUT,
+    )
+    .await;
 
     match result {
         Ok(Some(Some(clear_msg))) => {
@@ -440,13 +455,23 @@ pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
     let mut relay_peers: Vec<crate::models::peer::Model> = Vec::new();
     let mut direct_ok = 0u32;
 
+    // Phase 1 outcome per peer.
+    enum Phase1Outcome {
+        Bundle(PublicStatsBundle),
+        LegacyConfig(crate::api::setup::ConfigResponse),
+        Unreachable,
+    }
+
     if !skip_direct {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .unwrap_or_default();
 
-        // Parallel config check for all peers
+        // Parallel bundle fetch for all peers. Fast path: one GET per peer
+        // returns all scores + gamification + library name. Legacy fallback
+        // (when peer returns 404) reads /api/config so the old 4-call path
+        // can still provide scores for peers that haven't updated yet.
         let phase1_futures: Vec<_> = peers
             .iter()
             .map(|p| {
@@ -455,17 +480,30 @@ pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
                 async move {
                     // Skip peers already known to be unreachable
                     if state.is_peer_direct_unreachable(peer.id) {
-                        return (peer, None);
+                        return (peer, Phase1Outcome::Unreachable);
                     }
-                    let config_url = format!("{}/api/config", peer.url);
-                    match client.get(&config_url).send().await {
+                    let bundle_url = format!("{}/api/public-stats-bundle", peer.url);
+                    match client.get(&bundle_url).send().await {
                         Ok(res) if res.status().is_success() => {
-                            match res.json::<crate::api::setup::ConfigResponse>().await {
-                                Ok(config) => (peer, Some(config)),
-                                Err(_) => (peer, None),
+                            match res.json::<PublicStatsBundle>().await {
+                                Ok(bundle) => (peer, Phase1Outcome::Bundle(bundle)),
+                                Err(_) => (peer, Phase1Outcome::Unreachable),
                             }
                         }
-                        _ => (peer, None),
+                        Ok(res) if res.status() == reqwest::StatusCode::NOT_FOUND => {
+                            // Legacy peer: fall back to /api/config + per-game endpoints
+                            let config_url = format!("{}/api/config", peer.url);
+                            match client.get(&config_url).send().await {
+                                Ok(res) if res.status().is_success() => {
+                                    match res.json::<crate::api::setup::ConfigResponse>().await {
+                                        Ok(config) => (peer, Phase1Outcome::LegacyConfig(config)),
+                                        Err(_) => (peer, Phase1Outcome::Unreachable),
+                                    }
+                                }
+                                _ => (peer, Phase1Outcome::Unreachable),
+                            }
+                        }
+                        _ => (peer, Phase1Outcome::Unreachable),
                     }
                 }
             })
@@ -473,58 +511,61 @@ pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
 
         let phase1_results = futures::future::join_all(phase1_futures).await;
 
-        // For reachable peers, fetch all game scores via direct HTTP
-        for (peer, config) in &phase1_results {
-            if let Some(config) = config {
-                direct_ok += 1;
-                crate::modules::memory_game::handlers::sync_peer_memory_scores(
-                    db,
-                    peer.id,
-                    &peer.url,
-                    &peer.name,
-                    &client,
-                    Some(config.enabled_modules.contains(&"memory_game".to_string())),
-                )
-                .await;
-                crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
-                    db,
-                    peer.id,
-                    &peer.url,
-                    &peer.name,
-                    &client,
-                    Some(
-                        config
-                            .enabled_modules
-                            .contains(&"sliding_puzzle".to_string()),
-                    ),
-                )
-                .await;
-                crate::modules::hangman::handlers::sync_peer_hangman_scores(
-                    db,
-                    peer.id,
-                    &peer.url,
-                    &peer.name,
-                    &client,
-                    Some(config.enabled_modules.contains(&"hangman".to_string())),
-                )
-                .await;
-                crate::api::peer::sync_peer_gamification_stats(
-                    db,
-                    peer.id,
-                    &peer.url,
-                    &client,
-                    Some(config.share_gamification_stats),
-                )
-                .await;
-            }
-        }
-
-        // Queue unreachable peers for relay
-        for (peer, config) in phase1_results {
-            if config.is_none()
-                && let Some(ready) = ensure_relay_credentials(db, &peer).await
-            {
-                relay_peers.push(ready);
+        for (peer, outcome) in phase1_results {
+            match outcome {
+                Phase1Outcome::Bundle(bundle) => {
+                    direct_ok += 1;
+                    apply_stats_bundle_to_caches(db, peer.id, &peer.name, &bundle, true).await;
+                }
+                Phase1Outcome::LegacyConfig(config) => {
+                    direct_ok += 1;
+                    // Legacy path: 4 sequential calls. Removed once all peers
+                    // expose /api/public-stats-bundle.
+                    crate::modules::memory_game::handlers::sync_peer_memory_scores(
+                        db,
+                        peer.id,
+                        &peer.url,
+                        &peer.name,
+                        &client,
+                        Some(config.enabled_modules.contains(&"memory_game".to_string())),
+                    )
+                    .await;
+                    crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
+                        db,
+                        peer.id,
+                        &peer.url,
+                        &peer.name,
+                        &client,
+                        Some(
+                            config
+                                .enabled_modules
+                                .contains(&"sliding_puzzle".to_string()),
+                        ),
+                    )
+                    .await;
+                    crate::modules::hangman::handlers::sync_peer_hangman_scores(
+                        db,
+                        peer.id,
+                        &peer.url,
+                        &peer.name,
+                        &client,
+                        Some(config.enabled_modules.contains(&"hangman".to_string())),
+                    )
+                    .await;
+                    crate::api::peer::sync_peer_gamification_stats(
+                        db,
+                        peer.id,
+                        &peer.url,
+                        &client,
+                        Some(config.share_gamification_stats),
+                    )
+                    .await;
+                }
+                Phase1Outcome::Unreachable => {
+                    if let Some(ready) = ensure_relay_credentials(db, &peer).await {
+                        relay_peers.push(ready);
+                    }
+                }
             }
         }
     } else {
@@ -543,14 +584,14 @@ pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
         relay_peers.len(),
     );
 
-    // ── Phase 2: relay fallback (parallel, 15s per-peer timeout) ───
+    // ── Phase 2: relay fallback (parallel, per-peer timeout as safety net) ──
     if !relay_peers.is_empty() {
         let relay_start = std::time::Instant::now();
         let relay_count = relay_peers.len();
-        // 30s covers one full relay poll cycle (20s) + processing + response.
-        // With WS nudge active, responses arrive in ~1s. Without nudge,
-        // the remote peer polls every 20s so we need at least 25s.
-        let per_peer_timeout = std::time::Duration::from_secs(30);
+        // Safety net above the tighter `LEADERBOARD_RELAY_TIMEOUT` (25s)
+        // enforced inside `try_send_e2ee_with_timeout`. 5s of headroom
+        // covers any setup work around the actual await loop.
+        let per_peer_timeout = LEADERBOARD_RELAY_TIMEOUT + std::time::Duration::from_secs(5);
 
         let relay_futures: Vec<_> = relay_peers
             .iter()
@@ -737,5 +778,115 @@ mod tests {
         let bundle: PublicStatsBundle = serde_json::from_value(json).unwrap();
         assert!(!bundle.share_gamification_stats);
         assert!(bundle.memory_game.is_none());
+    }
+
+    async fn test_state() -> AppState {
+        let db = crate::db::init_db("sqlite::memory:")
+            .await
+            .expect("init_db in memory");
+        AppState::new(db)
+    }
+
+    async fn insert_peer(db: &sea_orm::DatabaseConnection, name: &str) -> i32 {
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
+        let now = chrono::Utc::now().to_rfc3339();
+        let model = peer::ActiveModel {
+            name: Set(name.to_string()),
+            url: Set(format!("http://peer-{}.local", uuid::Uuid::new_v4())),
+            key_exchange_done: Set(false),
+            connection_status: Set("accepted".to_string()),
+            auto_approve: Set(false),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert peer");
+        model.id
+    }
+
+    /// Regression test for the "stale peer name on LAN" bug: applying a bundle
+    /// that carries a different `library_name` must update `peers.name` so the
+    /// leaderboard UI shows the current display name without waiting for a
+    /// relay round-trip.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_stats_bundle_updates_peer_name_when_different() {
+        let state = test_state().await;
+        let db = state.db();
+        let peer_id = insert_peer(db, "Old Name").await;
+
+        let bundle = PublicStatsBundle {
+            share_gamification_stats: false,
+            enabled_modules: vec![],
+            gamification: None,
+            memory_game: None,
+            sliding_puzzle: None,
+            hangman: None,
+            library_name: Some("New Name".to_string()),
+        };
+
+        apply_stats_bundle_to_caches(db, peer_id, "Old Name", &bundle, true).await;
+
+        let refreshed = peer::Entity::find_by_id(peer_id)
+            .one(db)
+            .await
+            .expect("query peer")
+            .expect("peer exists");
+        assert_eq!(refreshed.name, "New Name");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_stats_bundle_keeps_peer_name_when_bundle_name_missing() {
+        let state = test_state().await;
+        let db = state.db();
+        let peer_id = insert_peer(db, "Stable Name").await;
+
+        let bundle = PublicStatsBundle {
+            share_gamification_stats: false,
+            enabled_modules: vec![],
+            gamification: None,
+            memory_game: None,
+            sliding_puzzle: None,
+            hangman: None,
+            library_name: None,
+        };
+
+        apply_stats_bundle_to_caches(db, peer_id, "Stable Name", &bundle, true).await;
+
+        let refreshed = peer::Entity::find_by_id(peer_id)
+            .one(db)
+            .await
+            .expect("query peer")
+            .expect("peer exists");
+        assert_eq!(refreshed.name, "Stable Name");
+    }
+
+    /// The `/api/public-stats-bundle` handler must produce a payload that
+    /// deserializes back into `PublicStatsBundle` with the expected shape,
+    /// so LAN Phase 1 can consume it in a single round-trip.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn public_stats_bundle_handler_returns_expected_fields() {
+        use axum::extract::State;
+
+        let state = test_state().await;
+        let response = crate::api::public_stats::get_public_stats_bundle(State(state)).await;
+        let value = response.0;
+
+        // Shape check — these are the fields Phase 1 deserializes into `PublicStatsBundle`.
+        assert!(value.get("share_gamification_stats").is_some());
+        assert!(value.get("enabled_modules").is_some());
+        assert!(value.get("memory_game").is_some());
+        assert!(value.get("sliding_puzzle").is_some());
+        assert!(value.get("hangman").is_some());
+        assert!(value.get("library_name").is_some());
+
+        let bundle: PublicStatsBundle = serde_json::from_value(value).expect("bundle deserializes");
+        // Empty DB: no modules enabled, no scores, no gamification.
+        assert!(bundle.enabled_modules.is_empty());
+        assert!(bundle.memory_game.is_none());
+        assert!(bundle.sliding_puzzle.is_none());
+        assert!(bundle.hangman.is_none());
     }
 }

@@ -23,6 +23,7 @@ pub mod loan;
 pub mod lookup;
 pub mod peer;
 pub mod profile;
+pub mod public_stats;
 pub mod relay;
 pub mod sales; // Sales endpoints for bookseller profile
 pub mod scan;
@@ -287,6 +288,10 @@ fn build_routes() -> Router<AppState> {
         .route("/setup", axum::routing::post(setup::setup))
         .route("/reset", axum::routing::post(setup::reset_app))
         .route("/config", get(setup::get_config))
+        .route(
+            "/public-stats-bundle",
+            get(public_stats::get_public_stats_bundle),
+        )
         .route("/identity/init", post(setup::init_identity))
         // Integrations (Professional)
         .route(

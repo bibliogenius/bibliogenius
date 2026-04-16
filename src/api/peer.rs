@@ -882,17 +882,50 @@ pub async fn offer_loan(
         .into_response()
 }
 
+/// Default overall timeout for awaiting a relay response in `try_send_e2ee`.
+///
+/// 90s covers one full remote poller cycle (60s) plus jitter and processing,
+/// so fire-and-forget request/response paths (loans, searches, syncs) keep
+/// their historical behavior. Latency-sensitive callers (leaderboard refresh)
+/// should use [`try_send_e2ee_with_timeout`] with a shorter bound.
+pub(crate) const DEFAULT_E2EE_RELAY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(90);
+
 /// Try to send a message to a peer via E2EE. Returns Ok(Some(response)) if E2EE succeeded,
 /// Ok(None) if E2EE is not available for this peer (caller should fall back to plaintext).
 ///
 /// ADR-012: All message types now support relay fallback. Request-response messages
 /// (search_request, book_sync_request, library_*) attach reply_to fields so the
 /// responder can deposit the answer in our mailbox.
+///
+/// Uses [`DEFAULT_E2EE_RELAY_TIMEOUT`] (90s) for relay response await. Use
+/// [`try_send_e2ee_with_timeout`] when a different bound is needed.
 pub(crate) async fn try_send_e2ee(
     state: &crate::infrastructure::AppState,
     peer: &peer::Model,
     message_type: &str,
     payload: serde_json::Value,
+) -> Result<Option<Option<crate::crypto::envelope::ClearMessage>>, String> {
+    try_send_e2ee_with_timeout(
+        state,
+        peer,
+        message_type,
+        payload,
+        DEFAULT_E2EE_RELAY_TIMEOUT,
+    )
+    .await
+}
+
+/// Same as [`try_send_e2ee`] but with a caller-chosen `overall_timeout` for the
+/// relay response await loop. Useful when the caller can tolerate missing a
+/// slow peer in exchange for faster UI feedback (e.g. leaderboard refresh
+/// where a 90s wait would freeze the refresh spinner).
+pub(crate) async fn try_send_e2ee_with_timeout(
+    state: &crate::infrastructure::AppState,
+    peer: &peer::Model,
+    message_type: &str,
+    payload: serde_json::Value,
+    overall_timeout: std::time::Duration,
 ) -> Result<Option<Option<crate::crypto::envelope::ClearMessage>>, String> {
     // Check if peer supports E2EE
     if !peer.key_exchange_done {
@@ -1129,11 +1162,12 @@ pub(crate) async fn try_send_e2ee(
 
                     // Await the relay response with periodic polling instead
                     // of returning 202 and relying on Flutter adaptive polling.
-                    // 65s covers one full remote poller cycle (60s + jitter).
+                    // `overall_timeout` comes from the caller: legacy path uses
+                    // `DEFAULT_E2EE_RELAY_TIMEOUT` (90s), latency-sensitive paths
+                    // like leaderboard refresh use a shorter bound.
                     if let Some(corr_id) = correlation_id_for_await {
                         let mut rx = state.register_relay_request(corr_id.clone());
                         let start = std::time::Instant::now();
-                        let overall_timeout = std::time::Duration::from_secs(90);
 
                         // Trigger immediate poll (don't wait for 60s background cycle)
                         let _ = crate::services::relay_poller::poll_once(
