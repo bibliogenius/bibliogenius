@@ -121,6 +121,10 @@ pub struct FrbBook {
     pub digital_formats: Option<Vec<String>>,
     pub private: bool, // Hidden from network peers
     pub page_count: Option<i32>,
+    /// ISO 8601 timestamp of when the book was added to its owner's library
+    /// (maps to `books.created_at`). Used by the "new" badge and by the
+    /// "recently added" carousel.
+    pub added_at: Option<String>,
 }
 
 /// Convert domain Book to FFI-safe FrbBook
@@ -151,6 +155,7 @@ impl From<crate::models::Book> for FrbBook {
             digital_formats: book.digital_formats,
             private: book.private.unwrap_or(false),
             page_count: book.page_count,
+            added_at: book.added_at,
         }
     }
 }
@@ -611,8 +616,44 @@ impl From<FrbBook> for crate::models::Book {
             private: Some(frb_book.private),
             page_count: frb_book.page_count,
             loan_duration_days: None,
-            added_at: None,
+            added_at: frb_book.added_at,
         }
+    }
+}
+
+#[cfg(test)]
+mod frb_book_conversion_tests {
+    use super::*;
+    use crate::models::Book;
+
+    #[test]
+    fn added_at_roundtrips_through_frb_book() {
+        let book = Book {
+            title: "Martin Eden".to_string(),
+            added_at: Some("2026-04-13T08:00:00Z".to_string()),
+            ..Default::default()
+        };
+
+        let frb: FrbBook = book.into();
+        assert_eq!(frb.added_at.as_deref(), Some("2026-04-13T08:00:00Z"));
+
+        let back: Book = frb.into();
+        assert_eq!(back.added_at.as_deref(), Some("2026-04-13T08:00:00Z"));
+    }
+
+    #[test]
+    fn added_at_none_propagates_both_directions() {
+        let book = Book {
+            title: "Sans date".to_string(),
+            added_at: None,
+            ..Default::default()
+        };
+
+        let frb: FrbBook = book.into();
+        assert!(frb.added_at.is_none());
+
+        let back: Book = frb.into();
+        assert!(back.added_at.is_none());
     }
 }
 
