@@ -1741,7 +1741,13 @@ pub async fn delete_relay_config_endpoint(
                 tracing::info!("Relay: Deleted mailbox on hub");
             }
             Ok(resp) => {
-                tracing::warn!("Relay: Hub mailbox delete returned {}", resp.status(),);
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(
+                    "Relay: Hub mailbox delete returned {} body={}",
+                    status,
+                    body
+                );
             }
             Err(e) => {
                 tracing::warn!("Relay: Failed to delete mailbox on hub: {e}");
