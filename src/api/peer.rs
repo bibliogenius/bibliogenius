@@ -1677,7 +1677,7 @@ async fn apply_relay_setup(
 
     let hub_changed = previous_hub_url
         .as_deref()
-        .is_some_and(|prev| hub_urls_differ(prev, relay_url));
+        .is_some_and(|prev| crate::utils::hub_url::hub_urls_differ(prev, relay_url));
 
     if hub_changed {
         db.execute(sea_orm::Statement::from_string(
@@ -1688,11 +1688,6 @@ async fn apply_relay_setup(
     }
 
     Ok(hub_changed)
-}
-
-/// Compare two hub URLs for equivalence, ignoring a trailing slash.
-fn hub_urls_differ(prev: &str, new: &str) -> bool {
-    prev.trim_end_matches('/') != new.trim_end_matches('/')
 }
 
 /// GET /api/peers/relay/config — Get current relay config (if any).
@@ -8247,22 +8242,6 @@ mod relay_setup_tests {
         .await
         .unwrap()
         .and_then(|row| row.try_get::<String>("", "write_token").ok())
-    }
-
-    #[test]
-    fn hub_urls_differ_ignores_trailing_slash() {
-        assert!(!hub_urls_differ(
-            "https://hub.example.org",
-            "https://hub.example.org/"
-        ));
-        assert!(!hub_urls_differ(
-            "https://hub.example.org/",
-            "https://hub.example.org"
-        ));
-        assert!(hub_urls_differ(
-            "https://hub.example.org",
-            "https://hub-dev.example.org"
-        ));
     }
 
     /// Re-registering a mailbox against the **same** hub must keep the

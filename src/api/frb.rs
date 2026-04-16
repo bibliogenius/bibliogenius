@@ -255,7 +255,10 @@ pub async fn set_hub_url_ffi(hub_url: String) -> Result<(), String> {
     // If the relay URL overrides the .env default, the directory config
     // (write_token) was issued by the .env hub and is invalid on the
     // relay hub. Invalidate so ensureRegistered() re-registers.
-    if effective_url != hub_url
+    // A trailing-slash difference alone must not count as "different hub",
+    // otherwise we burn the write_token on every startup; use the shared
+    // comparator that also guards the setup_relay path.
+    if crate::utils::hub_url::hub_urls_differ(&hub_url, &effective_url)
         && let Ok(db_ref) = hub_db()
     {
         use sea_orm::ConnectionTrait;

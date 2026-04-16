@@ -265,3 +265,71 @@ async fn register_reports_when_recovery_code_is_rejected() {
     );
     assert_eq!(stored_recovery_code(&db).await.as_deref(), Some("RC-BAD"));
 }
+
+/// Defensive scenario: `/recover` succeeds (fresh token + code persisted)
+/// but the retry upsert still returns 401 (hub misbehaving, or the fresh
+/// token got immediately revoked). The second 401 must surface as-is — we
+/// do not recurse — and the freshly rotated credentials must remain
+/// persisted so the next caller authenticates with them instead of
+/// re-burning another recovery code.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn register_does_not_recurse_when_retry_also_fails() {
+    let db = setup_test_db().await;
+    let node_id = "00000000-0000-0000-0000-00000000dead";
+    seed_directory_config(&db, node_id, "stale-token", Some("RC-OLD")).await;
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+
+    // Profile upsert always 401, whatever the Bearer. Two hits expected:
+    // the initial one with stale-token, and the retry with fresh-token.
+    Mock::given(method("POST"))
+        .and(path("/api/directory/profile"))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(2)
+        .mount(&hub)
+        .await;
+
+    // /recover genuinely rotates the creds server-side.
+    Mock::given(method("POST"))
+        .and(path("/api/directory/recover"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "node_id": node_id,
+            "display_name": "Test",
+            "description": null,
+            "book_count": 0,
+            "location_country": null,
+            "requires_approval": true,
+            "allow_borrowing": true,
+            "last_seen_at": null,
+            "view_count": 0,
+            "write_token": "fresh-token",
+            "recovery_code": "RC-NEW",
+        })))
+        .expect(1)
+        .mount(&hub)
+        .await;
+
+    let svc = HubDirectoryService::new();
+    let err = svc
+        .register_or_update(&db, base_params(node_id))
+        .await
+        .expect_err("second 401 must surface");
+
+    let msg = format!("{err}");
+    assert!(msg.contains("401"), "expected 401 in error, got {msg}");
+
+    // Rotation did happen; do not revert it. Next caller must use the
+    // fresh credentials rather than replaying the already-burned RC-OLD.
+    assert_eq!(
+        stored_write_token(&db).await.as_deref(),
+        Some("fresh-token"),
+        "rotated write_token must survive the retry failure",
+    );
+    assert_eq!(
+        stored_recovery_code(&db).await.as_deref(),
+        Some("RC-NEW"),
+        "rotated recovery_code must survive the retry failure",
+    );
+}
