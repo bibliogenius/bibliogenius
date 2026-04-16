@@ -83,9 +83,7 @@ pub async fn batch_sort(
         // Checking model... `author` is NOT in the struct! It seems we rely on `book_authors` relation.
         // For simple sorting, let's sort by Title for now, and fix Author sort later (requires join).
         SortCriteria::Title => sorted_books.sort_by(|a, b| a.title.cmp(&b.title)),
-        SortCriteria::Year => {
-            sorted_books.sort_by(|a, b| a.publication_year.cmp(&b.publication_year))
-        }
+        SortCriteria::Year => sorted_books.sort_by_key(|a| a.publication_year),
     }
 
     // 3. Update shelf_position
