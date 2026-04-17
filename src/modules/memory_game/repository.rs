@@ -126,6 +126,45 @@ impl MemoryGameRepository for SeaOrmGameRepository {
         }))
     }
 
+    async fn get_best_score_entries_per_difficulty(
+        &self,
+    ) -> Result<Vec<MemoryGameScore>, DomainError> {
+        use sea_orm::{ConnectionTrait, Statement};
+
+        let stmt = Statement::from_string(
+            self.db.get_database_backend(),
+            r#"
+            SELECT id, difficulty, pairs_count, elapsed_seconds, errors,
+                   normalized_score, played_at
+            FROM memory_game_scores
+            WHERE id IN (
+                SELECT id FROM memory_game_scores mg1
+                WHERE normalized_score = (
+                    SELECT MAX(normalized_score) FROM memory_game_scores mg2
+                    WHERE mg2.difficulty = mg1.difficulty
+                )
+                GROUP BY difficulty
+            )
+            "#
+            .to_owned(),
+        );
+
+        let rows = self.db.query_all(stmt).await?;
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in rows {
+            entries.push(MemoryGameScore {
+                id: Some(row.try_get("", "id")?),
+                difficulty: row.try_get("", "difficulty")?,
+                pairs_count: row.try_get("", "pairs_count")?,
+                elapsed_seconds: row.try_get("", "elapsed_seconds")?,
+                errors: row.try_get("", "errors")?,
+                normalized_score: row.try_get("", "normalized_score")?,
+                played_at: row.try_get("", "played_at")?,
+            });
+        }
+        Ok(entries)
+    }
+
     async fn delete_peer_scores(&self, peer_id: i32) -> Result<(), DomainError> {
         PeerScoreEntity::delete_many()
             .filter(PeerScoreColumn::PeerId.eq(peer_id))
@@ -144,8 +183,12 @@ impl MemoryGameRepository for SeaOrmGameRepository {
     ) -> Result<(), DomainError> {
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
+        // Key by (peer_id, difficulty) — see hangman::upsert_peer_score for
+        // why the legacy peer_id-only key hid a peer's scores at other
+        // difficulties.
         let existing = PeerScoreEntity::find()
             .filter(PeerScoreColumn::PeerId.eq(peer_id))
+            .filter(PeerScoreColumn::Difficulty.eq(difficulty))
             .one(&self.db)
             .await?;
 
@@ -157,7 +200,6 @@ impl MemoryGameRepository for SeaOrmGameRepository {
                 active.library_name = Set(library_name.to_string());
                 if score_improved {
                     active.best_score = Set(best_score);
-                    active.difficulty = Set(difficulty.to_string());
                     active.played_at = Set(played_at.to_string());
                 }
                 active.synced_at = Set(now);

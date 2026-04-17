@@ -65,6 +65,13 @@ pub trait MemoryGameRepository: Send + Sync {
     /// Get the full best score entry (score + difficulty + played_at)
     async fn get_best_score_entry(&self) -> Result<Option<MemoryGameScore>, DomainError>;
 
+    /// One best entry per difficulty actually played (see
+    /// `HangmanRepository::get_best_score_entries_per_difficulty` for the
+    /// rationale — peers must see every difficulty, not just the overall best).
+    async fn get_best_score_entries_per_difficulty(
+        &self,
+    ) -> Result<Vec<MemoryGameScore>, DomainError>;
+
     /// Delete all cached peer memory scores for a given peer
     async fn delete_peer_scores(&self, peer_id: i32) -> Result<(), DomainError>;
 

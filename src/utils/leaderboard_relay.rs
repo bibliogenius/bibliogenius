@@ -38,9 +38,20 @@ pub struct PublicStatsBundle {
     /// Active modules on the remote peer (used to distinguish "disabled" from "no score yet").
     pub enabled_modules: Vec<String>,
     pub gamification: Option<gamification_service::PublicGamificationStats>,
+    /// Overall best score across every difficulty. Kept for backward
+    /// compatibility with peers that only know this field. New peers
+    /// should prefer `memory_scores_per_difficulty` when present.
     pub memory_game: Option<GameBestScoreEntry>,
     pub sliding_puzzle: Option<GameBestScoreEntry>,
     pub hangman: Option<GameBestScoreEntry>,
+    /// One best entry per difficulty played. Empty for legacy peers; new
+    /// peers receive the full set and can rebuild per-difficulty caches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_scores_per_difficulty: Vec<GameBestScoreEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub puzzle_scores_per_difficulty: Vec<GameBestScoreEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hangman_scores_per_difficulty: Vec<GameBestScoreEntry>,
     /// Peer display name - included so relay-only peers stay up to date.
     pub library_name: Option<String>,
 }
@@ -77,59 +88,101 @@ pub async fn build_local_stats_bundle(state: &AppState) -> serde_json::Value {
         None
     };
 
-    // Memory game best score
-    let memory_game = if enabled_modules.contains(&"memory_game".to_string()) {
-        use crate::modules::memory_game::domain::MemoryGameRepository;
-        use crate::modules::memory_game::repository::SeaOrmGameRepository;
-        SeaOrmGameRepository::new(db.clone())
-            .get_best_score_entry()
-            .await
-            .ok()
-            .flatten()
-            .map(|e| GameBestScoreEntry {
-                best_score: e.normalized_score,
-                difficulty: e.difficulty,
-                played_at: e.played_at,
-            })
-    } else {
-        None
-    };
+    // Memory game best scores — overall best (for legacy peers) + one per difficulty.
+    let (memory_game, memory_scores_per_difficulty) =
+        if enabled_modules.contains(&"memory_game".to_string()) {
+            use crate::modules::memory_game::domain::MemoryGameRepository;
+            use crate::modules::memory_game::repository::SeaOrmGameRepository;
+            let repo = SeaOrmGameRepository::new(db.clone());
+            let overall =
+                repo.get_best_score_entry()
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|e| GameBestScoreEntry {
+                        best_score: e.normalized_score,
+                        difficulty: e.difficulty,
+                        played_at: e.played_at,
+                    });
+            let per_diff = repo
+                .get_best_score_entries_per_difficulty()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| GameBestScoreEntry {
+                    best_score: e.normalized_score,
+                    difficulty: e.difficulty,
+                    played_at: e.played_at,
+                })
+                .collect();
+            (overall, per_diff)
+        } else {
+            (None, Vec::new())
+        };
 
-    // Sliding puzzle best score
-    let sliding_puzzle = if enabled_modules.contains(&"sliding_puzzle".to_string()) {
-        use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
-        use crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository;
-        SeaOrmPuzzleRepository::new(db.clone())
-            .get_best_score_entry()
-            .await
-            .ok()
-            .flatten()
-            .map(|e| GameBestScoreEntry {
-                best_score: e.normalized_score,
-                difficulty: e.difficulty,
-                played_at: e.played_at,
-            })
-    } else {
-        None
-    };
+    // Sliding puzzle best scores — overall + per difficulty.
+    let (sliding_puzzle, puzzle_scores_per_difficulty) =
+        if enabled_modules.contains(&"sliding_puzzle".to_string()) {
+            use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
+            use crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository;
+            let repo = SeaOrmPuzzleRepository::new(db.clone());
+            let overall =
+                repo.get_best_score_entry()
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|e| GameBestScoreEntry {
+                        best_score: e.normalized_score,
+                        difficulty: e.difficulty,
+                        played_at: e.played_at,
+                    });
+            let per_diff = repo
+                .get_best_score_entries_per_difficulty()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| GameBestScoreEntry {
+                    best_score: e.normalized_score,
+                    difficulty: e.difficulty,
+                    played_at: e.played_at,
+                })
+                .collect();
+            (overall, per_diff)
+        } else {
+            (None, Vec::new())
+        };
 
-    // Hangman best score
-    let hangman = if enabled_modules.contains(&"hangman".to_string()) {
-        use crate::modules::hangman::domain::HangmanRepository;
-        use crate::modules::hangman::repository::SeaOrmHangmanRepository;
-        SeaOrmHangmanRepository::new(db.clone())
-            .get_best_score_entry()
-            .await
-            .ok()
-            .flatten()
-            .map(|e| GameBestScoreEntry {
-                best_score: e.normalized_score,
-                difficulty: e.difficulty,
-                played_at: e.played_at,
-            })
-    } else {
-        None
-    };
+    // Hangman best scores — overall + per difficulty.
+    let (hangman, hangman_scores_per_difficulty) =
+        if enabled_modules.contains(&"hangman".to_string()) {
+            use crate::modules::hangman::domain::HangmanRepository;
+            use crate::modules::hangman::repository::SeaOrmHangmanRepository;
+            let repo = SeaOrmHangmanRepository::new(db.clone());
+            let overall =
+                repo.get_best_score_entry()
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|e| GameBestScoreEntry {
+                        best_score: e.normalized_score,
+                        difficulty: e.difficulty,
+                        played_at: e.played_at,
+                    });
+            let per_diff = repo
+                .get_best_score_entries_per_difficulty()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| GameBestScoreEntry {
+                    best_score: e.normalized_score,
+                    difficulty: e.difficulty,
+                    played_at: e.played_at,
+                })
+                .collect();
+            (overall, per_diff)
+        } else {
+            (None, Vec::new())
+        };
 
     // Library name for peer display name updates
     let library_name: Option<String> = crate::models::library_config::Entity::find_by_id(1)
@@ -146,6 +199,9 @@ pub async fn build_local_stats_bundle(state: &AppState) -> serde_json::Value {
         "memory_game": memory_game,
         "sliding_puzzle": sliding_puzzle,
         "hangman": hangman,
+        "memory_scores_per_difficulty": memory_scores_per_difficulty,
+        "puzzle_scores_per_difficulty": puzzle_scores_per_difficulty,
+        "hangman_scores_per_difficulty": hangman_scores_per_difficulty,
         "library_name": library_name,
     })
 }
@@ -188,12 +244,12 @@ pub async fn ensure_relay_credentials(
 
 /// Overall timeout for a single `public_stats_request` relay round-trip.
 ///
-/// Covers one full remote poller cycle (20s) plus ~5s for our local poll
-/// to pick up the response. With ADR-017 WS nudge active the typical
-/// response arrives in ~1-3s, so this cap mostly bounds the worst case
-/// when a peer is offline or WS is unavailable. Shorter than the 90s
-/// default to keep the leaderboard refresh spinner under ~30s.
-const LEADERBOARD_RELAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+/// Tuned for the "contacts-style" UX: with ADR-017 WS nudge active, an
+/// online peer responds in 1-3s. Anything longer almost certainly means
+/// the peer is offline — we'd rather abort the spinner quickly and let
+/// the user retry. Offline peers are cached in `peer_relay_failures`
+/// so subsequent refreshes skip them entirely until the TTL expires.
+const LEADERBOARD_RELAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Request leaderboard stats from a relay peer via the ADR-012 reply-to protocol.
 ///
@@ -229,6 +285,8 @@ pub async fn fetch_peer_public_stats_via_relay(
                         "Leaderboard relay: received stats bundle from peer {}",
                         peer.id
                     );
+                    // Peer answered: clear any stale "unresponsive" mark.
+                    state.clear_peer_relay_failed(peer.id);
                     Some(bundle)
                 }
                 Err(e) => {
@@ -242,11 +300,14 @@ pub async fn fetch_peer_public_stats_via_relay(
             }
         }
         Ok(Some(None)) => {
-            // Relay sent but no response (timeout)
+            // Relay sent but no response (timeout). Remember so subsequent
+            // refreshes skip this peer until TTL expires — matches the
+            // contacts-side pattern of not re-probing known-offline peers.
             tracing::debug!(
                 "Leaderboard relay: no response from peer {} (timeout or unreachable)",
                 peer.id
             );
+            state.mark_peer_relay_failed(peer.id);
             None
         }
         Ok(None) => {
@@ -260,6 +321,7 @@ pub async fn fetch_peer_public_stats_via_relay(
                 peer.id,
                 e
             );
+            state.mark_peer_relay_failed(peer.id);
             None
         }
     }
@@ -304,14 +366,32 @@ pub async fn apply_stats_bundle_to_caches(
             .await;
     }
 
-    // Memory game
+    // Memory game — prefer per-difficulty list when present, fall back to
+    // the single overall-best entry from legacy peers.
     if bundle.enabled_modules.contains(&"memory_game".to_string()) {
-        if let Some(entry) = &bundle.memory_game
+        use crate::modules::memory_game::domain::MemoryGameRepository;
+        let repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+        if !bundle.memory_scores_per_difficulty.is_empty() {
+            // Replace cached rows with the fresh per-difficulty set so
+            // difficulties the peer no longer plays drop off naturally.
+            let _ = repo.delete_peer_scores(peer_id).await;
+            for entry in &bundle.memory_scores_per_difficulty {
+                if entry.best_score <= 0.0 {
+                    continue;
+                }
+                let _ = repo
+                    .upsert_peer_score(
+                        peer_id,
+                        display_name,
+                        entry.best_score,
+                        &entry.difficulty,
+                        &entry.played_at,
+                    )
+                    .await;
+            }
+        } else if let Some(entry) = &bundle.memory_game
             && entry.best_score > 0.0
         {
-            use crate::modules::memory_game::domain::MemoryGameRepository;
-            let repo =
-                crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
             let _ = repo
                 .upsert_peer_score(
                     peer_id,
@@ -333,12 +413,28 @@ pub async fn apply_stats_bundle_to_caches(
         .enabled_modules
         .contains(&"sliding_puzzle".to_string())
     {
-        if let Some(entry) = &bundle.sliding_puzzle
+        use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
+        let repo =
+            crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
+        if !bundle.puzzle_scores_per_difficulty.is_empty() {
+            let _ = repo.delete_peer_scores(peer_id).await;
+            for entry in &bundle.puzzle_scores_per_difficulty {
+                if entry.best_score <= 0.0 {
+                    continue;
+                }
+                let _ = repo
+                    .upsert_peer_score(
+                        peer_id,
+                        display_name,
+                        entry.best_score,
+                        &entry.difficulty,
+                        &entry.played_at,
+                    )
+                    .await;
+            }
+        } else if let Some(entry) = &bundle.sliding_puzzle
             && entry.best_score > 0.0
         {
-            use crate::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
-            let repo =
-                crate::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository::new(db.clone());
             let _ = repo
                 .upsert_peer_score(
                     peer_id,
@@ -358,12 +454,27 @@ pub async fn apply_stats_bundle_to_caches(
 
     // Hangman
     if bundle.enabled_modules.contains(&"hangman".to_string()) {
-        if let Some(entry) = &bundle.hangman
+        use crate::modules::hangman::domain::HangmanRepository;
+        let repo = crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
+        if !bundle.hangman_scores_per_difficulty.is_empty() {
+            let _ = repo.delete_peer_scores(peer_id).await;
+            for entry in &bundle.hangman_scores_per_difficulty {
+                if entry.best_score <= 0.0 {
+                    continue;
+                }
+                let _ = repo
+                    .upsert_peer_score(
+                        peer_id,
+                        display_name,
+                        entry.best_score,
+                        &entry.difficulty,
+                        &entry.played_at,
+                    )
+                    .await;
+            }
+        } else if let Some(entry) = &bundle.hangman
             && entry.best_score > 0.0
         {
-            use crate::modules::hangman::domain::HangmanRepository;
-            let repo =
-                crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
             let _ = repo
                 .upsert_peer_score(
                     peer_id,
@@ -455,11 +566,15 @@ pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
     let mut relay_peers: Vec<crate::models::peer::Model> = Vec::new();
     let mut direct_ok = 0u32;
 
-    // Phase 1 outcome per peer.
+    // Phase 1 outcome per peer. Legacy calls and relay credential lookup
+    // all happen *inside* the Phase 1 future to keep the whole phase
+    // parallel across peers — the previous sequential post-processing
+    // could spend 5s × 4 calls × N peers before Phase 2 even started.
     enum Phase1Outcome {
         Bundle(PublicStatsBundle),
-        LegacyConfig(crate::api::setup::ConfigResponse),
-        Unreachable,
+        LegacyHandled,
+        NeedsRelay(crate::models::peer::Model),
+        Dead,
     }
 
     if !skip_direct {
@@ -468,112 +583,134 @@ pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
             .build()
             .unwrap_or_default();
 
-        // Parallel bundle fetch for all peers. Fast path: one GET per peer
-        // returns all scores + gamification + library name. Legacy fallback
-        // (when peer returns 404) reads /api/config so the old 4-call path
-        // can still provide scores for peers that haven't updated yet.
-        let phase1_futures: Vec<_> = peers
-            .iter()
-            .map(|p| {
-                let client = client.clone();
-                let peer = p.clone();
-                async move {
-                    // Skip peers already known to be unreachable
-                    if state.is_peer_direct_unreachable(peer.id) {
-                        return (peer, Phase1Outcome::Unreachable);
-                    }
-                    let bundle_url = format!("{}/api/public-stats-bundle", peer.url);
-                    match client.get(&bundle_url).send().await {
-                        Ok(res) if res.status().is_success() => {
-                            match res.json::<PublicStatsBundle>().await {
-                                Ok(bundle) => (peer, Phase1Outcome::Bundle(bundle)),
-                                Err(_) => (peer, Phase1Outcome::Unreachable),
-                            }
+        let phase1_futures: Vec<_> =
+            peers
+                .iter()
+                .map(|p| {
+                    let client = client.clone();
+                    let peer = p.clone();
+                    async move {
+                        // Skip peers we've already proven unresponsive via
+                        // relay within the TTL. Matches the contacts UX:
+                        // known-offline peers don't keep blocking the spinner.
+                        if state.is_peer_relay_unreachable(peer.id)
+                            && state.is_peer_direct_unreachable(peer.id)
+                        {
+                            return Phase1Outcome::Dead;
                         }
-                        Ok(res) if res.status() == reqwest::StatusCode::NOT_FOUND => {
-                            // Legacy peer: fall back to /api/config + per-game endpoints
-                            let config_url = format!("{}/api/config", peer.url);
-                            match client.get(&config_url).send().await {
-                                Ok(res) if res.status().is_success() => {
-                                    match res.json::<crate::api::setup::ConfigResponse>().await {
-                                        Ok(config) => (peer, Phase1Outcome::LegacyConfig(config)),
-                                        Err(_) => (peer, Phase1Outcome::Unreachable),
-                                    }
+                        // Skip peers already known to be unreachable — go
+                        // straight to relay credential lookup.
+                        if state.is_peer_direct_unreachable(peer.id) {
+                            if state.is_peer_relay_unreachable(peer.id) {
+                                return Phase1Outcome::Dead;
+                            }
+                            return match ensure_relay_credentials(db, &peer).await {
+                                Some(ready) => Phase1Outcome::NeedsRelay(ready),
+                                None => Phase1Outcome::Dead,
+                            };
+                        }
+
+                        let bundle_url = format!("{}/api/public-stats-bundle", peer.url);
+                        match client.get(&bundle_url).send().await {
+                            Ok(res) if res.status().is_success() => {
+                                match res.json::<PublicStatsBundle>().await {
+                                    Ok(bundle) => Phase1Outcome::Bundle(bundle),
+                                    Err(_) => Phase1Outcome::Dead,
                                 }
-                                _ => (peer, Phase1Outcome::Unreachable),
+                            }
+                            Ok(res) if res.status() == reqwest::StatusCode::NOT_FOUND => {
+                                // Legacy peer: /api/config + 4 per-game endpoints.
+                                // Runs inside this future so multiple legacy peers
+                                // don't serialize behind each other.
+                                let config_url = format!("{}/api/config", peer.url);
+                                let config = match client.get(&config_url).send().await {
+                                    Ok(res) if res.status().is_success() => {
+                                        res.json::<crate::api::setup::ConfigResponse>().await.ok()
+                                    }
+                                    _ => None,
+                                };
+                                let Some(config) = config else {
+                                    if state.is_peer_relay_unreachable(peer.id) {
+                                        return Phase1Outcome::Dead;
+                                    }
+                                    return match ensure_relay_credentials(db, &peer).await {
+                                        Some(ready) => Phase1Outcome::NeedsRelay(ready),
+                                        None => Phase1Outcome::Dead,
+                                    };
+                                };
+                                let modules = &config.enabled_modules;
+                                let (mem_enabled, puz_enabled, han_enabled) = (
+                                    Some(modules.contains(&"memory_game".to_string())),
+                                    Some(modules.contains(&"sliding_puzzle".to_string())),
+                                    Some(modules.contains(&"hangman".to_string())),
+                                );
+                                // Parallel per-game fetches inside the legacy branch.
+                                tokio::join!(
+                                crate::modules::memory_game::handlers::sync_peer_memory_scores(
+                                    db, peer.id, &peer.url, &peer.name, &client, mem_enabled,
+                                ),
+                                crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
+                                    db, peer.id, &peer.url, &peer.name, &client, puz_enabled,
+                                ),
+                                crate::modules::hangman::handlers::sync_peer_hangman_scores(
+                                    db, peer.id, &peer.url, &peer.name, &client, han_enabled,
+                                ),
+                                crate::api::peer::sync_peer_gamification_stats(
+                                    db,
+                                    peer.id,
+                                    &peer.url,
+                                    &client,
+                                    Some(config.share_gamification_stats),
+                                ),
+                            );
+                                Phase1Outcome::LegacyHandled
+                            }
+                            _ => {
+                                if state.is_peer_relay_unreachable(peer.id) {
+                                    return Phase1Outcome::Dead;
+                                }
+                                match ensure_relay_credentials(db, &peer).await {
+                                    Some(ready) => Phase1Outcome::NeedsRelay(ready),
+                                    None => Phase1Outcome::Dead,
+                                }
                             }
                         }
-                        _ => (peer, Phase1Outcome::Unreachable),
                     }
-                }
-            })
-            .collect();
+                })
+                .collect();
 
         let phase1_results = futures::future::join_all(phase1_futures).await;
 
-        for (peer, outcome) in phase1_results {
+        // Collect bundles to apply. apply_stats_bundle_to_caches is DB-bound
+        // and cheap; running it sequentially here after join_all keeps the
+        // SeaORM writes orderly without adding perceivable latency.
+        for (peer, outcome) in peers.iter().zip(phase1_results) {
             match outcome {
                 Phase1Outcome::Bundle(bundle) => {
                     direct_ok += 1;
                     apply_stats_bundle_to_caches(db, peer.id, &peer.name, &bundle, true).await;
                 }
-                Phase1Outcome::LegacyConfig(config) => {
+                Phase1Outcome::LegacyHandled => {
                     direct_ok += 1;
-                    // Legacy path: 4 sequential calls. Removed once all peers
-                    // expose /api/public-stats-bundle.
-                    crate::modules::memory_game::handlers::sync_peer_memory_scores(
-                        db,
-                        peer.id,
-                        &peer.url,
-                        &peer.name,
-                        &client,
-                        Some(config.enabled_modules.contains(&"memory_game".to_string())),
-                    )
-                    .await;
-                    crate::modules::sliding_puzzle::handlers::sync_peer_puzzle_scores(
-                        db,
-                        peer.id,
-                        &peer.url,
-                        &peer.name,
-                        &client,
-                        Some(
-                            config
-                                .enabled_modules
-                                .contains(&"sliding_puzzle".to_string()),
-                        ),
-                    )
-                    .await;
-                    crate::modules::hangman::handlers::sync_peer_hangman_scores(
-                        db,
-                        peer.id,
-                        &peer.url,
-                        &peer.name,
-                        &client,
-                        Some(config.enabled_modules.contains(&"hangman".to_string())),
-                    )
-                    .await;
-                    crate::api::peer::sync_peer_gamification_stats(
-                        db,
-                        peer.id,
-                        &peer.url,
-                        &client,
-                        Some(config.share_gamification_stats),
-                    )
-                    .await;
                 }
-                Phase1Outcome::Unreachable => {
-                    if let Some(ready) = ensure_relay_credentials(db, &peer).await {
-                        relay_peers.push(ready);
-                    }
+                Phase1Outcome::NeedsRelay(ready) => {
+                    relay_peers.push(ready);
                 }
+                Phase1Outcome::Dead => {}
             }
         }
     } else {
-        // Skip direct entirely -- queue all peers with relay credentials
-        for peer in &peers {
-            if let Some(ready) = ensure_relay_credentials(db, peer).await {
-                relay_peers.push(ready);
-            }
+        // Skip direct entirely -- resolve relay credentials in parallel.
+        let cred_futures: Vec<_> = peers
+            .iter()
+            .map(|peer| async move { ensure_relay_credentials(db, peer).await })
+            .collect();
+        for ready in futures::future::join_all(cred_futures)
+            .await
+            .into_iter()
+            .flatten()
+        {
+            relay_peers.push(ready);
         }
     }
 
@@ -750,6 +887,9 @@ mod tests {
             }),
             sliding_puzzle: None,
             hangman: None,
+            memory_scores_per_difficulty: vec![],
+            puzzle_scores_per_difficulty: vec![],
+            hangman_scores_per_difficulty: vec![],
             library_name: Some("Alice's Library".to_string()),
         };
 
@@ -824,6 +964,9 @@ mod tests {
             memory_game: None,
             sliding_puzzle: None,
             hangman: None,
+            memory_scores_per_difficulty: vec![],
+            puzzle_scores_per_difficulty: vec![],
+            hangman_scores_per_difficulty: vec![],
             library_name: Some("New Name".to_string()),
         };
 
@@ -850,6 +993,9 @@ mod tests {
             memory_game: None,
             sliding_puzzle: None,
             hangman: None,
+            memory_scores_per_difficulty: vec![],
+            puzzle_scores_per_difficulty: vec![],
+            hangman_scores_per_difficulty: vec![],
             library_name: None,
         };
 

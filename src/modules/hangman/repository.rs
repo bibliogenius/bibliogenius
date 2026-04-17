@@ -152,6 +152,51 @@ impl HangmanRepository for SeaOrmHangmanRepository {
         }))
     }
 
+    async fn get_best_score_entries_per_difficulty(
+        &self,
+    ) -> Result<Vec<HangmanScore>, DomainError> {
+        use sea_orm::{ConnectionTrait, Statement};
+
+        // Pick the full row matching the best `normalized_score` within each
+        // difficulty bucket. Subquery avoids joining on (difficulty, score)
+        // ties by grabbing a single id per bucket via MAX(id).
+        let stmt = Statement::from_string(
+            self.db.get_database_backend(),
+            r#"
+            SELECT id, book_id, difficulty, elapsed_seconds, errors,
+                   hints_used, won, normalized_score, played_at
+            FROM hangman_scores
+            WHERE id IN (
+                SELECT id FROM hangman_scores hs1
+                WHERE normalized_score = (
+                    SELECT MAX(normalized_score) FROM hangman_scores hs2
+                    WHERE hs2.difficulty = hs1.difficulty
+                )
+                GROUP BY difficulty
+            )
+            "#
+            .to_owned(),
+        );
+
+        let rows = self.db.query_all(stmt).await?;
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in rows {
+            let won: i32 = row.try_get("", "won")?;
+            entries.push(HangmanScore {
+                id: Some(row.try_get("", "id")?),
+                book_id: row.try_get("", "book_id")?,
+                difficulty: row.try_get("", "difficulty")?,
+                elapsed_seconds: row.try_get("", "elapsed_seconds")?,
+                errors: row.try_get("", "errors")?,
+                hints_used: row.try_get("", "hints_used")?,
+                won: won != 0,
+                normalized_score: row.try_get("", "normalized_score")?,
+                played_at: row.try_get("", "played_at")?,
+            });
+        }
+        Ok(entries)
+    }
+
     async fn delete_peer_scores(&self, peer_id: i32) -> Result<(), DomainError> {
         PeerScoreEntity::delete_many()
             .filter(PeerScoreColumn::PeerId.eq(peer_id))
@@ -170,8 +215,13 @@ impl HangmanRepository for SeaOrmHangmanRepository {
     ) -> Result<(), DomainError> {
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
+        // Key by (peer_id, difficulty) so each peer can hold one best per
+        // difficulty. The legacy behaviour (key by peer_id only) meant only
+        // a peer's overall best was ever visible — their easy score was
+        // hidden if they later beat it in medium.
         let existing = PeerScoreEntity::find()
             .filter(PeerScoreColumn::PeerId.eq(peer_id))
+            .filter(PeerScoreColumn::Difficulty.eq(difficulty))
             .one(&self.db)
             .await?;
 
@@ -183,7 +233,6 @@ impl HangmanRepository for SeaOrmHangmanRepository {
                 active.library_name = Set(library_name.to_string());
                 if score_improved {
                     active.best_score = Set(best_score);
-                    active.difficulty = Set(difficulty.to_string());
                     active.played_at = Set(played_at.to_string());
                 }
                 active.synced_at = Set(now);

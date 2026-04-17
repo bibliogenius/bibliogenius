@@ -132,6 +132,44 @@ impl SlidingPuzzleRepository for SeaOrmPuzzleRepository {
         }))
     }
 
+    async fn get_best_score_entries_per_difficulty(&self) -> Result<Vec<PuzzleScore>, DomainError> {
+        use sea_orm::{ConnectionTrait, Statement};
+
+        let stmt = Statement::from_string(
+            self.db.get_database_backend(),
+            r#"
+            SELECT id, difficulty, grid_size, elapsed_seconds, move_count,
+                   par_moves, normalized_score, played_at
+            FROM sliding_puzzle_scores
+            WHERE id IN (
+                SELECT id FROM sliding_puzzle_scores sp1
+                WHERE normalized_score = (
+                    SELECT MAX(normalized_score) FROM sliding_puzzle_scores sp2
+                    WHERE sp2.difficulty = sp1.difficulty
+                )
+                GROUP BY difficulty
+            )
+            "#
+            .to_owned(),
+        );
+
+        let rows = self.db.query_all(stmt).await?;
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in rows {
+            entries.push(PuzzleScore {
+                id: Some(row.try_get("", "id")?),
+                difficulty: row.try_get("", "difficulty")?,
+                grid_size: row.try_get("", "grid_size")?,
+                elapsed_seconds: row.try_get("", "elapsed_seconds")?,
+                move_count: row.try_get("", "move_count")?,
+                par_moves: row.try_get("", "par_moves")?,
+                normalized_score: row.try_get("", "normalized_score")?,
+                played_at: row.try_get("", "played_at")?,
+            });
+        }
+        Ok(entries)
+    }
+
     async fn delete_peer_scores(&self, peer_id: i32) -> Result<(), DomainError> {
         PeerScoreEntity::delete_many()
             .filter(PeerScoreColumn::PeerId.eq(peer_id))
@@ -150,8 +188,10 @@ impl SlidingPuzzleRepository for SeaOrmPuzzleRepository {
     ) -> Result<(), DomainError> {
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
+        // Key by (peer_id, difficulty) — see hangman::upsert_peer_score.
         let existing = PeerScoreEntity::find()
             .filter(PeerScoreColumn::PeerId.eq(peer_id))
+            .filter(PeerScoreColumn::Difficulty.eq(difficulty))
             .one(&self.db)
             .await?;
 
@@ -163,7 +203,6 @@ impl SlidingPuzzleRepository for SeaOrmPuzzleRepository {
                 active.library_name = Set(library_name.to_string());
                 if score_improved {
                     active.best_score = Set(best_score);
-                    active.difficulty = Set(difficulty.to_string());
                     active.played_at = Set(played_at.to_string());
                 }
                 active.synced_at = Set(now);

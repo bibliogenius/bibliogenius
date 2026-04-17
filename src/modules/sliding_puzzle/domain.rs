@@ -79,6 +79,10 @@ pub trait SlidingPuzzleRepository: Send + Sync {
     /// Get the full best score entry (for public API)
     async fn get_best_score_entry(&self) -> Result<Option<PuzzleScore>, DomainError>;
 
+    /// One best entry per difficulty actually played — used by the public
+    /// stats bundle so peers see all difficulties, not just the overall best.
+    async fn get_best_score_entries_per_difficulty(&self) -> Result<Vec<PuzzleScore>, DomainError>;
+
     /// Delete all cached peer puzzle scores for a given peer
     async fn delete_peer_scores(&self, peer_id: i32) -> Result<(), DomainError>;
 

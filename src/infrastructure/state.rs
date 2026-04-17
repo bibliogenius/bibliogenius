@@ -31,6 +31,12 @@ type PendingRelayRequests =
 /// Entries older than [`PEER_UNREACHABLE_TTL`] are treated as expired.
 type PeerDirectFailures = Arc<dashmap::DashMap<i32, std::time::Instant>>;
 
+/// Cache of peers whose relay round-trip recently timed out. Same shape and
+/// TTL as [`PeerDirectFailures`]. Used by the leaderboard refresh path to
+/// skip known-unresponsive peers entirely on subsequent refreshes, so the
+/// spinner doesn't wait on them again until the TTL expires.
+type PeerRelayFailures = Arc<dashmap::DashMap<i32, std::time::Instant>>;
+
 /// Guard against concurrent `poll_once()` executions.
 /// Multiple callers (timer, WS nudge, poll_now endpoint, peer.rs) could overlap
 /// and fetch the same relay messages before acks go through, causing double processing.
@@ -78,6 +84,9 @@ pub struct AppState {
     /// Cache of peers whose direct LAN connection recently failed.
     /// Used by `try_send_e2ee` to skip direct and go straight to relay.
     peer_direct_failures: PeerDirectFailures,
+    /// Cache of peers whose relay round-trip recently timed out.
+    /// Used by the leaderboard refresh to skip unresponsive peers entirely.
+    peer_relay_failures: PeerRelayFailures,
     /// Relay poll lock — prevents concurrent `poll_once()` from double-processing messages.
     relay_poll_lock: RelayPollLock,
     /// Leaderboard sync lock — prevents concurrent `sync_all_leaderboards()` runs.
@@ -140,6 +149,7 @@ impl AppState {
             pending_relay_requests: Arc::new(dashmap::DashMap::new()),
             hub_directory: Arc::new(HubDirectoryService::new()),
             peer_direct_failures: Arc::new(dashmap::DashMap::new()),
+            peer_relay_failures: Arc::new(dashmap::DashMap::new()),
             relay_poll_lock: Arc::new(tokio::sync::Mutex::new(())),
             leaderboard_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -241,6 +251,33 @@ impl AppState {
     /// Clear the "unreachable" mark for a peer (e.g. when direct succeeds).
     pub fn clear_peer_direct_failed(&self, peer_id: i32) {
         self.peer_direct_failures.remove(&peer_id);
+    }
+
+    /// Mark a peer as unresponsive via relay. Paired with
+    /// [`is_peer_relay_unreachable`] so subsequent leaderboard refreshes
+    /// skip the peer until [`PEER_UNREACHABLE_TTL`] expires. Mirrors the
+    /// direct-failure cache so the UX pattern used for contact sync
+    /// (fast-fail, serve cache) also applies to the leaderboard.
+    pub fn mark_peer_relay_failed(&self, peer_id: i32) {
+        self.peer_relay_failures
+            .insert(peer_id, std::time::Instant::now());
+    }
+
+    /// True if the peer relay round-trip recently timed out within TTL.
+    pub fn is_peer_relay_unreachable(&self, peer_id: i32) -> bool {
+        if let Some(entry) = self.peer_relay_failures.get(&peer_id) {
+            if entry.value().elapsed() < PEER_UNREACHABLE_TTL {
+                return true;
+            }
+            drop(entry);
+            self.peer_relay_failures.remove(&peer_id);
+        }
+        false
+    }
+
+    /// Clear the relay-unreachable mark (e.g. when relay succeeds).
+    pub fn clear_peer_relay_failed(&self, peer_id: i32) {
+        self.peer_relay_failures.remove(&peer_id);
     }
 
     // ── Relay poll deduplication ────────────────────────────────────

@@ -98,6 +98,60 @@ async fn phase1_uses_new_bundle_endpoint() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
+async fn phase1_applies_per_difficulty_hangman_scores() {
+    // Regression test for the "only one peer score visible" bug: when a peer
+    // beats their overall best in medium, their easy score used to vanish
+    // from other peers' caches because the bundle only carried the overall
+    // best and upsert_peer_score keyed on peer_id alone.
+    let db = setup_test_db().await;
+    let server = MockServer::start().await;
+
+    let bundle = serde_json::json!({
+        "share_gamification_stats": false,
+        "enabled_modules": ["hangman"],
+        "gamification": null,
+        "hangman": {
+            "best_score": 950.0,
+            "difficulty": "medium",
+            "played_at": "2026-04-17T10:00:00Z",
+        },
+        "hangman_scores_per_difficulty": [
+            {"best_score": 950.0, "difficulty": "medium", "played_at": "2026-04-17T10:00:00Z"},
+            {"best_score": 400.0, "difficulty": "easy", "played_at": "2026-04-17T09:00:00Z"},
+        ],
+        "memory_game": null,
+        "sliding_puzzle": null,
+        "library_name": "Per-Difficulty Peer",
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/api/public-stats-bundle"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&bundle))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let peer = insert_peer(&db, "Per-Difficulty Peer", &server.uri()).await;
+
+    let state = AppState::new(db.clone());
+    rust_lib_app::utils::leaderboard_relay::sync_all_leaderboards(&state, false).await;
+
+    use rust_lib_app::modules::hangman::domain::HangmanRepository;
+    use rust_lib_app::modules::hangman::repository::SeaOrmHangmanRepository;
+    let repo = SeaOrmHangmanRepository::new(db.clone());
+    let mut scores = repo.get_peer_scores().await.expect("peer scores");
+    scores.sort_by(|a, b| a.difficulty.cmp(&b.difficulty));
+
+    assert_eq!(scores.len(), 2, "both easy and medium should be cached");
+    assert_eq!(scores[0].difficulty, "easy");
+    assert_eq!(scores[0].best_score, 400.0);
+    assert_eq!(scores[0].peer_id, peer.id);
+    assert_eq!(scores[1].difficulty, "medium");
+    assert_eq!(scores[1].best_score, 950.0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn phase1_falls_back_to_legacy_on_404() {
     let db = setup_test_db().await;
     let server = MockServer::start().await;
