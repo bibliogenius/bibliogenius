@@ -4466,8 +4466,10 @@ pub struct FrbCatalogEntry {
     pub title: String,
     pub author: Option<String>,
     pub cover_url: Option<String>,
-    /// When this entry was first seen locally (ISO 8601). Used for "new" badge.
-    pub first_seen_at: Option<String>,
+    /// Owner's `books.created_at` broadcast through the catalog payload.
+    /// Source of truth for the "NEW" badge: every viewer agrees on what's
+    /// recent because the timestamp lives on the owner's side.
+    pub added_at: Option<String>,
 }
 
 impl From<CatalogEntry> for FrbCatalogEntry {
@@ -4477,7 +4479,7 @@ impl From<CatalogEntry> for FrbCatalogEntry {
             title: e.title,
             author: e.author,
             cover_url: e.cover_url,
-            first_seen_at: None,
+            added_at: e.added_at,
         }
     }
 }
@@ -4637,6 +4639,7 @@ pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), St
             title: String::new(),
             author: None,
             cover_url: None,
+            added_at: None,
         })
         .collect();
     hub_directory_svc()
@@ -4688,11 +4691,6 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Not registered in directory".to_string())?;
-
-    // Total book count (all owned books, regardless of ISBN presence).
-    let book_count = crate::services::book_service::count_books(db)
-        .await
-        .map_err(|e| format!("count_books: {e:?}"))?;
 
     // Collect ALL owned books with their authors (no ISBN filter).
     let books_with_authors: Vec<(
@@ -4759,12 +4757,18 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
             };
 
         let idx = entries.len();
+        // book.created_at is the owner's authoritative "added to library"
+        // timestamp. Carrying it on the catalog entry lets every follower
+        // agree on whether a book is recent (source of truth for the
+        // "NEW" badge on the viewer side), instead of relying on the
+        // per-device first_seen_at heuristic.
         entries.push(CatalogEntry {
             isbn,
             book_id,
             title: book.title,
             author,
             cover_url,
+            added_at: Some(book.created_at),
         });
         id_to_index.insert(book_id_val, idx);
     }
@@ -4784,6 +4788,11 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
     }
 
     let count = entries.len() as i32;
+    // Hub-profile book_count matches what followers actually see. Using
+    // `entries.len()` (owned + isbn-or-title) instead of a raw `books` row
+    // count avoids inflating the public number with wishlist rows, stale
+    // sync entries, or owned books that were filtered out of the catalog.
+    let book_count = count as i64;
 
     // Always push: even with an empty catalog, book_count must reach the hub.
     // push_catalog short-circuits when the catalog hasn't changed (ADR-027);
@@ -4828,7 +4837,7 @@ pub async fn hub_directory_get_profile(node_id: String) -> Result<FrbHubProfile,
 }
 
 /// Gets the catalog of a library (public or approved follow).
-/// Fetches from hub, upserts into local cache, and returns entries with first_seen_at.
+/// Fetches from hub, upserts into local cache, and returns entries with added_at.
 /// If the hub fetch fails, returns the cached entries (offline-first).
 pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalogEntry>, String> {
     use crate::models::peer_book;
@@ -4845,7 +4854,7 @@ pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalog
                 "hub_directory_get_catalog: fetched {} entries, upserting cache",
                 entries.len()
             );
-            // Upsert into local cache and return with first_seen_at
+            // Upsert into local cache and return with owner-side added_at
             let result = upsert_directory_catalog_cache(db, &node_id, &entries).await;
             Ok(result)
         }
@@ -4870,7 +4879,10 @@ pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalog
                         title: pb.title,
                         author: pb.author,
                         cover_url: pb.cover_url,
-                        first_seen_at: pb.first_seen_at,
+                        // Offline: trust the last `added_at` we received from the
+                        // owner. Legacy cached rows (pre-added_at push) have None
+                        // here, which correctly suppresses the "NEW" badge.
+                        added_at: pb.added_at,
                     })
                 })
                 .collect())
@@ -4879,9 +4891,10 @@ pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalog
 }
 
 /// Upserts directory catalog entries into peer_books cache (peer_id = 0 sentinel).
-/// Returns entries enriched with first_seen_at from the local cache.
-/// On initial discovery (no existing entries for this node), first_seen_at is NULL
-/// to suppress the "new" badge when all entries arrive at once.
+/// Returns entries enriched with the authoritative `added_at` from the owner
+/// (carried on every CatalogEntry). `first_seen_at` is still populated for
+/// legacy reasons (viewer-local timestamp) but is no longer used for the
+/// "NEW" badge — `added_at` is the single source of truth now.
 async fn upsert_directory_catalog_cache(
     db: &DatabaseConnection,
     node_id: &str,
@@ -4917,18 +4930,17 @@ async fn upsert_directory_catalog_cache(
     let mut fresh_isbns = std::collections::HashSet::new();
     let mut result = Vec::with_capacity(entries.len());
 
-    // On initial discovery, suppress "new" badges (same rationale as peer books)
-    let is_initial_sync = existing_map.is_empty();
-
     for entry in entries {
         fresh_isbns.insert(entry.isbn.clone());
 
         if let Some(existing_entry) = existing_map.get(&entry.isbn) {
-            // UPDATE: preserve first_seen_at and notified_at, refresh metadata
+            // UPDATE: refresh metadata + owner-side added_at. `first_seen_at`
+            // stays untouched for any legacy reader that still consults it.
             let mut active: peer_book::ActiveModel = existing_entry.clone().into();
             active.title = Set(entry.title.clone());
             active.author = Set(entry.author.clone());
             active.cover_url = Set(entry.cover_url.clone());
+            active.added_at = Set(entry.added_at.clone());
             active.synced_at = Set(now.clone());
             let _ = active.update(db).await;
 
@@ -4937,16 +4949,13 @@ async fn upsert_directory_catalog_cache(
                 title: entry.title.clone(),
                 author: entry.author.clone(),
                 cover_url: entry.cover_url.clone(),
-                first_seen_at: existing_entry.first_seen_at.clone(),
+                added_at: entry.added_at.clone(),
             });
         } else {
-            let first_seen = if is_initial_sync {
-                None
-            } else {
-                Some(now.clone())
-            };
-
-            // INSERT: new entry (notified_at = NULL - not yet notified)
+            // INSERT: new entry (notified_at = NULL - not yet notified).
+            // first_seen_at records when this viewer first saw the entry.
+            // added_at is the owner's broadcast timestamp (the one the "NEW"
+            // badge actually reads).
             let cache = peer_book::ActiveModel {
                 peer_id: Set(0), // sentinel for directory entries
                 remote_book_id: Set(0),
@@ -4957,8 +4966,8 @@ async fn upsert_directory_catalog_cache(
                 summary: Set(None),
                 synced_at: Set(now.clone()),
                 node_id: Set(Some(node_id.to_string())),
-                first_seen_at: Set(first_seen.clone()),
-                added_at: Set(None),
+                first_seen_at: Set(Some(now.clone())),
+                added_at: Set(entry.added_at.clone()),
                 notified_at: Set(None),
                 ..Default::default()
             };
@@ -4972,7 +4981,7 @@ async fn upsert_directory_catalog_cache(
                 title: entry.title.clone(),
                 author: entry.author.clone(),
                 cover_url: entry.cover_url.clone(),
-                first_seen_at: first_seen,
+                added_at: entry.added_at.clone(),
             });
         }
     }

@@ -50,6 +50,7 @@ fn sample_entries() -> Vec<CatalogEntry> {
             title: "L'Étranger".to_string(),
             author: Some("Albert Camus".to_string()),
             cover_url: None,
+            added_at: None,
         },
         CatalogEntry {
             isbn: "9780140283334".to_string(),
@@ -57,6 +58,7 @@ fn sample_entries() -> Vec<CatalogEntry> {
             title: "Slaughterhouse-Five".to_string(),
             author: Some("Kurt Vonnegut".to_string()),
             cover_url: None,
+            added_at: None,
         },
     ]
 }
@@ -69,6 +71,7 @@ fn mutated_entries() -> Vec<CatalogEntry> {
         title: "1984".to_string(),
         author: Some("George Orwell".to_string()),
         cover_url: None,
+        added_at: None,
     });
     e
 }

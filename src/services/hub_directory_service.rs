@@ -140,6 +140,11 @@ pub struct HubCatalog {
 
 /// A single entry in the enriched catalog (ISBN + title + author + optional cover).
 /// Books without ISBN use `book_id` as an alternative key.
+///
+/// `added_at` carries the owner's `books.created_at` so every follower agrees
+/// on whether an entry is recent (replaces the per-viewer `peer_books.first_seen_at`
+/// heuristic, which was noisy because it flagged every entry as "new" on first
+/// sync of a library). Optional so older clients still round-trip cleanly.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CatalogEntry {
     pub isbn: String,
@@ -149,6 +154,8 @@ pub struct CatalogEntry {
     pub author: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<String>,
 }
 
 /// Result of `push_catalog`: whether the catalog was actually sent or the
@@ -871,6 +878,7 @@ impl HubDirectoryService {
                 title: String::new(),
                 author: None,
                 cover_url: None,
+                added_at: None,
             })
             .collect())
     }
@@ -1392,6 +1400,7 @@ mod catalog_hash_tests {
             title: title.to_string(),
             author: author.map(str::to_string),
             cover_url: None,
+            added_at: None,
         }
     }
 
