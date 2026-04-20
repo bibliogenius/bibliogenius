@@ -92,6 +92,11 @@ pub struct Model {
     pub private: bool,
     pub page_count: Option<i32>,
     pub loan_duration_days: Option<i32>,
+    /// ISO 8601 timestamp of the last failed hub cover upload for this book.
+    /// NULL when the most recent attempt succeeded or none ever ran. The
+    /// owner's UI reads this to surface a warning badge while a retry is
+    /// pending. Cleared on successful upload and on hub purge.
+    pub hub_cover_upload_failed_at: Option<String>,
 }
 
 // ... (Relation enum and Related impls omit for brevity) ...
@@ -190,6 +195,12 @@ pub struct Book {
     /// wait out the 7-day image cache TTL.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub updated_at: Option<String>,
+    /// ISO 8601 timestamp of the last failed hub cover upload. Exposed to
+    /// the owner's UI so a warning badge can be shown while a retry pends.
+    /// Redacted from peer-facing responses (see `redact_for_peer`) so
+    /// visitors never see another library's internal sync state.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub hub_cover_upload_failed_at: Option<String>,
 }
 
 impl From<Model> for Book {
@@ -248,6 +259,7 @@ impl From<Model> for Book {
             loan_duration_days: model.loan_duration_days,
             added_at: Some(model.created_at),
             updated_at: Some(model.updated_at),
+            hub_cover_upload_failed_at: model.hub_cover_upload_failed_at,
         }
     }
 }
@@ -397,6 +409,8 @@ impl Book {
         self.user_rating = None;
         self.price = None;
         self.private = None;
+        // Internal sync state: peers have no business knowing our retry backlog.
+        self.hub_cover_upload_failed_at = None;
     }
 
     /// Appends the canonical `?v={tag}` cache-buster to an already-built
@@ -586,6 +600,9 @@ impl From<Book> for ActiveModel {
             private: book.private.map_or(NotSet, Set),
             page_count: book.page_count.map_or(NotSet, |p| Set(Some(p))),
             loan_duration_days: book.loan_duration_days.map_or(NotSet, |d| Set(Some(d))),
+            // Owned solely by the hub-sync loop; leave NotSet on DTO round
+            // trips so regular CRUD never clobbers a pending-failure flag.
+            hub_cover_upload_failed_at: NotSet,
         }
     }
 }

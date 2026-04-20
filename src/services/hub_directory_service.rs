@@ -829,6 +829,105 @@ impl HubDirectoryService {
         ))
     }
 
+    /// Records a failed hub cover upload so the owner's UI can surface a
+    /// warning badge until the next sync retry succeeds. Side-effect only:
+    /// DB errors are logged and swallowed so a bookkeeping failure never
+    /// aborts the surrounding sync loop.
+    pub async fn mark_hub_cover_upload_failure(db: &DatabaseConnection, book_id: i32) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let backend = db.get_database_backend();
+        if let Err(e) = db
+            .execute(Statement::from_sql_and_values(
+                backend,
+                "UPDATE books SET hub_cover_upload_failed_at = ? WHERE id = ?",
+                [now.into(), book_id.into()],
+            ))
+            .await
+        {
+            tracing::warn!("failed to mark hub_cover_upload_failed_at for book {book_id}: {e}");
+        }
+    }
+
+    /// Clears the pending-failure flag after a successful hub cover upload.
+    /// Side-effect only: DB errors are logged and swallowed.
+    pub async fn clear_hub_cover_upload_failure(db: &DatabaseConnection, book_id: i32) {
+        let backend = db.get_database_backend();
+        if let Err(e) = db
+            .execute(Statement::from_sql_and_values(
+                backend,
+                "UPDATE books SET hub_cover_upload_failed_at = NULL WHERE id = ?",
+                [book_id.into()],
+            ))
+            .await
+        {
+            tracing::warn!("failed to clear hub_cover_upload_failed_at for book {book_id}: {e}");
+        }
+    }
+
+    /// Resets the pending-failure flag on every book. Called when the library
+    /// unregisters from the hub so stale warning badges do not survive a
+    /// purge / re-registration cycle.
+    pub async fn reset_all_hub_cover_upload_failures(db: &DatabaseConnection) {
+        let backend = db.get_database_backend();
+        if let Err(e) = db
+            .execute(Statement::from_string(
+                backend,
+                "UPDATE books SET hub_cover_upload_failed_at = NULL".to_owned(),
+            ))
+            .await
+        {
+            tracing::warn!("failed to reset hub_cover_upload_failed_at: {e}");
+        }
+    }
+
+    /// Reads a local cover file, resizes it to a JPEG thumbnail, and uploads
+    /// it to the hub. Shared pipeline so LAN peer responses and hub-stored
+    /// covers stay pixel-for-pixel identical.
+    pub async fn resize_and_upload_cover(
+        &self,
+        db: &DatabaseConnection,
+        book_id: i32,
+        path: &str,
+    ) -> Result<String, String> {
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| format!("read {path}: {e}"))?;
+
+        let jpeg_bytes = tokio::task::spawn_blocking(move || {
+            crate::utils::cover_image::resize_to_jpeg_thumbnail(&bytes)
+        })
+        .await
+        .map_err(|e| format!("spawn: {e}"))??;
+
+        self.upload_cover(db, book_id, jpeg_bytes)
+            .await
+            .map_err(|e| format!("upload: {e}"))
+    }
+
+    /// End-to-end wrapper around `resize_and_upload_cover` that also drives
+    /// the `hub_cover_upload_failed_at` flag: clears it on success, sets it
+    /// on failure, so the owner's UI stays in sync with the actual hub state
+    /// without the caller having to remember the bookkeeping. Returns the
+    /// hub URL on success, `None` on failure (already logged at ERROR).
+    pub async fn process_local_cover_upload(
+        &self,
+        db: &DatabaseConnection,
+        book_id: i32,
+        path: &str,
+    ) -> Option<String> {
+        match self.resize_and_upload_cover(db, book_id, path).await {
+            Ok(hub_url) => {
+                Self::clear_hub_cover_upload_failure(db, book_id).await;
+                Some(hub_url)
+            }
+            Err(e) => {
+                tracing::error!("cover upload failed for book {book_id}: {e}");
+                Self::mark_hub_cover_upload_failure(db, book_id).await;
+                None
+            }
+        }
+    }
+
     /// Fetches the catalog of a public or approved library from the hub.
     ///
     /// Returns enriched entries if available, otherwise falls back to ISBN-only entries.

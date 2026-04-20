@@ -85,6 +85,8 @@ impl From<Model> for super::Book {
             // cover versioning: the owner's timestamp is what matters
             // and it already lives in the cover_url they sent us.
             updated_at: None,
+            // Owner-only sync state; never meaningful for a peer-cached row.
+            hub_cover_upload_failed_at: None,
         }
     }
 }

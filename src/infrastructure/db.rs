@@ -1723,6 +1723,17 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 072: Track failed hub cover uploads so the owner's UI can
+    // surface a warning badge while retries pend. NULL = no pending failure
+    // (either never attempted, or last attempt succeeded). Reset to NULL on
+    // successful upload and on hub purge (library unregistered).
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE books ADD COLUMN hub_cover_upload_failed_at TEXT".to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

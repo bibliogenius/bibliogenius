@@ -299,6 +299,9 @@ pub async fn import_data(
                 private: Set(b.private),
                 page_count: Set(b.page_count),
                 loan_duration_days: Set(b.loan_duration_days),
+                // Imported backups start with a clean slate; any prior
+                // failure flag was tied to the previous install's hub registration.
+                hub_cover_upload_failed_at: Set(None),
             };
             if active.insert(&db).await.is_ok() {
                 books_count += 1;
@@ -594,6 +597,9 @@ pub async fn import_data_upsert(
                 private: Set(b.private),
                 page_count: Set(b.page_count),
                 loan_duration_days: Set(b.loan_duration_days),
+                // Imported backups start with a clean slate; any prior
+                // failure flag was tied to the previous install's hub registration.
+                hub_cover_upload_failed_at: Set(None),
             };
             let res = book::Entity::insert(active)
                 .on_conflict(

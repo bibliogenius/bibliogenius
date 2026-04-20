@@ -125,6 +125,10 @@ pub struct FrbBook {
     /// (maps to `books.created_at`). Used by the "new" badge and by the
     /// "recently added" carousel.
     pub added_at: Option<String>,
+    /// ISO 8601 timestamp of the last failed hub cover upload for this book.
+    /// NULL when the most recent attempt succeeded or none ever ran. Read by
+    /// the owner's UI to surface a warning badge while a retry pends.
+    pub hub_cover_upload_failed_at: Option<String>,
 }
 
 /// Convert domain Book to FFI-safe FrbBook
@@ -156,6 +160,7 @@ impl From<crate::models::Book> for FrbBook {
             private: book.private.unwrap_or(false),
             page_count: book.page_count,
             added_at: book.added_at,
+            hub_cover_upload_failed_at: book.hub_cover_upload_failed_at,
         }
     }
 }
@@ -621,6 +626,7 @@ impl From<FrbBook> for crate::models::Book {
             // versioning pipeline only needs it on the catalog-push side
             // where books are read directly from the Model.
             updated_at: None,
+            hub_cover_upload_failed_at: frb_book.hub_cover_upload_failed_at,
         }
     }
 }
@@ -4588,6 +4594,10 @@ pub async fn hub_directory_purge_config() -> Result<(), String> {
     ))
     .await
     .map_err(|e| format!("Failed to purge hub_directory_config: {e}"))?;
+    // Clear any pending cover-upload failures: once unregistered, the old
+    // warnings become meaningless and would never auto-clear (no next sync
+    // with the old registration). Next registration starts fresh.
+    crate::services::hub_directory_service::HubDirectoryService::reset_all_hub_cover_upload_failures(db).await;
     tracing::info!("hub_directory_config purged for 401 recovery");
     Ok(())
 }
@@ -4651,32 +4661,6 @@ pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), St
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())
-}
-
-/// Resizes a local cover image to a thumbnail and uploads it to the hub.
-/// Returns the public hub URL for the uploaded thumbnail.
-///
-/// Uses the shared `utils::cover_image` pipeline so LAN peer responses and
-/// hub-stored covers stay pixel-for-pixel identical.
-async fn resize_and_upload_cover(
-    db: &sea_orm::DatabaseConnection,
-    svc: &crate::services::hub_directory_service::HubDirectoryService,
-    book_id: i32,
-    path: &str,
-) -> Result<String, String> {
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|e| format!("read {path}: {e}"))?;
-
-    let jpeg_bytes = tokio::task::spawn_blocking(move || {
-        crate::utils::cover_image::resize_to_jpeg_thumbnail(&bytes)
-    })
-    .await
-    .map_err(|e| format!("spawn: {e}"))??;
-
-    svc.upload_cover(db, book_id, jpeg_bytes)
-        .await
-        .map_err(|e| format!("upload: {e}"))
 }
 
 /// Reads all owned books from the local database, collects title, author,
@@ -4789,21 +4773,14 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
     // goes through). Logged at ERROR so the failure is diagnosable rather
     // than drowned in warn-level noise.
     for (bid, path, updated_at) in &local_covers {
-        match resize_and_upload_cover(db, svc, *bid, path).await {
-            Ok(hub_url) => {
-                if let Some(&idx) = id_to_index.get(bid) {
-                    // Append the canonical ?v=tag so peers bust their
-                    // CachedNetworkImage cache when the owner re-uploads.
-                    let versioned = crate::models::Book::append_cover_version_tag(
-                        hub_url,
-                        Some(updated_at.as_str()),
-                    );
-                    entries[idx].cover_url = Some(versioned);
-                }
-            }
-            Err(e) => {
-                tracing::error!("cover upload failed for book {bid}: {e}");
-            }
+        if let Some(hub_url) = svc.process_local_cover_upload(db, *bid, path).await
+            && let Some(&idx) = id_to_index.get(bid)
+        {
+            // Append the canonical ?v=tag so peers bust their
+            // CachedNetworkImage cache when the owner re-uploads.
+            let versioned =
+                crate::models::Book::append_cover_version_tag(hub_url, Some(updated_at.as_str()));
+            entries[idx].cover_url = Some(versioned);
         }
     }
 
