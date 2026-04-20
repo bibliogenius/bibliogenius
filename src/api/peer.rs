@@ -446,6 +446,7 @@ pub(crate) async fn perform_loan_acceptance(
         book_cover_url: crate::models::Book::safe_cover_url_for_relay(
             book.cover_url.as_deref(),
             book.id,
+            Some(book.updated_at.as_str()),
             hub_prefix.as_deref(),
         ),
     })
@@ -833,7 +834,12 @@ pub async fn offer_loan(
         // Payload goes through `try_send_e2ee` (relay-capable): strip
         // unservable local paths rather than embedding a `/api/books/{id}/cover`
         // URL the borrower cannot reach from the hub relay.
-        "cover_url": crate::models::Book::safe_cover_url_for_relay(book.cover_url.as_deref(), book.id, hub_prefix.as_deref()),
+        "cover_url": crate::models::Book::safe_cover_url_for_relay(
+            book.cover_url.as_deref(),
+            book.id,
+            Some(book.updated_at.as_str()),
+            hub_prefix.as_deref(),
+        ),
         "lender_name": lender_name,
         "due_date": due_date_str,
         "request_id": request_id,
@@ -6433,6 +6439,7 @@ pub async fn update_request_status(
         let book_cover = crate::models::Book::safe_cover_url_for_relay(
             book.cover_url.as_deref(),
             book.id,
+            Some(book.updated_at.as_str()),
             hub_prefix.as_deref(),
         );
         let due_date = (chrono::Utc::now()

@@ -749,6 +749,7 @@ pub async fn search_unified(
                 page_count: None,
                 loan_duration_days: None,
                 added_at: None,
+                updated_at: None,
             };
             results.push(book);
         }
@@ -798,6 +799,7 @@ pub async fn search_unified(
                     page_count: None,
                     loan_duration_days: None,
                     added_at: None,
+                    updated_at: None,
                 };
                 results.push(book);
             }
@@ -888,6 +890,7 @@ pub async fn search_unified(
                     page_count: None,
                     loan_duration_days: None,
                     added_at: None,
+                    updated_at: None,
                 };
                 results.push(book);
             }

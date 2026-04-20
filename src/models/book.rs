@@ -2,6 +2,47 @@ use sea_orm::entity::prelude::*;
 use sea_orm::{ModelTrait, NotSet, Set};
 use serde::{Deserialize, Serialize};
 
+/// Strips non-alphanumeric characters from a timestamp so it can be
+/// embedded as a `?v=` query parameter without percent-encoding.
+/// A SQLite timestamp `"2026-04-20 10:30:00"` becomes `"20260420103000"`,
+/// which is deterministic, short enough for URL hygiene, and changes on
+/// every book edit — exactly what cache-busting needs.
+fn cover_version_tag(updated_at: &str) -> String {
+    updated_at
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect()
+}
+
+/// Builds a hub-hosted cover URL, optionally suffixed with a `?v={tag}`
+/// cache-buster derived from `updated_at`. The caller is responsible for
+/// passing a canonical `hub_cover_prefix` (without trailing slash).
+fn build_hub_cover_url(hub_cover_prefix: &str, book_id: i32, updated_at: Option<&str>) -> String {
+    let base = format!("{hub_cover_prefix}/{book_id}");
+    append_version(base, updated_at)
+}
+
+/// Builds a LAN peer cover URL (`/api/books/{id}/cover`), with the same
+/// optional `?v={tag}` cache-buster logic as the hub variant. The peer's
+/// own HTTP cover endpoint ignores query strings so this is safe.
+fn build_lan_cover_url(book_id: i32, updated_at: Option<&str>) -> String {
+    append_version(format!("/api/books/{book_id}/cover"), updated_at)
+}
+
+fn append_version(base: String, updated_at: Option<&str>) -> String {
+    match updated_at {
+        Some(s) if !s.is_empty() => {
+            let tag = cover_version_tag(s);
+            if tag.is_empty() {
+                base
+            } else {
+                format!("{base}?v={tag}")
+            }
+        }
+        _ => base,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "books")]
 pub struct Model {
@@ -143,6 +184,12 @@ pub struct Book {
     /// personal annotation.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub added_at: Option<String>,
+    /// Last modification timestamp of the book row (maps to `books.updated_at`).
+    /// Used to build a cache-busting `?v=` suffix on cover URLs so peers
+    /// refetch the image after the owner re-uploads it, without having to
+    /// wait out the 7-day image cache TTL.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub updated_at: Option<String>,
 }
 
 impl From<Model> for Book {
@@ -200,6 +247,7 @@ impl From<Model> for Book {
             page_count: model.page_count,
             loan_duration_days: model.loan_duration_days,
             added_at: Some(model.created_at),
+            updated_at: Some(model.updated_at),
         }
     }
 }
@@ -230,6 +278,8 @@ impl Book {
     /// local paths become absolute hub URLs that work for both LAN and relay peers.
     /// Without it, falls back to relative `/api/books/{id}/cover` (LAN only).
     /// HTTP URLs and paths already starting with `/api` are left untouched.
+    /// Every rewritten URL carries a `?v={tag}` suffix derived from the
+    /// book's `updated_at` so peers refetch automatically after a re-upload.
     ///
     /// This is the LAN variant: callers that serve the payload over local
     /// HTTP (peers on the same network) can rely on the relative fallback
@@ -241,13 +291,12 @@ impl Book {
             if let Some(ref url) = book.cover_url
                 && !url.starts_with("http")
                 && !url.starts_with("/api")
+                && let Some(id) = book.id
             {
-                book.cover_url = book.id.map(|id| {
-                    if let Some(prefix) = hub_cover_prefix {
-                        format!("{}/{}", prefix, id)
-                    } else {
-                        format!("/api/books/{}/cover", id)
-                    }
+                let version = book.updated_at.as_deref();
+                book.cover_url = Some(match hub_cover_prefix {
+                    Some(prefix) => build_hub_cover_url(prefix, id, version),
+                    None => build_lan_cover_url(id, version),
                 });
             }
         }
@@ -294,7 +343,8 @@ impl Book {
                 && !url.starts_with("/api")
                 && let Some(id) = book.id
             {
-                book.cover_url = Some(format!("{prefix}/{id}"));
+                let version = book.updated_at.as_deref();
+                book.cover_url = Some(build_hub_cover_url(prefix, id, version));
             }
         }
         Ok(())
@@ -349,34 +399,23 @@ impl Book {
         self.private = None;
     }
 
-    /// Rewrites a single cover_url from a SeaORM entity model.
-    /// Same logic as `rewrite_local_cover_urls` but for individual books.
-    /// LAN variant: falls back to relative `/api/books/{id}/cover` when
-    /// no hub prefix is available. For relay-bound payloads use
-    /// `safe_cover_url_for_relay`.
-    pub fn safe_cover_url(
-        cover_url: Option<&str>,
-        book_id: i32,
-        hub_cover_prefix: Option<&str>,
-    ) -> Option<String> {
-        match cover_url {
-            Some(url) if url.starts_with("http") || url.starts_with("/api") => {
-                Some(url.to_string())
-            }
-            Some(_) => Some(if let Some(prefix) = hub_cover_prefix {
-                format!("{}/{}", prefix, book_id)
-            } else {
-                format!("/api/books/{}/cover", book_id)
-            }),
-            None => None,
-        }
+    /// Appends the canonical `?v={tag}` cache-buster to an already-built
+    /// cover URL based on `updated_at`. Exposed for callers that received
+    /// a hub URL from the directory service and need to match the
+    /// versioning scheme of the rewrite functions without rebuilding from
+    /// parts. No-op when `updated_at` is None or empty.
+    pub fn append_cover_version_tag(url: String, updated_at: Option<&str>) -> String {
+        append_version(url, updated_at)
     }
 
-    /// Strict relay variant of `safe_cover_url`: errors when the source is
-    /// a local path and no hub prefix is configured.
+    /// Strict relay variant for a single book: errors when the source is
+    /// a local path and no hub prefix is configured. `updated_at` (if any)
+    /// adds a cache-busting `?v={tag}` suffix so peers refetch after a
+    /// re-upload without waiting for their image cache to expire.
     pub fn safe_cover_url_strict(
         cover_url: Option<&str>,
         book_id: i32,
+        updated_at: Option<&str>,
         hub_cover_prefix: Option<&str>,
     ) -> Result<Option<String>, CoverRewriteError> {
         match cover_url {
@@ -388,7 +427,7 @@ impl Book {
                 let prefix = hub_cover_prefix.ok_or(CoverRewriteError {
                     book_ids: vec![book_id],
                 })?;
-                Ok(Some(format!("{prefix}/{book_id}")))
+                Ok(Some(build_hub_cover_url(prefix, book_id, updated_at)))
             }
         }
     }
@@ -400,9 +439,10 @@ impl Book {
     pub fn safe_cover_url_for_relay(
         cover_url: Option<&str>,
         book_id: i32,
+        updated_at: Option<&str>,
         hub_cover_prefix: Option<&str>,
     ) -> Option<String> {
-        match Self::safe_cover_url_strict(cover_url, book_id, hub_cover_prefix) {
+        match Self::safe_cover_url_strict(cover_url, book_id, updated_at, hub_cover_prefix) {
             Ok(v) => v,
             Err(e) => {
                 tracing::error!("relay safe_cover_url failed for book {book_id}: {e}");
@@ -584,6 +624,16 @@ mod tests {
         }
     }
 
+    fn mk_book_with_updated(id: Option<i32>, cover: Option<&str>, updated_at: &str) -> Book {
+        Book {
+            id,
+            title: "t".into(),
+            cover_url: cover.map(str::to_string),
+            updated_at: Some(updated_at.into()),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn strict_rewrites_local_paths_with_hub_prefix() {
         let mut books = vec![
@@ -665,13 +715,14 @@ mod tests {
 
     #[test]
     fn safe_strict_http_passthrough() {
-        let out = Book::safe_cover_url_strict(Some("https://cdn/ok.jpg"), 1, None).unwrap();
+        let out = Book::safe_cover_url_strict(Some("https://cdn/ok.jpg"), 1, None, None).unwrap();
         assert_eq!(out.as_deref(), Some("https://cdn/ok.jpg"));
     }
 
     #[test]
     fn safe_strict_local_without_prefix_errors() {
-        let err = Book::safe_cover_url_strict(Some("/var/mobile/c.jpg"), 42, None).unwrap_err();
+        let err =
+            Book::safe_cover_url_strict(Some("/var/mobile/c.jpg"), 42, None, None).unwrap_err();
         assert_eq!(err.book_ids, vec![42]);
     }
 
@@ -680,6 +731,7 @@ mod tests {
         let out = Book::safe_cover_url_strict(
             Some("/var/mobile/c.jpg"),
             42,
+            None,
             Some("https://hub/api/directory/n/covers"),
         )
         .unwrap();
@@ -690,15 +742,81 @@ mod tests {
     }
 
     #[test]
+    fn safe_strict_with_updated_at_appends_version() {
+        let out = Book::safe_cover_url_strict(
+            Some("/var/mobile/c.jpg"),
+            42,
+            Some("2026-04-20 10:30:00"),
+            Some("https://hub/api/directory/n/covers"),
+        )
+        .unwrap();
+        assert_eq!(
+            out.as_deref(),
+            Some("https://hub/api/directory/n/covers/42?v=20260420103000")
+        );
+    }
+
+    #[test]
     fn safe_strict_none_in_none_out() {
-        let out = Book::safe_cover_url_strict(None, 1, None).unwrap();
+        let out = Book::safe_cover_url_strict(None, 1, None, None).unwrap();
         assert_eq!(out, None);
     }
 
     #[test]
     fn safe_relay_wrapper_returns_none_on_failure() {
-        let out = Book::safe_cover_url_for_relay(Some("/var/mobile/c.jpg"), 42, None);
+        let out = Book::safe_cover_url_for_relay(Some("/var/mobile/c.jpg"), 42, None, None);
         assert_eq!(out, None);
+    }
+
+    #[test]
+    fn cover_version_tag_strips_non_alnum() {
+        assert_eq!(cover_version_tag("2026-04-20 10:30:00"), "20260420103000");
+        assert_eq!(
+            cover_version_tag("2026-04-20T10:30:00Z"),
+            "20260420T103000Z"
+        );
+        assert_eq!(cover_version_tag(""), "");
+    }
+
+    #[test]
+    fn rewrite_versions_hub_urls_from_updated_at() {
+        let mut books = vec![mk_book_with_updated(
+            Some(7),
+            Some("/var/mobile/c.jpg"),
+            "2026-04-20 10:30:00",
+        )];
+        Book::rewrite_cover_urls_strict(&mut books, Some("https://hub/api/directory/n/covers"))
+            .unwrap();
+
+        assert_eq!(
+            books[0].cover_url.as_deref(),
+            Some("https://hub/api/directory/n/covers/7?v=20260420103000")
+        );
+    }
+
+    #[test]
+    fn rewrite_versions_lan_urls_from_updated_at() {
+        let mut books = vec![mk_book_with_updated(
+            Some(7),
+            Some("/var/mobile/c.jpg"),
+            "2026-04-20 10:30:00",
+        )];
+        Book::rewrite_local_cover_urls(&mut books, None);
+
+        assert_eq!(
+            books[0].cover_url.as_deref(),
+            Some("/api/books/7/cover?v=20260420103000")
+        );
+    }
+
+    #[test]
+    fn rewrite_skips_version_when_updated_at_missing() {
+        // Book with id but no updated_at (shouldn't happen in practice, but
+        // the rewrite must stay safe — no dangling `?v=` suffix).
+        let mut books = vec![mk_book(Some(7), Some("/var/mobile/c.jpg"))];
+        Book::rewrite_cover_urls_strict(&mut books, Some("https://hub/covers")).unwrap();
+
+        assert_eq!(books[0].cover_url.as_deref(), Some("https://hub/covers/7"));
     }
 
     /// Guardrail: every handler in `api/e2ee.rs` produces a JSON payload

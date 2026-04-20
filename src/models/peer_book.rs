@@ -81,6 +81,10 @@ impl From<Model> for super::Book {
             page_count: None,
             loan_duration_days: None,
             added_at: pb.added_at,
+            // Peer-cached rows have no meaningful local updated_at for
+            // cover versioning: the owner's timestamp is what matters
+            // and it already lives in the cover_url they sent us.
+            updated_at: None,
         }
     }
 }

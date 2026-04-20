@@ -617,6 +617,10 @@ impl From<FrbBook> for crate::models::Book {
             page_count: frb_book.page_count,
             loan_duration_days: None,
             added_at: frb_book.added_at,
+            // FrbBook (FFI DTO) doesn't carry updated_at; the cover
+            // versioning pipeline only needs it on the catalog-push side
+            // where books are read directly from the Model.
+            updated_at: None,
         }
     }
 }
@@ -4708,7 +4712,10 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
     let mut entries: Vec<CatalogEntry> = Vec::new();
     // Map book_id -> entry index for updating cover URLs after upload
     let mut id_to_index: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
-    let mut local_covers: Vec<(i32, String)> = Vec::new();
+    // (book_id, local_cover_path, updated_at) — updated_at is needed at
+    // upload-completion time to append the ?v=tag cache-buster so peers
+    // refetch immediately after a re-upload.
+    let mut local_covers: Vec<(i32, String, String)> = Vec::new();
 
     for (book, authors) in books_with_authors {
         let isbn = book
@@ -4718,6 +4725,7 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
             .unwrap_or("")
             .to_string();
         let book_id_val = book.id;
+        let book_updated_at = book.updated_at.clone();
         // For no-ISBN books, include book_id as alternative key
         let book_id = if isbn.is_empty() {
             Some(book_id_val)
@@ -4750,7 +4758,7 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
                 Some(cover_url_raw)
             } else if !cover_url_raw.is_empty() {
                 // Local file path: schedule for thumbnail upload
-                local_covers.push((book_id_val, cover_url_raw));
+                local_covers.push((book_id_val, cover_url_raw, book_updated_at));
                 None // Will be updated after upload
             } else {
                 None
@@ -4773,16 +4781,28 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
         id_to_index.insert(book_id_val, idx);
     }
 
-    // Upload local cover thumbnails to the hub (best-effort).
-    for (bid, path) in &local_covers {
+    // Upload local cover thumbnails to the hub. A failure here leaves
+    // `entries[idx].cover_url = None`, so the peer sees no cover for this
+    // book until the next sync retries (naturally: the next sync re-iterates
+    // all owned books and re-attempts the upload, the new catalog payload
+    // includes the now-filled cover_url so its hash differs and the push
+    // goes through). Logged at ERROR so the failure is diagnosable rather
+    // than drowned in warn-level noise.
+    for (bid, path, updated_at) in &local_covers {
         match resize_and_upload_cover(db, svc, *bid, path).await {
             Ok(hub_url) => {
                 if let Some(&idx) = id_to_index.get(bid) {
-                    entries[idx].cover_url = Some(hub_url);
+                    // Append the canonical ?v=tag so peers bust their
+                    // CachedNetworkImage cache when the owner re-uploads.
+                    let versioned = crate::models::Book::append_cover_version_tag(
+                        hub_url,
+                        Some(updated_at.as_str()),
+                    );
+                    entries[idx].cover_url = Some(versioned);
                 }
             }
             Err(e) => {
-                tracing::warn!("cover upload failed for book {bid}: {e}");
+                tracing::error!("cover upload failed for book {bid}: {e}");
             }
         }
     }
