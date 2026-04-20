@@ -464,6 +464,15 @@ pub async fn delete_book(db: &DatabaseConnection, id: i32) -> Result<(), Service
 
     let _ = crate::sync::log_operation(db, "book", id, "DELETE", None).await;
 
+    // Best-effort: remove the orphaned cover from the hub so storage
+    // does not grow indefinitely. A failure here (hub unreachable, not
+    // registered, cover never existed) must not fail the deletion
+    // itself — the book is already gone from the local DB.
+    let hub_svc = crate::services::hub_directory_service::HubDirectoryService::new();
+    if let Err(e) = hub_svc.delete_cover(db, id).await {
+        tracing::debug!("hub cover cleanup skipped for book {id}: {e}");
+    }
+
     Ok(())
 }
 

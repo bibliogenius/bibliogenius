@@ -476,6 +476,11 @@ pub async fn delete_book(
     match state.book_repo.delete(id).await {
         Ok(()) | Err(DomainError::NotFound) => {
             let _ = crate::sync::log_operation(state.db(), "book", id, "DELETE", None).await;
+            // Best-effort hub cover cleanup — same rationale as the FFI
+            // delete path. Non-fatal: the book is already gone locally.
+            if let Err(e) = state.hub_directory.delete_cover(state.db(), id).await {
+                tracing::debug!("hub cover cleanup skipped for book {id}: {e}");
+            }
             // Notify accepted peers that our catalog changed (debounced).
             crate::services::catalog_notification::schedule_catalog_changed_notification(
                 state.clone(),

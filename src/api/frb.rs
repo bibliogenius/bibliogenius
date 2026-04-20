@@ -4737,16 +4737,15 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
         // S5: only HTTP/HTTPS cover URLs go to the hub catalog directly.
         // Local file paths are collected for thumbnail upload.
         let cover_url_raw = book.cover_url.unwrap_or_default();
-        let cover_url =
-            if cover_url_raw.starts_with("http://") || cover_url_raw.starts_with("https://") {
-                Some(cover_url_raw)
-            } else if !cover_url_raw.is_empty() {
-                // Local file path: schedule for thumbnail upload
-                local_covers.push((book_id_val, cover_url_raw, book_updated_at));
-                None // Will be updated after upload
-            } else {
-                None
-            };
+        let cover_url = if crate::utils::cover_url::is_servable_remotely(&cover_url_raw) {
+            Some(cover_url_raw)
+        } else if !cover_url_raw.is_empty() {
+            // Local file path: schedule for thumbnail upload
+            local_covers.push((book_id_val, cover_url_raw, book_updated_at));
+            None // Will be updated after upload
+        } else {
+            None
+        };
 
         let idx = entries.len();
         // book.created_at is the owner's authoritative "added to library"

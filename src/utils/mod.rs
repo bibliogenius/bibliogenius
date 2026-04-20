@@ -1,4 +1,5 @@
 pub mod cover_image;
+pub mod cover_url;
 pub mod etag;
 pub mod hub_url;
 pub mod leaderboard_relay;

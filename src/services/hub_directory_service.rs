@@ -829,6 +829,43 @@ impl HubDirectoryService {
         ))
     }
 
+    /// Deletes a previously uploaded cover thumbnail from the hub.
+    ///
+    /// Called when a book is permanently removed from the local library
+    /// so the hub storage does not keep growing with orphaned covers.
+    /// Safe to call for books that never had a hub cover: the hub
+    /// returns `204 No Content` for missing files.
+    ///
+    /// Not called on cover replacement (re-upload overwrites the same
+    /// path on the hub, so no cleanup is needed).
+    pub async fn delete_cover(
+        &self,
+        db: &DatabaseConnection,
+        book_id: i32,
+    ) -> Result<(), HubDirectoryError> {
+        let cfg = Self::get_config(db)
+            .await?
+            .ok_or(HubDirectoryError::NotRegistered)?;
+        let hub_url = Self::hub_base_url()?;
+
+        let url = format!("{hub_url}/api/directory/{}/covers/{book_id}", cfg.node_id);
+
+        let response = self
+            .http_client
+            .delete(&url)
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let msg = response.text().await.unwrap_or_default();
+            return Err(HubDirectoryError::Hub(status, msg));
+        }
+
+        Ok(())
+    }
+
     /// Records a failed hub cover upload so the owner's UI can surface a
     /// warning badge until the next sync retry succeeds. Side-effect only:
     /// DB errors are logged and swallowed so a bookkeeping failure never

@@ -2,46 +2,12 @@ use sea_orm::entity::prelude::*;
 use sea_orm::{ModelTrait, NotSet, Set};
 use serde::{Deserialize, Serialize};
 
-/// Strips non-alphanumeric characters from a timestamp so it can be
-/// embedded as a `?v=` query parameter without percent-encoding.
-/// A SQLite timestamp `"2026-04-20 10:30:00"` becomes `"20260420103000"`,
-/// which is deterministic, short enough for URL hygiene, and changes on
-/// every book edit — exactly what cache-busting needs.
-fn cover_version_tag(updated_at: &str) -> String {
-    updated_at
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect()
-}
+use crate::utils::cover_url::{self, ResolveScope};
 
-/// Builds a hub-hosted cover URL, optionally suffixed with a `?v={tag}`
-/// cache-buster derived from `updated_at`. The caller is responsible for
-/// passing a canonical `hub_cover_prefix` (without trailing slash).
-fn build_hub_cover_url(hub_cover_prefix: &str, book_id: i32, updated_at: Option<&str>) -> String {
-    let base = format!("{hub_cover_prefix}/{book_id}");
-    append_version(base, updated_at)
-}
-
-/// Builds a LAN peer cover URL (`/api/books/{id}/cover`), with the same
-/// optional `?v={tag}` cache-buster logic as the hub variant. The peer's
-/// own HTTP cover endpoint ignores query strings so this is safe.
-fn build_lan_cover_url(book_id: i32, updated_at: Option<&str>) -> String {
-    append_version(format!("/api/books/{book_id}/cover"), updated_at)
-}
-
-fn append_version(base: String, updated_at: Option<&str>) -> String {
-    match updated_at {
-        Some(s) if !s.is_empty() => {
-            let tag = cover_version_tag(s);
-            if tag.is_empty() {
-                base
-            } else {
-                format!("{base}?v={tag}")
-            }
-        }
-        _ => base,
-    }
-}
+/// Backward-compatible alias so existing callers and tests that name the
+/// error type keep compiling. The canonical name lives in
+/// `utils::cover_url::CoverResolveError`.
+pub type CoverRewriteError = cover_url::CoverResolveError;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "books")]
@@ -299,17 +265,22 @@ impl Book {
     /// payloads that may travel via hub relay to a peer with no direct
     /// connectivity, use `rewrite_cover_urls_for_relay` instead.
     pub fn rewrite_local_cover_urls(books: &mut [Book], hub_cover_prefix: Option<&str>) {
-        for book in books {
-            if let Some(ref url) = book.cover_url
-                && !url.starts_with("http")
-                && !url.starts_with("/api")
-                && let Some(id) = book.id
-            {
-                let version = book.updated_at.as_deref();
-                book.cover_url = Some(match hub_cover_prefix {
-                    Some(prefix) => build_hub_cover_url(prefix, id, version),
-                    None => build_lan_cover_url(id, version),
-                });
+        for book in books.iter_mut() {
+            let Some(id) = book.id else { continue };
+            let Some(url) = book.cover_url.as_deref() else {
+                continue;
+            };
+            if cover_url::is_servable_on_lan(url) {
+                continue;
+            }
+            if let Ok(Some(new_url)) = cover_url::resolve_single(
+                Some(url),
+                id,
+                book.updated_at.as_deref(),
+                hub_cover_prefix,
+                ResolveScope::Lan,
+            ) {
+                book.cover_url = Some(new_url);
             }
         }
     }
@@ -326,37 +297,41 @@ impl Book {
         books: &mut [Book],
         hub_cover_prefix: Option<&str>,
     ) -> Result<(), CoverRewriteError> {
+        // Validate the whole batch before mutating any entry so a failed
+        // call leaves `books` untouched (the caller retains full knowledge
+        // of what was missing).
         let offenders: Vec<i32> = books
             .iter()
             .filter(|b| {
                 b.cover_url
                     .as_deref()
-                    .is_some_and(|u| !u.starts_with("http") && !u.starts_with("/api"))
+                    .is_some_and(|u| !cover_url::is_servable_on_lan(u))
             })
             .filter_map(|b| b.id)
             .collect();
 
-        if offenders.is_empty() {
-            return Ok(());
+        if !offenders.is_empty() && hub_cover_prefix.is_none() {
+            return Err(CoverRewriteError {
+                book_ids: offenders,
+            });
         }
 
-        let prefix = match hub_cover_prefix {
-            Some(p) => p,
-            None => {
-                return Err(CoverRewriteError {
-                    book_ids: offenders,
-                });
-            }
-        };
-
         for book in books.iter_mut() {
-            if let Some(ref url) = book.cover_url
-                && !url.starts_with("http")
-                && !url.starts_with("/api")
-                && let Some(id) = book.id
-            {
-                let version = book.updated_at.as_deref();
-                book.cover_url = Some(build_hub_cover_url(prefix, id, version));
+            let Some(id) = book.id else { continue };
+            let Some(url) = book.cover_url.as_deref() else {
+                continue;
+            };
+            if cover_url::is_servable_on_lan(url) {
+                continue;
+            }
+            if let Some(new_url) = cover_url::resolve_single(
+                Some(url),
+                id,
+                book.updated_at.as_deref(),
+                hub_cover_prefix,
+                ResolveScope::Relay,
+            )? {
+                book.cover_url = Some(new_url);
             }
         }
         Ok(())
@@ -376,9 +351,8 @@ impl Book {
                 e.book_ids.len()
             );
             for book in books.iter_mut() {
-                if let Some(ref u) = book.cover_url
-                    && !u.starts_with("http")
-                    && !u.starts_with("/api")
+                if let Some(u) = book.cover_url.as_deref()
+                    && !cover_url::is_servable_on_lan(u)
                 {
                     book.cover_url = None;
                 }
@@ -419,7 +393,7 @@ impl Book {
     /// versioning scheme of the rewrite functions without rebuilding from
     /// parts. No-op when `updated_at` is None or empty.
     pub fn append_cover_version_tag(url: String, updated_at: Option<&str>) -> String {
-        append_version(url, updated_at)
+        cover_url::append_version(url, updated_at)
     }
 
     /// Strict relay variant for a single book: errors when the source is
@@ -432,18 +406,13 @@ impl Book {
         updated_at: Option<&str>,
         hub_cover_prefix: Option<&str>,
     ) -> Result<Option<String>, CoverRewriteError> {
-        match cover_url {
-            None => Ok(None),
-            Some(url) if url.starts_with("http") || url.starts_with("/api") => {
-                Ok(Some(url.to_string()))
-            }
-            Some(_) => {
-                let prefix = hub_cover_prefix.ok_or(CoverRewriteError {
-                    book_ids: vec![book_id],
-                })?;
-                Ok(Some(build_hub_cover_url(prefix, book_id, updated_at)))
-            }
-        }
+        crate::utils::cover_url::resolve_single(
+            cover_url,
+            book_id,
+            updated_at,
+            hub_cover_prefix,
+            ResolveScope::Relay,
+        )
     }
 
     /// Relay-safe wrapper around `safe_cover_url_strict`. Logs ERROR and
@@ -607,27 +576,6 @@ impl From<Book> for ActiveModel {
     }
 }
 
-/// Signals that a cover URL rewrite intended for a relay-bound payload
-/// could not produce a remotely reachable URL: one or more books carry a
-/// local filesystem path while no hub prefix is configured. The caller
-/// must decide whether to strip the offending fields or abort the payload.
-#[derive(Debug, Clone)]
-pub struct CoverRewriteError {
-    pub book_ids: Vec<i32>,
-}
-
-impl std::fmt::Display for CoverRewriteError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "cover rewrite requires a hub prefix but none is configured (book_ids: {:?})",
-            self.book_ids
-        )
-    }
-}
-
-impl std::error::Error for CoverRewriteError {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,16 +734,6 @@ mod tests {
     }
 
     #[test]
-    fn cover_version_tag_strips_non_alnum() {
-        assert_eq!(cover_version_tag("2026-04-20 10:30:00"), "20260420103000");
-        assert_eq!(
-            cover_version_tag("2026-04-20T10:30:00Z"),
-            "20260420T103000Z"
-        );
-        assert_eq!(cover_version_tag(""), "");
-    }
-
-    #[test]
     fn rewrite_versions_hub_urls_from_updated_at() {
         let mut books = vec![mk_book_with_updated(
             Some(7),
@@ -842,6 +780,11 @@ mod tests {
     /// `safe_cover_url`) can emit `/api/books/{id}/cover` paths that are
     /// unreachable in that context. This test fails at compile time for
     /// any future caller that forgets to use the `_for_relay` variant.
+    ///
+    /// Covers three ways a regression could sneak in:
+    /// - legacy Book::rewrite_local_cover_urls
+    /// - legacy Book::safe_cover_url (*)
+    /// - direct call to utils::cover_url::resolve_single with ResolveScope::Lan
     #[test]
     fn e2ee_handlers_never_use_lan_cover_rewriters() {
         let src = include_str!("../api/e2ee.rs");
@@ -852,6 +795,11 @@ mod tests {
         assert!(
             !src.contains("safe_cover_url("),
             "api/e2ee.rs must use Book::safe_cover_url_for_relay, not the LAN variant"
+        );
+        assert!(
+            !src.contains("ResolveScope::Lan"),
+            "api/e2ee.rs must not reach into utils::cover_url with LAN scope; \
+             relay-bound payloads require ResolveScope::Relay"
         );
     }
 }
