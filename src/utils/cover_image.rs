@@ -1,10 +1,12 @@
-use image::{ImageReader, codecs::jpeg::JpegEncoder};
+use image::{ImageReader, Rgb, RgbImage, codecs::jpeg::JpegEncoder};
 use std::io::Cursor;
 
-/// Target max width for served/stored book covers (px).
+/// Target width for served/stored book covers (px). The output is always
+/// exactly this wide, padded if the source aspect ratio is not 2:3.
 pub const COVER_MAX_WIDTH: u32 = 300;
 
-/// Target max height for served/stored book covers (px).
+/// Target height for served/stored book covers (px). The output is always
+/// exactly this tall, padded if the source aspect ratio is not 2:3.
 pub const COVER_MAX_HEIGHT: u32 = 450;
 
 /// Default JPEG quality for cover thumbnails (0-100).
@@ -22,9 +24,16 @@ pub const COVER_MAX_INPUT_BYTES: usize = 10 * 1024 * 1024;
 const QUALITY_STEPS: [u8; 3] = [COVER_JPEG_QUALITY, 75, 65];
 
 /// Decode an arbitrary image, resize it to fit within 300x450 while keeping
-/// aspect ratio, and re-encode as JPEG. If the first encode exceeds the soft
-/// size cap, retries at lower quality steps before returning the smallest
-/// result obtained.
+/// aspect ratio, pad to exactly 300x450 with a solid white or black canvas
+/// (chosen by mean luminance of the resized image), then re-encode as JPEG.
+///
+/// The fixed output aspect ratio is what lets every peer render the same
+/// cover identically: a non-2:3 source would otherwise be cropped differently
+/// by each client's image widget. Padding with a uniform colour keeps the
+/// JPEG size down because flat regions compress extremely well.
+///
+/// If the first encode exceeds the soft size cap, retries at lower quality
+/// steps before returning the smallest result obtained.
 ///
 /// This is CPU-bound; callers running inside an async context should invoke
 /// it from `tokio::task::spawn_blocking`.
@@ -43,15 +52,16 @@ pub fn resize_to_jpeg_thumbnail(input: &[u8]) -> Result<Vec<u8>, String> {
     let img = reader.decode().map_err(|e| format!("decode: {e}"))?;
 
     let thumb = img.thumbnail(COVER_MAX_WIDTH, COVER_MAX_HEIGHT);
-    let rgb = thumb.to_rgb8();
-    let (w, h) = rgb.dimensions();
+    let resized = thumb.to_rgb8();
+    let padded = pad_to_target(&resized, COVER_MAX_WIDTH, COVER_MAX_HEIGHT);
+    let (w, h) = padded.dimensions();
 
     let mut best: Option<Vec<u8>> = None;
     for quality in QUALITY_STEPS {
         let mut buf: Vec<u8> = Vec::new();
         let mut encoder = JpegEncoder::new_with_quality(&mut buf, quality);
         encoder
-            .encode(rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+            .encode(padded.as_raw(), w, h, image::ExtendedColorType::Rgb8)
             .map_err(|e| format!("encode q={quality}: {e}"))?;
 
         let fits_cap = buf.len() <= COVER_SIZE_CAP_BYTES;
@@ -66,6 +76,56 @@ pub fn resize_to_jpeg_thumbnail(input: &[u8]) -> Result<Vec<u8>, String> {
     }
 
     best.ok_or_else(|| "no encode attempt succeeded".to_string())
+}
+
+/// Pads `src` onto a `target_w` x `target_h` canvas, centred. The pad colour
+/// is solid white or black, picked by the mean luminance of the source so
+/// the padding blends with the dominant tone of the cover.
+fn pad_to_target(src: &RgbImage, target_w: u32, target_h: u32) -> RgbImage {
+    let (w, h) = src.dimensions();
+    if w == target_w && h == target_h {
+        return src.clone();
+    }
+
+    let pad_colour = pick_pad_colour(src);
+    let mut canvas = RgbImage::from_pixel(target_w, target_h, pad_colour);
+
+    // Integer division centres the content; any 1-pixel remainder sits on
+    // the bottom/right which is imperceptible at this scale.
+    let offset_x = (target_w.saturating_sub(w)) / 2;
+    let offset_y = (target_h.saturating_sub(h)) / 2;
+
+    for (x, y, pixel) in src.enumerate_pixels() {
+        canvas.put_pixel(offset_x + x, offset_y + y, *pixel);
+    }
+    canvas
+}
+
+/// Picks a padding colour (pure white or pure black) based on the mean
+/// luminance of the source. ITU-R BT.601 weighting matches how the human
+/// eye perceives brightness, so the pad tone blends with the dominant
+/// impression of the cover rather than its raw pixel average.
+fn pick_pad_colour(src: &RgbImage) -> Rgb<u8> {
+    let (w, h) = src.dimensions();
+    let pixel_count = (w as u64) * (h as u64);
+    if pixel_count == 0 {
+        return Rgb([255, 255, 255]);
+    }
+
+    let mut sum: u64 = 0;
+    for p in src.pixels() {
+        // Scale weights by 1000 to keep integer math; max per-pixel contribution
+        // is 255 * 1000 = 255_000 which stays well inside u64 even for 300*450.
+        let y = 299 * (p[0] as u64) + 587 * (p[1] as u64) + 114 * (p[2] as u64);
+        sum += y;
+    }
+    let mean = sum / (pixel_count * 1000);
+
+    if mean > 128 {
+        Rgb([255, 255, 255])
+    } else {
+        Rgb([0, 0, 0])
+    }
 }
 
 #[cfg(test)]
@@ -108,8 +168,16 @@ mod tests {
         DynamicImage::ImageRgb8(img)
     }
 
+    fn solid_color_image(w: u32, h: u32, color: [u8; 3]) -> DynamicImage {
+        let mut img = RgbImage::new(w, h);
+        for p in img.pixels_mut() {
+            *p = image::Rgb(color);
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
     #[test]
-    fn resizes_large_png_down_to_target_box() {
+    fn resizes_large_2_3_png_to_exact_target() {
         let src = cover_like_image(1200, 1800);
         let png = encode_png(&src);
 
@@ -119,31 +187,125 @@ mod tests {
         assert!(out.starts_with(&[0xFF, 0xD8, 0xFF]));
 
         let decoded = image::load_from_memory(&out).unwrap();
-        assert!(
-            decoded.width() <= COVER_MAX_WIDTH && decoded.height() <= COVER_MAX_HEIGHT,
-            "dimensions {}x{} must fit in {}x{}",
-            decoded.width(),
-            decoded.height(),
-            COVER_MAX_WIDTH,
-            COVER_MAX_HEIGHT,
-        );
-        // At least one axis reaches the target box (aspect preserved).
-        assert!(
-            decoded.width() == COVER_MAX_WIDTH || decoded.height() == COVER_MAX_HEIGHT,
-            "expected one axis to hit the target box",
-        );
+        assert_eq!(decoded.width(), COVER_MAX_WIDTH);
+        assert_eq!(decoded.height(), COVER_MAX_HEIGHT);
     }
 
     #[test]
-    fn preserves_aspect_ratio_for_square_input() {
-        let src = cover_like_image(800, 800);
+    fn pads_square_input_to_2_3_box() {
+        let src = cover_like_image(300, 300);
         let png = encode_png(&src);
 
         let out = resize_to_jpeg_thumbnail(&png).unwrap();
         let decoded = image::load_from_memory(&out).unwrap();
 
-        assert_eq!(decoded.width(), decoded.height(), "square stays square");
-        assert!(decoded.width() <= COVER_MAX_WIDTH);
+        assert_eq!(decoded.width(), COVER_MAX_WIDTH);
+        assert_eq!(decoded.height(), COVER_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn pads_landscape_input_to_2_3_box() {
+        let src = cover_like_image(450, 300);
+        let png = encode_png(&src);
+
+        let out = resize_to_jpeg_thumbnail(&png).unwrap();
+        let decoded = image::load_from_memory(&out).unwrap();
+
+        assert_eq!(decoded.width(), COVER_MAX_WIDTH);
+        assert_eq!(decoded.height(), COVER_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn pads_narrow_portrait_to_2_3_box() {
+        let src = cover_like_image(300, 400);
+        let png = encode_png(&src);
+
+        let out = resize_to_jpeg_thumbnail(&png).unwrap();
+        let decoded = image::load_from_memory(&out).unwrap();
+
+        assert_eq!(decoded.width(), COVER_MAX_WIDTH);
+        assert_eq!(decoded.height(), COVER_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn uses_white_padding_for_light_sources() {
+        // Solid light gray (luminance ~220) must trigger white padding.
+        let src = solid_color_image(300, 300, [220, 220, 220]);
+        let png = encode_png(&src);
+
+        let out = resize_to_jpeg_thumbnail(&png).unwrap();
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+
+        // Source 300x300 sits centered in 300x450 with 75px pad above/below.
+        // Sample a pixel well inside the top pad band.
+        let pad_pixel = decoded.get_pixel(150, 5);
+        assert!(
+            pad_pixel[0] > 200 && pad_pixel[1] > 200 && pad_pixel[2] > 200,
+            "expected near-white padding for light source, got {:?}",
+            pad_pixel
+        );
+    }
+
+    #[test]
+    fn uses_black_padding_for_dark_sources() {
+        let src = solid_color_image(300, 300, [30, 30, 30]);
+        let png = encode_png(&src);
+
+        let out = resize_to_jpeg_thumbnail(&png).unwrap();
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+
+        let pad_pixel = decoded.get_pixel(150, 5);
+        assert!(
+            pad_pixel[0] < 50 && pad_pixel[1] < 50 && pad_pixel[2] < 50,
+            "expected near-black padding for dark source, got {:?}",
+            pad_pixel
+        );
+    }
+
+    /// Manual sanity check for the padding pipeline. Reads `/tmp/src.jpg`
+    /// (or any format supported by the `image` crate) and writes the
+    /// padded + re-encoded JPEG to `/tmp/cover_out.jpg` so the developer
+    /// can inspect the result visually.
+    ///
+    /// Run with:
+    ///   cp <some photo> /tmp/src.jpg
+    ///   cargo test --lib -- --ignored manual_padding_check --nocapture
+    ///   open /tmp/cover_out.jpg
+    ///   sips -g pixelWidth -g pixelHeight /tmp/cover_out.jpg
+    #[test]
+    #[ignore = "manual visual check: writes /tmp/cover_out.jpg"]
+    fn manual_padding_check() {
+        let input = std::fs::read("/tmp/src.jpg")
+            .expect("missing /tmp/src.jpg - copy a non-2:3 photo there first");
+
+        let out = resize_to_jpeg_thumbnail(&input).expect("resize failed");
+        std::fs::write("/tmp/cover_out.jpg", &out).expect("write output");
+
+        let decoded = image::load_from_memory(&out).unwrap();
+        println!(
+            "wrote /tmp/cover_out.jpg: {}x{}, {} bytes",
+            decoded.width(),
+            decoded.height(),
+            out.len()
+        );
+        assert_eq!(decoded.width(), COVER_MAX_WIDTH);
+        assert_eq!(decoded.height(), COVER_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn padded_output_stays_under_soft_cap() {
+        // Padding adds 150px of uniform color to a 300x300 source. Uniform
+        // regions compress very well in JPEG so the soft cap still holds.
+        let src = cover_like_image(300, 300);
+        let png = encode_png(&src);
+
+        let out = resize_to_jpeg_thumbnail(&png).unwrap();
+        assert!(
+            out.len() <= COVER_SIZE_CAP_BYTES,
+            "padded output {} bytes exceeds soft cap {}",
+            out.len(),
+            COVER_SIZE_CAP_BYTES,
+        );
     }
 
     #[test]
