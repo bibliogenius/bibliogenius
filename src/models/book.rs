@@ -230,6 +230,12 @@ impl Book {
     /// local paths become absolute hub URLs that work for both LAN and relay peers.
     /// Without it, falls back to relative `/api/books/{id}/cover` (LAN only).
     /// HTTP URLs and paths already starting with `/api` are left untouched.
+    ///
+    /// This is the LAN variant: callers that serve the payload over local
+    /// HTTP (peers on the same network) can rely on the relative fallback
+    /// because the peer resolves it against the known base URL. For
+    /// payloads that may travel via hub relay to a peer with no direct
+    /// connectivity, use `rewrite_cover_urls_for_relay` instead.
     pub fn rewrite_local_cover_urls(books: &mut [Book], hub_cover_prefix: Option<&str>) {
         for book in books {
             if let Some(ref url) = book.cover_url
@@ -243,6 +249,77 @@ impl Book {
                         format!("/api/books/{}/cover", id)
                     }
                 });
+            }
+        }
+    }
+
+    /// Rewrites local cover paths strictly: errors if any book carries a
+    /// local filesystem path while no hub prefix is configured.
+    ///
+    /// Used for relay-bound payloads where the relative `/api/books/{id}/cover`
+    /// fallback is unreachable (the peer has no direct HTTP route to us).
+    /// HTTP URLs and `/api` paths pass through untouched. Books with local
+    /// paths but no id are left as-is (they are already non-servable; the
+    /// caller can strip them separately if desired).
+    pub fn rewrite_cover_urls_strict(
+        books: &mut [Book],
+        hub_cover_prefix: Option<&str>,
+    ) -> Result<(), CoverRewriteError> {
+        let offenders: Vec<i32> = books
+            .iter()
+            .filter(|b| {
+                b.cover_url
+                    .as_deref()
+                    .is_some_and(|u| !u.starts_with("http") && !u.starts_with("/api"))
+            })
+            .filter_map(|b| b.id)
+            .collect();
+
+        if offenders.is_empty() {
+            return Ok(());
+        }
+
+        let prefix = match hub_cover_prefix {
+            Some(p) => p,
+            None => {
+                return Err(CoverRewriteError {
+                    book_ids: offenders,
+                });
+            }
+        };
+
+        for book in books.iter_mut() {
+            if let Some(ref url) = book.cover_url
+                && !url.starts_with("http")
+                && !url.starts_with("/api")
+                && let Some(id) = book.id
+            {
+                book.cover_url = Some(format!("{prefix}/{id}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Relay-safe wrapper around `rewrite_cover_urls_strict`. On failure,
+    /// logs ERROR and strips the offending `cover_url` entries to `None`
+    /// so no unreachable path leaks into the envelope sent over the hub.
+    ///
+    /// Callers that produce E2EE / relay payloads should prefer this over
+    /// `rewrite_local_cover_urls` so the peer never receives
+    /// `/api/books/{id}/cover` paths it cannot resolve.
+    pub fn rewrite_cover_urls_for_relay(books: &mut [Book], hub_cover_prefix: Option<&str>) {
+        if let Err(e) = Self::rewrite_cover_urls_strict(books, hub_cover_prefix) {
+            tracing::error!(
+                "relay cover rewrite failed, stripping {} offender(s) to None: {e}",
+                e.book_ids.len()
+            );
+            for book in books.iter_mut() {
+                if let Some(ref u) = book.cover_url
+                    && !u.starts_with("http")
+                    && !u.starts_with("/api")
+                {
+                    book.cover_url = None;
+                }
             }
         }
     }
@@ -274,6 +351,9 @@ impl Book {
 
     /// Rewrites a single cover_url from a SeaORM entity model.
     /// Same logic as `rewrite_local_cover_urls` but for individual books.
+    /// LAN variant: falls back to relative `/api/books/{id}/cover` when
+    /// no hub prefix is available. For relay-bound payloads use
+    /// `safe_cover_url_for_relay`.
     pub fn safe_cover_url(
         cover_url: Option<&str>,
         book_id: i32,
@@ -289,6 +369,45 @@ impl Book {
                 format!("/api/books/{}/cover", book_id)
             }),
             None => None,
+        }
+    }
+
+    /// Strict relay variant of `safe_cover_url`: errors when the source is
+    /// a local path and no hub prefix is configured.
+    pub fn safe_cover_url_strict(
+        cover_url: Option<&str>,
+        book_id: i32,
+        hub_cover_prefix: Option<&str>,
+    ) -> Result<Option<String>, CoverRewriteError> {
+        match cover_url {
+            None => Ok(None),
+            Some(url) if url.starts_with("http") || url.starts_with("/api") => {
+                Ok(Some(url.to_string()))
+            }
+            Some(_) => {
+                let prefix = hub_cover_prefix.ok_or(CoverRewriteError {
+                    book_ids: vec![book_id],
+                })?;
+                Ok(Some(format!("{prefix}/{book_id}")))
+            }
+        }
+    }
+
+    /// Relay-safe wrapper around `safe_cover_url_strict`. Logs ERROR and
+    /// returns `None` if the source is an unservable local path and no
+    /// hub prefix is available, so E2EE payloads never carry unreachable
+    /// paths.
+    pub fn safe_cover_url_for_relay(
+        cover_url: Option<&str>,
+        book_id: i32,
+        hub_cover_prefix: Option<&str>,
+    ) -> Option<String> {
+        match Self::safe_cover_url_strict(cover_url, book_id, hub_cover_prefix) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("relay safe_cover_url failed for book {book_id}: {e}");
+                None
+            }
         }
     }
 
@@ -428,5 +547,176 @@ impl From<Book> for ActiveModel {
             page_count: book.page_count.map_or(NotSet, |p| Set(Some(p))),
             loan_duration_days: book.loan_duration_days.map_or(NotSet, |d| Set(Some(d))),
         }
+    }
+}
+
+/// Signals that a cover URL rewrite intended for a relay-bound payload
+/// could not produce a remotely reachable URL: one or more books carry a
+/// local filesystem path while no hub prefix is configured. The caller
+/// must decide whether to strip the offending fields or abort the payload.
+#[derive(Debug, Clone)]
+pub struct CoverRewriteError {
+    pub book_ids: Vec<i32>,
+}
+
+impl std::fmt::Display for CoverRewriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "cover rewrite requires a hub prefix but none is configured (book_ids: {:?})",
+            self.book_ids
+        )
+    }
+}
+
+impl std::error::Error for CoverRewriteError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk_book(id: Option<i32>, cover: Option<&str>) -> Book {
+        Book {
+            id,
+            title: "t".into(),
+            cover_url: cover.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn strict_rewrites_local_paths_with_hub_prefix() {
+        let mut books = vec![
+            mk_book(Some(1), Some("/var/mobile/cover_1.jpg")),
+            mk_book(Some(2), Some("/Users/x/cover_2.png")),
+        ];
+        Book::rewrite_cover_urls_strict(&mut books, Some("https://hub/api/directory/node/covers"))
+            .expect("hub prefix provided");
+
+        assert_eq!(
+            books[0].cover_url.as_deref(),
+            Some("https://hub/api/directory/node/covers/1")
+        );
+        assert_eq!(
+            books[1].cover_url.as_deref(),
+            Some("https://hub/api/directory/node/covers/2")
+        );
+    }
+
+    #[test]
+    fn strict_errors_on_local_paths_without_hub_prefix() {
+        let mut books = vec![
+            mk_book(Some(7), Some("/var/local_path.jpg")),
+            mk_book(Some(9), Some("https://cdn.example/ok.jpg")),
+            mk_book(Some(11), Some("/tmp/another.png")),
+        ];
+        let err = Book::rewrite_cover_urls_strict(&mut books, None).unwrap_err();
+
+        // Only books with local paths appear in the error list.
+        assert_eq!(err.book_ids, vec![7, 11]);
+        // Books themselves are left unchanged when the call fails so the
+        // caller retains full knowledge of what was missing.
+        assert_eq!(books[0].cover_url.as_deref(), Some("/var/local_path.jpg"));
+        assert_eq!(
+            books[1].cover_url.as_deref(),
+            Some("https://cdn.example/ok.jpg")
+        );
+    }
+
+    #[test]
+    fn strict_passthrough_for_http_and_api_urls() {
+        let mut books = vec![
+            mk_book(Some(1), Some("https://covers.openlibrary.org/x.jpg")),
+            mk_book(Some(2), Some("/api/books/2/cover")),
+        ];
+        Book::rewrite_cover_urls_strict(&mut books, None).expect("no local paths => Ok");
+
+        assert_eq!(
+            books[0].cover_url.as_deref(),
+            Some("https://covers.openlibrary.org/x.jpg")
+        );
+        assert_eq!(books[1].cover_url.as_deref(), Some("/api/books/2/cover"));
+    }
+
+    #[test]
+    fn strict_ignores_books_without_id() {
+        // A local-path book without an id can't be rewritten regardless; it
+        // should not appear in the error set, and the call should succeed
+        // when no other offender exists.
+        let mut books = vec![mk_book(None, Some("/tmp/orphan.jpg"))];
+        Book::rewrite_cover_urls_strict(&mut books, None).expect("no id => not an offender");
+    }
+
+    #[test]
+    fn relay_wrapper_strips_offenders_to_none_on_failure() {
+        let mut books = vec![
+            mk_book(Some(1), Some("/var/local.jpg")),
+            mk_book(Some(2), Some("https://cdn/ok.jpg")),
+        ];
+        Book::rewrite_cover_urls_for_relay(&mut books, None);
+
+        assert_eq!(books[0].cover_url, None, "local path must be stripped");
+        assert_eq!(
+            books[1].cover_url.as_deref(),
+            Some("https://cdn/ok.jpg"),
+            "HTTP URL must be preserved"
+        );
+    }
+
+    #[test]
+    fn safe_strict_http_passthrough() {
+        let out = Book::safe_cover_url_strict(Some("https://cdn/ok.jpg"), 1, None).unwrap();
+        assert_eq!(out.as_deref(), Some("https://cdn/ok.jpg"));
+    }
+
+    #[test]
+    fn safe_strict_local_without_prefix_errors() {
+        let err = Book::safe_cover_url_strict(Some("/var/mobile/c.jpg"), 42, None).unwrap_err();
+        assert_eq!(err.book_ids, vec![42]);
+    }
+
+    #[test]
+    fn safe_strict_local_with_prefix_builds_hub_url() {
+        let out = Book::safe_cover_url_strict(
+            Some("/var/mobile/c.jpg"),
+            42,
+            Some("https://hub/api/directory/n/covers"),
+        )
+        .unwrap();
+        assert_eq!(
+            out.as_deref(),
+            Some("https://hub/api/directory/n/covers/42")
+        );
+    }
+
+    #[test]
+    fn safe_strict_none_in_none_out() {
+        let out = Book::safe_cover_url_strict(None, 1, None).unwrap();
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn safe_relay_wrapper_returns_none_on_failure() {
+        let out = Book::safe_cover_url_for_relay(Some("/var/mobile/c.jpg"), 42, None);
+        assert_eq!(out, None);
+    }
+
+    /// Guardrail: every handler in `api/e2ee.rs` produces a JSON payload
+    /// that may travel via hub relay to a peer with no direct HTTP route
+    /// back to us. The LAN cover variants (`rewrite_local_cover_urls`,
+    /// `safe_cover_url`) can emit `/api/books/{id}/cover` paths that are
+    /// unreachable in that context. This test fails at compile time for
+    /// any future caller that forgets to use the `_for_relay` variant.
+    #[test]
+    fn e2ee_handlers_never_use_lan_cover_rewriters() {
+        let src = include_str!("../api/e2ee.rs");
+        assert!(
+            !src.contains("rewrite_local_cover_urls"),
+            "api/e2ee.rs must use Book::rewrite_cover_urls_for_relay, not the LAN variant"
+        );
+        assert!(
+            !src.contains("safe_cover_url("),
+            "api/e2ee.rs must use Book::safe_cover_url_for_relay, not the LAN variant"
+        );
     }
 }

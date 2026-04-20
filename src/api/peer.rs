@@ -440,7 +440,10 @@ pub(crate) async fn perform_loan_acceptance(
         due_date: due.format("%Y-%m-%d").to_string(),
         book_isbn: book.isbn,
         book_title: book.title,
-        book_cover_url: crate::models::Book::safe_cover_url(
+        // Loan-accept result is forwarded to the borrower through an E2EE
+        // envelope that may travel via hub relay, so use the relay-safe
+        // variant: local paths without a hub prefix are stripped to None.
+        book_cover_url: crate::models::Book::safe_cover_url_for_relay(
             book.cover_url.as_deref(),
             book.id,
             hub_prefix.as_deref(),
@@ -827,7 +830,10 @@ pub async fn offer_loan(
     let offer_payload = json!({
         "isbn": book.isbn,
         "title": book.title,
-        "cover_url": crate::models::Book::safe_cover_url(book.cover_url.as_deref(), book.id, hub_prefix.as_deref()),
+        // Payload goes through `try_send_e2ee` (relay-capable): strip
+        // unservable local paths rather than embedding a `/api/books/{id}/cover`
+        // URL the borrower cannot reach from the hub relay.
+        "cover_url": crate::models::Book::safe_cover_url_for_relay(book.cover_url.as_deref(), book.id, hub_prefix.as_deref()),
         "lender_name": lender_name,
         "due_date": due_date_str,
         "request_id": request_id,
@@ -6422,7 +6428,9 @@ pub async fn update_request_status(
         let book_isbn = book.isbn.clone();
         let book_title = book.title.clone();
         let hub_prefix = crate::models::Book::hub_cover_prefix(&db).await;
-        let book_cover = crate::models::Book::safe_cover_url(
+        // Borrower notification may travel via hub relay; use relay-safe
+        // variant so unreachable local paths are stripped rather than sent.
+        let book_cover = crate::models::Book::safe_cover_url_for_relay(
             book.cover_url.as_deref(),
             book.id,
             hub_prefix.as_deref(),

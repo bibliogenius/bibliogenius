@@ -930,7 +930,7 @@ pub async fn handle_book_sync_request(
     let books = book::Entity::find().all(db).await.unwrap_or_default();
     let mut book_dtos = crate::models::Book::populate_authors(db, books).await;
     let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
-    crate::models::Book::rewrite_local_cover_urls(&mut book_dtos, hub_prefix.as_deref());
+    crate::models::Book::rewrite_cover_urls_for_relay(&mut book_dtos, hub_prefix.as_deref());
 
     let avatar_config: Option<serde_json::Value> =
         crate::models::installation_profile::Entity::find_by_id(1)
@@ -992,7 +992,7 @@ pub async fn handle_search_request(
 
     let mut book_dtos = crate::models::Book::populate_authors(db, books).await;
     let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
-    crate::models::Book::rewrite_local_cover_urls(&mut book_dtos, hub_prefix.as_deref());
+    crate::models::Book::rewrite_cover_urls_for_relay(&mut book_dtos, hub_prefix.as_deref());
     json!({ "results": book_dtos })
 }
 
@@ -1444,7 +1444,7 @@ pub async fn handle_library_manifest_request(
         let preview: Vec<_> = with_covers.into_iter().take(8).collect();
         let mut preview_dtos = crate::models::Book::populate_authors(db, preview).await;
         let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
-        crate::models::Book::rewrite_local_cover_urls(&mut preview_dtos, hub_prefix.as_deref());
+        crate::models::Book::rewrite_cover_urls_for_relay(&mut preview_dtos, hub_prefix.as_deref());
         preview_dtos
             .iter()
             .map(|b| {
@@ -1518,7 +1518,7 @@ pub async fn handle_library_page_request(
     // Populate authors for browse profile
     let mut book_dtos = crate::models::Book::populate_authors(db, page).await;
     let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
-    crate::models::Book::rewrite_local_cover_urls(&mut book_dtos, hub_prefix.as_deref());
+    crate::models::Book::rewrite_cover_urls_for_relay(&mut book_dtos, hub_prefix.as_deref());
 
     // Browse profile: only title, author, isbn, cover_url, added_at
     // (~270 bytes/book). `added_at` is required for the "new" badge.
@@ -1576,7 +1576,7 @@ pub async fn handle_library_browse_request(
 
     let mut book_dtos = crate::models::Book::populate_authors(db, books).await;
     let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
-    crate::models::Book::rewrite_local_cover_urls(&mut book_dtos, hub_prefix.as_deref());
+    crate::models::Book::rewrite_cover_urls_for_relay(&mut book_dtos, hub_prefix.as_deref());
     let has_more = ((page + 1) * limit) < total;
 
     json!({
@@ -1626,7 +1626,7 @@ pub async fn handle_library_search_via_relay(
     let page: Vec<_> = books.into_iter().take(limit).collect();
     let mut book_dtos = crate::models::Book::populate_authors(db, page).await;
     let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
-    crate::models::Book::rewrite_local_cover_urls(&mut book_dtos, hub_prefix.as_deref());
+    crate::models::Book::rewrite_cover_urls_for_relay(&mut book_dtos, hub_prefix.as_deref());
 
     // Browse profile (added_at needed for the "new" badge)
     let browse_books: Vec<serde_json::Value> = book_dtos
