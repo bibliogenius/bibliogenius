@@ -269,6 +269,68 @@ async fn has_more_signals_when_window_capped() {
 }
 
 #[tokio::test]
+async fn local_cover_paths_never_leak_as_relative_urls() {
+    // Regression: the relay delta handler used to delegate to the LAN
+    // variant of the cover rewriter, emitting `/api/books/{id}/cover` for
+    // books whose `cover_url` is a local filesystem path. A 5G peer
+    // receiving this via hub relay has no base URL to resolve it against,
+    // so the cover silently fails to load. Relay mode must rewrite local
+    // paths to absolute hub URLs, or strip them to `None` when no hub
+    // prefix is configured — never emit a relative path.
+    let state = setup().await;
+    let now = chrono::Utc::now().to_rfc3339();
+    let book = rust_lib_app::models::book::ActiveModel {
+        title: Set("With local cover".to_owned()),
+        owned: Set(true),
+        private: Set(false),
+        cover_url: Set(Some("/Users/local/path/cover.jpg".to_owned())),
+        created_at: Set(now.clone()),
+        updated_at: Set(now.clone()),
+        ..Default::default()
+    }
+    .insert(state.db())
+    .await
+    .expect("insert book");
+
+    operation_log::Entity::insert(operation_log::ActiveModel {
+        entity_type: Set("book".to_owned()),
+        entity_id: Set(book.id),
+        operation: Set("INSERT".to_owned()),
+        payload: Set(None),
+        source: Set("local".to_owned()),
+        status: Set("applied".to_owned()),
+        created_at: Set(now),
+        ..Default::default()
+    })
+    .exec(state.db())
+    .await
+    .unwrap();
+
+    let msg = request_message(json!({ "since": 0, "limit": 500 }));
+    let resp = rust_lib_app::api::e2ee::handle_catalog_delta_request(&state, &msg).await;
+
+    let payload = serde_json::to_string(&resp).unwrap();
+    assert!(
+        !payload.contains("/api/books/"),
+        "relay delta must never emit relative /api/books/... cover URLs \
+         (unresolvable for a peer reaching us via hub relay); got: {payload}"
+    );
+
+    // Without HUB_URL set in the test env, `Book::hub_cover_prefix`
+    // returns None, so Relay mode strips offending covers rather than
+    // failing outright. `cover_url` is `#[serde(skip_serializing_if =
+    // "Option::is_none")]` on the DTO, so a stripped value disappears
+    // from the JSON entirely.
+    let ops = resp["operations"].as_array().unwrap();
+    assert_eq!(ops.len(), 1);
+    assert!(
+        ops[0]["book"].get("cover_url").is_none(),
+        "expected cover_url stripped with no hub prefix, got {:?}",
+        ops[0]["book"].get("cover_url")
+    );
+}
+
+#[tokio::test]
 async fn remote_source_rows_are_ignored() {
     // Rows written by `source=device:X` must not surface via delta sync (D1).
     let state = setup().await;

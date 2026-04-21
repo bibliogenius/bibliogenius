@@ -1329,8 +1329,14 @@ pub async fn handle_catalog_delta_request(
         .unwrap_or(DELTA_DEFAULT_LIMIT);
 
     // Peer callers are never "owner" — the E1 privacy pipeline must run.
+    // Relay cover-rewrite: peer may have no LAN route back (5G), so absolute
+    // hub URLs (or `None`) must replace local `/api/books/{id}/cover` paths.
+    let hub_prefix = crate::models::Book::hub_cover_prefix(state.db()).await;
+    let cover_mode = crate::api::books::CoverRewriteMode::Relay { hub_prefix };
     let outcome =
-        match crate::api::books::build_book_delta_response(state, since, limit, false).await {
+        match crate::api::books::build_book_delta_response(state, since, limit, false, cover_mode)
+            .await
+        {
             Ok(o) => o,
             Err(e) => {
                 tracing::error!("catalog_delta_request: build_book_delta_response failed: {e}");

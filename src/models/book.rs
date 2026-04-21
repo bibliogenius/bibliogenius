@@ -802,4 +802,28 @@ mod tests {
              relay-bound payloads require ResolveScope::Relay"
         );
     }
+
+    /// Transitive guardrail for the delta-sync path (ADR-029).
+    /// `handle_catalog_delta_request` in `api/e2ee.rs` delegates cover
+    /// rewriting to `build_book_delta_response` in `api/books.rs`, which
+    /// accepts either `CoverRewriteMode::Lan` or `CoverRewriteMode::Relay`.
+    /// Any delegation from the relay handler MUST select `Relay`, else
+    /// local FS cover paths leak as relative `/api/books/{id}/cover` URLs
+    /// that a 5G peer cannot resolve against any base URL.
+    #[test]
+    fn e2ee_delta_handler_selects_relay_cover_mode() {
+        let src = include_str!("../api/e2ee.rs");
+        assert!(
+            !src.contains("CoverRewriteMode::Lan"),
+            "api/e2ee.rs must never pass CoverRewriteMode::Lan to \
+             build_book_delta_response: relay peers cannot resolve relative \
+             /api/books/{{id}}/cover paths"
+        );
+        assert!(
+            src.contains("CoverRewriteMode::Relay"),
+            "api/e2ee.rs must explicitly select CoverRewriteMode::Relay for \
+             any build_book_delta_response delegation so local cover paths \
+             get rewritten to hub URLs (or stripped to None)"
+        );
+    }
 }
