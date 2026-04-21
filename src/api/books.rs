@@ -102,6 +102,16 @@ pub async fn list_books(
     let mut book_dtos = result.books;
     let mut total = result.total;
 
+    // Populate copy-derived availability BEFORE redact so peers see accurate
+    // `available_copies` (not redacted — needed so the iPhone-side carousel
+    // filter can drop fully-lent books the peer can't actually fulfill).
+    if let Err(e) =
+        crate::services::book_service::populate_available_copies(state.db(), &mut book_dtos).await
+    {
+        tracing::error!("Failed to populate available_copies: {}", e);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     // Peer-facing privacy (E1): filter private books and redact personal
     // annotations when no owner JWT is present. Post-query in-memory
     // filtering is acceptable for the project's catalog sizes (<1k books);
@@ -178,13 +188,29 @@ pub async fn list_books(
         .unwrap())
 }
 
+/// Selects how cover URLs in the delta response should be rewritten.
+///
+/// The delta responder is shared between two transports with different
+/// reachability assumptions:
+/// - HTTP callers (`GET /api/books?since=`, ADR-028) reach the responder
+///   over LAN and can resolve relative `/api/books/{id}/cover` paths.
+/// - E2EE relay callers (`catalog_delta_request`, ADR-029) may have no
+///   direct route back (5G peer): `Relay` mode rewrites to absolute hub
+///   URLs when a hub prefix is known, or strips the cover to `None` so
+///   the peer never receives an unreachable path.
+pub enum CoverRewriteMode {
+    Lan,
+    Relay { hub_prefix: Option<String> },
+}
+
 /// Transport-agnostic outcome of a book delta pull.
 ///
 /// Shared between the HTTP path (`GET /api/books?since=`, ADR-028) and the
 /// E2EE relay path (`catalog_delta_request`, ADR-029). The two transports
 /// serialise this outcome differently (HTTP 410 vs in-payload
-/// `reset_required`), but the delta construction, privacy pipeline and
-/// cover-URL rewriting are identical.
+/// `reset_required`), but the delta construction and privacy pipeline
+/// are identical; cover-URL rewriting is selected by the caller via
+/// [`CoverRewriteMode`].
 pub enum BookDeltaOutcome {
     Delta {
         operations: Vec<serde_json::Value>,
@@ -216,6 +242,7 @@ pub async fn build_book_delta_response(
     since: Option<i64>,
     limit: i64,
     is_owner: bool,
+    cover_mode: CoverRewriteMode,
 ) -> Result<BookDeltaOutcome, crate::domain::DomainError> {
     use crate::services::delta_service::{self, DeltaOp};
 
@@ -233,11 +260,22 @@ pub async fn build_book_delta_response(
         });
     }
 
-    let mut operations: Vec<serde_json::Value> = Vec::with_capacity(window.operations.len());
+    // Two-pass so the cover rewrite runs on the whole batch. The relay
+    // variant validates the full batch up-front (any offender without a
+    // hub prefix fails the whole call), which only makes sense once every
+    // upsert has been collected.
+    enum Pending {
+        Delete(i32),
+        Upsert(usize),
+    }
+
+    let mut pending: Vec<Pending> = Vec::with_capacity(window.operations.len());
+    let mut upserts: Vec<Book> = Vec::new();
+
     for op in &window.operations {
         match op.op {
             DeltaOp::Delete => {
-                operations.push(json!({ "op": "delete", "book_id": op.entity_id }));
+                pending.push(Pending::Delete(op.entity_id));
             }
             DeltaOp::Upsert => {
                 let Some(mut book) = state.book_repo.find_by_id(op.entity_id).await? else {
@@ -254,10 +292,37 @@ pub async fn build_book_delta_response(
                     }
                     book.redact_for_peer();
                 }
-                let mut wrap = vec![book];
-                Book::rewrite_local_cover_urls(&mut wrap, None);
-                let book = wrap.into_iter().next().unwrap();
-                operations.push(json!({ "op": "upsert", "book": book }));
+                pending.push(Pending::Upsert(upserts.len()));
+                upserts.push(book);
+            }
+        }
+    }
+
+    // Populate `available_copies` for the same reason as the full-GET
+    // path: peers must receive accurate loan-state data so their cache
+    // (and the downstream carousel filter) can hide fully-lent books.
+    // Redaction has already stripped `reading_status` for peer callers
+    // above, so this only adds `available_copies` (which is never
+    // redacted) for the upserts.
+    crate::services::book_service::populate_available_copies(state.db(), &mut upserts).await?;
+
+    match cover_mode {
+        CoverRewriteMode::Lan => {
+            Book::rewrite_local_cover_urls(&mut upserts, None);
+        }
+        CoverRewriteMode::Relay { hub_prefix } => {
+            Book::rewrite_cover_urls_for_relay(&mut upserts, hub_prefix.as_deref());
+        }
+    }
+
+    let mut operations: Vec<serde_json::Value> = Vec::with_capacity(pending.len());
+    for p in pending {
+        match p {
+            Pending::Delete(id) => {
+                operations.push(json!({ "op": "delete", "book_id": id }));
+            }
+            Pending::Upsert(idx) => {
+                operations.push(json!({ "op": "upsert", "book": &upserts[idx] }));
             }
         }
     }
@@ -285,12 +350,17 @@ async fn list_books_delta(
         .map(|n| (n as i64).clamp(1, DELTA_MAX_LIMIT))
         .unwrap_or(DELTA_DEFAULT_LIMIT);
 
-    let outcome = build_book_delta_response(&state, Some(since), limit, is_owner)
-        .await
-        .map_err(|e| {
-            tracing::error!("build_book_delta_response: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    // HTTP caller reaches this handler over LAN, so the relative
+    // `/api/books/{id}/cover` fallback is resolvable against the known
+    // base URL. Relay callers use `handle_catalog_delta_request` and pick
+    // `CoverRewriteMode::Relay` with the hub prefix instead.
+    let outcome =
+        build_book_delta_response(&state, Some(since), limit, is_owner, CoverRewriteMode::Lan)
+            .await
+            .map_err(|e| {
+                tracing::error!("build_book_delta_response: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
     match outcome {
         BookDeltaOutcome::ResetRequired {

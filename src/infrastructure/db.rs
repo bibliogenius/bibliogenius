@@ -1734,6 +1734,54 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 073: Cache peer loan status in `peer_books`. Without these,
+    // the carousel can't tell which of a peer's books are actually
+    // requestable. Legacy rows default to owned=true / available_copies=NULL
+    // (treated as "unknown, keep"); the companion cursor reset below forces
+    // every peer to resync from scratch so the new columns actually get
+    // populated — without it a stale book unchanged since pre-073 would
+    // never get refreshed by the delta flow.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peer_books ADD COLUMN owned INTEGER NOT NULL DEFAULT 1".to_owned(),
+        ))
+        .await;
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peer_books ADD COLUMN available_copies INTEGER".to_owned(),
+        ))
+        .await;
+    // One-time full-resync trigger (idempotency via `_migration_log`, same
+    // pattern as migration 067). Every run would otherwise blow the cursor
+    // away and force a full catalog pull on every boot.
+    let already_applied = db
+        .query_one(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT name FROM _migration_log WHERE name = '073_reset_peer_delta_cursor'".to_owned(),
+        ))
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if !already_applied {
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                "UPDATE peers SET last_delta_cursor = NULL".to_owned(),
+            ))
+            .await;
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                "INSERT INTO _migration_log (name, applied_at) \
+                 VALUES ('073_reset_peer_delta_cursor', datetime('now'))"
+                    .to_owned(),
+            ))
+            .await;
+    }
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

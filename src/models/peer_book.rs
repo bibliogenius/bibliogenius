@@ -21,6 +21,14 @@ pub struct Model {
     /// Replaces `first_seen_at` for the "new" badge: source of truth is
     /// the owner's library, not the local cache observation time.
     pub added_at: Option<String>,
+    /// Whether the owning peer actually owns this book (false when they
+    /// borrowed it themselves). Cached so the peer-lib carousel can hide
+    /// non-requestable books without re-querying the peer.
+    pub owned: bool,
+    /// Count of copies currently in "available" status on the owner's side.
+    /// `None` means unknown (legacy rows before migration 073 or peers that
+    /// don't broadcast it); `Some(0)` means every copy is on loan.
+    pub available_copies: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -72,11 +80,11 @@ impl From<Model> for super::Book {
             cover_url: pb.cover_url,
             large_cover_url: None,
             user_rating: None,
-            owned: None,
+            owned: Some(pb.owned),
             price: None,
             language: None,
             digital_formats: None,
-            available_copies: None,
+            available_copies: pb.available_copies,
             private: None,
             page_count: None,
             loan_duration_days: None,

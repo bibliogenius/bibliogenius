@@ -2457,6 +2457,11 @@ async fn upsert_peer_books_cache(
             if book.added_at.is_some() {
                 active.added_at = Set(book.added_at);
             }
+            // Loan status: owner is authoritative. Missing `owned` means a
+            // pre-073 peer or a DTO with the field stripped — fall back to
+            // `true` so legacy books stay visible.
+            active.owned = Set(book.owned.unwrap_or(true));
+            active.available_copies = Set(book.available_copies);
             // notified_at stays unchanged
             let _ = active.update(db).await;
         } else {
@@ -2474,6 +2479,8 @@ async fn upsert_peer_books_cache(
                 first_seen_at: Set(None),
                 added_at: Set(book.added_at),
                 notified_at: Set(None),
+                owned: Set(book.owned.unwrap_or(true)),
+                available_copies: Set(book.available_copies),
                 ..Default::default()
             };
             let _ = peer_book::Entity::insert(cache).exec(db).await;
@@ -8062,6 +8069,8 @@ mod added_at_tests {
             first_seen_at: Set(None),
             added_at: Set(added_at.map(|s| s.to_string())),
             notified_at: Set(None),
+            owned: Set(true),
+            available_copies: Set(None),
             ..Default::default()
         };
         peer_book::Entity::insert(pb).exec(db).await.unwrap();
@@ -8086,6 +8095,8 @@ mod added_at_tests {
             first_seen_at: None,
             added_at: Some("2026-04-13T08:00:00Z".to_string()),
             notified_at: None,
+            owned: true,
+            available_copies: Some(2),
         };
         let book: crate::models::Book = pb.into();
         assert_eq!(
@@ -8095,6 +8106,88 @@ mod added_at_tests {
         );
         assert_eq!(book.added_at.as_deref(), Some("2026-04-13T08:00:00Z"));
         assert_eq!(book.title, "Le Livre");
+        assert_eq!(book.owned, Some(true));
+        assert_eq!(book.available_copies, Some(2));
+    }
+
+    /// Loan status from the owner (owned=false, available_copies=Some(0))
+    /// must round-trip through the cache so the peer-lib carousel can hide
+    /// non-requestable books without re-querying the peer.
+    #[tokio::test]
+    async fn upsert_peer_books_cache_persists_loan_status() {
+        let db = setup().await;
+        let peer_id = insert_peer(&db).await;
+
+        let books = vec![
+            crate::models::Book {
+                id: Some(10),
+                title: "Borrowed by peer".to_string(),
+                owned: Some(false),
+                available_copies: Some(1),
+                ..Default::default()
+            },
+            crate::models::Book {
+                id: Some(11),
+                title: "All copies on loan".to_string(),
+                owned: Some(true),
+                available_copies: Some(0),
+                ..Default::default()
+            },
+            crate::models::Book {
+                id: Some(12),
+                title: "Available".to_string(),
+                owned: Some(true),
+                available_copies: Some(2),
+                ..Default::default()
+            },
+        ];
+        upsert_peer_books_cache(&db, peer_id, None, books).await;
+
+        let fetch = |remote_id: i32| {
+            let db = db.clone();
+            async move {
+                peer_book::Entity::find()
+                    .filter(peer_book::Column::PeerId.eq(peer_id))
+                    .filter(peer_book::Column::RemoteBookId.eq(remote_id))
+                    .one(&db)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let borrowed = fetch(10).await;
+        let fully_lent = fetch(11).await;
+        let available = fetch(12).await;
+
+        assert!(
+            !borrowed.owned,
+            "peer-borrowed book must persist owned=false"
+        );
+        assert_eq!(borrowed.available_copies, Some(1));
+        assert!(fully_lent.owned);
+        assert_eq!(
+            fully_lent.available_copies,
+            Some(0),
+            "available_copies=0 must round-trip so the carousel filter can drop fully-lent books",
+        );
+        assert!(available.owned);
+        assert_eq!(available.available_copies, Some(2));
+
+        // UPDATE path: a later sync marks the available book as fully lent.
+        let updated = vec![crate::models::Book {
+            id: Some(12),
+            title: "Available".to_string(),
+            owned: Some(true),
+            available_copies: Some(0),
+            ..Default::default()
+        }];
+        upsert_peer_books_cache(&db, peer_id, None, updated).await;
+        let refreshed = fetch(12).await;
+        assert_eq!(
+            refreshed.available_copies,
+            Some(0),
+            "update must refresh available_copies to reflect the current loan state",
+        );
     }
 
     /// `redact_for_peer` strips personal fields but MUST keep `added_at`:

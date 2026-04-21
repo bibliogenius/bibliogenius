@@ -52,6 +52,40 @@ impl From<sea_orm::DbErr> for ServiceError {
     }
 }
 
+/// Populate `Book.available_copies` from the `copies` table for a batch of
+/// books. Must run before serving any `/api/books*` response so peers can
+/// tell which books are actually borrowable — without it, the iPhone-side
+/// peer carousel filter receives `None` and can't drop books whose copies
+/// are all on loan.
+///
+/// A single batch `IN (...)` query keeps this O(1) round-trips regardless
+/// of the book count.
+pub async fn populate_available_copies(
+    db: &DatabaseConnection,
+    books: &mut [Book],
+) -> Result<(), sea_orm::DbErr> {
+    let book_ids: Vec<i32> = books.iter().filter_map(|b| b.id).collect();
+    if book_ids.is_empty() {
+        return Ok(());
+    }
+    let copies = crate::models::copy::Entity::find()
+        .filter(crate::models::copy::Column::BookId.is_in(book_ids))
+        .all(db)
+        .await?;
+
+    let mut available_map: HashMap<i32, i32> = HashMap::new();
+    for c in &copies {
+        if c.status == "available" {
+            *available_map.entry(c.book_id).or_insert(0) += 1;
+        }
+    }
+    for book in books.iter_mut() {
+        let id = book.id.unwrap_or(0);
+        book.available_copies = Some(*available_map.get(&id).unwrap_or(&0));
+    }
+    Ok(())
+}
+
 /// Strip formatting from ISBN (hyphens, spaces). Keeps digits and X.
 fn normalize_isbn(isbn: Option<String>) -> Option<String> {
     isbn.map(|s| {
@@ -108,9 +142,11 @@ pub async fn list_books(
 
     tracing::info!("DB query returned {} books", books_with_authors.len());
 
-    // Batch-fetch copy info for all book IDs (same as populate_authors)
+    // Batch-fetch lent/borrowed sets for the owner-only reading_status
+    // override below. `available_copies` is populated separately via the
+    // shared `populate_available_copies` helper so HTTP peer-facing paths
+    // stay consistent with this FRB path.
     let book_ids: Vec<i32> = books_with_authors.iter().map(|(m, _)| m.id).collect();
-    let mut available_map: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
     let mut lent_set: std::collections::HashSet<i32> = std::collections::HashSet::new();
     let mut borrowed_set: std::collections::HashSet<i32> = std::collections::HashSet::new();
     if !book_ids.is_empty()
@@ -120,9 +156,6 @@ pub async fn list_books(
             .await
     {
         for c in &copies {
-            if c.status == "available" {
-                *available_map.entry(c.book_id).or_insert(0) += 1;
-            }
             if c.status == "loaned" {
                 lent_set.insert(c.book_id);
             }
@@ -147,8 +180,6 @@ pub async fn list_books(
             );
         }
 
-        book_dto.available_copies =
-            Some(*available_map.get(&book_dto.id.unwrap_or(0)).unwrap_or(&0));
         // Override reading_status based on copy status:
         // - Temporary copy borrowed → I borrowed this book from someone
         // - Own copy borrowed → I lent this book to someone
@@ -189,6 +220,8 @@ pub async fn list_books(
 
         book_dtos.push(book_dto);
     }
+
+    populate_available_copies(db, &mut book_dtos).await?;
 
     tracing::info!("Returning {} books after filters", book_dtos.len());
     Ok(book_dtos)
@@ -1298,5 +1331,114 @@ mod tests {
     #[test]
     fn test_author_tokens_match_accented_names() {
         assert!(author_tokens_match("Emile Zola", "Zola, Emile"));
+    }
+
+    async fn insert_test_book(db: &DatabaseConnection, title: &str) -> i32 {
+        use crate::models::book;
+        use sea_orm::Set;
+        let now = chrono::Utc::now().to_rfc3339();
+        book::Entity::insert(book::ActiveModel {
+            title: Set(title.to_owned()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .unwrap()
+        .last_insert_id
+    }
+
+    async fn insert_test_copy(
+        db: &DatabaseConnection,
+        book_id: i32,
+        status: &str,
+        is_temporary: bool,
+    ) {
+        use crate::models::copy;
+        use sea_orm::Set;
+        let now = chrono::Utc::now().to_rfc3339();
+        copy::Entity::insert(copy::ActiveModel {
+            book_id: Set(book_id),
+            library_id: Set(0),
+            status: Set(status.to_owned()),
+            is_temporary: Set(is_temporary),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .unwrap();
+    }
+
+    /// `populate_available_copies` must count only copies whose status is
+    /// exactly "available" (not "loaned", "borrowed", etc.). This is the
+    /// field the peer-lib carousel filter relies on to hide fully-lent
+    /// books cached on the iPhone.
+    #[tokio::test]
+    async fn populate_available_copies_counts_only_available_status() {
+        use crate::db;
+        use sea_orm::{ConnectionTrait, Statement};
+
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "PRAGMA foreign_keys = OFF".to_owned(),
+        ))
+        .await
+        .unwrap();
+
+        let id_two_avail = insert_test_book(&db, "Two available").await;
+        let id_all_lent = insert_test_book(&db, "All lent out").await;
+        let id_peer_borrowed = insert_test_book(&db, "I borrowed it").await;
+        let id_no_copies = insert_test_book(&db, "Standalone metadata").await;
+
+        insert_test_copy(&db, id_two_avail, "available", false).await;
+        insert_test_copy(&db, id_two_avail, "available", false).await;
+        insert_test_copy(&db, id_two_avail, "loaned", false).await;
+        insert_test_copy(&db, id_all_lent, "loaned", false).await;
+        insert_test_copy(&db, id_peer_borrowed, "borrowed", true).await;
+
+        let mut books = vec![
+            Book {
+                id: Some(id_two_avail),
+                title: "Two available".to_owned(),
+                ..Default::default()
+            },
+            Book {
+                id: Some(id_all_lent),
+                title: "All lent out".to_owned(),
+                ..Default::default()
+            },
+            Book {
+                id: Some(id_peer_borrowed),
+                title: "I borrowed it".to_owned(),
+                ..Default::default()
+            },
+            Book {
+                id: Some(id_no_copies),
+                title: "Standalone metadata".to_owned(),
+                ..Default::default()
+            },
+        ];
+        populate_available_copies(&db, &mut books).await.unwrap();
+
+        assert_eq!(books[0].available_copies, Some(2));
+        assert_eq!(
+            books[1].available_copies,
+            Some(0),
+            "all-loaned book must report zero availability so peers drop it",
+        );
+        assert_eq!(
+            books[2].available_copies,
+            Some(0),
+            "a book with only a temporary borrowed copy must report zero",
+        );
+        assert_eq!(
+            books[3].available_copies,
+            Some(0),
+            "book with no copies must still be set to Some(0), not None",
+        );
     }
 }

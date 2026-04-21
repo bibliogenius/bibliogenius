@@ -271,6 +271,11 @@ async fn upsert_peer_book_row(
         if book.added_at.is_some() {
             active.added_at = Set(book.added_at.clone());
         }
+        // Mirror `upsert_peer_books_cache` (HTTP path): the owner is the
+        // source of truth for loan state. Persisting these lets the iPhone
+        // carousel filter drop books that aren't borrowable.
+        active.owned = Set(book.owned.unwrap_or(true));
+        active.available_copies = Set(book.available_copies);
         // notified_at intentionally preserved.
         active.update(db).await?;
     } else {
@@ -287,6 +292,8 @@ async fn upsert_peer_book_row(
             first_seen_at: Set(None),
             added_at: Set(book.added_at.clone()),
             notified_at: Set(None),
+            owned: Set(book.owned.unwrap_or(true)),
+            available_copies: Set(book.available_copies),
             ..Default::default()
         };
         peer_book::Entity::insert(new_row).exec(db).await?;
@@ -553,6 +560,84 @@ mod tests {
             .await
             .unwrap();
         assert!(row.is_some());
+    }
+
+    /// Loan status from the owner (owned=false, available_copies=Some(0))
+    /// must round-trip through the relay delta path — same guarantee as the
+    /// HTTP `upsert_peer_books_cache` path, otherwise the iPhone-side
+    /// carousel filter can't hide fully-lent books when sync is via relay.
+    #[tokio::test]
+    async fn upsert_persists_loan_status_on_insert_and_update() {
+        let db = setup().await;
+        let peer_id = create_peer(&db).await;
+
+        // INSERT path: owner lent out every copy of book 20.
+        let fully_lent = json!({
+            "op": "upsert",
+            "book": {
+                "id": 20,
+                "title": "All lent out",
+                "owned": true,
+                "available_copies": 0,
+                "added_at": "2026-04-15T10:00:00+00:00",
+            }
+        });
+        // INSERT path: owner borrowed book 21 from someone else.
+        let peer_borrowed = json!({
+            "op": "upsert",
+            "book": {
+                "id": 21,
+                "title": "I borrowed it",
+                "owned": false,
+                "available_copies": 1,
+                "added_at": "2026-04-15T10:00:00+00:00",
+            }
+        });
+        apply_peer_delta_operations(&db, peer_id, &[fully_lent, peer_borrowed])
+            .await
+            .unwrap();
+
+        let fetch = |remote_id: i32| {
+            let db = db.clone();
+            async move {
+                peer_book::Entity::find()
+                    .filter(peer_book::Column::PeerId.eq(peer_id))
+                    .filter(peer_book::Column::RemoteBookId.eq(remote_id))
+                    .one(&db)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let row_lent = fetch(20).await;
+        let row_borrowed = fetch(21).await;
+        assert!(row_lent.owned);
+        assert_eq!(row_lent.available_copies, Some(0));
+        assert!(!row_borrowed.owned);
+        assert_eq!(row_borrowed.available_copies, Some(1));
+
+        // UPDATE path: a later sync reports book 20 now has one copy back
+        // and book 21 has been returned to its owner (so we no longer hold
+        // a temporary copy, i.e. owner flips back to true).
+        let lent_updated = json!({
+            "op": "upsert",
+            "book": {
+                "id": 20,
+                "title": "All lent out",
+                "owned": true,
+                "available_copies": 2,
+                "added_at": "2026-04-15T10:00:00+00:00",
+            }
+        });
+        apply_peer_delta_operations(&db, peer_id, &[lent_updated])
+            .await
+            .unwrap();
+        let refreshed = fetch(20).await;
+        assert_eq!(
+            refreshed.available_copies,
+            Some(2),
+            "update must refresh available_copies (otherwise the cache stays stale)",
+        );
     }
 
     #[tokio::test]
