@@ -27,6 +27,7 @@ pub mod peer_identity_sync;
 pub mod profile_events;
 pub mod profile_notification;
 pub mod relay_poller;
+pub mod relay_session;
 pub mod relay_transport;
 pub mod sale_service; // Service de vente pour profil Libraire
 pub mod ws_nudge;

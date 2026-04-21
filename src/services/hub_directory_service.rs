@@ -496,13 +496,38 @@ impl HubDirectoryService {
         let initial_token = existing.as_ref().map(|c| c.write_token.clone());
         let has_auth = initial_token.is_some();
 
+        let provenance = crate::services::relay_session::classify_mailbox_provenance(
+            params.relay_mailbox_id.as_deref(),
+        );
+
         tracing::info!(
-            "Hub directory: register_or_update node_id={} hub={} auth={} relay_mailbox={}",
+            "Hub directory: register_or_update node_id={} hub={} auth={} relay_mailbox={} mailbox_fresh={}",
             &params.node_id[..12.min(params.node_id.len())],
             hub_url,
             has_auth,
             params.relay_mailbox_id.as_deref().unwrap_or("none"),
+            matches!(
+                provenance,
+                crate::services::relay_session::MailboxProvenance::Fresh
+            ),
         );
+
+        if provenance == crate::services::relay_session::MailboxProvenance::Restored {
+            // Diagnostic: the mailbox_uuid about to be advertised to the hub
+            // was loaded from my_relay_config at startup, not minted this
+            // session. If the hub has since purged it (device-fingerprint
+            // dedup, admin purge, orphan cleanup) peers will silently hit
+            // "deposit to non-existent mailbox". poll_inner() auto-recreates
+            // on 404 but only if the poller is actually running against this
+            // hub; this WARN surfaces the risk at the source so it can be
+            // correlated with hub-side dashboard counters.
+            let mid = params.relay_mailbox_id.as_deref().unwrap_or("");
+            tracing::warn!(
+                "Hub directory: advertising relay_mailbox_id={} restored from my_relay_config \
+                 (not created this session) — may be stale if hub has purged it",
+                &mid[..12.min(mid.len())],
+            );
+        }
 
         let response = self
             .send_profile_upsert(&hub_url, &body, initial_token.as_deref())

@@ -798,6 +798,8 @@ pub async fn recreate_mailbox(
         .await
         .map_err(|e| format!("Failed to save relay config: {e}"))?;
 
+    crate::services::relay_session::mark_mailbox_created_this_session();
+
     tracing::info!("Relay: Mailbox recreated successfully");
     Ok(mailbox_uuid)
 }

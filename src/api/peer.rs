@@ -1721,6 +1721,8 @@ async fn apply_relay_setup(
     .insert(db)
     .await?;
 
+    crate::services::relay_session::mark_mailbox_created_this_session();
+
     let hub_changed = previous_hub_url
         .as_deref()
         .is_some_and(|prev| crate::utils::hub_url::hub_urls_differ(prev, relay_url));
@@ -8362,7 +8364,9 @@ mod hub_catalog_cache_tests {
 mod relay_setup_tests {
     use super::*;
     use crate::db;
+    use crate::services::relay_session;
     use sea_orm::{ConnectionTrait, Statement};
+    use serial_test::serial;
 
     async fn setup_db() -> DatabaseConnection {
         db::init_db("sqlite::memory:").await.expect("init db")
@@ -8397,7 +8401,9 @@ mod relay_setup_tests {
     /// unconditional DELETE wiped the token on every setup, causing the
     /// next profile heartbeat to hit 401 in a loop (stuck Eve scenario).
     #[tokio::test]
+    #[serial]
     async fn apply_relay_setup_preserves_directory_config_when_hub_unchanged() {
+        relay_session::reset_for_tests();
         let db = setup_db().await;
 
         apply_relay_setup(&db, "https://hub.example.org", "mbx-1", "rtok-1", "wtok-1")
@@ -8417,12 +8423,18 @@ mod relay_setup_tests {
             Some("preserved-token"),
             "hub_directory_config must survive a same-URL re-setup",
         );
+        assert!(
+            relay_session::mailbox_created_this_session(),
+            "apply_relay_setup must mark the session flag",
+        );
     }
 
     /// A genuine hub swap still invalidates the directory config, since the
     /// write_token from the old hub cannot authenticate against the new one.
     #[tokio::test]
+    #[serial]
     async fn apply_relay_setup_wipes_directory_config_when_hub_changes() {
+        relay_session::reset_for_tests();
         let db = setup_db().await;
 
         apply_relay_setup(
@@ -8452,13 +8464,24 @@ mod relay_setup_tests {
             directory_token(&db).await.is_none(),
             "hub_directory_config must be wiped when the hub actually changes",
         );
+        assert!(
+            relay_session::mailbox_created_this_session(),
+            "apply_relay_setup must mark the session flag",
+        );
     }
 
     /// First-time setup (no previous relay config) is neither a "same hub"
     /// nor a "hub change" — we simply have nothing to invalidate.
     #[tokio::test]
+    #[serial]
     async fn apply_relay_setup_first_time_reports_no_change() {
+        relay_session::reset_for_tests();
         let db = setup_db().await;
+
+        assert!(
+            !relay_session::mailbox_created_this_session(),
+            "flag must start unset",
+        );
 
         let changed =
             apply_relay_setup(&db, "https://hub.example.org", "mbx-1", "rtok-1", "wtok-1")
@@ -8466,5 +8489,9 @@ mod relay_setup_tests {
                 .expect("first setup");
 
         assert!(!changed, "no previous hub means no change to signal");
+        assert!(
+            relay_session::mailbox_created_this_session(),
+            "apply_relay_setup must mark the session flag",
+        );
     }
 }
