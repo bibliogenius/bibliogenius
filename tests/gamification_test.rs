@@ -81,8 +81,7 @@ async fn test_gamification_tables_created() {
         .await
         .expect("Failed to query gamification_streaks");
 
-    // Tables exist if we got here without errors
-    assert!(true, "All gamification tables were created successfully");
+    // Tables exist if we got here without errors (preceding queries would have panicked otherwise)
 }
 
 #[tokio::test]

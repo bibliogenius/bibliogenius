@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn too_short_blob_fails() {
         let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
-        let short = BASE64.encode(&[0u8; 10]);
+        let short = BASE64.encode([0u8; 10]);
         let result = open(&secret, &short);
         assert!(result.is_err());
     }

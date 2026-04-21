@@ -9,10 +9,10 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 // Helper to create a test database
 async fn setup_test_db() -> DatabaseConnection {
     // In-memory SQLite for testing
-    let db = db::init_db("sqlite::memory:")
+
+    db::init_db("sqlite::memory:")
         .await
-        .expect("Failed to init DB");
-    db
+        .expect("Failed to init DB")
 }
 
 // Helper to create a test admin user

@@ -393,10 +393,10 @@ mod tests {
 
         async fn get_effective_duration(&self, book_id: i32) -> Result<i32, DomainError> {
             let settings = self.get_settings().await?;
-            if settings.per_book_duration_enabled {
-                if let Ok(Some(days)) = self.get_book_loan_duration(book_id).await {
-                    return Ok(days);
-                }
+            if settings.per_book_duration_enabled
+                && let Ok(Some(days)) = self.get_book_loan_duration(book_id).await
+            {
+                return Ok(days);
             }
             Ok(settings.default_loan_duration_days)
         }

@@ -358,7 +358,7 @@ async fn test_author_crud_via_repository() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json.as_array().unwrap().len() >= 1);
+    assert!(!json.as_array().unwrap().is_empty());
 
     // Delete author
     let delete_app = Router::new()
@@ -761,7 +761,7 @@ async fn test_collection_crud_via_repository() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json.as_array().unwrap().len() >= 1);
+    assert!(!json.as_array().unwrap().is_empty());
 
     // Delete collection
     let delete_app = Router::new()

@@ -454,11 +454,13 @@ mod tests {
 
     #[test]
     fn test_max_discovered_peers_is_reasonable() {
-        assert!(MAX_DISCOVERED_PEERS >= 10, "limit too low for normal use");
-        assert!(
-            MAX_DISCOVERED_PEERS <= 200,
-            "limit too high, defeats purpose"
-        );
+        const {
+            assert!(MAX_DISCOVERED_PEERS >= 10, "limit too low for normal use");
+            assert!(
+                MAX_DISCOVERED_PEERS <= 200,
+                "limit too high, defeats purpose"
+            );
+        }
     }
 
     #[test]
