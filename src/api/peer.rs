@@ -996,12 +996,14 @@ pub(crate) async fn try_send_e2ee_with_timeout(
     let message =
         crate::services::e2ee_transport::DirectTransport::build_message(message_type, payload);
 
-    // Skip direct if peer recently failed and has relay credentials available.
-    // This avoids burning 3s on a timeout when we already know the peer is off-LAN.
+    // Skip direct if peer recently failed and has usable relay credentials.
+    // Don't skip when the write_token is gated by ADR-032, otherwise we'd
+    // waste the one chance direct still has to reach the peer on LAN.
     let skip_direct = state.is_peer_direct_unreachable(peer.id)
         && peer.relay_url.is_some()
         && peer.mailbox_id.is_some()
-        && peer.relay_write_token.is_some();
+        && peer.relay_write_token.is_some()
+        && peer.relay_gate_allows_send();
 
     let direct_result = if skip_direct {
         tracing::info!(
@@ -1039,6 +1041,19 @@ pub(crate) async fn try_send_e2ee_with_timeout(
             // Network error - peer unreachable. Try relay fallback.
             // ADR-012: All message types can now be relayed. Request-response messages
             // attach reply_to fields so responses come back via our mailbox.
+            // ADR-032: Skip relay entirely when the peer's write_token has been
+            // flagged stale and the retry window hasn't elapsed. This is the
+            // primary flood-suppression point for broadcast + interactive sends.
+            if !peer.relay_gate_allows_send() {
+                tracing::info!(
+                    "E2EE Relay: Skipping peer {} - write_token flagged stale (ADR-032)",
+                    peer.name
+                );
+                return Err(format!(
+                    "E2EE: peer {} unreachable (direct: {net_err}, relay: invitation stale)",
+                    peer.name
+                ));
+            }
             if let (Some(relay_url), Some(mailbox_id), Some(write_token)) =
                 (&peer.relay_url, &peer.mailbox_id, &peer.relay_write_token)
             {
@@ -1128,6 +1143,10 @@ pub(crate) async fn try_send_e2ee_with_timeout(
                                     true
                                 }
                                 Err(retry_err) => {
+                                    // ADR-032: still 404 after refreshed creds,
+                                    // or any other terminal error. Flag the
+                                    // write_token to stop the flood.
+                                    mark_peer_invite_stale(state.db(), peer.id).await;
                                     if let Some(corr_id) = correlation_id_for_await {
                                         state.cancel_relay_request(&corr_id);
                                     }
@@ -1142,6 +1161,10 @@ pub(crate) async fn try_send_e2ee_with_timeout(
                                 peer.name,
                                 peer.url.starts_with("relay://")
                             );
+                            // ADR-032: refresh exhausted LAN + hub directory;
+                            // no way to recover the token without a fresh
+                            // invitation. Flag and short-circuit next calls.
+                            mark_peer_invite_stale(state.db(), peer.id).await;
                             if let Some(corr_id) = correlation_id_for_await {
                                 state.cancel_relay_request(&corr_id);
                             }
@@ -1380,12 +1403,15 @@ pub async fn refresh_peer_relay_credentials(
         return None;
     }
 
-    // Update peer record with fresh relay credentials
+    // Update peer record with fresh relay credentials. Any stale-invite flag
+    // (ADR-032) is cleared at the same time since the new token is assumed
+    // fresh from the hub/LAN probe.
     if let Ok(Some(existing)) = peer::Entity::find_by_id(peer_model.id).one(db).await {
         let mut active: peer::ActiveModel = existing.into();
         active.relay_url = Set(Some(relay_url.clone()));
         active.mailbox_id = Set(Some(mailbox_id.clone()));
         active.relay_write_token = Set(Some(write_token.clone()));
+        active.relay_write_token_invalid_at = Set(None);
         active.updated_at = Set(chrono::Utc::now().to_rfc3339());
         let _ = active.update(db).await;
         tracing::info!(
@@ -1396,6 +1422,31 @@ pub async fn refresh_peer_relay_credentials(
     }
 
     Some((relay_url, mailbox_id, write_token))
+}
+
+/// ADR-032: Flag a peer's `relay_write_token` as invalid. Called after a
+/// deposit 404 that could not be recovered by `refresh_peer_relay_credentials`.
+/// Subsequent sends short-circuit via `peer.relay_gate_allows_send()` until
+/// either the retry window elapses, a refresh succeeds, or the user imports
+/// a fresh invitation from the peer.
+pub(crate) async fn mark_peer_invite_stale(db: &DatabaseConnection, peer_id: i32) {
+    if let Ok(Some(existing)) = peer::Entity::find_by_id(peer_id).one(db).await {
+        let mut active: peer::ActiveModel = existing.into();
+        active.relay_write_token_invalid_at = Set(Some(chrono::Utc::now().to_rfc3339()));
+        active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        if let Err(e) = active.update(db).await {
+            tracing::warn!(
+                "Relay: failed to persist stale-invite flag for peer {}: {}",
+                peer_id,
+                e
+            );
+        } else {
+            tracing::info!(
+                "Relay: Flagged peer {} write_token as stale (ADR-032)",
+                peer_id
+            );
+        }
+    }
 }
 
 /// Refresh relay credentials via direct HTTP to the peer's LAN URL.
@@ -2277,6 +2328,8 @@ pub async fn connect(
             }
             if relay_write_token.is_some() {
                 active.relay_write_token = Set(relay_write_token);
+                // ADR-032: fresh invitation clears any stale-token gate.
+                active.relay_write_token_invalid_at = Set(None);
             }
             match active.update(&db).await {
                 Ok(_) => {
@@ -2959,6 +3012,8 @@ pub async fn receive_connection_request(
                 }
                 if payload.relay_write_token.is_some() {
                     active.relay_write_token = Set(payload.relay_write_token);
+                    // ADR-032: fresh invitation clears any stale-token gate.
+                    active.relay_write_token_invalid_at = Set(None);
                 }
                 active.updated_at = Set(Utc::now().to_rfc3339());
                 let _ = active.update(&db).await;
@@ -3144,6 +3199,7 @@ pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoRespon
                 "relay_url": p.relay_url,
                 "mailbox_id": p.mailbox_id,
                 "relay_write_token": p.relay_write_token,
+                "relay_write_token_invalid_at": p.relay_write_token_invalid_at,
                 "last_seen": p.last_seen,
                 "avatar_config": p.avatar_config,
                 "created_at": p.created_at,
@@ -4649,6 +4705,9 @@ pub async fn sync_peer_by_url(
             active.relay_url = Set(Some(r_url.to_string()));
             active.mailbox_id = Set(Some(m_id.to_string()));
             active.relay_write_token = Set(Some(w_tok.to_string()));
+            // ADR-032: fresh credentials from the peer's /api/config clear
+            // any stale-token gate.
+            active.relay_write_token_invalid_at = Set(None);
             active.updated_at = Set(chrono::Utc::now().to_rfc3339());
             let _ = active.update(&db).await;
             tracing::info!(
@@ -8493,5 +8552,123 @@ mod relay_setup_tests {
             relay_session::mailbox_created_this_session(),
             "apply_relay_setup must mark the session flag",
         );
+    }
+}
+
+#[cfg(test)]
+mod stale_invite_flag_tests {
+    //! ADR-032: `relay_write_token_invalid_at` gate + clear paths.
+    use super::*;
+    use crate::db;
+    use sea_orm::Set;
+
+    async fn setup_db() -> DatabaseConnection {
+        db::init_db("sqlite::memory:").await.expect("init db")
+    }
+
+    async fn insert_peer_with_relay(db: &DatabaseConnection) -> peer::Model {
+        let now = chrono::Utc::now().to_rfc3339();
+        let active = peer::ActiveModel {
+            name: Set("test-peer".to_string()),
+            url: Set("http://test-peer.local:8080".to_string()),
+            relay_url: Set(Some("https://hub.example.org".to_string())),
+            mailbox_id: Set(Some("mbx-original".to_string())),
+            relay_write_token: Set(Some("wtok-original".to_string())),
+            relay_write_token_invalid_at: Set(None),
+            key_exchange_done: Set(true),
+            connection_status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let id = peer::Entity::insert(active)
+            .exec(db)
+            .await
+            .expect("insert peer")
+            .last_insert_id;
+        peer::Entity::find_by_id(id)
+            .one(db)
+            .await
+            .expect("query")
+            .expect("peer row")
+    }
+
+    /// `mark_peer_invite_stale` persists a non-empty timestamp so later
+    /// queries see the gate closed.
+    #[tokio::test]
+    async fn mark_peer_invite_stale_sets_timestamp() {
+        let db = setup_db().await;
+        let p = insert_peer_with_relay(&db).await;
+        assert!(p.relay_write_token_invalid_at.is_none());
+
+        mark_peer_invite_stale(&db, p.id).await;
+
+        let reloaded = peer::Entity::find_by_id(p.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            reloaded.relay_write_token_invalid_at.is_some(),
+            "timestamp must be persisted after mark_peer_invite_stale"
+        );
+        assert!(
+            !reloaded.relay_gate_allows_send(),
+            "fresh flag must close the retry gate"
+        );
+    }
+
+    /// Gate admits a send again after the retry window has elapsed, so a
+    /// peer coming back online eventually recovers without user action.
+    #[tokio::test]
+    async fn gate_admits_send_after_retry_window() {
+        let db = setup_db().await;
+        let mut p = insert_peer_with_relay(&db).await;
+
+        let one_hour_ago = (chrono::Utc::now() - chrono::Duration::seconds(3601)).to_rfc3339();
+        p.relay_write_token_invalid_at = Some(one_hour_ago);
+        assert!(
+            p.relay_gate_allows_send(),
+            "gate must admit a send once the retry window has elapsed"
+        );
+
+        p.relay_write_token_invalid_at = Some(chrono::Utc::now().to_rfc3339());
+        assert!(
+            !p.relay_gate_allows_send(),
+            "gate must close again when the timestamp is fresh"
+        );
+    }
+
+    /// `refresh_peer_relay_credentials` shouldn't be callable here without a
+    /// real peer HTTP endpoint, so we simulate the credential write path: a
+    /// successful update must clear any previously set stale-invite flag.
+    #[tokio::test]
+    async fn refresh_clears_stale_invite_flag() {
+        let db = setup_db().await;
+        let p = insert_peer_with_relay(&db).await;
+        mark_peer_invite_stale(&db, p.id).await;
+
+        // Emulate the credential-write branch inside refresh_peer_relay_credentials
+        let existing = peer::Entity::find_by_id(p.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut active: peer::ActiveModel = existing.into();
+        active.relay_write_token = Set(Some("wtok-fresh".to_string()));
+        active.relay_write_token_invalid_at = Set(None);
+        active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        active.update(&db).await.expect("update peer");
+
+        let reloaded = peer::Entity::find_by_id(p.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            reloaded.relay_write_token_invalid_at.is_none(),
+            "refresh must clear stale-invite flag"
+        );
+        assert!(reloaded.relay_gate_allows_send());
     }
 }

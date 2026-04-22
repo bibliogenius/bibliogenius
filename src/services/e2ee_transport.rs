@@ -21,6 +21,10 @@ pub enum E2eeTransportError {
     Network(String),
     /// Peer returned an error status.
     PeerError(u16, String),
+    /// Peer's relay write_token has been flagged invalid (ADR-032); the
+    /// caller must not attempt a deposit until a fresh invitation is
+    /// imported. Short-circuits the retry flood at the source.
+    PeerInviteStale,
 }
 
 impl std::fmt::Display for E2eeTransportError {
@@ -29,6 +33,7 @@ impl std::fmt::Display for E2eeTransportError {
             Self::Crypto(msg) => write!(f, "crypto error: {msg}"),
             Self::Network(msg) => write!(f, "network error: {msg}"),
             Self::PeerError(status, msg) => write!(f, "peer error ({status}): {msg}"),
+            Self::PeerInviteStale => write!(f, "peer invitation is stale"),
         }
     }
 }

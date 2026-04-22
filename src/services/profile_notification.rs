@@ -98,6 +98,15 @@ async fn notify_peers_profile_changed(state: AppState, changed: Vec<String>) {
     let relay = RelayTransport::new(Some(crypto_service));
 
     for p in &peers {
+        // ADR-032: don't broadcast to peers whose write_token has been flagged
+        // stale and is still within the retry window.
+        if !p.relay_gate_allows_send() {
+            tracing::debug!(
+                "Profile notify: peer {} write_token flagged stale (ADR-032), skipping",
+                p.name
+            );
+            continue;
+        }
         let (Some(relay_url), Some(mailbox_id), Some(write_token)) =
             (&p.relay_url, &p.mailbox_id, &p.relay_write_token)
         else {

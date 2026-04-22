@@ -836,6 +836,9 @@ pub async fn update_peer_relay_from_reply_to(
             active.relay_url = Set(Some(relay_url.to_string()));
             active.mailbox_id = Set(Some(reply_to_mailbox.to_string()));
             active.relay_write_token = Set(Some(reply_to_write_token.to_string()));
+            // ADR-032: fresh reply-to credentials indicate the peer's mailbox
+            // is live; clear any stale-token gate we had on them.
+            active.relay_write_token_invalid_at = Set(None);
             active.updated_at = Set(chrono::Utc::now().to_rfc3339());
             if let Err(e) = active.update(db).await {
                 tracing::warn!(
@@ -936,6 +939,8 @@ async fn handle_credential_update(
         active.relay_url = Set(Some(new_relay_url.to_string()));
         active.mailbox_id = Set(Some(new_mailbox_id.to_string()));
         active.relay_write_token = Set(Some(new_write_token.to_string()));
+        // ADR-032: peer just broadcast fresh credentials, clear any stale-token gate.
+        active.relay_write_token_invalid_at = Set(None);
         active.updated_at = Set(chrono::Utc::now().to_rfc3339());
         active
             .update(db)
@@ -1115,6 +1120,9 @@ async fn handle_connection_request(
         }
         if relay_write_token.is_some() {
             active.relay_write_token = Set(relay_write_token);
+            // ADR-032: a fresh connection_request means the peer has a live
+            // mailbox and sent us new credentials. Clear any stale-token gate.
+            active.relay_write_token_invalid_at = Set(None);
         }
         if library_uuid.is_some() {
             active.library_uuid = Set(library_uuid);

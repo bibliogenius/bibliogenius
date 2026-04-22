@@ -442,6 +442,7 @@ pub async fn import_data(
                 mailbox_id: Set(p.mailbox_id),
                 relay_url: Set(p.relay_url),
                 relay_write_token: Set(None),
+                relay_write_token_invalid_at: Set(None),
                 latitude: Set(p.latitude),
                 longitude: Set(p.longitude),
                 auto_approve: Set(p.auto_approve),

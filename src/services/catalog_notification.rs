@@ -123,6 +123,15 @@ async fn notify_peers_catalog_changed(state: AppState) {
     let relay = RelayTransport::new(Some(crypto_service));
 
     for p in &peers {
+        // ADR-032: skip peers flagged with a stale write_token inside the
+        // retry window; otherwise every catalog_changed broadcast 404s them.
+        if !p.relay_gate_allows_send() {
+            tracing::debug!(
+                "Catalog notify: peer {} write_token flagged stale (ADR-032), skipping",
+                p.name
+            );
+            continue;
+        }
         let (Some(relay_url), Some(mailbox_id), Some(write_token)) =
             (&p.relay_url, &p.mailbox_id, &p.relay_write_token)
         else {

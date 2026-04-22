@@ -1782,6 +1782,18 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             .await;
     }
 
+    // Migration 074: Mark a peer's `relay_write_token` as dead after a 404
+    // that couldn't be recovered by credential refresh (ADR-032). Stops the
+    // deposit-retry flood against a mailbox the hub no longer has. NULL =
+    // valid, ISO 8601 timestamp = invalidated at that time. Cleared when a
+    // fresh write_token is persisted (handshake, refresh success).
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peers ADD COLUMN relay_write_token_invalid_at TEXT".to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

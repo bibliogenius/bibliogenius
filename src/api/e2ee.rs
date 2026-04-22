@@ -195,6 +195,7 @@ pub fn build_known_peers_with_devices(
             mailbox_id: d.mailbox_id.clone(),
             relay_url: d.relay_url.clone(),
             relay_write_token: d.relay_write_token.clone(),
+            relay_write_token_invalid_at: None,
             latitude: None,
             longitude: None,
             auto_approve: false,

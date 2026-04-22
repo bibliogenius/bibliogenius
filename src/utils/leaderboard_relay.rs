@@ -829,6 +829,11 @@ pub async fn notify_peers_of_stats_push(state: &AppState) {
     let relay = crate::services::relay_transport::RelayTransport::new(Some(crypto_service));
 
     for p in &peers {
+        // ADR-032: skip peers whose write_token has been flagged stale and is
+        // still within the retry window, to avoid a broadcast-level 404 flood.
+        if !p.relay_gate_allows_send() {
+            continue;
+        }
         let (Some(relay_url), Some(mailbox_id), Some(write_token)) =
             (&p.relay_url, &p.mailbox_id, &p.relay_write_token)
         else {
