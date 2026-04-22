@@ -130,19 +130,27 @@ pub async fn list_books(
     // HTTP handler = LAN peer, relative path is fine (no hub prefix needed).
     Book::rewrite_local_cover_urls(&mut book_dtos, None);
 
-    // Apply in-memory author sorting only if no pagination (full dataset)
-    // Author sorting at DB level requires complex joins not yet implemented
+    // Apply in-memory author sorting only if no pagination (full dataset).
+    // Author sorting at DB level requires complex joins not yet implemented.
+    // Books with a missing or whitespace-only author are placed last, to mirror
+    // the Flutter client behavior (see `utils/book_sort.dart`).
     if filter.limit.is_none()
         && let Some(sort_order) = &filter.sort
         && sort_order == "author_asc"
     {
         book_dtos.sort_by(|a, b| {
-            let author_a = a.author.as_deref().unwrap_or("").to_lowercase();
-            let author_b = b.author.as_deref().unwrap_or("").to_lowercase();
-            if author_a == author_b {
-                a.title.to_lowercase().cmp(&b.title.to_lowercase())
-            } else {
-                author_a.cmp(&author_b)
+            let a_empty = a.author.as_deref().is_none_or(|s| s.trim().is_empty());
+            let b_empty = b.author.as_deref().is_none_or(|s| s.trim().is_empty());
+            match (a_empty, b_empty) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => {
+                    let author_a = a.author.as_deref().unwrap_or("").to_lowercase();
+                    let author_b = b.author.as_deref().unwrap_or("").to_lowercase();
+                    author_a
+                        .cmp(&author_b)
+                        .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+                }
             }
         });
     }
