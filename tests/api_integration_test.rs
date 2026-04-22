@@ -1425,3 +1425,156 @@ async fn test_upsert_cache_empty_incoming_preserves_cache() {
 
     assert_eq!(cached, 3, "Empty incoming must NOT wipe existing cache");
 }
+
+// ========== P2P REQUEST LIST: cover URL leak guard ==========
+//
+// Security rule S5 + UX: a filesystem path in `cover_url` is unservable by
+// `CachedNetworkImage` on the UI. The hydration pattern
+// `isbn_book_map.insert(isbn, (id, b.cover_url.clone()))` used to pass
+// `/Users/.../covers/{id}.jpg` straight to the response JSON. These tests
+// lock the contract: cover_url in the response is `None`, an HTTP(S) URL,
+// or a `/api/books/{id}/cover[?v=...]` relative path. Never a filesystem
+// path.
+
+async fn insert_book_with_cover(
+    db: &DatabaseConnection,
+    title: &str,
+    isbn: &str,
+    cover_url: &str,
+) -> i32 {
+    let now = chrono::Utc::now().to_rfc3339();
+    let book = rust_lib_app::models::book::ActiveModel {
+        title: Set(title.to_string()),
+        isbn: Set(Some(isbn.to_string())),
+        cover_url: Set(Some(cover_url.to_string())),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    let res = rust_lib_app::models::book::Entity::insert(book)
+        .exec(db)
+        .await
+        .expect("Failed to create book");
+    res.last_insert_id
+}
+
+fn assert_cover_url_servable(cover: &serde_json::Value, context: &str) {
+    match cover {
+        serde_json::Value::Null => {}
+        serde_json::Value::String(s) => {
+            let ok = s.starts_with("http://") || s.starts_with("https://") || s.starts_with("/api");
+            assert!(
+                ok,
+                "{context}: cover_url leaked a non-servable value {s:?} (must be null, http(s), or /api)"
+            );
+        }
+        other => panic!("{context}: cover_url has unexpected JSON type {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn list_requests_never_leaks_local_cover_path() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let db = setup_test_db().await;
+
+    // Book owned locally with a filesystem cover path (typical of a custom
+    // upload that has not yet round-tripped through the hub).
+    let cover = "/Users/federico/Library/Application Support/com.bibliogenius.app/covers/2008.jpg";
+    let _book_id = insert_book_with_cover(&db, "test QA", "222", cover).await;
+
+    let peer_id = create_test_peer(&db, "Borrower", "http://peer:8000").await;
+    create_test_request(&db, "req-leak-1", peer_id, "222", "test QA", "pending").await;
+
+    let app = rust_lib_app::api::api_router(db.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/peers/requests")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let arr = json.as_array().expect("response must be an array");
+    assert_eq!(arr.len(), 1, "expected one request in the list");
+
+    let cover_url = &arr[0]["cover_url"];
+    assert_cover_url_servable(cover_url, "list_requests");
+    // Positive lock: the /api fallback is what we expect when no hub prefix
+    // is configured (LAN scope).
+    assert!(
+        cover_url
+            .as_str()
+            .is_some_and(|s| s.starts_with("/api/books/")),
+        "list_requests: expected /api/books/... fallback without hub, got {cover_url:?}"
+    );
+}
+
+#[tokio::test]
+async fn list_outgoing_requests_never_leaks_local_cover_path() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let db = setup_test_db().await;
+
+    let cover = "/var/mobile/Containers/Data/Application/abc/Documents/covers/2008.jpg";
+    let _book_id = insert_book_with_cover(&db, "test QA", "333", cover).await;
+
+    let peer_id = create_test_peer(&db, "Lender", "http://peer:8000").await;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let outgoing = rust_lib_app::models::p2p_outgoing_request::ActiveModel {
+        id: Set("out-leak-1".to_string()),
+        to_peer_id: Set(peer_id),
+        book_isbn: Set("333".to_string()),
+        book_title: Set("test QA".to_string()),
+        status: Set("pending".to_string()),
+        lender_request_id: Set(None),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+    };
+    rust_lib_app::models::p2p_outgoing_request::Entity::insert(outgoing)
+        .exec(&db)
+        .await
+        .expect("Failed to create outgoing request");
+
+    let app = rust_lib_app::api::api_router(db.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/peers/requests/outgoing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let arr = json.as_array().expect("response must be an array");
+    assert_eq!(arr.len(), 1, "expected one outgoing request in the list");
+
+    let cover_url = &arr[0]["cover_url"];
+    assert_cover_url_servable(cover_url, "list_outgoing_requests");
+    assert!(
+        cover_url
+            .as_str()
+            .is_some_and(|s| s.starts_with("/api/books/")),
+        "list_outgoing_requests: expected /api/books/... fallback, got {cover_url:?}"
+    );
+}

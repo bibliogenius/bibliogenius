@@ -5789,6 +5789,7 @@ pub async fn request_book_by_url(
 
 pub async fn list_outgoing_requests(State(db): State<DatabaseConnection>) -> impl IntoResponse {
     use crate::models::book;
+    use crate::utils::cover_url::{self, ResolveScope};
 
     let requests = crate::models::p2p_outgoing_request::Entity::find()
         .find_also_related(peer::Entity)
@@ -5803,6 +5804,12 @@ pub async fn list_outgoing_requests(State(db): State<DatabaseConnection>) -> imp
         .filter(|isbn| !isbn.is_empty())
         .collect();
 
+    // Cover URLs must be servable by `CachedNetworkImage` on the UI. A raw
+    // filesystem path in `books.cover_url` (typical of a local upload before
+    // hub sync) would render a placeholder, so the rewrite to a hub URL or
+    // `/api/books/{id}/cover` fallback happens here, keyed on the same scope
+    // as `api/books.rs` list endpoint.
+    let hub_prefix = crate::models::Book::hub_cover_prefix(&db).await;
     let mut isbn_book_map: std::collections::HashMap<String, (i32, Option<String>)> =
         std::collections::HashMap::new();
     if !isbns.is_empty()
@@ -5813,7 +5820,15 @@ pub async fn list_outgoing_requests(State(db): State<DatabaseConnection>) -> imp
     {
         for b in books {
             if let Some(isbn) = &b.isbn {
-                isbn_book_map.insert(isbn.clone(), (b.id, b.cover_url.clone()));
+                let resolved = cover_url::resolve_single(
+                    b.cover_url.as_deref(),
+                    b.id,
+                    Some(&b.updated_at),
+                    hub_prefix.as_deref(),
+                    ResolveScope::Lan,
+                )
+                .unwrap_or(None);
+                isbn_book_map.insert(isbn.clone(), (b.id, resolved));
             }
         }
     }
@@ -6211,6 +6226,7 @@ pub async fn receive_request(
 
 pub async fn list_requests(State(db): State<DatabaseConnection>) -> impl IntoResponse {
     use crate::models::book;
+    use crate::utils::cover_url::{self, ResolveScope};
 
     let requests = crate::models::p2p_request::Entity::find()
         .find_also_related(peer::Entity)
@@ -6225,6 +6241,12 @@ pub async fn list_requests(State(db): State<DatabaseConnection>) -> impl IntoRes
         .filter(|isbn| !isbn.is_empty())
         .collect();
 
+    // Cover URLs must be servable by `CachedNetworkImage` on the UI. A raw
+    // filesystem path in `books.cover_url` (typical of a local upload before
+    // hub sync) would render a placeholder on the owner's list of incoming
+    // requests, so the rewrite to a hub URL or `/api/books/{id}/cover`
+    // fallback happens here, keyed on the same LAN scope as `api/books.rs`.
+    let hub_prefix = crate::models::Book::hub_cover_prefix(&db).await;
     let mut isbn_book_map: std::collections::HashMap<String, (i32, Option<String>)> =
         std::collections::HashMap::new();
     if !isbns.is_empty()
@@ -6235,7 +6257,15 @@ pub async fn list_requests(State(db): State<DatabaseConnection>) -> impl IntoRes
     {
         for b in books {
             if let Some(isbn) = &b.isbn {
-                isbn_book_map.insert(isbn.clone(), (b.id, b.cover_url.clone()));
+                let resolved = cover_url::resolve_single(
+                    b.cover_url.as_deref(),
+                    b.id,
+                    Some(&b.updated_at),
+                    hub_prefix.as_deref(),
+                    ResolveScope::Lan,
+                )
+                .unwrap_or(None);
+                isbn_book_map.insert(isbn.clone(), (b.id, resolved));
             }
         }
     }
