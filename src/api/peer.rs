@@ -429,10 +429,7 @@ pub(crate) async fn perform_loan_acceptance(
     }
 
     // 7. Get lender name
-    let lender_name = match crate::models::library::Entity::find_by_id(1).one(db).await {
-        Ok(Some(lib)) => lib.name,
-        _ => "Unknown Library".to_string(),
-    };
+    let lender_name = crate::utils::library_helpers::resolve_lender_display_name(db).await;
 
     let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
     Ok(LoanAcceptResult {
@@ -640,7 +637,7 @@ pub async fn offer_loan(
     Path(peer_id): Path<i32>,
     Json(payload): Json<OfferLoanRequest>,
 ) -> impl IntoResponse {
-    use crate::models::{book, contact, copy, library, loan};
+    use crate::models::{book, contact, copy, loan};
 
     let db = state.db();
 
@@ -822,10 +819,7 @@ pub async fn offer_loan(
     }
 
     // 8. Build loan_offer payload and notify peer
-    let lender_name = match library::Entity::find_by_id(1).one(db).await {
-        Ok(Some(lib)) => lib.name,
-        _ => "Unknown Library".to_string(),
-    };
+    let lender_name = crate::utils::library_helpers::resolve_lender_display_name(db).await;
 
     let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
     let offer_payload = json!({
@@ -6546,10 +6540,7 @@ pub async fn update_request_status(
         .to_string();
 
         // Get library name for lender identification
-        let lender_name = match crate::models::library::Entity::find_by_id(1).one(&db).await {
-            Ok(Some(lib)) => lib.name,
-            _ => "Unknown Library".to_string(),
-        };
+        let lender_name = crate::utils::library_helpers::resolve_lender_display_name(&db).await;
 
         let confirm_payload = serde_json::json!({
             "isbn": book_isbn,
