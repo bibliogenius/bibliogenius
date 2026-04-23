@@ -28,6 +28,11 @@ ignore = [
     # Transitive pin via sqlx 0.7 → rustls 0.21; fix needs sqlx 0.8 / sea-orm 1.x.
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
+    # rustls-webpki 0.101.7 reachable panic in CRL parsing (empty BIT STRING in
+    # onlySomeReasons of IssuingDistributionPoint). Not exploitable here: sqlx
+    # is SQLite-only (no TLS path), and CRLs are never parsed by this binary.
+    # Same transitive pin as above; resolved by the sqlx 0.8 / sea-orm 1.x upgrade.
+    "RUSTSEC-2026-0104",
     # NOTE: All above will be resolved by upgrading sea-orm to 1.x.
 ]
 
