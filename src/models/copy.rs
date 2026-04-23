@@ -28,6 +28,21 @@ pub struct Model {
     /// If set, this overrides the book's default price.
     /// If NULL, the price from the parent book is used.
     pub price: Option<f64>,
+    /// Display name of the lender (peer library name or contact name).
+    /// Populated when `status = 'borrowed'`. NULL for non-borrowed copies
+    /// and for legacy borrowed copies created before ADR-034 (see backfill
+    /// in `infrastructure/db.rs`).
+    pub lender_display_name: Option<String>,
+    /// FK to `peers.id` when the copy was borrowed from a P2P peer.
+    /// NULL for contact loans or legacy rows.
+    pub lender_peer_id: Option<i32>,
+    /// ISO 8601 due date for a borrowed copy (string to match the rest of
+    /// the date columns in this schema). NULL for non-borrowed copies.
+    pub borrow_due_date: Option<String>,
+    /// Source of the borrow: `"peer"` (P2P loan) or `"contact"` (local
+    /// contact loan). Stored as TEXT; see `BorrowSource` for the typed
+    /// representation used across the code. NULL for non-borrowed copies.
+    pub borrow_source: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

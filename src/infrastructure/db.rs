@@ -1794,6 +1794,41 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 075: Typed loan metadata on `copies` (ADR-034). Replaces the
+    // free-text `notes` schema previously used to carry the lender name and
+    // due date. `notes` is preserved and still double-written for one
+    // release cycle so non-upgraded clients keep rendering borrowed copies.
+    for stmt in [
+        "ALTER TABLE copies ADD COLUMN lender_display_name TEXT",
+        "ALTER TABLE copies ADD COLUMN lender_peer_id INTEGER REFERENCES peers(id) ON DELETE SET NULL",
+        "ALTER TABLE copies ADD COLUMN borrow_due_date TEXT",
+        "ALTER TABLE copies ADD COLUMN borrow_source TEXT",
+    ] {
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                stmt.to_owned(),
+            ))
+            .await;
+    }
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE INDEX IF NOT EXISTS idx_copies_borrow_source ON copies(borrow_source)"
+                .to_owned(),
+        ))
+        .await;
+    // Idempotent: only hydrates rows where new columns are still NULL.
+    match backfill_borrow_metadata(db).await {
+        Ok(stats) if stats.hydrated + stats.unparsed > 0 => tracing::info!(
+            "Migration 075 backfill: hydrated {} borrowed copies, {} left for client-side fallback",
+            stats.hydrated,
+            stats.unparsed
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Migration 075 backfill skipped: {e}"),
+    }
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;
@@ -1801,4 +1836,163 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     crate::modules::book_notes::migrate(db).await?;
 
     Ok(())
+}
+
+/// Result of `backfill_borrow_metadata` — used by migration logs and tests.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BackfillStats {
+    pub hydrated: usize,
+    pub unparsed: usize,
+}
+
+/// Parse a legacy free-text `notes` string on a borrowed copy into
+/// `(display_name, due_date, source)`. Returns `None` when the string
+/// does not match any known pre-ADR-034 format.
+///
+/// Recognized formats:
+/// - `"Emprunté de NAME jusqu'au DATE"` — written by the Rust peer flow.
+/// - `"Borrowed from NAME"` / `"Emprunté à NAME"` — written by the Flutter
+///   contact-loan flow across locales. An optional legacy `" (ID: N)"`
+///   suffix is stripped if present.
+pub(crate) fn parse_legacy_borrow_notes(
+    notes: &str,
+) -> Option<(String, Option<String>, &'static str)> {
+    let trimmed = notes.trim();
+    if let Some(rest) = trimmed.strip_prefix("Emprunté de ")
+        && let Some((name, due)) = rest.split_once(" jusqu'au ")
+    {
+        let name = name.trim();
+        let due = due.trim();
+        if !name.is_empty() && !due.is_empty() {
+            return Some((name.to_string(), Some(due.to_string()), "peer"));
+        }
+    }
+
+    for prefix in ["Borrowed from", "Emprunté à"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let rest = rest.trim_start_matches([':', ' ']).trim();
+            if rest.is_empty() {
+                continue;
+            }
+            let name = rest
+                .rsplit_once(" (ID: ")
+                .map(|(n, _)| n.trim().to_string())
+                .unwrap_or_else(|| rest.to_string());
+            if !name.is_empty() {
+                return Some((name, None, "contact"));
+            }
+        }
+    }
+
+    None
+}
+
+/// Hydrate the four ADR-034 columns on existing borrowed copies by parsing
+/// the legacy free-text `notes` field. Idempotent: only rows where
+/// `lender_display_name IS NULL` are considered, and rows whose `notes`
+/// does not match a known format are left untouched (the Flutter fallback
+/// still renders them via the old regex).
+///
+/// Exposed at crate level so migration tests can exercise it directly
+/// without rerunning every migration.
+pub async fn backfill_borrow_metadata(db: &DatabaseConnection) -> Result<BackfillStats, DbErr> {
+    let backend = db.get_database_backend();
+    let rows = db
+        .query_all(Statement::from_string(
+            backend,
+            "SELECT id, notes FROM copies \
+             WHERE status = 'borrowed' \
+               AND notes IS NOT NULL \
+               AND lender_display_name IS NULL"
+                .to_owned(),
+        ))
+        .await?;
+
+    let mut stats = BackfillStats::default();
+    for row in rows {
+        let id: i32 = row.try_get("", "id")?;
+        let notes: String = row.try_get("", "notes")?;
+
+        let Some((name, due, source)) = parse_legacy_borrow_notes(&notes) else {
+            stats.unparsed += 1;
+            continue;
+        };
+
+        let stmt = match due {
+            Some(due) => Statement::from_sql_and_values(
+                backend,
+                "UPDATE copies SET lender_display_name = ?, borrow_due_date = ?, borrow_source = ? \
+                 WHERE id = ?",
+                [
+                    sea_orm::Value::from(name),
+                    sea_orm::Value::from(due),
+                    sea_orm::Value::from(source.to_string()),
+                    sea_orm::Value::from(id),
+                ],
+            ),
+            None => Statement::from_sql_and_values(
+                backend,
+                "UPDATE copies SET lender_display_name = ?, borrow_source = ? WHERE id = ?",
+                [
+                    sea_orm::Value::from(name),
+                    sea_orm::Value::from(source.to_string()),
+                    sea_orm::Value::from(id),
+                ],
+            ),
+        };
+        db.execute(stmt).await?;
+        stats.hydrated += 1;
+    }
+    Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_peer_format() {
+        let (name, due, source) =
+            parse_legacy_borrow_notes("Emprunté de Alice jusqu'au 2026-12-01").unwrap();
+        assert_eq!(name, "Alice");
+        assert_eq!(due.as_deref(), Some("2026-12-01"));
+        assert_eq!(source, "peer");
+    }
+
+    #[test]
+    fn parse_peer_format_multiword_name() {
+        let (name, due, _) =
+            parse_legacy_borrow_notes("Emprunté de Bob l'Éponge jusqu'au 2030-01-15").unwrap();
+        assert_eq!(name, "Bob l'Éponge");
+        assert_eq!(due.as_deref(), Some("2030-01-15"));
+    }
+
+    #[test]
+    fn parse_contact_format_english() {
+        let (name, due, source) = parse_legacy_borrow_notes("Borrowed from Charlie").unwrap();
+        assert_eq!(name, "Charlie");
+        assert!(due.is_none());
+        assert_eq!(source, "contact");
+    }
+
+    #[test]
+    fn parse_contact_format_french_a() {
+        let (name, _, source) = parse_legacy_borrow_notes("Emprunté à Diane").unwrap();
+        assert_eq!(name, "Diane");
+        assert_eq!(source, "contact");
+    }
+
+    #[test]
+    fn parse_contact_format_with_id_suffix() {
+        let (name, _, source) = parse_legacy_borrow_notes("Borrowed from: Eve (ID: 42)").unwrap();
+        assert_eq!(name, "Eve");
+        assert_eq!(source, "contact");
+    }
+
+    #[test]
+    fn parse_unknown_format_returns_none() {
+        assert!(parse_legacy_borrow_notes("Some freeform user note").is_none());
+        assert!(parse_legacy_borrow_notes("").is_none());
+        assert!(parse_legacy_borrow_notes("Emprunté de ").is_none());
+    }
 }

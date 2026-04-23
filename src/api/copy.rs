@@ -38,6 +38,13 @@ pub struct CreateCopyRequest {
     pub status: String,
     pub is_temporary: bool,
     pub price: Option<f64>,
+    /// Loan metadata (ADR-034). Callers creating a contact-loan copy should
+    /// send `lender_display_name` + `borrow_source = "contact"` here rather
+    /// than encode the lender name into `notes`.
+    pub lender_display_name: Option<String>,
+    pub lender_peer_id: Option<i32>,
+    pub borrow_due_date: Option<String>,
+    pub borrow_source: Option<String>,
 }
 
 // Create a new copy
@@ -58,6 +65,16 @@ pub async fn create_copy(
             }
         },
     };
+    // Reject unknown borrow_source values early so the DB never holds junk.
+    if let Some(src) = payload.borrow_source.as_deref()
+        && src.parse::<crate::domain::BorrowSource>().is_err()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("Invalid borrow_source: '{}'", src) })),
+        )
+            .into_response();
+    }
     let input = CreateCopyInput {
         book_id: payload.book_id,
         library_id,
@@ -66,6 +83,10 @@ pub async fn create_copy(
         status: payload.status,
         is_temporary: payload.is_temporary,
         price: payload.price,
+        lender_display_name: payload.lender_display_name,
+        lender_peer_id: payload.lender_peer_id,
+        borrow_due_date: payload.borrow_due_date,
+        borrow_source: payload.borrow_source,
     };
 
     match state.copy_repo.create(input).await {
@@ -143,6 +164,9 @@ pub async fn get_borrowed_copies(State(state): State<AppState>) -> impl IntoResp
                 .copies
                 .into_iter()
                 .map(|copy| {
+                    // ADR-034: prefer typed columns; keep `notes` and
+                    // `from_contact` in the payload one release cycle for
+                    // clients that still read the legacy free-text format.
                     json!({
                         "id": copy.id,
                         "book_id": copy.book_id,
@@ -151,7 +175,11 @@ pub async fn get_borrowed_copies(State(state): State<AppState>) -> impl IntoResp
                         "status": copy.status,
                         "notes": copy.notes,
                         "acquisition_date": copy.acquisition_date,
-                        "from_contact": copy.notes  // Notes contains "Borrowed from: Name (ID: x)"
+                        "from_contact": copy.notes,
+                        "lender_display_name": copy.lender_display_name,
+                        "lender_peer_id": copy.lender_peer_id,
+                        "borrow_due_date": copy.borrow_due_date,
+                        "borrow_source": copy.borrow_source,
                     })
                 })
                 .collect();
@@ -218,6 +246,7 @@ pub async fn update_copy(
         notes: payload.notes,
         acquisition_date: payload.acquisition_date,
         price: payload.price,
+        ..Default::default()
     };
 
     match state.copy_repo.update(id, input).await {

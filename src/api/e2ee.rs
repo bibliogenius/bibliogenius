@@ -719,6 +719,10 @@ async fn handle_loan_confirmation(
         cover_url,
         lender_name,
         due_date,
+        // E2EE confirmation: the sender peer is known via envelope decryption
+        // but resolving it to `peers.id` here would mean threading the sender
+        // through the handler. Follow-up work — display name is authoritative.
+        lender_peer_id: None,
     };
 
     let result = match super::peer::create_borrowed_copy(db, &params).await {
@@ -842,6 +846,8 @@ async fn handle_loan_offer(
         cover_url,
         lender_name,
         due_date,
+        // E2EE loan offer: same deferred resolution as the confirmation path.
+        lender_peer_id: None,
     };
 
     let result = match super::peer::create_borrowed_copy(db, &params).await {

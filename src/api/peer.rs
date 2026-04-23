@@ -459,6 +459,10 @@ pub(crate) struct BorrowedCopyParams<'a> {
     pub cover_url: Option<&'a str>,
     pub lender_name: &'a str,
     pub due_date: &'a str,
+    /// Optional FK to `peers.id` — populated when the borrower knows which
+    /// local peer row corresponds to the lender. Stored on the new
+    /// `copies.lender_peer_id` column (ADR-034).
+    pub lender_peer_id: Option<i32>,
 }
 
 /// Result of creating a borrowed copy.
@@ -588,15 +592,18 @@ pub(crate) async fn create_borrowed_copy(
         })?;
 
     let now = Utc::now().to_rfc3339();
+    // ADR-034: lender metadata lives in typed columns. `notes` stays free for
+    // real user notes; the migration-075 backfill hydrates these columns for
+    // rows written before this change.
     let new_copy = copy::ActiveModel {
         book_id: Set(book_id),
         library_id: Set(lib_id),
         status: Set("borrowed".to_string()),
         is_temporary: Set(true),
-        notes: Set(Some(format!(
-            "Emprunté de {} jusqu'au {}",
-            params.lender_name, params.due_date
-        ))),
+        lender_display_name: Set(Some(params.lender_name.to_string())),
+        lender_peer_id: Set(params.lender_peer_id),
+        borrow_due_date: Set(Some(params.due_date.to_string())),
+        borrow_source: Set(Some(crate::domain::BorrowSource::Peer.as_str().to_string())),
         acquisition_date: Set(Some(now.clone())),
         created_at: Set(now.clone()),
         updated_at: Set(now),
@@ -5115,14 +5122,18 @@ async fn process_borrower_acceptance(
         }
     };
     let now = Utc::now().to_rfc3339();
+    // ADR-034: typed loan columns only; `notes` freed for user notes.
+    // Deferring lender_peer_id resolution to a follow-up (would need to
+    // join via `p2p_outgoing_request.to_peer_id`).
     let new_copy = copy::ActiveModel {
         book_id: Set(book_id),
         library_id: Set(lib_id),
         status: Set("borrowed".to_string()),
         is_temporary: Set(true),
-        notes: Set(Some(format!(
-            "Emprunté de {lender_name} jusqu'au {due_date}"
-        ))),
+        lender_display_name: Set(Some(lender_name.to_string())),
+        lender_peer_id: Set(None),
+        borrow_due_date: Set(Some(due_date.to_string())),
+        borrow_source: Set(Some(crate::domain::BorrowSource::Peer.as_str().to_string())),
         acquisition_date: Set(Some(now.clone())),
         created_at: Set(now.clone()),
         updated_at: Set(now),
@@ -7828,6 +7839,10 @@ pub async fn receive_loan_confirmation(
         cover_url: payload.cover_url.as_deref(),
         lender_name: &payload.lender_name,
         due_date: &payload.due_date,
+        // Resolving the local `peers.id` for the lender in this plaintext
+        // path would need a Node-Id lookup and is deferred to a follow-up;
+        // the display name is authoritative for the ADR-034 UX.
+        lender_peer_id: None,
     };
 
     let result = match create_borrowed_copy(&db, &params).await {
@@ -7934,6 +7949,10 @@ pub async fn receive_loan_offer(
         cover_url: payload.cover_url.as_deref(),
         lender_name: &payload.lender_name,
         due_date: &payload.due_date,
+        // Loan offer path: we never issued a request, so no outgoing row to
+        // resolve the lender's `peers.id` from. Populating this column is a
+        // follow-up; display name is authoritative today.
+        lender_peer_id: None,
     };
 
     let result = match create_borrowed_copy(&db, &params).await {
