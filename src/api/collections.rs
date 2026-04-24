@@ -2,7 +2,7 @@
 
 use axum::{
     Json,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -10,8 +10,9 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, QueryFilter, Set};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::domain::{CreateCollectionInput, DomainError};
+use crate::domain::CreateCollectionInput;
 use crate::infrastructure::AppState;
+use crate::services::collection_service::{self, CollectionServiceError};
 use crate::utils::library_helpers::resolve_library_id;
 
 /// List all collections with book counts
@@ -84,27 +85,51 @@ pub async fn get_collection(
     }
 }
 
-/// Delete a collection by ID
+#[derive(Deserialize, Default)]
+pub struct DeleteCollectionQuery {
+    /// When true, also delete books that are not loaned/borrowed, not in
+    /// another collection, and not on any shelf.
+    #[serde(default)]
+    pub delete_books: bool,
+}
+
+/// Delete a collection by ID. Optionally delete its books via `?delete_books=true`.
 pub async fn delete_collection(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<DeleteCollectionQuery>,
 ) -> impl IntoResponse {
-    match state.collection_repo.delete(&id).await {
-        Ok(()) => {
-            let _ = crate::sync::log_operation_with_str_id(
-                state.db(),
-                "collection",
-                &id,
-                "DELETE",
-                None,
-            )
-            .await;
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(DomainError::NotFound) => {
-            // Idempotent delete
-            StatusCode::NO_CONTENT.into_response()
-        }
+    match collection_service::delete_collection(state.db(), &id, query.delete_books).await {
+        Ok(deleted_book_ids) => (
+            StatusCode::OK,
+            Json(json!({
+                "deleted_books": deleted_book_ids.len(),
+                "book_ids": deleted_book_ids,
+            })),
+        )
+            .into_response(),
+        // Idempotent on 404 to match the previous contract.
+        Err(CollectionServiceError::NotFound) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Preview what happens if a collection is deleted along with its books.
+pub async fn deletion_preview(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match collection_service::preview_deletion(state.db(), &id).await {
+        Ok(preview) => (StatusCode::OK, Json(preview)).into_response(),
+        Err(CollectionServiceError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Collection not found"})),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),

@@ -130,6 +130,10 @@ fn build_routes() -> Router<AppState> {
             get(collections::get_collection).delete(collections::delete_collection),
         )
         .route(
+            "/collections/:id/deletion-preview",
+            get(collections::deletion_preview),
+        )
+        .route(
             "/collections/:id/books",
             get(collections::get_collection_books).post(collections::import_collection),
         )

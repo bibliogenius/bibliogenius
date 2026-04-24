@@ -6,6 +6,7 @@
 pub mod book_service;
 pub mod catalog_events;
 pub mod catalog_notification;
+pub mod collection_service;
 pub mod contact_service;
 pub mod crypto_service;
 pub mod delta_service;

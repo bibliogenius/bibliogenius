@@ -5382,12 +5382,56 @@ pub async fn create_collection(
         .map_err(|e| format!("{e:?}"))
 }
 
-/// Deletes a collection by ID.
+/// Deletes a collection by ID. Books are left orphaned (current behaviour).
 pub async fn delete_collection(id: String) -> Result<(), String> {
-    use crate::domain::collection_repository::CollectionRepository;
     let db = db().ok_or("Database not initialized")?;
-    let repo = collection_repo!(db);
-    repo.delete(&id).await.map_err(|e| format!("{e:?}"))
+    crate::services::collection_service::delete_collection(db, &id, false)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Preview data for the "delete collection with its books" flow.
+///
+/// * `total_books` - books currently in the collection
+/// * `to_delete` - books that would be deleted
+/// * `to_keep` - books kept (loaned, borrowed, multi-collection, shelved)
+pub struct FrbCollectionDeletionPreview {
+    pub total_books: i64,
+    pub to_delete: i64,
+    pub to_keep: i64,
+}
+
+impl From<crate::services::collection_service::DeletionPreview> for FrbCollectionDeletionPreview {
+    fn from(p: crate::services::collection_service::DeletionPreview) -> Self {
+        FrbCollectionDeletionPreview {
+            total_books: p.total_books,
+            to_delete: p.to_delete,
+            to_keep: p.to_keep,
+        }
+    }
+}
+
+/// Returns how many books would be deleted / kept if the collection were
+/// removed along with its books.
+pub async fn get_collection_deletion_preview(
+    id: String,
+) -> Result<FrbCollectionDeletionPreview, String> {
+    let db = db().ok_or("Database not initialized")?;
+    crate::services::collection_service::preview_deletion(db, &id)
+        .await
+        .map(FrbCollectionDeletionPreview::from)
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Deletes a collection along with its eligible books (no loaned/borrowed
+/// copy, not in another collection, on no shelf). Returns the IDs of books
+/// that were actually removed.
+pub async fn delete_collection_with_books(id: String) -> Result<Vec<i32>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    crate::services::collection_service::delete_collection(db, &id, true)
+        .await
+        .map_err(|e| format!("{e:?}"))
 }
 
 /// Returns all books belonging to a collection.

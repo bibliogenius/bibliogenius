@@ -778,9 +778,13 @@ async fn test_collection_crud_via_repository() {
         .unwrap();
 
     let response = delete_app.clone().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    // First delete succeeds and returns 200 with a JSON body carrying the
+    // count of deleted books (0 when the ?delete_books flag is omitted).
+    assert_eq!(response.status(), StatusCode::OK);
 
-    // Verify idempotent delete
+    // Verify idempotent delete — on a missing collection the handler still
+    // returns 204 to keep the previous "no-op" contract for callers that
+    // retry a DELETE.
     let req = Request::builder()
         .uri(format!("/collections/{}", collection_id))
         .method("DELETE")
