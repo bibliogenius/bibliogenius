@@ -6738,6 +6738,7 @@ impl SseDecode for crate::api::frb::FrbHubProfile {
         let mut var_description = <Option<String>>::sse_decode(deserializer);
         let mut var_bookCount = <i32>::sse_decode(deserializer);
         let mut var_locationCountry = <Option<String>>::sse_decode(deserializer);
+        let mut var_locationCityId = <Option<i64>>::sse_decode(deserializer);
         let mut var_requiresApproval = <bool>::sse_decode(deserializer);
         let mut var_allowBorrowing = <Option<bool>>::sse_decode(deserializer);
         let mut var_lastSeenAt = <Option<String>>::sse_decode(deserializer);
@@ -6753,6 +6754,7 @@ impl SseDecode for crate::api::frb::FrbHubProfile {
             description: var_description,
             book_count: var_bookCount,
             location_country: var_locationCountry,
+            location_city_id: var_locationCityId,
             requires_approval: var_requiresApproval,
             allow_borrowing: var_allowBorrowing,
             last_seen_at: var_lastSeenAt,
@@ -7171,6 +7173,7 @@ impl SseDecode for crate::api::frb::FrbRegisterParams {
         let mut var_acceptFrom = <String>::sse_decode(deserializer);
         let mut var_description = <Option<String>>::sse_decode(deserializer);
         let mut var_locationCountry = <Option<String>>::sse_decode(deserializer);
+        let mut var_locationCityId = <Option<i64>>::sse_decode(deserializer);
         let mut var_allowBorrowing = <bool>::sse_decode(deserializer);
         let mut var_x25519PublicKey = <Option<String>>::sse_decode(deserializer);
         let mut var_website = <Option<String>>::sse_decode(deserializer);
@@ -7190,6 +7193,7 @@ impl SseDecode for crate::api::frb::FrbRegisterParams {
             accept_from: var_acceptFrom,
             description: var_description,
             location_country: var_locationCountry,
+            location_city_id: var_locationCityId,
             allow_borrowing: var_allowBorrowing,
             x25519_public_key: var_x25519PublicKey,
             website: var_website,
@@ -7754,6 +7758,17 @@ impl SseDecode for Option<i32> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<i32>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<i64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<i64>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -8829,6 +8844,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbHubProfile {
             self.description.into_into_dart().into_dart(),
             self.book_count.into_into_dart().into_dart(),
             self.location_country.into_into_dart().into_dart(),
+            self.location_city_id.into_into_dart().into_dart(),
             self.requires_approval.into_into_dart().into_dart(),
             self.allow_borrowing.into_into_dart().into_dart(),
             self.last_seen_at.into_into_dart().into_dart(),
@@ -9353,6 +9369,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbRegisterParams {
             self.accept_from.into_into_dart().into_dart(),
             self.description.into_into_dart().into_dart(),
             self.location_country.into_into_dart().into_dart(),
+            self.location_city_id.into_into_dart().into_dart(),
             self.allow_borrowing.into_into_dart().into_dart(),
             self.x25519_public_key.into_into_dart().into_dart(),
             self.website.into_into_dart().into_dart(),
@@ -9852,6 +9869,7 @@ impl SseEncode for crate::api::frb::FrbHubProfile {
         <Option<String>>::sse_encode(self.description, serializer);
         <i32>::sse_encode(self.book_count, serializer);
         <Option<String>>::sse_encode(self.location_country, serializer);
+        <Option<i64>>::sse_encode(self.location_city_id, serializer);
         <bool>::sse_encode(self.requires_approval, serializer);
         <Option<bool>>::sse_encode(self.allow_borrowing, serializer);
         <Option<String>>::sse_encode(self.last_seen_at, serializer);
@@ -10111,6 +10129,7 @@ impl SseEncode for crate::api::frb::FrbRegisterParams {
         <String>::sse_encode(self.accept_from, serializer);
         <Option<String>>::sse_encode(self.description, serializer);
         <Option<String>>::sse_encode(self.location_country, serializer);
+        <Option<i64>>::sse_encode(self.location_city_id, serializer);
         <bool>::sse_encode(self.allow_borrowing, serializer);
         <Option<String>>::sse_encode(self.x25519_public_key, serializer);
         <Option<String>>::sse_encode(self.website, serializer);
@@ -10560,6 +10579,16 @@ impl SseEncode for Option<i32> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <i32>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<i64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <i64>::sse_encode(value, serializer);
         }
     }
 }

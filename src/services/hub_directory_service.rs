@@ -68,6 +68,10 @@ pub struct HubProfile {
     pub description: Option<String>,
     pub book_count: i32,
     pub location_country: Option<String>,
+    /// GeoNames populated-place ID opted into by the user (ADR-035).
+    /// None when the user has not enabled "share my city".
+    #[serde(default)]
+    pub location_city_id: Option<i64>,
     pub requires_approval: bool,
     /// Whether this library accepts borrow requests from followers.
     #[serde(default = "default_true")]
@@ -226,6 +230,8 @@ pub struct RegisterParams {
     pub accept_from: String,
     pub description: Option<String>,
     pub location_country: Option<String>,
+    /// GeoNames populated-place ID, opt-in (ADR-035). None means no city sharing.
+    pub location_city_id: Option<i64>,
     pub allow_borrowing: bool,
     pub x25519_public_key: Option<String>,
     pub website: Option<String>,
@@ -462,6 +468,9 @@ impl HubDirectoryService {
         }
         if let Some(ref country) = params.location_country {
             body["location_country"] = serde_json::Value::String(country.clone());
+        }
+        if let Some(city_id) = params.location_city_id {
+            body["location_city_id"] = serde_json::Value::Number(city_id.into());
         }
         if let Some(ref key) = params.x25519_public_key {
             body["x25519_public_key"] = serde_json::Value::String(key.clone());
