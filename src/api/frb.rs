@@ -4813,14 +4813,24 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
 }
 
 /// Browses the hub public directory.
+///
+/// ADR-035 Phase 2: `city_id` filters by GeoNames id (combinable with
+/// `country` and `search`). Pass `None` to return all listed libraries.
 pub async fn hub_directory_list(
     limit: i64,
     offset: i64,
     country: Option<String>,
     search: Option<String>,
+    city_id: Option<i64>,
 ) -> Result<Vec<FrbHubProfile>, String> {
     hub_directory_svc()
-        .list_directory(limit, offset, country.as_deref(), search.as_deref())
+        .list_directory(
+            limit,
+            offset,
+            country.as_deref(),
+            search.as_deref(),
+            city_id,
+        )
         .await
         .map(|v| v.into_iter().map(FrbHubProfile::from).collect())
         .map_err(|e| e.to_string())

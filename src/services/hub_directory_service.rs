@@ -1063,11 +1063,19 @@ impl HubDirectoryService {
         offset: i64,
         country: Option<&str>,
         search: Option<&str>,
+        city_id: Option<i64>,
     ) -> Result<Vec<HubProfile>, HubDirectoryError> {
         let hub_url = Self::hub_base_url()?;
         let mut url = format!("{hub_url}/api/directory?limit={limit}&offset={offset}");
         if let Some(c) = country {
             url.push_str(&format!("&country={c}"));
+        }
+        if let Some(id) = city_id {
+            // ADR-035 Phase 2: hub validates city_id is a positive integer,
+            // so we forward Some(0) as well even though the picker should
+            // never produce it — the hub will reply 400 and the UI can
+            // surface that as a generic error.
+            url.push_str(&format!("&city_id={id}"));
         }
         if let Some(s) = search {
             url.push_str(&format!("&search={}", urlencoding::encode(s)));

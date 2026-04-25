@@ -3254,6 +3254,7 @@ fn wire__crate__api__frb__hub_directory_list_impl(
             let api_offset = <i64>::sse_decode(&mut deserializer);
             let api_country = <Option<String>>::sse_decode(&mut deserializer);
             let api_search = <Option<String>>::sse_decode(&mut deserializer);
+            let api_city_id = <Option<i64>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -3263,6 +3264,7 @@ fn wire__crate__api__frb__hub_directory_list_impl(
                             api_offset,
                             api_country,
                             api_search,
+                            api_city_id,
                         )
                         .await?;
                         Ok(output_ok)
