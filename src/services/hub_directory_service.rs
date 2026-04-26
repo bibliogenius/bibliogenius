@@ -443,16 +443,18 @@ impl HubDirectoryService {
     // Profile
     // -----------------------------------------------------------------------
 
-    /// Registers the library with the hub directory (first call) or updates its profile.
-    /// On first registration, the hub returns a write_token that is persisted locally.
-    pub async fn register_or_update(
-        &self,
-        db: &DatabaseConnection,
-        params: RegisterParams,
-    ) -> Result<DirectoryConfig, HubDirectoryError> {
-        let hub_url = Self::hub_base_url()?;
-        let existing = Self::get_config(db).await?;
-
+    /// Build the JSON body for a hub directory register/update request.
+    ///
+    /// Most optional fields follow "Some = set, None = leave alone": the key
+    /// is only added to the body when the caller passes a value. The hub's
+    /// upsert handler uses array_key_exists, so absent keys preserve the
+    /// stored value.
+    ///
+    /// `location_city_id` deliberately breaks that pattern: ADR-035 §8
+    /// requires that toggling off "Partager ma ville" clears the hub side
+    /// immediately. We therefore always include the key, sending JSON null
+    /// when the caller passes None so the hub overwrites the stored value.
+    fn build_register_body(params: &RegisterParams) -> serde_json::Value {
         let mut body = serde_json::json!({
             "node_id":           params.node_id,
             "display_name":      params.display_name,
@@ -469,9 +471,11 @@ impl HubDirectoryService {
         if let Some(ref country) = params.location_country {
             body["location_country"] = serde_json::Value::String(country.clone());
         }
-        if let Some(city_id) = params.location_city_id {
-            body["location_city_id"] = serde_json::Value::Number(city_id.into());
-        }
+        // ADR-035 §8: always include the key so None propagates as a clear.
+        body["location_city_id"] = match params.location_city_id {
+            Some(id) => serde_json::Value::Number(id.into()),
+            None => serde_json::Value::Null,
+        };
         if let Some(ref key) = params.x25519_public_key {
             body["x25519_public_key"] = serde_json::Value::String(key.clone());
         }
@@ -501,6 +505,21 @@ impl HubDirectoryService {
         {
             body["avatar_config"] = val;
         }
+
+        body
+    }
+
+    /// Registers the library with the hub directory (first call) or updates its profile.
+    /// On first registration, the hub returns a write_token that is persisted locally.
+    pub async fn register_or_update(
+        &self,
+        db: &DatabaseConnection,
+        params: RegisterParams,
+    ) -> Result<DirectoryConfig, HubDirectoryError> {
+        let hub_url = Self::hub_base_url()?;
+        let existing = Self::get_config(db).await?;
+
+        let body = Self::build_register_body(&params);
 
         let initial_token = existing.as_ref().map(|c| c.write_token.clone());
         let has_auth = initial_token.is_some();
@@ -1660,5 +1679,65 @@ mod catalog_hash_tests {
             PushCatalogOutcome::SkippedLocal,
             PushCatalogOutcome::SkippedRemote,
         );
+    }
+}
+
+#[cfg(test)]
+mod register_body_tests {
+    //! Locks the hub upsert body contract for ADR-035 §8: clearing the city
+    //! must propagate to the hub. Other Option fields keep the historical
+    //! "Some = set, None = leave alone" semantics.
+
+    use super::*;
+
+    fn base_params() -> RegisterParams {
+        RegisterParams {
+            node_id: "node123".to_string(),
+            display_name: "Test".to_string(),
+            book_count: 0,
+            is_listed: true,
+            requires_approval: false,
+            accept_from: "anyone".to_string(),
+            allow_borrowing: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn body_includes_city_id_when_some() {
+        let params = RegisterParams {
+            location_city_id: Some(2_988_507),
+            ..base_params()
+        };
+        let body = HubDirectoryService::build_register_body(&params);
+        assert_eq!(body["location_city_id"], serde_json::json!(2_988_507));
+    }
+
+    #[test]
+    fn body_sends_null_city_id_when_none() {
+        // ADR-035 §8: None must serialize as JSON null so the hub clears
+        // the stored value (its upsert uses array_key_exists to detect
+        // the field). Omitting the key would silently leave the previous
+        // value in place after the user toggles off "Partager ma ville".
+        let params = RegisterParams {
+            location_city_id: None,
+            ..base_params()
+        };
+        let body = HubDirectoryService::build_register_body(&params);
+        assert!(body.get("location_city_id").is_some());
+        assert_eq!(body["location_city_id"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn body_omits_country_when_none() {
+        // Counter-test: the city carve-out must NOT spread to other
+        // optional fields. location_country still follows the legacy
+        // "absent key = preserve" contract; only city_id is special.
+        let params = RegisterParams {
+            location_country: None,
+            ..base_params()
+        };
+        let body = HubDirectoryService::build_register_body(&params);
+        assert!(body.get("location_country").is_none());
     }
 }
