@@ -552,7 +552,7 @@ impl HubDirectoryService {
             let mid = params.relay_mailbox_id.as_deref().unwrap_or("");
             tracing::warn!(
                 "Hub directory: advertising relay_mailbox_id={} restored from my_relay_config \
-                 (not created this session) — may be stale if hub has purged it",
+                 (not created this session) - may be stale if hub has purged it",
                 &mid[..12.min(mid.len())],
             );
         }
@@ -1092,7 +1092,7 @@ impl HubDirectoryService {
         if let Some(id) = city_id {
             // ADR-035 Phase 2: hub validates city_id is a positive integer,
             // so we forward Some(0) as well even though the picker should
-            // never produce it — the hub will reply 400 and the UI can
+            // never produce it - the hub will reply 400 and the UI can
             // surface that as a generic error.
             url.push_str(&format!("&city_id={id}"));
         }

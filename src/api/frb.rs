@@ -18,7 +18,7 @@ static DB: OnceLock<DatabaseConnection> = OnceLock::new();
 /// display backend logs without relying on Xcode Console (stderr is invisible
 /// to the iOS FFI host process).
 static LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
-/// Global AppState — set once in `initBackend`, read by FFI handlers that need
+/// Global AppState - set once in `initBackend`, read by FFI handlers that need
 /// services not available as individual statics (e.g. catalog notifications).
 static GLOBAL_APP_STATE: OnceLock<crate::infrastructure::AppState> = OnceLock::new();
 #[allow(dead_code)]
@@ -182,7 +182,7 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
     //   iOS:   <app sandbox>/Documents/bibliogenius-rust.log
     // Both are writable and retrievable via `get_rust_log_tail` FFI.
     // Truncated at each init so the file does not grow indefinitely across
-    // launches — within a single session tracing keeps appending.
+    // launches - within a single session tracing keeps appending.
     let log_path = std::path::Path::new(&db_path)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
@@ -193,7 +193,7 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
     TRACING_INIT.call_once(|| {
         if cfg!(debug_assertions) {
             // Also enable the `ssrf` target family (ADR-026) so SSRF audit
-            // events are always visible in debug builds — they live outside
+            // events are always visible in debug builds - they live outside
             // the `rust_lib_app` namespace so they would otherwise be dropped.
             let filter = tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "rust_lib_app=info,ssrf=warn".into());
@@ -246,7 +246,7 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
 
 /// Pass the hub URL from Flutter to the Rust process environment.
 /// Must be called once after init_backend, before any hub_directory calls.
-/// Rust reads HUB_URL via std::env::var — it cannot see Flutter's dotenv map.
+/// Rust reads HUB_URL via std::env::var - it cannot see Flutter's dotenv map.
 ///
 /// The .env value is only a default: if a relay has been configured (persisted
 /// in `my_relay_config`), its URL takes precedence so the hub directory and
@@ -816,7 +816,7 @@ pub async fn delete_book(id: i32) -> Result<(), String> {
 
     match crate::services::book_service::delete_book(db, id).await {
         Ok(_) => {
-            // Notify peers that our catalog changed (same as create_book — HTTP handler bypassed).
+            // Notify peers that our catalog changed (same as create_book - HTTP handler bypassed).
             if let Some(state) = global_app_state() {
                 crate::services::catalog_notification::schedule_catalog_changed_notification(
                     state.clone(),
@@ -923,7 +923,7 @@ pub async fn search_all_covers_by_title(
 }
 
 /// Metadata fetched from external sources for a book refresh.
-/// Each field is optional — only non-null fields have data from the source.
+/// Each field is optional - only non-null fields have data from the source.
 #[frb(dart_metadata=("freezed"))]
 pub struct FrbBookMetadata {
     pub title: Option<String>,
@@ -1644,7 +1644,7 @@ pub async fn check_loan_reminders(language: String) -> Result<i32, String> {
         let ref_id = loan.id.to_string();
 
         if days_left <= 0 {
-            // Due today or overdue — emit LoanDueToday if not already present
+            // Due today or overdue - emit LoanDueToday if not already present
             let already = notif_repo
                 .exists(
                     NotificationEventType::LoanDueToday.as_str(),
@@ -1670,7 +1670,7 @@ pub async fn check_loan_reminders(language: String) -> Result<i32, String> {
                 }
             }
         } else if days_left <= reminder_days as i64 {
-            // Approaching due date — emit LoanDueReminder if not already present
+            // Approaching due date - emit LoanDueReminder if not already present
             let already = notif_repo
                 .exists(
                     NotificationEventType::LoanDueReminder.as_str(),
@@ -1710,19 +1710,19 @@ fn loan_due_today_text(lang: &str, title: &str, borrower: &str) -> (String, Stri
     match lang {
         "fr" => (
             "Retour prévu aujourd'hui".to_string(),
-            format!("«{}» doit être rendu aujourd'hui — {}", title, borrower),
+            format!("«{}» doit être rendu aujourd'hui - {}", title, borrower),
         ),
         "es" => (
             "Devolución prevista hoy".to_string(),
-            format!("«{}» debe devolverse hoy — {}", title, borrower),
+            format!("«{}» debe devolverse hoy - {}", title, borrower),
         ),
         "de" => (
             "Rückgabe heute fällig".to_string(),
-            format!("«{}» · Heute fällig — {}", title, borrower),
+            format!("«{}» · Heute fällig - {}", title, borrower),
         ),
         _ => (
             "Return due today".to_string(),
-            format!("«{}» · Due today — {}", title, borrower),
+            format!("«{}» · Due today - {}", title, borrower),
         ),
     }
 }
@@ -1732,7 +1732,7 @@ fn loan_due_reminder_text(lang: &str, title: &str, borrower: &str, days: i32) ->
         "fr" => (
             "Rappel de prêt".to_string(),
             format!(
-                "«{}» · Retour dans {} jour{} — {}",
+                "«{}» · Retour dans {} jour{} - {}",
                 title,
                 days,
                 if days > 1 { "s" } else { "" },
@@ -1742,7 +1742,7 @@ fn loan_due_reminder_text(lang: &str, title: &str, borrower: &str, days: i32) ->
         "es" => (
             "Recordatorio de préstamo".to_string(),
             format!(
-                "«{}» · Vence en {} día{} — {}",
+                "«{}» · Vence en {} día{} - {}",
                 title,
                 days,
                 if days > 1 { "s" } else { "" },
@@ -1752,7 +1752,7 @@ fn loan_due_reminder_text(lang: &str, title: &str, borrower: &str, days: i32) ->
         "de" => (
             "Leih-Erinnerung".to_string(),
             format!(
-                "«{}» · Fällig in {} Tag{} — {}",
+                "«{}» · Fällig in {} Tag{} - {}",
                 title,
                 days,
                 if days > 1 { "en" } else { "" },
@@ -1762,7 +1762,7 @@ fn loan_due_reminder_text(lang: &str, title: &str, borrower: &str, days: i32) ->
         _ => (
             "Loan reminder".to_string(),
             format!(
-                "«{}» · Due in {} day{} — {}",
+                "«{}» · Due in {} day{} - {}",
                 title,
                 days,
                 if days > 1 { "s" } else { "" },
@@ -2119,11 +2119,11 @@ fn nudge_source_label(source: crate::services::nudge_events::NudgeSource) -> Str
 /// Attempt a delta sync against a peer via E2EE (ADR-029).
 ///
 /// Returns `true` when a delta window was successfully fetched and applied
-/// to `peer_books` — the caller should SKIP the legacy
+/// to `peer_books` - the caller should SKIP the legacy
 /// `relay_library_request("manifest")` loop and simply re-read the local
 /// cache. Returns `false` on any non-applied outcome
 /// (`ResetRequired`, `FallbackRequired`, `E2eeUnavailable`, transport
-/// error) — the caller should run the legacy full-catalog flow as before.
+/// error) - the caller should run the legacy full-catalog flow as before.
 ///
 /// Designed to be called from the Flutter `subscribe_catalog_changes`
 /// handler before triggering a full sync, so the delta path replaces the
@@ -2200,8 +2200,8 @@ pub async fn set_peer_delta_cursor(peer_id: i32, cursor: i64) -> Result<(), Stri
 ///
 /// Trust model: only call this with a `new_uuid` read from an ENVELOPE
 /// that successfully verified against `peers.public_key` (ed25519). The
-/// signature check on that path is what binds the uuid to the peer identity
-/// — skipping it would let any relay forwarder inject an arbitrary uuid.
+/// signature check on that path is what binds the uuid to the peer identity.
+/// Skipping it would let any relay forwarder inject an arbitrary uuid.
 /// `peer_book` rows are intentionally left untouched: they key on
 /// `peer_id`, not `library_uuid`, and the enclosing manifest sync pass is
 /// already about to refresh them via upsert (a premature purge would flash
@@ -3518,7 +3518,7 @@ pub async fn gamification_get_leaderboard() -> Result<FrbLeaderboardResponse, St
 }
 
 /// Refresh leaderboard (returns current state) via FFI.
-/// Peer sync happens via the HTTP endpoint — this just returns current data.
+/// Peer sync happens via the HTTP endpoint - this just returns current data.
 pub async fn gamification_refresh_leaderboard() -> Result<FrbLeaderboardResponse, String> {
     gamification_get_leaderboard().await
 }
@@ -4700,7 +4700,7 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
     let mut entries: Vec<CatalogEntry> = Vec::new();
     // Map book_id -> entry index for updating cover URLs after upload
     let mut id_to_index: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
-    // (book_id, local_cover_path, updated_at) — updated_at is needed at
+    // (book_id, local_cover_path, updated_at) - updated_at is needed at
     // upload-completion time to append the ?v=tag cache-buster so peers
     // refetch immediately after a re-upload.
     let mut local_covers: Vec<(i32, String, String)> = Vec::new();
@@ -4904,7 +4904,7 @@ pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalog
 /// Returns entries enriched with the authoritative `added_at` from the owner
 /// (carried on every CatalogEntry). `first_seen_at` is still populated for
 /// legacy reasons (viewer-local timestamp) but is no longer used for the
-/// "NEW" badge — `added_at` is the single source of truth now.
+/// "NEW" badge - `added_at` is the single source of truth now.
 async fn upsert_directory_catalog_cache(
     db: &DatabaseConnection,
     node_id: &str,
