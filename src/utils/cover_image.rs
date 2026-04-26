@@ -1,4 +1,7 @@
-use image::{ImageReader, Rgb, RgbImage, codecs::jpeg::JpegEncoder};
+use image::{
+    DynamicImage, ImageDecoder, ImageReader, Rgb, RgbImage, codecs::jpeg::JpegEncoder,
+    metadata::Orientation,
+};
 use std::io::Cursor;
 
 /// Target width for served/stored book covers (px). The output is always
@@ -49,7 +52,16 @@ pub fn resize_to_jpeg_thumbnail(input: &[u8]) -> Result<Vec<u8>, String> {
     let reader = ImageReader::new(Cursor::new(input))
         .with_guessed_format()
         .map_err(|e| format!("guess format: {e}"))?;
-    let img = reader.decode().map_err(|e| format!("decode: {e}"))?;
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|e| format!("into_decoder: {e}"))?;
+    // iPhones (and many cameras) store sensor-native pixels and put the
+    // logical rotation in an EXIF Orientation tag. If we skip this step the
+    // re-encoded thumbnail looks rotated 90° to peers, with pad-coloured
+    // bands above/below where the rotated content used to fit.
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut img = DynamicImage::from_decoder(decoder).map_err(|e| format!("decode: {e}"))?;
+    img.apply_orientation(orientation);
 
     let thumb = img.thumbnail(COVER_MAX_WIDTH, COVER_MAX_HEIGHT);
     let resized = thumb.to_rgb8();
@@ -344,5 +356,78 @@ mod tests {
         let out = resize_to_jpeg_thumbnail(&jpeg_in).unwrap();
         assert!(out.starts_with(&[0xFF, 0xD8, 0xFF]));
         assert!(out.len() <= COVER_SIZE_CAP_BYTES);
+    }
+
+    /// Wraps a plain JPEG with a minimal APP1/EXIF segment carrying a single
+    /// Orientation tag. Lets us simulate the kind of JPEG iPhones produce
+    /// (sensor-native landscape pixels + EXIF orientation tag) without
+    /// pulling in an EXIF writer dependency.
+    fn jpeg_with_exif_orientation(rgb: &RgbImage, exif_orientation: u8) -> Vec<u8> {
+        let (w, h) = rgb.dimensions();
+        let mut jpeg = Vec::new();
+        let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, 90);
+        encoder
+            .encode(rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+            .unwrap();
+
+        // EXIF payload: TIFF header (little-endian) + one IFD0 entry.
+        let mut payload: Vec<u8> = Vec::new();
+        payload.extend_from_slice(b"Exif\0\0");
+        payload.extend_from_slice(&[0x49, 0x49, 0x2A, 0x00]); // "II", magic 42
+        payload.extend_from_slice(&[0x08, 0x00, 0x00, 0x00]); // IFD0 offset
+        payload.extend_from_slice(&[0x01, 0x00]); // 1 entry
+        payload.extend_from_slice(&[0x12, 0x01]); // tag 0x0112 = Orientation
+        payload.extend_from_slice(&[0x03, 0x00]); // type SHORT
+        payload.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]); // count 1
+        payload.extend_from_slice(&[exif_orientation, 0x00, 0x00, 0x00]);
+        payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // next IFD = 0
+
+        let segment_len: u16 = (payload.len() + 2) as u16;
+        let mut app1: Vec<u8> = Vec::with_capacity(payload.len() + 4);
+        app1.extend_from_slice(&[0xFF, 0xE1]);
+        app1.extend_from_slice(&segment_len.to_be_bytes());
+        app1.extend_from_slice(&payload);
+
+        // Insert APP1 immediately after SOI (FF D8).
+        let mut out = Vec::with_capacity(jpeg.len() + app1.len());
+        out.extend_from_slice(&jpeg[..2]);
+        out.extend_from_slice(&app1);
+        out.extend_from_slice(&jpeg[2..]);
+        out
+    }
+
+    #[test]
+    fn applies_exif_orientation_rotate90() {
+        // Reproduces the iPhone "rotated cover with two black bands" bug.
+        //
+        // Pixels are stored as 600x400 landscape, but the EXIF Orientation
+        // tag (value 6 = Rotate90 CW) declares the logical image is 400x600
+        // portrait. After applying the orientation the image is exact 2:3
+        // and fits 300x450 with NO padding bands.
+        //
+        // Without the EXIF fix, the decoder yields raw 600x400 pixels:
+        // thumbnail() shrinks them to ~300x200, pad_to_target() then adds
+        // two pad-coloured bands above and below the content. The assertions
+        // below sample the centre column near top and bottom, where those
+        // bands would land.
+        let rgb = RgbImage::from_pixel(600, 400, image::Rgb([200, 50, 50]));
+        let jpeg_in = jpeg_with_exif_orientation(&rgb, 6);
+
+        let out = resize_to_jpeg_thumbnail(&jpeg_in).expect("resize");
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+
+        assert_eq!(decoded.width(), COVER_MAX_WIDTH);
+        assert_eq!(decoded.height(), COVER_MAX_HEIGHT);
+
+        let top = decoded.get_pixel(150, 10);
+        assert!(
+            top[0] > 100 && top[1] < 120 && top[2] < 120,
+            "expected reddish pixel near top (no padding band), got {top:?}",
+        );
+        let bottom = decoded.get_pixel(150, 440);
+        assert!(
+            bottom[0] > 100 && bottom[1] < 120 && bottom[2] < 120,
+            "expected reddish pixel near bottom (no padding band), got {bottom:?}",
+        );
     }
 }
