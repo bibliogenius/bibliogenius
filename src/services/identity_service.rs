@@ -15,6 +15,41 @@ use crate::crypto::encryption::{
 };
 use crate::crypto::identity::NodeIdentity;
 
+/// Stable prefix surfaced to Flutter so the recovery dialog can pattern-match
+/// on the FFI exception message without parsing free-form text.
+pub const E_IDENTITY_DECRYPT_FAILED: &str = "E_IDENTITY_DECRYPT_FAILED";
+
+/// Errors returned by `IdentityService::init`.
+///
+/// `DecryptionFailed` signals that the stored `crypto_keys` row exists but cannot
+/// be decrypted with the provided `library_uuid` (typically a storage swing
+/// between Keychain and NSUserDefaults on macOS, see
+/// `memory/e2ee_identity_storage_fragility.md`). Callers MUST surface a recovery
+/// flow to the user (retry / explicit regeneration) instead of silently wiping
+/// the keys, because regeneration breaks every paired peer.
+#[derive(Debug)]
+pub enum IdentityError {
+    DecryptionFailed(String),
+    Other(String),
+}
+
+impl std::fmt::Display for IdentityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DecryptionFailed(detail) => write!(f, "{E_IDENTITY_DECRYPT_FAILED}: {detail}"),
+            Self::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for IdentityError {}
+
+impl From<String> for IdentityError {
+    fn from(msg: String) -> Self {
+        Self::Other(msg)
+    }
+}
+
 /// Thread-safe identity service. Ensures generate-once semantics.
 #[derive(Clone)]
 pub struct IdentityService {
@@ -35,11 +70,15 @@ impl IdentityService {
 
     /// Initialize or reload the node identity.
     ///
-    /// - If `crypto_keys` has existing keys for user_id=1, decrypt and load them.
+    /// - If `crypto_keys` has existing keys for user_id=0, decrypt and load them.
     /// - Otherwise, generate a fresh identity, encrypt, and store.
+    /// - If the keys exist but cannot be decrypted, return
+    ///   `IdentityError::DecryptionFailed`. Callers MUST surface a recovery flow
+    ///   (the keys are intentionally NOT auto-wiped — regeneration breaks every
+    ///   paired peer and must be a deliberate, user-confirmed action).
     ///
     /// Uses Argon2id(library_uuid) as the encryption password.
-    pub async fn init(&self, library_uuid: &str) -> Result<(), String> {
+    pub async fn init(&self, library_uuid: &str) -> Result<(), IdentityError> {
         let db = &self.db;
         let uuid = library_uuid.to_string();
 
@@ -62,19 +101,19 @@ impl IdentityService {
                         Ok(identity)
                     }
                     Err(e) if e.contains("Decryption failed") || e.contains("not 32 bytes") => {
-                        // UUID mismatch after app reset: the stored keys were
-                        // encrypted with a different library_uuid that no longer
-                        // exists (SharedPreferences cleared). The old keys are
-                        // unrecoverable - delete them and generate fresh ones.
-                        // Peers will need to re-pair (expected after a reset).
-                        tracing::warn!("Stored identity undecryptable ({e}), regenerating");
-                        delete_identity_from_db(db).await?;
-                        let identity = NodeIdentity::generate();
-                        store_identity_to_db(db, &identity, &uuid).await?;
-                        tracing::info!("Regenerated node identity after decryption failure");
-                        Ok(identity)
+                        // Stored keys cannot be decrypted with the supplied
+                        // library_uuid. Most often this is a storage swing
+                        // (Keychain ↔ NSUserDefaults on macOS) — the original
+                        // UUID is still recoverable on the device, so we MUST
+                        // NOT wipe the keys here. Bubble the typed error up;
+                        // the FFI surface translates it to a stable string the
+                        // Flutter layer matches on to show a recovery dialog.
+                        tracing::error!(
+                            "Stored identity undecryptable ({e}); refusing to silently regenerate"
+                        );
+                        Err(IdentityError::DecryptionFailed(e))
                     }
-                    Err(e) => Err(e),
+                    Err(e) => Err(IdentityError::Other(e)),
                 }
             })
             .await?;
@@ -231,8 +270,12 @@ async fn store_identity_to_db(
     Ok(())
 }
 
-/// Delete all identity keys from crypto_keys (used before regeneration).
-async fn delete_identity_from_db(db: &DatabaseConnection) -> Result<(), String> {
+/// Delete all identity keys from `crypto_keys`.
+///
+/// Used by:
+/// - `reset_app` (full reset path: wipes the row so the next init regenerates cleanly)
+/// - `confirm_regenerate_identity_ffi` (user-confirmed recovery from `DecryptionFailed`)
+pub(crate) async fn delete_identity_from_db(db: &DatabaseConnection) -> Result<(), String> {
     db.execute(Statement::from_sql_and_values(
         db.get_database_backend(),
         "DELETE FROM crypto_keys WHERE user_id = 0",
@@ -311,28 +354,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrong_uuid_regenerates_identity() {
+    async fn wrong_uuid_returns_error() {
         let db = setup_test_db().await;
 
         // Store with one UUID
         let svc1 = IdentityService::new(db.clone());
         svc1.init("correct-uuid").await.unwrap();
-        let (ed1, x1) = svc1.get_public_keys_hex().unwrap();
+        let rows_before = count_crypto_keys(&db).await;
+        assert_eq!(
+            rows_before, 2,
+            "expected 2 crypto_keys rows after first init (ed25519 + x25519)"
+        );
 
-        // Init with different UUID: old keys can't be decrypted,
-        // so a fresh identity is generated (reset/reinstall scenario).
+        // Init with a different UUID: stored keys cannot be decrypted.
+        // Pre-fix: this would silently DELETE crypto_keys + regenerate.
+        // Post-fix: it must return DecryptionFailed and leave the row intact
+        // so the original UUID can still recover the keys (e.g. after a
+        // Keychain ↔ NSUserDefaults swing).
         let svc2 = IdentityService::new(db.clone());
-        svc2.init("wrong-uuid").await.unwrap();
-        let (ed2, x2) = svc2.get_public_keys_hex().unwrap();
+        let err = svc2
+            .init("wrong-uuid")
+            .await
+            .expect_err("init must fail when UUID doesn't match stored keys");
 
-        assert_ne!(
-            ed1, ed2,
-            "Regenerated identity should have different Ed25519 key"
+        assert!(
+            matches!(err, IdentityError::DecryptionFailed(_)),
+            "expected IdentityError::DecryptionFailed, got {err:?}"
         );
-        assert_ne!(
-            x1, x2,
-            "Regenerated identity should have different X25519 key"
+        assert!(
+            err.to_string().starts_with(E_IDENTITY_DECRYPT_FAILED),
+            "Display must emit the stable prefix for Flutter to pattern-match, got {err}"
         );
+
+        let rows_after = count_crypto_keys(&db).await;
+        assert_eq!(
+            rows_after, rows_before,
+            "crypto_keys must remain intact on DecryptionFailed (no silent wipe)"
+        );
+
+        // The original UUID still works — proves the row was preserved.
+        let svc3 = IdentityService::new(db.clone());
+        svc3.init("correct-uuid").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_identity_from_db_clears_crypto_keys() {
+        // Covers the contract relied upon by reset_app and
+        // confirm_regenerate_identity_ffi: wiping the row leaves crypto_keys
+        // empty, so the next init takes the Ok(None) branch and regenerates
+        // a fresh identity without going through the DecryptionFailed path.
+        let db = setup_test_db().await;
+
+        let svc = IdentityService::new(db.clone());
+        svc.init("some-uuid").await.unwrap();
+        assert_eq!(count_crypto_keys(&db).await, 2);
+
+        delete_identity_from_db(&db).await.unwrap();
+        assert_eq!(count_crypto_keys(&db).await, 0);
+
+        // Next init on a fresh service falls through Ok(None) and regenerates.
+        let svc2 = IdentityService::new(db.clone());
+        svc2.init("brand-new-uuid").await.unwrap();
+        assert_eq!(count_crypto_keys(&db).await, 2);
+    }
+
+    async fn count_crypto_keys(db: &DatabaseConnection) -> i64 {
+        let row = db
+            .query_one(Statement::from_sql_and_values(
+                db.get_database_backend(),
+                "SELECT COUNT(*) AS n FROM crypto_keys WHERE user_id = 0",
+                [],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        row.try_get::<i64>("", "n").unwrap()
     }
 
     #[tokio::test]
