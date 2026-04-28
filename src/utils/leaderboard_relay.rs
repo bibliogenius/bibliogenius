@@ -860,8 +860,12 @@ pub async fn notify_peers_of_stats_push(state: &AppState) {
                 tracing::info!("Stats push: notified peer {} ({})", p.name, p.id);
             }
             Err(crate::services::e2ee_transport::E2eeTransportError::PeerError(404, _)) => {
+                // ADR-032: flag the peer's write_token as stale so the next
+                // hour of broadcasts short-circuit at the gate, instead of
+                // re-hammering the dead mailbox once per stats push.
+                crate::api::peer::mark_peer_invite_stale(db, p.id).await;
                 tracing::info!(
-                    "Stats push: peer {} mailbox expired (404), skipping",
+                    "Stats push: peer {} mailbox expired (404), flagged stale (ADR-032)",
                     p.name
                 );
             }

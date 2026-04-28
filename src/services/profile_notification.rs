@@ -150,8 +150,12 @@ async fn notify_peers_profile_changed(state: AppState, changed: Vec<String>) {
                 tracing::info!("Profile notify: notified peer {} ({})", p.name, p.id);
             }
             Err(crate::services::e2ee_transport::E2eeTransportError::PeerError(404, _)) => {
+                // ADR-032: flag the peer's write_token as stale so the next
+                // hour of broadcasts short-circuit at the gate, instead of
+                // re-hammering the dead mailbox once per change event.
+                crate::api::peer::mark_peer_invite_stale(state.db(), p.id).await;
                 tracing::info!(
-                    "Profile notify: peer {} mailbox expired (404), skipping",
+                    "Profile notify: peer {} mailbox expired (404), flagged stale (ADR-032)",
                     p.name
                 );
             }

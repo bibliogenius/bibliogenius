@@ -176,8 +176,12 @@ async fn notify_peers_catalog_changed(state: AppState) {
                 tracing::info!("Catalog notify: notified peer {} ({})", p.name, p.id);
             }
             Err(crate::services::e2ee_transport::E2eeTransportError::PeerError(404, _)) => {
+                // ADR-032: flag the peer's write_token as stale so the next
+                // hour of broadcasts short-circuit at the gate, instead of
+                // re-hammering the dead mailbox once per change event.
+                crate::api::peer::mark_peer_invite_stale(state.db(), p.id).await;
                 tracing::info!(
-                    "Catalog notify: peer {} mailbox expired (404), skipping",
+                    "Catalog notify: peer {} mailbox expired (404), flagged stale (ADR-032)",
                     p.name
                 );
             }
@@ -238,6 +242,90 @@ mod tests {
         assert!(
             elapsed >= NOTIFY_COOLDOWN_SECS,
             "call after cooldown should be allowed (elapsed={elapsed}s)"
+        );
+    }
+
+    /// ADR-032 wiring guard (canary for points 8 + the two sibling notifiers).
+    ///
+    /// `notify_peers_catalog_changed` must mark a peer as having a stale
+    /// `relay_write_token` when the deposit returns 404 — this is what stops
+    /// the production "165 deposits/day to a dead mailbox" loop. The three
+    /// notifiers (catalog/profile/leaderboard) share the same wiring shape:
+    /// regression here is a strong signal the same regression exists in the
+    /// other two.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn notify_peers_catalog_changed_marks_invite_stale_on_relay_404() {
+        use crate::infrastructure::AppState;
+        use crate::infrastructure::db::init_db;
+        use crate::models::peer;
+        use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Mock relay hub: every deposit POST is answered with 404, mirroring
+        // a peer whose mailbox has been recreated/purged on the hub side.
+        let relay = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/relay/mailbox/[^/]+/messages$"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&relay)
+            .await;
+
+        let db = init_db("sqlite::memory:").await.expect("init test DB");
+        let state = AppState::new(db.clone());
+        // Initialize the local crypto identity so state.crypto_service()
+        // returns Some on first access. Without this, the notifier exits
+        // early before the relay POST and the test would not exercise the
+        // 404 → mark_peer_invite_stale wiring at all.
+        state
+            .identity_service
+            .init("test-library-uuid")
+            .await
+            .expect("init identity");
+
+        // Generate a real x25519 public key for the peer so the encryption
+        // step before the POST does not bail on a malformed key.
+        let peer_secret = x25519_dalek::EphemeralSecret::random_from_rng(rand::thread_rng());
+        let peer_pub = x25519_dalek::PublicKey::from(&peer_secret);
+        let peer_x25519_hex = hex::encode(peer_pub.as_bytes());
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let peer_id = peer::ActiveModel {
+            name: Set("MockNithaM".to_string()),
+            url: Set("relay://mock-mailbox-uuid".to_string()),
+            library_uuid: Set(Some("peer-library-uuid".to_string())),
+            x25519_public_key: Set(Some(peer_x25519_hex)),
+            key_exchange_done: Set(true),
+            connection_status: Set("accepted".to_string()),
+            relay_url: Set(Some(relay.uri())),
+            mailbox_id: Set(Some("dead-mailbox-uuid".to_string())),
+            relay_write_token: Set(Some("write-token-that-points-to-nothing".to_string())),
+            relay_write_token_invalid_at: Set(None),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert peer");
+
+        // Pre-condition: no stale flag.
+        assert!(
+            peer_id.relay_write_token_invalid_at.is_none(),
+            "fresh peer must start with a clean ADR-032 flag",
+        );
+
+        super::notify_peers_catalog_changed(state).await;
+
+        // Post-condition: deposit returned 404, the wiring set the flag.
+        let reloaded = peer::Entity::find_by_id(peer_id.id)
+            .one(&db)
+            .await
+            .expect("reload peer")
+            .expect("peer exists");
+        assert!(
+            reloaded.relay_write_token_invalid_at.is_some(),
+            "ADR-032 wiring (point 8) regressed: catalog notify did not flag the peer after a deposit 404",
         );
     }
 }
