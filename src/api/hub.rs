@@ -36,7 +36,7 @@ pub async fn register_with_hub(
     let library_config = config
         .map(LibraryConfig::from)
         .unwrap_or_else(|| LibraryConfig {
-            name: "My Library".to_string(),
+            name: "Unknown Library".to_string(),
             description: None,
             tags: vec![],
             latitude: None,

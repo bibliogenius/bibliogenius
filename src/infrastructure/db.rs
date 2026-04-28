@@ -1,5 +1,7 @@
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, Statement};
 
+use crate::utils::default_library_name::compute_default_library_name_seed;
+
 pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     let db = Database::connect(database_url).await?;
 
@@ -93,14 +95,18 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
-    // Insert default library config if not exists
-    db.execute(Statement::from_string(
+    // Insert default library config if not exists. The seed name is computed
+    // from the host machine so the standalone Rust binary (MCP/CLI/tests)
+    // never registers itself as the literal placeholder "My Library". In FFI
+    // mode Flutter overwrites this seed with its own device-aware default.
+    let default_name = compute_default_library_name_seed();
+    db.execute(Statement::from_sql_and_values(
         db.get_database_backend(),
         r#"
         INSERT OR IGNORE INTO library_config (id, name, description, tags, latitude, longitude, share_location, created_at, updated_at)
-        VALUES (1, 'My Library', 'Personal book collection', '[]', NULL, NULL, 0, datetime('now'), datetime('now'))
-        "#
-        .to_owned(),
+        VALUES (1, ?, 'Personal book collection', '[]', NULL, NULL, 0, datetime('now'), datetime('now'))
+        "#,
+        [default_name.into()],
     ))
     .await?;
 

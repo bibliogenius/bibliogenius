@@ -1985,7 +1985,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn book_sync_response_includes_avatar_and_library_name() {
         let db = setup_test_db().await;
-        // init_db seeds installation_profile (id=1, no avatar) and library_config (id=1, "My Library")
+        // init_db seeds installation_profile (id=1, no avatar) and a non
+        // placeholder library_config name (see utils/default_library_name.rs).
         let avatar_json = r#"{"style":"lorelei","seed":"alice"}"#;
         set_avatar_config(&db, avatar_json).await;
 
@@ -2000,10 +2001,16 @@ mod tests {
             Some("lorelei"),
             "avatar_config style must match what was stored"
         );
-        assert_eq!(
-            response["library_name"].as_str(),
-            Some("My Library"),
-            "book_sync_request response must include library_name"
+        let library_name = response["library_name"]
+            .as_str()
+            .expect("book_sync_request response must include library_name");
+        assert!(
+            !library_name.trim().is_empty(),
+            "library_name must not be empty"
+        );
+        assert_ne!(
+            library_name, "My Library",
+            "library_name must not be the legacy placeholder"
         );
     }
 
@@ -2016,7 +2023,7 @@ mod tests {
             response.get("avatar_config").is_none(),
             "avatar_config must be absent when installation_profile has no avatar set"
         );
-        // library_config is seeded with "My Library" - library_name must always be present
+        // library_config is seeded by init_db, so library_name must always be present.
         assert!(
             response.get("library_name").is_some(),
             "library_name must be present (seeded by init_db)"

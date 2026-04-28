@@ -250,7 +250,9 @@ impl GamificationRepository for SeaOrmGamificationRepository {
     async fn get_library_name(&self) -> Result<String, DomainError> {
         let config = library_config::Entity::find_by_id(1).one(&self.db).await?;
 
-        Ok(config.map(|c| c.name).unwrap_or("My Library".to_string()))
+        Ok(config
+            .map(|c| c.name)
+            .unwrap_or_else(|| "Unknown Library".to_string()))
     }
 
     async fn get_user_id(&self) -> Result<i32, DomainError> {

@@ -42,7 +42,7 @@ pub async fn get_config(State(db): State<DatabaseConnection>) -> Result<Json<Val
             Ok(Json(json_val))
         }
         None => Ok(Json(json!({
-            "name": "My Library",
+            "name": "Unknown Library",
             "description": null,
             "tags": [],
             "enabled_modules": enabled_modules

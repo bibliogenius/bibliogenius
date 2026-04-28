@@ -367,7 +367,15 @@ pub async fn get_config(State(state): State<crate::infrastructure::AppState>) ->
             c.share_location.unwrap_or(false),
             c.show_borrowed_books.unwrap_or(false),
         ),
-        None => (0, "My Library".to_string(), None, None, None, false, false),
+        None => (
+            0,
+            "Unknown Library".to_string(),
+            None,
+            None,
+            None,
+            false,
+            false,
+        ),
     };
 
     (
