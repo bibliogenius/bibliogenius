@@ -3,3 +3,4 @@ pub mod google_books;
 pub mod inventaire;
 pub mod openlibrary;
 pub mod sudoc;
+pub mod unimarc;

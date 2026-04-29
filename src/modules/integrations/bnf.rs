@@ -421,9 +421,6 @@ LIMIT 1
 /// Search for a book by ISBN on catalogue.bnf.fr (SRU API)
 /// This has better coverage than the SPARQL endpoint for recent books
 pub async fn lookup_bnf_sru(isbn: &str) -> Result<Option<BnfBook>, String> {
-    use quick_xml::events::Event;
-    use quick_xml::reader::Reader;
-
     let clean_isbn = isbn.replace('-', "");
     let cache_key = format!("isbn:{}", clean_isbn);
 
@@ -464,19 +461,49 @@ pub async fn lookup_bnf_sru(isbn: &str) -> Result<Option<BnfBook>, String> {
         return Ok(None);
     }
 
-    // Parse MARC XML
-    let mut reader = Reader::from_str(&xml);
+    let parsed = match parse_bnf_sru_record(&xml, &clean_isbn)? {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let (mut book, pending_cover_url) = parsed;
+
+    // Validate cover URL asynchronously (catalogue.bnf.fr often returns 500)
+    if let Some(url) = pending_cover_url {
+        book.cover_url = validate_bnf_cover_url(&url).await;
+    }
+
+    // Store in cache
+    if let Ok(mut cache) = BNF_SRU_CACHE.try_lock() {
+        if cache.len() >= MAX_CACHE_ENTRIES {
+            cache.retain(|_, entry| entry.created_at.elapsed() < CACHE_TTL);
+        }
+        cache.insert(
+            cache_key,
+            CacheEntry {
+                data: vec![book.clone()],
+                created_at: Instant::now(),
+            },
+        );
+    }
+
+    Ok(Some(book))
+}
+
+/// Parse a single BNF SRU record (one-result XML response) into a `BnfBook`,
+/// alongside an unvalidated cover URL the caller may want to HEAD-check.
+///
+/// Sync, no I/O — extracted for testability with fixture XML.
+fn parse_bnf_sru_record(
+    xml: &str,
+    clean_isbn: &str,
+) -> Result<Option<(BnfBook, Option<String>)>, String> {
+    use quick_xml::events::Event;
+    use quick_xml::reader::Reader;
+
+    let mut reader = Reader::from_str(xml);
     reader.trim_text(true);
 
-    let mut title = String::new();
-    let mut author: Option<String> = None;
-    let mut author_surname: Option<String> = None;
-    let mut author_firstname: Option<String> = None;
-    let mut publisher: Option<String> = None;
-    let mut year: Option<i32> = None;
-    let mut description: Option<String> = None;
-    let mut ark_id: Option<String> = None;
-
+    let mut builder = BnfBookBuilder::default();
     let mut buf = Vec::new();
     let mut current_tag = String::new();
     let mut current_code = String::new();
@@ -516,37 +543,47 @@ pub async fn lookup_bnf_sru(isbn: &str) -> Result<Option<BnfBook>, String> {
             Ok(Event::Text(e)) => {
                 let text = e.unescape().unwrap_or_default().to_string();
 
-                // Control fields (003 = ARK URL)
                 if in_controlfield
                     && controlfield_tag == "003"
                     && let Some(ark_start) = text.find("ark:/12148/")
                 {
-                    ark_id = Some(text[ark_start..].to_string());
+                    builder.ark_id = Some(text[ark_start..].to_string());
                 }
 
-                // Data fields
                 if in_subfield {
                     match (current_tag.as_str(), current_code.as_str()) {
-                        // Title (200 $a)
-                        ("200", "a") => title = text,
-                        // Author from 200 $f (simple form)
-                        ("200", "f") if author.is_none() => author = Some(text),
-                        // Author from 700 $a (surname) and $b (firstname)
-                        ("700", "a") | ("701", "a") => author_surname = Some(text),
-                        ("700", "b") | ("701", "b") => author_firstname = Some(text),
-                        // Publisher (214 $c for new UNIMARC, 210 $c for old)
-                        ("214", "c") | ("210", "c") => publisher = Some(text),
-                        // Year (214 $d or 210 $d) - extract 4 digits
+                        ("200", "a") => builder.title = text,
+                        ("200", "f") if builder.responsibility_200f.is_none() => {
+                            builder.responsibility_200f = Some(text)
+                        }
+                        ("700", "a") if builder.author_700.1.is_none() => {
+                            builder.author_700.1 = Some(text)
+                        }
+                        ("700", "b") if builder.author_700.0.is_none() => {
+                            builder.author_700.0 = Some(text)
+                        }
+                        ("701", "a") if builder.author_701.1.is_none() => {
+                            builder.author_701.1 = Some(text)
+                        }
+                        ("701", "b") if builder.author_701.0.is_none() => {
+                            builder.author_701.0 = Some(text)
+                        }
+                        ("702", "a") if builder.author_702.1.is_none() => {
+                            builder.author_702.1 = Some(text)
+                        }
+                        ("702", "b") if builder.author_702.0.is_none() => {
+                            builder.author_702.0 = Some(text)
+                        }
+                        ("214", "c") | ("210", "c") => builder.publisher = Some(text),
                         ("214", "d") | ("210", "d") => {
-                            year = text
+                            builder.year = text
                                 .chars()
                                 .filter(|c| c.is_ascii_digit())
                                 .collect::<String>()
                                 .get(0..4)
                                 .and_then(|y| y.parse::<i32>().ok());
                         }
-                        // Description/Summary (330 $a)
-                        ("330", "a") => description = Some(text),
+                        ("330", "a") => builder.description = Some(text),
                         _ => {}
                     }
                 }
@@ -571,55 +608,12 @@ pub async fn lookup_bnf_sru(isbn: &str) -> Result<Option<BnfBook>, String> {
         buf.clear();
     }
 
-    if title.is_empty() {
-        return Ok(None);
+    // Default the ISBN to the lookup key when the record didn't carry it.
+    if builder.isbn.is_none() {
+        builder.isbn = Some(clean_isbn.to_string());
     }
 
-    // Build author from structured fields if not found in 200$f
-    if author.is_none() {
-        if let (Some(surname), Some(firstname)) = (&author_surname, &author_firstname) {
-            author = Some(format!("{} {}", firstname, surname));
-        } else if let Some(surname) = author_surname {
-            author = Some(surname);
-        }
-    }
-
-    // Build cover URL from ARK ID and validate it (catalogue.bnf.fr often returns 500)
-    let cover_url = if let Some(ark) = &ark_id {
-        let url = catalogue_cover_url_from_ark(ark);
-        validate_bnf_cover_url(&url).await
-    } else {
-        None
-    };
-
-    let book = BnfBook {
-        title,
-        author,
-        publisher,
-        publication_year: year,
-        isbn: Some(clean_isbn.clone()),
-        cover_url,
-        bnf_uri: ark_id
-            .map(|a| format!("https://catalogue.bnf.fr/{}", a))
-            .unwrap_or_default(),
-        description,
-    };
-
-    // Store in cache
-    if let Ok(mut cache) = BNF_SRU_CACHE.try_lock() {
-        if cache.len() >= MAX_CACHE_ENTRIES {
-            cache.retain(|_, entry| entry.created_at.elapsed() < CACHE_TTL);
-        }
-        cache.insert(
-            format!("isbn:{}", clean_isbn),
-            CacheEntry {
-                data: vec![book.clone()],
-                created_at: Instant::now(),
-            },
-        );
-    }
-
-    Ok(Some(book))
+    Ok(builder.build())
 }
 
 /// Search books by title/author on catalogue.bnf.fr (SRU API)
@@ -757,11 +751,27 @@ pub async fn search_bnf_sru(
                 if in_subfield {
                     match (current_tag.as_str(), current_code.as_str()) {
                         ("200", "a") => current_book.title = text,
-                        ("200", "f") if current_book.author.is_none() => {
-                            current_book.author = Some(text)
+                        ("200", "f") if current_book.responsibility_200f.is_none() => {
+                            current_book.responsibility_200f = Some(text)
                         }
-                        ("700", "a") | ("701", "a") => current_book.author_surname = Some(text),
-                        ("700", "b") | ("701", "b") => current_book.author_firstname = Some(text),
+                        ("700", "a") if current_book.author_700.1.is_none() => {
+                            current_book.author_700.1 = Some(text)
+                        }
+                        ("700", "b") if current_book.author_700.0.is_none() => {
+                            current_book.author_700.0 = Some(text)
+                        }
+                        ("701", "a") if current_book.author_701.1.is_none() => {
+                            current_book.author_701.1 = Some(text)
+                        }
+                        ("701", "b") if current_book.author_701.0.is_none() => {
+                            current_book.author_701.0 = Some(text)
+                        }
+                        ("702", "a") if current_book.author_702.1.is_none() => {
+                            current_book.author_702.1 = Some(text)
+                        }
+                        ("702", "b") if current_book.author_702.0.is_none() => {
+                            current_book.author_702.0 = Some(text)
+                        }
                         ("214", "c") | ("210", "c") => current_book.publisher = Some(text),
                         ("214", "d") | ("210", "d") => {
                             current_book.year = text
@@ -844,9 +854,15 @@ pub async fn search_bnf_sru(
 #[derive(Default)]
 struct BnfBookBuilder {
     title: String,
-    author: Option<String>,
-    author_surname: Option<String>,
-    author_firstname: Option<String>,
+    /// UNIMARC `200 $f` — statement of responsibility (free text). Used as a
+    /// last-resort fallback only; structured `7XX` fields take precedence.
+    responsibility_200f: Option<String>,
+    /// (firstname, surname) from UNIMARC `700` (main author).
+    author_700: (Option<String>, Option<String>),
+    /// `701` (alternative author).
+    author_701: (Option<String>, Option<String>),
+    /// `702` (secondary contributor — translator/editor/annotator).
+    author_702: (Option<String>, Option<String>),
     publisher: Option<String>,
     year: Option<i32>,
     isbn: Option<String>,
@@ -861,13 +877,12 @@ impl BnfBookBuilder {
             return None;
         }
 
-        let author = self
-            .author
-            .or_else(|| match (&self.author_firstname, &self.author_surname) {
-                (Some(f), Some(s)) => Some(format!("{} {}", f, s)),
-                (None, Some(s)) => Some(s.clone()),
-                _ => None,
-            });
+        let author = super::unimarc::compose_author(
+            self.author_700,
+            self.author_701,
+            self.author_702,
+            self.responsibility_200f,
+        );
 
         // Cover URL is NOT set here (sync context). The caller must validate
         // asynchronously via `validate_bnf_cover_url` after build.
@@ -898,6 +913,53 @@ impl BnfBookBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real BNF SRU UNIMARC record for ISBN 9782367321257
+    /// (Le voyage de Magellan, Pigafetta / Castro).
+    /// This record has no `700` (main author) and only a `702` for Castro,
+    /// plus a `200 $f` free-text statement of responsibility. The parser must
+    /// fall back to `702`, never to the `200 $f` sentence.
+    const BNF_SRU_PIGAFETTA_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/bnf_sru_9782367321257.xml");
+
+    #[test]
+    fn parse_bnf_sru_record_falls_back_to_702_over_200f() {
+        let parsed = parse_bnf_sru_record(BNF_SRU_PIGAFETTA_FIXTURE, "9782367321257")
+            .expect("parser must not error on real BNF response")
+            .expect("record must be parsed into a book");
+        let (book, _pending_cover) = parsed;
+        assert_eq!(book.title, "Le voyage de Magellan, 1519-1522");
+        assert_eq!(
+            book.author.as_deref(),
+            Some("Xavier de Castro"),
+            "Author must come from UNIMARC 702 (no 700/701 in this record), \
+             not the 200$f responsibility statement",
+        );
+        assert_eq!(book.isbn.as_deref(), Some("9782367321257"));
+    }
+
+    #[test]
+    fn bnf_book_builder_prefers_700_over_responsibility() {
+        let builder = BnfBookBuilder {
+            title: "T".into(),
+            author_700: (Some("Antonio".into()), Some("Pigafetta".into())),
+            responsibility_200f: Some("présenté par Xavier de Castro".into()),
+            ..Default::default()
+        };
+        let (book, _) = builder.build().expect("build should succeed");
+        assert_eq!(book.author.as_deref(), Some("Antonio Pigafetta"));
+    }
+
+    #[test]
+    fn bnf_book_builder_uses_responsibility_when_no_7xx() {
+        let builder = BnfBookBuilder {
+            title: "T".into(),
+            responsibility_200f: Some("anonymous".into()),
+            ..Default::default()
+        };
+        let (book, _) = builder.build().expect("build should succeed");
+        assert_eq!(book.author.as_deref(), Some("anonymous"));
+    }
 
     #[tokio::test]
     async fn test_search_bnf() {

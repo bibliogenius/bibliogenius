@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?><srw:searchRetrieveResponse xmlns:srw="http://www.loc.gov/zing/srw/" xmlns="http://catalogue.bnf.fr/namespaces/InterXMarc" xmlns:ixm="http://catalogue.bnf.fr/namespaces/InterXMarc" xmlns:mn="http://catalogue.bnf.fr/namespaces/motsnotices" xmlns:sd="http://www.loc.gov/zing/srw/diagnostic/">
+<srw:version>1.2</srw:version>
+<srw:echoedSearchRetrieveRequest>
+<srw:version>1.2</srw:version>
+<srw:query>bib.isbn any "9782367321257"</srw:query>
+</srw:echoedSearchRetrieveRequest>
+<srw:numberOfRecords>1</srw:numberOfRecords>
+<srw:records>
+<srw:record>
+<srw:recordSchema>marcxchange</srw:recordSchema>
+<srw:recordPacking>xml</srw:recordPacking>
+<srw:recordData>
+<mxc:record xmlns:mxc="info:lc/xmlns/marcxchange-v2" format="UNIMARC" id="ark:/12148/cb45425087c" type="Bibliographic">
+<mxc:leader>     cam  22        450 </mxc:leader>
+<mxc:controlfield tag="001">FRBNF454250870000006</mxc:controlfield>
+<mxc:controlfield tag="003">http://catalogue.bnf.fr/ark:/12148/cb45425087c</mxc:controlfield>
+<mxc:datafield tag="010" ind1=" " ind2=" ">
+<mxc:subfield code="a">978-2-36732-125-7</mxc:subfield>
+<mxc:subfield code="b">br.</mxc:subfield>
+<mxc:subfield code="d">14,50 EUR</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="020" ind1=" " ind2=" ">
+<mxc:subfield code="a">FR</mxc:subfield>
+<mxc:subfield code="b">01830617</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="073" ind1=" " ind2="0">
+<mxc:subfield code="a">9782367321257</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="100" ind1=" " ind2=" ">
+<mxc:subfield code="a">20180112d2017    m  y0frey50      ba</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="101" ind1="0" ind2=" ">
+<mxc:subfield code="a">fre</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="102" ind1=" " ind2=" ">
+<mxc:subfield code="a">FR</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="105" ind1=" " ind2=" ">
+<mxc:subfield code="a">||||z   00|y|</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="106" ind1=" " ind2=" ">
+<mxc:subfield code="a">r</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="181" ind1=" " ind2="0">
+<mxc:subfield code="6">01</mxc:subfield>
+<mxc:subfield code="a">i </mxc:subfield>
+<mxc:subfield code="b">xxxe  </mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="181" ind1=" " ind2=" ">
+<mxc:subfield code="6">02</mxc:subfield>
+<mxc:subfield code="c">txt</mxc:subfield>
+<mxc:subfield code="2">rdacontent</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="182" ind1=" " ind2="0">
+<mxc:subfield code="6">01</mxc:subfield>
+<mxc:subfield code="a">n</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="182" ind1=" " ind2=" ">
+<mxc:subfield code="6">02</mxc:subfield>
+<mxc:subfield code="c">n</mxc:subfield>
+<mxc:subfield code="2">rdamedia</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="200" ind1="1" ind2=" ">
+<mxc:subfield code="a">Le voyage de Magellan, 1519-1522</mxc:subfield>
+<mxc:subfield code="b">Texte imprimé</mxc:subfield>
+<mxc:subfield code="e">la relation d'Antonio Pigafetta du premier voyage autour du monde</mxc:subfield>
+<mxc:subfield code="f">transcrite, présentée &amp; annotée par Xavier de Castro</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="205" ind1=" " ind2=" ">
+<mxc:subfield code="a">Nouv. éd. abrégée avec mises à jour</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="214" ind1=" " ind2="0">
+<mxc:subfield code="a">Paris</mxc:subfield>
+<mxc:subfield code="c">Éditions Chandeigne</mxc:subfield>
+<mxc:subfield code="d">DL 2017</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="214" ind1=" " ind2="3">
+<mxc:subfield code="a">impr. en République tchèque</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="215" ind1=" " ind2=" ">
+<mxc:subfield code="a">1 vol. (349 p.)</mxc:subfield>
+<mxc:subfield code="d">18 cm</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="225" ind1="|" ind2=" ">
+<mxc:subfield code="a">Magellane poche</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="300" ind1=" " ind2=" ">
+<mxc:subfield code="a">Contient : "Navigation &amp; découvrement de l'Inde supérieure &amp; îles de Malucque, où naissent les clous de girofle" / faite par Antonio Pigafetta</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="300" ind1=" " ind2=" ">
+<mxc:subfield code="a">Bibliogr.  p. 341-344. Index</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="330" ind1=" " ind2=" ">
+<mxc:subfield code="a">Magellan est le plus connu des navigateurs, son voyage, la plus extraordinaire des aventures, mais des dizaines d'erreurs et d'approximations, invariablement reprises de livre en livre, circulaient malheureusement dans tous les ouvrages, même réputés sérieux, notamment la biographie de Zweig. L'édition critique de l'intégralité des sources directes sur le Voyage de Magellan (1050 p.), publiée en 2007 par les éditions Chandeigne a pu rectifier ces erreurs et faire de nombreuses découvertes sur cette expédition. Elle est devenue l'ouvrage de référence dans le monde. Ce livre de poche fait la synthèse de cette édition critique. Il donne à lire le récit de Pigafetta, le plus célèbre des témoignages, accompagné des itinéraires détaillés. Un cahier couleurs rassemble les cartes de l'époque. L'appareil de notes développe les principaux apports de l'édition de 2007 et ajoute, chapitre par chapitre, tout ce que la relation de Pigafetta omet. Une annexe traite des navires et des équipages, dont la liste et le nombre ont été pour la première fois établis en détails. Ce livre de poche devient donc désormais l'édition de référence, accessible à tous, de la relation d'Antonio Pigafetta et du voyage de Magellan. La relation d'Antonio Pigafetta du premier tour du monde 1519-1522</mxc:subfield>
+<mxc:subfield code="2">éditeur</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="410" ind1=" " ind2="0">
+<mxc:subfield code="0">36132021</mxc:subfield>
+<mxc:subfield code="t">Magellane poche</mxc:subfield>
+<mxc:subfield code="x">1287-0269</mxc:subfield>
+<mxc:subfield code="d">2017</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="600" ind1=" " ind2="|">
+<mxc:subfield code="3">11935241</mxc:subfield>
+<mxc:subfield code="a">Magellan</mxc:subfield>
+<mxc:subfield code="b">Fernand de</mxc:subfield>
+<mxc:subfield code="f">1480?-1521</mxc:subfield>
+<mxc:subfield code="3">12653273</mxc:subfield>
+<mxc:subfield code="x">Voyages</mxc:subfield>
+<mxc:subfield code="2">rameau</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="676" ind1=" " ind2=" ">
+<mxc:subfield code="a">910.410 9031</mxc:subfield>
+<mxc:subfield code="v">23</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="686" ind1=" " ind2=" ">
+<mxc:subfield code="a">910</mxc:subfield>
+<mxc:subfield code="2">Cadre de classement de la Bibliographie nationale française</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="702" ind1=" " ind2="|">
+<mxc:subfield code="3">12329313</mxc:subfield>
+<mxc:subfield code="o">ISNI0000000121231009</mxc:subfield>
+<mxc:subfield code="a">Castro</mxc:subfield>
+<mxc:subfield code="b">Xavier de</mxc:subfield>
+<mxc:subfield code="f">1957-....</mxc:subfield>
+<mxc:subfield code="4">340</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="801" ind1=" " ind2="0">
+<mxc:subfield code="a">FR</mxc:subfield>
+<mxc:subfield code="b">FR-751131015</mxc:subfield>
+<mxc:subfield code="c">20180112</mxc:subfield>
+<mxc:subfield code="g">AFNOR</mxc:subfield>
+<mxc:subfield code="h">FRBNF454250870000006</mxc:subfield>
+<mxc:subfield code="2">intermrc</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="856" ind1=" " ind2="2">
+<mxc:subfield code="u">290596</mxc:subfield>
+<mxc:subfield code="b">Première de couverture</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="930" ind1=" " ind2=" ">
+<mxc:subfield code="5">FR-751131007:45425087001001</mxc:subfield>
+<mxc:subfield code="a">2018-6111</mxc:subfield>
+<mxc:subfield code="b">759999999</mxc:subfield>
+<mxc:subfield code="c">Tolbiac - Rez de Jardin - Philosophie, histoire, sciences de l'homme - Magasin</mxc:subfield>
+<mxc:subfield code="d">O</mxc:subfield>
+</mxc:datafield>
+<mxc:datafield tag="930" ind1=" " ind2=" ">
+<mxc:subfield code="5">FR-751131007:45425087002001</mxc:subfield>
+<mxc:subfield code="a">909/330 CAST v</mxc:subfield>
+<mxc:subfield code="b">759999999</mxc:subfield>
+<mxc:subfield code="c">Tolbiac - Haut de Jardin - Philosophie, histoire, sciences de l'homme - Salle J - Libre accès</mxc:subfield>
+<mxc:subfield code="d">N</mxc:subfield>
+</mxc:datafield>
+</mxc:record>      </srw:recordData>
+<srw:recordIdentifier>ark:/12148/cb45425087c</srw:recordIdentifier>
+<srw:recordPosition>1</srw:recordPosition>
+<srw:extraRecordData>
+<ixm:attr name="CreationDate">20180112</ixm:attr>
+<ixm:attr name="LastModificationDate">20231222</ixm:attr>
+<mn:score>6.4376454</mn:score>
+</srw:extraRecordData>
+</srw:record>
+</srw:records>
+</srw:searchRetrieveResponse>

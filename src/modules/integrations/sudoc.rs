@@ -113,12 +113,21 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
     reader.trim_text(true);
 
     let mut title = String::new();
-    let mut author = None;
     let mut publisher = None;
     let mut year = None;
     let mut dewey = None;
     let mut subjects = Vec::new();
     let mut summary = None;
+
+    // UNIMARC author candidates, in priority order.
+    // 700 = main author, 701 = alternative, 702 = secondary (translator/editor).
+    // 200 $f is the free-text statement of responsibility and must only be a
+    // last-resort fallback (it contains sentences like "présenté par X", not
+    // a clean author name).
+    let mut author_700: (Option<String>, Option<String>) = (None, None);
+    let mut author_701: (Option<String>, Option<String>) = (None, None);
+    let mut author_702: (Option<String>, Option<String>) = (None, None);
+    let mut responsibility_200f: Option<String> = None;
 
     let mut buf = Vec::new();
     let mut current_tag = String::new();
@@ -128,12 +137,13 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
     // Note: SUDOC XML is MARCXML-like but specific (UNIMARC).
     // We look for specific datafields.
     // 200 $a = Title
-    // 200 $f = Author
+    // 200 $f = Statement of responsibility (free text, fallback only)
     // 210 $c = Publisher
     // 210 $d = Year
     // 330 $a = Summary / abstract (4ème de couverture)
     // 676 $a = Dewey
     // 606 $a = Subject (RAMEAU)
+    // 700/701/702 $a = Author surname, $b = Author firstname
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -161,7 +171,15 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
 
                 match (current_tag.as_str(), current_code.as_str()) {
                     ("200", "a") => title = text,
-                    ("200", "f") => author = Some(text),
+                    ("200", "f") if responsibility_200f.is_none() => {
+                        responsibility_200f = Some(text)
+                    }
+                    ("700", "a") if author_700.1.is_none() => author_700.1 = Some(text),
+                    ("700", "b") if author_700.0.is_none() => author_700.0 = Some(text),
+                    ("701", "a") if author_701.1.is_none() => author_701.1 = Some(text),
+                    ("701", "b") if author_701.0.is_none() => author_701.0 = Some(text),
+                    ("702", "a") if author_702.1.is_none() => author_702.1 = Some(text),
+                    ("702", "b") if author_702.0.is_none() => author_702.0 = Some(text),
                     ("210", "c") => publisher = Some(text),
                     ("210", "d") => {
                         // Extract year (first 4 digits)
@@ -197,6 +215,9 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
         buf.clear();
     }
 
+    let author =
+        super::unimarc::compose_author(author_700, author_701, author_702, responsibility_200f);
+
     Ok(SudocBook {
         title,
         author,
@@ -208,4 +229,28 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
         ppn: ppn.to_string(),
         raw_data: Some(xml.to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real SUDOC UNIMARC record for ISBN 9782367321257
+    /// (Le voyage de Magellan, Pigafetta / Castro).
+    /// The record has both `700` (Pigafetta, primary author) and `200 $f`
+    /// ("transcrite, présentée & annotée par Xavier de Castro" — a free-text
+    /// statement of responsibility). Author must come from `700`, not `200 $f`.
+    const SUDOC_PIGAFETTA_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/sudoc_9782367321257.xml");
+
+    #[test]
+    fn parses_author_from_700_not_200f() {
+        let book = parse_sudoc_xml(SUDOC_PIGAFETTA_FIXTURE, "224415891").unwrap();
+        assert_eq!(book.title, "Le voyage de Magellan");
+        assert_eq!(
+            book.author.as_deref(),
+            Some("Antonio Pigafetta"),
+            "Author must come from UNIMARC 700, not the 200$f responsibility statement",
+        );
+    }
 }
