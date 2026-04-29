@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -691784876;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1462346503;
 
 // Section: executor
 
@@ -6239,6 +6239,57 @@ fn wire__crate__api__frb__update_tag_impl(
         },
     )
 }
+fn wire__crate__api__frb__write_backup_ffi_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "write_backup_ffi",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_output_path = <String>::sse_decode(&mut deserializer);
+            let api_secret_bytes = <Vec<u8>>::sse_decode(&mut deserializer);
+            let api_unlock_kind = <String>::sse_decode(&mut deserializer);
+            let api_library_uuid = <String>::sse_decode(&mut deserializer);
+            let api_include_identity = <bool>::sse_decode(&mut deserializer);
+            let api_prefs_json = <String>::sse_decode(&mut deserializer);
+            let api_cover_dir = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::write_backup_ffi(
+                            api_output_path,
+                            api_secret_bytes,
+                            api_unlock_kind,
+                            api_library_uuid,
+                            api_include_identity,
+                            api_prefs_json,
+                            api_cover_dir,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 
 // Section: dart2rust
 
@@ -6341,6 +6392,50 @@ impl SseDecode for f64 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_f64::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbBackupSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_archivePath = <String>::sse_decode(deserializer);
+        let mut var_archiveSizeBytes = <i64>::sse_decode(deserializer);
+        let mut var_identityIncluded = <bool>::sse_decode(deserializer);
+        let mut var_exportedAt = <String>::sse_decode(deserializer);
+        let mut var_libraryUuid = <String>::sse_decode(deserializer);
+        let mut var_schemaVersion = <i64>::sse_decode(deserializer);
+        let mut var_formatVersion = <String>::sse_decode(deserializer);
+        let mut var_booksCount = <i64>::sse_decode(deserializer);
+        let mut var_copiesCount = <i64>::sse_decode(deserializer);
+        let mut var_loansCount = <i64>::sse_decode(deserializer);
+        let mut var_contactsCount = <i64>::sse_decode(deserializer);
+        let mut var_authorsCount = <i64>::sse_decode(deserializer);
+        let mut var_tagsCount = <i64>::sse_decode(deserializer);
+        let mut var_collectionsCount = <i64>::sse_decode(deserializer);
+        let mut var_peersCount = <i64>::sse_decode(deserializer);
+        let mut var_salesCount = <i64>::sse_decode(deserializer);
+        let mut var_coversCount = <i64>::sse_decode(deserializer);
+        let mut var_manifestJson = <String>::sse_decode(deserializer);
+        return crate::api::frb::FrbBackupSummary {
+            archive_path: var_archivePath,
+            archive_size_bytes: var_archiveSizeBytes,
+            identity_included: var_identityIncluded,
+            exported_at: var_exportedAt,
+            library_uuid: var_libraryUuid,
+            schema_version: var_schemaVersion,
+            format_version: var_formatVersion,
+            books_count: var_booksCount,
+            copies_count: var_copiesCount,
+            loans_count: var_loansCount,
+            contacts_count: var_contactsCount,
+            authors_count: var_authorsCount,
+            tags_count: var_tagsCount,
+            collections_count: var_collectionsCount,
+            peers_count: var_peersCount,
+            sales_count: var_salesCount,
+            covers_count: var_coversCount,
+            manifest_json: var_manifestJson,
+        };
     }
 }
 
@@ -8445,6 +8540,7 @@ fn pde_ffi_dispatcher_primary_impl(
             wire__crate__api__frb__update_peer_library_uuid_impl(port, ptr, rust_vec_len, data_len)
         }
         167 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
+        168 => wire__crate__api__frb__write_backup_ffi_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -8469,6 +8565,43 @@ fn pde_ffi_dispatcher_sync_impl(
 
 // Section: rust2dart
 
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbBackupSummary {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.archive_path.into_into_dart().into_dart(),
+            self.archive_size_bytes.into_into_dart().into_dart(),
+            self.identity_included.into_into_dart().into_dart(),
+            self.exported_at.into_into_dart().into_dart(),
+            self.library_uuid.into_into_dart().into_dart(),
+            self.schema_version.into_into_dart().into_dart(),
+            self.format_version.into_into_dart().into_dart(),
+            self.books_count.into_into_dart().into_dart(),
+            self.copies_count.into_into_dart().into_dart(),
+            self.loans_count.into_into_dart().into_dart(),
+            self.contacts_count.into_into_dart().into_dart(),
+            self.authors_count.into_into_dart().into_dart(),
+            self.tags_count.into_into_dart().into_dart(),
+            self.collections_count.into_into_dart().into_dart(),
+            self.peers_count.into_into_dart().into_dart(),
+            self.sales_count.into_into_dart().into_dart(),
+            self.covers_count.into_into_dart().into_dart(),
+            self.manifest_json.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbBackupSummary
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbBackupSummary>
+    for crate::api::frb::FrbBackupSummary
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbBackupSummary {
+        self
+    }
+}
 // Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbBook {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
@@ -9773,6 +9906,30 @@ impl SseEncode for f64 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_f64::<NativeEndian>(self).unwrap();
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbBackupSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.archive_path, serializer);
+        <i64>::sse_encode(self.archive_size_bytes, serializer);
+        <bool>::sse_encode(self.identity_included, serializer);
+        <String>::sse_encode(self.exported_at, serializer);
+        <String>::sse_encode(self.library_uuid, serializer);
+        <i64>::sse_encode(self.schema_version, serializer);
+        <String>::sse_encode(self.format_version, serializer);
+        <i64>::sse_encode(self.books_count, serializer);
+        <i64>::sse_encode(self.copies_count, serializer);
+        <i64>::sse_encode(self.loans_count, serializer);
+        <i64>::sse_encode(self.contacts_count, serializer);
+        <i64>::sse_encode(self.authors_count, serializer);
+        <i64>::sse_encode(self.tags_count, serializer);
+        <i64>::sse_encode(self.collections_count, serializer);
+        <i64>::sse_encode(self.peers_count, serializer);
+        <i64>::sse_encode(self.sales_count, serializer);
+        <i64>::sse_encode(self.covers_count, serializer);
+        <String>::sse_encode(self.manifest_json, serializer);
     }
 }
 

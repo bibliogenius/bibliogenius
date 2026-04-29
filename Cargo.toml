@@ -113,6 +113,11 @@ hex = "0.4"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
+# Local backup archive (.bgbackup). Default features pull deflate via
+# flate2 + a couple of others; the compile cost is acceptable and we want
+# a simple, well-tested feature set for archive interop.
+zip = "2"
+
 [profile.release]
 strip = true
 lto = true
@@ -126,3 +131,4 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "native-tls",
 ] }
+tempfile = "3"

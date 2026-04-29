@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod auth;
 pub mod author;
+pub mod backup;
 pub mod batch;
 pub mod books;
 pub mod chat;

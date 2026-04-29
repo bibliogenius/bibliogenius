@@ -5904,3 +5904,131 @@ pub async fn delete_book_note(id: i32) -> Result<(), String> {
     let _ = crate::sync::log_operation(db, "book_note", id, "DELETE", None).await;
     Ok(())
 }
+
+// ============ Local Backup (.bgbackup) — FFI (ADR-037) ============
+
+/// Summary of a successfully written `.bgbackup` archive, returned to the
+/// Flutter caller. Counts and sizes are surfaced as `i64` for FFI
+/// portability (Dart `int` is signed 64-bit on native).
+#[frb(dart_metadata = ("freezed"))]
+pub struct FrbBackupSummary {
+    pub archive_path: String,
+    pub archive_size_bytes: i64,
+    pub identity_included: bool,
+    pub exported_at: String,
+    pub library_uuid: String,
+    pub schema_version: i64,
+    pub format_version: String,
+    pub books_count: i64,
+    pub copies_count: i64,
+    pub loans_count: i64,
+    pub contacts_count: i64,
+    pub authors_count: i64,
+    pub tags_count: i64,
+    pub collections_count: i64,
+    pub peers_count: i64,
+    pub sales_count: i64,
+    pub covers_count: i64,
+    /// Full manifest serialized as JSON. Already public in clear inside
+    /// the archive itself; safe to surface to the UI for diagnostics.
+    pub manifest_json: String,
+}
+
+impl FrbBackupSummary {
+    fn try_from_summary(s: crate::api::backup::BackupSummary) -> Result<Self, String> {
+        let manifest_json =
+            serde_json::to_string(&s.manifest).map_err(|e| format!("manifest serialize: {e}"))?;
+        Ok(Self {
+            archive_path: s.archive_path.to_string_lossy().into_owned(),
+            archive_size_bytes: s.archive_size_bytes as i64,
+            identity_included: s.manifest.identity_included,
+            exported_at: s.manifest.exported_at.clone(),
+            library_uuid: s.manifest.library_uuid.clone(),
+            schema_version: s.manifest.schema_version as i64,
+            format_version: s.manifest.format_version.clone(),
+            books_count: s.manifest.counts.books as i64,
+            copies_count: s.manifest.counts.copies as i64,
+            loans_count: s.manifest.counts.loans as i64,
+            contacts_count: s.manifest.counts.contacts as i64,
+            authors_count: s.manifest.counts.authors as i64,
+            tags_count: s.manifest.counts.tags as i64,
+            collections_count: s.manifest.counts.collections as i64,
+            peers_count: s.manifest.counts.peers as i64,
+            sales_count: s.manifest.counts.sales as i64,
+            covers_count: s.manifest.covers.len() as i64,
+            manifest_json,
+        })
+    }
+}
+
+/// Write a `.bgbackup` archive at `output_path` (ADR-037).
+///
+/// `unlock_kind` accepts `"recovery_code"` or `"passphrase"`. Any other
+/// value yields an error before any heavy work runs.
+///
+/// `secret_bytes` carries the resolved passphrase or recovery code as raw
+/// UTF-8 bytes. Crossing the FFI as `Uint8List` (rather than `String`)
+/// lets the Flutter caller clear the buffer in place via
+/// `fillRange(0, len, 0)` after the call returns; Dart `String` is
+/// immutable and cannot be wiped reliably.
+///
+/// The Rust side wraps `secret_bytes` in `Zeroizing` so it is also
+/// scrubbed on every return path (including panics) before write_backup
+/// makes its own internal copy.
+///
+/// `include_identity = true` packs the Ed25519 + X25519 secret bytes in
+/// `identity.bin` (Option C clone mode). The identity must already be
+/// initialized via `init_identity_ffi`; otherwise the call returns an
+/// error before any file is touched on disk.
+///
+/// `cover_dir` is the on-disk directory where local cover images live;
+/// hub-hosted URLs are detected by their `http(s)://` prefix and skipped.
+pub async fn write_backup_ffi(
+    output_path: String,
+    secret_bytes: Vec<u8>,
+    unlock_kind: String,
+    library_uuid: String,
+    include_identity: bool,
+    prefs_json: String,
+    cover_dir: String,
+) -> Result<FrbBackupSummary, String> {
+    use std::path::Path;
+    use zeroize::Zeroizing;
+
+    let db_conn = db().ok_or("Database not initialized")?;
+
+    let unlock = match unlock_kind.as_str() {
+        "recovery_code" => crate::api::backup::UnlockKind::RecoveryCode,
+        "passphrase" => crate::api::backup::UnlockKind::Passphrase,
+        other => return Err(format!("invalid unlock_kind: {other}")),
+    };
+
+    // Resolve identity bytes BEFORE running heavy work so a misconfigured
+    // call fails fast (no Argon2, no VACUUM, no partial archive).
+    let identity_bytes = if include_identity {
+        let svc = IDENTITY_SERVICE
+            .get()
+            .ok_or("Identity not initialized; call init_identity_ffi first")?;
+        let identity = svc.identity().map_err(|e| e.to_string())?;
+        Some(identity.export_secret_bytes())
+    } else {
+        None
+    };
+
+    let secret_owned: Zeroizing<Vec<u8>> = Zeroizing::new(secret_bytes);
+
+    let summary = crate::api::backup::write_backup(
+        db_conn,
+        Path::new(&output_path),
+        &secret_owned,
+        unlock,
+        &library_uuid,
+        identity_bytes,
+        &prefs_json,
+        Path::new(&cover_dir),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    FrbBackupSummary::try_from_summary(summary)
+}

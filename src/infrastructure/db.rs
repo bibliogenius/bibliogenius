@@ -2,6 +2,14 @@ use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, Statement};
 
 use crate::utils::default_library_name::compute_default_library_name_seed;
 
+/// Highest migration index applied by `run_migrations`.
+///
+/// Embedded in `.bgbackup` manifests (ADR-037 §2) so the restore pipeline
+/// can decide whether to migrate the archived DB forward or refuse a
+/// future-version archive. **Bump this constant whenever a new migration
+/// is appended to `run_migrations`.**
+pub const SCHEMA_VERSION: u32 = 75;
+
 pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     let db = Database::connect(database_url).await?;
 
