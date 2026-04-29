@@ -3596,6 +3596,120 @@ pub async fn gamification_update_streak() -> Result<FrbStreakInfo, String> {
     })
 }
 
+// ── Installation profile (search settings via FFI direct) ────────────
+
+/// Search-related settings persisted in the installation profile.
+///
+/// Mirrors the `fallback_preferences` and `api_keys` fields the Flutter
+/// settings screen expects under `_userStatus['config']`. The legacy
+/// `gamification_get_status` payload (returned by `getUserStatus` in FFI
+/// mode) does not carry these fields, hence this dedicated accessor.
+pub struct FrbSearchSettings {
+    /// Per-provider toggles. Only entries the user explicitly toggled away
+    /// from the implicit defaults are populated, so the client's `?? default`
+    /// fallbacks (e.g. `bnfDefault = isFrench`) keep applying for untouched
+    /// providers — preventing UI regressions on the BNF locale heuristic.
+    ///
+    /// Mapping (inverse of `api/profile.rs::update_profile`):
+    /// - `enable_google_books` in modules → `google_books: true`
+    /// - `disable_fallback:<provider>` in modules → `<provider>: false`
+    pub fallback_preferences: std::collections::HashMap<String, bool>,
+    /// API keys stored in `installation_profile.api_keys`
+    /// (e.g. `{"google_books": "AIza..."}`).
+    pub api_keys: std::collections::HashMap<String, String>,
+}
+
+/// Pure conversion from raw `enabled_modules` strings to the toggle map.
+/// Extracted for unit-testability (no DB needed).
+fn modules_to_fallback_preferences(modules: &[String]) -> std::collections::HashMap<String, bool> {
+    let mut prefs = std::collections::HashMap::new();
+    for module in modules {
+        if module == "enable_google_books" {
+            prefs.insert("google_books".to_string(), true);
+        } else if let Some(provider) = module.strip_prefix("disable_fallback:") {
+            prefs.insert(provider.to_string(), false);
+        }
+    }
+    prefs
+}
+
+/// Read the installation profile's search settings (toggles + API keys).
+///
+/// Used by the Flutter settings screen to display the persisted state of
+/// the "Search Sources" section. Returns an error if the profile row is
+/// missing; callers should fall back to defaults in that case.
+pub async fn installation_profile_get_search_settings() -> Result<FrbSearchSettings, String> {
+    use crate::models::installation_profile::ProfileConfig;
+
+    let db = db().ok_or("Database not initialized")?;
+    // Reuse the canonical loader so any future schema change stays in one place.
+    let profile = ProfileConfig::load(db).await?;
+
+    Ok(FrbSearchSettings {
+        fallback_preferences: modules_to_fallback_preferences(&profile.enabled_modules),
+        api_keys: profile.api_keys,
+    })
+}
+
+#[cfg(test)]
+mod search_settings_conversion_tests {
+    use super::modules_to_fallback_preferences;
+
+    #[test]
+    fn empty_modules_yields_empty_prefs() {
+        let prefs = modules_to_fallback_preferences(&[]);
+        assert!(prefs.is_empty());
+    }
+
+    #[test]
+    fn enable_google_books_maps_to_true() {
+        let prefs = modules_to_fallback_preferences(&["enable_google_books".to_string()]);
+        assert_eq!(prefs.get("google_books"), Some(&true));
+        assert_eq!(prefs.len(), 1);
+    }
+
+    #[test]
+    fn disable_fallback_maps_to_false() {
+        let prefs = modules_to_fallback_preferences(&[
+            "disable_fallback:openlibrary".to_string(),
+            "disable_fallback:bnf".to_string(),
+        ]);
+        assert_eq!(prefs.get("openlibrary"), Some(&false));
+        assert_eq!(prefs.get("bnf"), Some(&false));
+        assert_eq!(prefs.len(), 2);
+    }
+
+    #[test]
+    fn unrelated_modules_are_ignored() {
+        let prefs = modules_to_fallback_preferences(&[
+            "memory_game".to_string(),
+            "sliding_puzzle".to_string(),
+            "enable_google_books".to_string(),
+        ]);
+        assert_eq!(prefs.len(), 1);
+        assert_eq!(prefs.get("google_books"), Some(&true));
+    }
+
+    #[test]
+    fn round_trip_with_update_profile_format() {
+        // Mirror the exact shape that api/profile.rs::update_profile writes
+        // when the client sends fallback_preferences:
+        //   { google_books: true, inventaire: false, openlibrary: true }
+        let modules = vec![
+            "enable_google_books".to_string(),
+            "disable_fallback:inventaire".to_string(),
+            // "openlibrary: true" ⇒ no disable flag, so absent from modules.
+        ];
+        let prefs = modules_to_fallback_preferences(&modules);
+        assert_eq!(prefs.get("google_books"), Some(&true));
+        assert_eq!(prefs.get("inventaire"), Some(&false));
+        assert!(
+            !prefs.contains_key("openlibrary"),
+            "providers with neither flag must stay absent so the client default applies"
+        );
+    }
+}
+
 // ── Operation Log Viewer FFI ──────────────────────────────────────────
 
 #[frb(dart_metadata=("freezed"))]

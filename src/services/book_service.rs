@@ -1460,7 +1460,7 @@ mod tests {
     #[tokio::test]
     async fn update_book_clears_authors_when_author_field_is_empty() {
         use crate::db;
-        use crate::models::author::{ActiveModel as AuthorActive, Entity as AuthorEntity};
+        use crate::models::author::ActiveModel as AuthorActive;
         use crate::models::book_authors::{
             ActiveModel as BookAuthorActive, Column as BACol, Entity as BookAuthorEntity,
         };
