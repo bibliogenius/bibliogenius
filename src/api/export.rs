@@ -4,7 +4,10 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
 };
-use sea_orm::{DatabaseConnection, EntityTrait, Set, sea_query::OnConflict};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, Set, TransactionTrait,
+    sea_query::OnConflict,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::models::{
@@ -241,11 +244,85 @@ pub struct ImportResult {
     pub message: String,
 }
 
+/// Wipe all catalog tables (books, authors, tags, copies, contacts, loans,
+/// sales, collections, peers, gamification, library_config) in a FK-safe order.
+///
+/// Out of scope: install-/identity-/transient-state tables that are NOT in the
+/// export, e.g. `users`, `libraries`, `crypto_keys`, `operation_log`,
+/// `installation_profile`, `linked_devices`, `relay_*`, `notifications`,
+/// `loan_settings`, `hub_directory_config`, `library_view_stats`. These belong
+/// to the install, not the catalog content the user backed up.
+async fn wipe_catalog<C: ConnectionTrait>(conn: &C) -> Result<(), DbErr> {
+    collection_book::Entity::delete_many().exec(conn).await?;
+    collection::Entity::delete_many().exec(conn).await?;
+    sale::Entity::delete_many().exec(conn).await?;
+    loan::Entity::delete_many().exec(conn).await?;
+    copy::Entity::delete_many().exec(conn).await?;
+    book_authors::Entity::delete_many().exec(conn).await?;
+    book_tags::Entity::delete_many().exec(conn).await?;
+    book::Entity::delete_many().exec(conn).await?;
+    author::Entity::delete_many().exec(conn).await?;
+    // Tags have a self-referential FK (parent_id) with ON DELETE SET NULL,
+    // so a single delete_many is safe regardless of internal order.
+    tag::Entity::delete_many().exec(conn).await?;
+    contact::Entity::delete_many().exec(conn).await?;
+    // peer cascades to peer_books, p2p_requests, p2p_outgoing_requests,
+    // peer_gamification_stats (all ON DELETE CASCADE).
+    peer::Entity::delete_many().exec(conn).await?;
+    gamification_streaks::Entity::delete_many()
+        .exec(conn)
+        .await?;
+    gamification_achievements::Entity::delete_many()
+        .exec(conn)
+        .await?;
+    gamification_progress::Entity::delete_many()
+        .exec(conn)
+        .await?;
+    gamification_config::Entity::delete_many()
+        .exec(conn)
+        .await?;
+    library_config::Entity::delete_many().exec(conn).await?;
+    Ok(())
+}
+
+fn import_error(message: String) -> (StatusCode, Json<ImportResult>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ImportResult {
+            success: false,
+            books_imported: 0,
+            copies_imported: 0,
+            contacts_imported: 0,
+            loans_imported: 0,
+            tags_imported: 0,
+            authors_imported: 0,
+            collections_imported: 0,
+            peers_imported: 0,
+            sales_imported: 0,
+            gamification_imported: 0,
+            message,
+        }),
+    )
+}
+
 pub async fn import_data(
     State(db): State<DatabaseConnection>,
     Json(backup): Json<ImportBackupData>,
-) -> impl IntoResponse {
+) -> (StatusCode, Json<ImportResult>) {
     use sea_orm::{ActiveModelTrait, IntoActiveModel};
+
+    let txn = match db.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            return import_error(format!("Failed to begin transaction: {}", e));
+        }
+    };
+
+    // Restore replaces the catalog: wipe everything in scope before insert.
+    if let Err(e) = wipe_catalog(&txn).await {
+        let _ = txn.rollback().await;
+        return import_error(format!("Failed to wipe existing catalog: {}", e));
+    }
 
     let now = chrono::Utc::now().to_rfc3339();
     let mut books_count = 0;
@@ -263,7 +340,7 @@ pub async fn import_data(
     if let Some(authors) = backup.authors {
         for a in authors {
             let active = a.into_active_model();
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 authors_count += 1;
             }
         }
@@ -303,7 +380,7 @@ pub async fn import_data(
                 // failure flag was tied to the previous install's hub registration.
                 hub_cover_upload_failed_at: Set(None),
             };
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 books_count += 1;
             }
         }
@@ -313,7 +390,7 @@ pub async fn import_data(
     if let Some(bas) = backup.book_authors {
         for ba in bas {
             let active = ba.into_active_model();
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 // counted with authors
             }
         }
@@ -330,7 +407,7 @@ pub async fn import_data(
                 created_at: Set(t.created_at.unwrap_or_else(|| now.clone())),
                 updated_at: Set(t.updated_at.unwrap_or_else(|| now.clone())),
             };
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 tags_count += 1;
             }
         }
@@ -340,7 +417,7 @@ pub async fn import_data(
     if let Some(bts) = backup.book_tags {
         for bt in bts {
             let active = bt.into_active_model();
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 // counted with tags
             }
         }
@@ -370,7 +447,7 @@ pub async fn import_data(
                 created_at: Set(c.created_at.unwrap_or_else(|| now.clone())),
                 updated_at: Set(c.updated_at.unwrap_or_else(|| now.clone())),
             };
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 contacts_count += 1;
             }
         }
@@ -380,7 +457,7 @@ pub async fn import_data(
     if let Some(copies) = backup.copies {
         for c in copies {
             let active = c.into_active_model();
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 copies_count += 1;
             }
         }
@@ -390,7 +467,7 @@ pub async fn import_data(
     if let Some(loans) = backup.loans {
         for l in loans {
             let active = l.into_active_model();
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 loans_count += 1;
             }
         }
@@ -400,7 +477,7 @@ pub async fn import_data(
     if let Some(sales) = backup.sales {
         for s in sales {
             let active = s.into_active_model();
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 sales_count += 1;
             }
         }
@@ -410,7 +487,7 @@ pub async fn import_data(
     if let Some(collections) = backup.collections {
         for c in collections {
             let active = c.into_active_model();
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 collections_count += 1;
             }
         }
@@ -420,14 +497,21 @@ pub async fn import_data(
     if let Some(cbs) = backup.collection_books {
         for cb in cbs {
             let active = cb.into_active_model();
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 // counted with collections
             }
         }
     }
 
-    // 12. Import peers (reset E2EE state -- new install has a new identity,
-    //     peers will need to re-exchange keys on next contact)
+    // 12. Import peers
+    //
+    // E2EE state is reset because the install identity may differ from the
+    // backup's: peers will re-handshake on next contact, and `try_send_e2ee`
+    // already falls back to plaintext while `key_exchange_done = false`.
+    //
+    // `connection_status` is preserved from the backup: hard-coding "pending"
+    // would resurrect old, already-accepted peers as new connection requests
+    // every time the user restores on the same install (observed 2026-04-29).
     if let Some(peers) = backup.peers {
         for p in peers {
             let active = peer::ActiveModel {
@@ -446,7 +530,7 @@ pub async fn import_data(
                 latitude: Set(p.latitude),
                 longitude: Set(p.longitude),
                 auto_approve: Set(p.auto_approve),
-                connection_status: Set("pending".to_string()),
+                connection_status: Set(p.connection_status),
                 last_seen: Set(None),
                 avatar_config: Set(None),
                 catalog_hash: Set(None),
@@ -455,7 +539,7 @@ pub async fn import_data(
                 created_at: Set(p.created_at),
                 updated_at: Set(now.clone()),
             };
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 peers_count += 1;
             }
         }
@@ -464,7 +548,7 @@ pub async fn import_data(
     // 13. Import gamification
     if let Some(gc) = backup.gamification_config {
         let active = gc.into_active_model();
-        if active.insert(&db).await.is_ok() {
+        if active.insert(&txn).await.is_ok() {
             gamification_count += 1;
         }
     }
@@ -472,7 +556,7 @@ pub async fn import_data(
     if let Some(gps) = backup.gamification_progress {
         for gp in gps {
             let active = gp.into_active_model();
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 gamification_count += 1;
             }
         }
@@ -481,7 +565,7 @@ pub async fn import_data(
     if let Some(gas) = backup.gamification_achievements {
         for ga in gas {
             let active = ga.into_active_model();
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 gamification_count += 1;
             }
         }
@@ -490,17 +574,20 @@ pub async fn import_data(
     if let Some(gss) = backup.gamification_streaks {
         for gs in gss {
             let active = gs.into_active_model();
-            if active.insert(&db).await.is_ok() {
+            if active.insert(&txn).await.is_ok() {
                 gamification_count += 1;
             }
         }
     }
 
-    // 14. Import library config (upsert)
+    // 14. Import library config (singleton, wiped above)
     if let Some(lc) = backup.library_config {
         let active = lc.into_active_model();
-        // Try insert first, ignore if already exists (id=1)
-        let _ = active.insert(&db).await;
+        let _ = active.insert(&txn).await;
+    }
+
+    if let Err(e) = txn.commit().await {
+        return import_error(format!("Failed to commit restore transaction: {}", e));
     }
 
     let total = books_count
@@ -1051,5 +1138,206 @@ where
             Ok(Some(serde_json::to_string(&arr).unwrap_or_default()))
         }
         Some(other) => Ok(Some(other.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::{ActiveModelTrait, Database, EntityTrait, Set};
+
+    async fn setup() -> DatabaseConnection {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        crate::infrastructure::db::run_migrations(&db)
+            .await
+            .unwrap();
+        db
+    }
+
+    fn empty_backup() -> ImportBackupData {
+        ImportBackupData {
+            version: Some("2.0".to_string()),
+            exported_at: Some(chrono::Utc::now().to_rfc3339()),
+            library_config: None,
+            books: None,
+            authors: None,
+            book_authors: None,
+            copies: None,
+            contacts: None,
+            loans: None,
+            sales: None,
+            tags: None,
+            book_tags: None,
+            collections: None,
+            collection_books: None,
+            peers: None,
+            gamification_config: None,
+            gamification_progress: None,
+            gamification_achievements: None,
+            gamification_streaks: None,
+        }
+    }
+
+    fn make_import_book(id: Option<i32>, title: &str) -> ImportBook {
+        ImportBook {
+            id,
+            title: title.to_string(),
+            isbn: None,
+            summary: None,
+            publisher: None,
+            publication_year: None,
+            dewey_decimal: None,
+            lcc: None,
+            subjects: None,
+            marc_record: None,
+            cataloguing_notes: None,
+            source_data: None,
+            shelf_position: None,
+            reading_status: "to_read".to_string(),
+            finished_reading_at: None,
+            started_reading_at: None,
+            cover_url: None,
+            created_at: None,
+            updated_at: None,
+            user_rating: None,
+            owned: true,
+            price: None,
+            digital_formats: None,
+            private: false,
+            page_count: None,
+            loan_duration_days: None,
+            author: None,
+        }
+    }
+
+    /// Restore must wipe pre-existing catalog rows before inserting backup
+    /// rows -- merge semantics would silently leak the user's "after-export"
+    /// books (regression observed 2026-04-29).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_data_wipes_existing_catalog_before_restore() {
+        let db = setup().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Seed pre-existing book + tag (the "added after export" scenario).
+        book::ActiveModel {
+            title: Set("Old Book".to_string()),
+            reading_status: Set("to_read".to_string()),
+            owned: Set(true),
+            private: Set(false),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        tag::ActiveModel {
+            name: Set("Old Tag".to_string()),
+            path: Set("Old Tag".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        // Backup contains only "New Book" (no tags).
+        let backup = ImportBackupData {
+            books: Some(vec![make_import_book(None, "New Book")]),
+            ..empty_backup()
+        };
+
+        let (status, Json(result)) = import_data(State(db.clone()), Json(backup)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(result.success);
+        assert_eq!(result.books_imported, 1);
+
+        let books = book::Entity::find().all(&db).await.unwrap();
+        assert_eq!(books.len(), 1, "old book should have been wiped");
+        assert_eq!(books[0].title, "New Book");
+
+        let tags = tag::Entity::find().all(&db).await.unwrap();
+        assert!(tags.is_empty(), "old tag should have been wiped");
+    }
+
+    /// `connection_status` from the backup must round-trip. Hard-coding
+    /// "pending" here would resurrect already-accepted peers as new connection
+    /// requests on every same-install restore (observed 2026-04-29 with a
+    /// stale iPhone -> Mac demande appearing post-restore).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_data_preserves_peer_connection_status() {
+        let db = setup().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let backup = ImportBackupData {
+            peers: Some(vec![peer::Model {
+                id: 1,
+                name: "iPhone".to_string(),
+                display_name: None,
+                url: "http://192.168.1.42:3000".to_string(),
+                library_uuid: Some("uuid-1".to_string()),
+                public_key: None,
+                x25519_public_key: None,
+                key_exchange_done: true,
+                mailbox_id: None,
+                relay_url: None,
+                relay_write_token: None,
+                relay_write_token_invalid_at: None,
+                latitude: None,
+                longitude: None,
+                auto_approve: false,
+                connection_status: "accepted".to_string(),
+                last_seen: None,
+                catalog_hash: None,
+                last_catalog_sync: None,
+                avatar_config: None,
+                last_delta_cursor: None,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            }]),
+            ..empty_backup()
+        };
+
+        let (status, Json(result)) = import_data(State(db.clone()), Json(backup)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result.peers_imported, 1);
+
+        let peers = peer::Entity::find().all(&db).await.unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].connection_status, "accepted");
+        // E2EE state should still be reset (cross-install safe default).
+        assert!(!peers[0].key_exchange_done);
+        assert!(peers[0].x25519_public_key.is_none());
+    }
+
+    /// An empty backup is destructive too: the user explicitly chose to
+    /// "Restaurer" something, and the empty file is still a valid restore
+    /// target. Wiping unconditionally matches the UI promise.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_data_with_empty_backup_wipes_catalog() {
+        let db = setup().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        book::ActiveModel {
+            title: Set("Doomed".to_string()),
+            reading_status: Set("to_read".to_string()),
+            owned: Set(true),
+            private: Set(false),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        let (status, Json(result)) = import_data(State(db.clone()), Json(empty_backup())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(result.success);
+        assert_eq!(result.books_imported, 0);
+
+        let books = book::Entity::find().all(&db).await.unwrap();
+        assert!(books.is_empty());
     }
 }
