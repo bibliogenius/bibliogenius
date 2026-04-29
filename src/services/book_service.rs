@@ -416,24 +416,32 @@ pub async fn update_book(
 
     let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
 
-    // Handle author update: if author field is provided, update the book_authors join table
-    let author_names: Vec<String> = if let Some(ref authors_list) = book_data.authors {
-        authors_list.clone()
-    } else if let Some(ref author_str) = book_data.author {
-        author_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // Handle author update. The caller signals "I am updating the authors"
+    // by setting either `authors` (Vec form) or `author` (comma-joined string).
+    // When the caller leaves both as `None`, existing links are preserved.
+    // When the caller provides either field — including an empty value —
+    // the existing links are cleared and replaced with the new set, so a
+    // user emptying the author input via the UI actually removes them.
+    let authors_update_provided = book_data.authors.is_some() || book_data.author.is_some();
 
-    if !author_names.is_empty() {
+    if authors_update_provided {
         use crate::models::author::{self, ActiveModel as AuthorActive, Entity as AuthorEntity};
         use crate::models::book_authors::{self, ActiveModel as BookAuthorActive};
 
-        // Remove existing author links
+        let author_names: Vec<String> = if let Some(ref authors_list) = book_data.authors {
+            authors_list.clone()
+        } else if let Some(ref author_str) = book_data.author {
+            author_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Always clear existing links — the caller is providing the new
+        // authoritative state (which may be empty).
         book_authors::Entity::delete_many()
             .filter(book_authors::Column::BookId.eq(id))
             .exec(db)
@@ -448,7 +456,9 @@ pub async fn update_book(
         )
         .await;
 
-        // Find or create each author and link to book
+        // Find or create each author and link to book.
+        // No-op when `author_names` is empty (the deletion above is the
+        // entire effect for the "clear all authors" case).
         for author_name in author_names {
             let author_model = match AuthorEntity::find()
                 .filter(author::Column::Name.eq(&author_name))
@@ -1439,6 +1449,101 @@ mod tests {
             books[3].available_copies,
             Some(0),
             "book with no copies must still be set to Some(0), not None",
+        );
+    }
+
+    /// When the caller explicitly sends an empty author payload, every
+    /// `book_authors` link for that book must be removed. Mirrors the
+    /// HTTP `PUT /api/books/{id}` semantics so the FFI path stays consistent.
+    /// Regression check for the "remove all authors and save → ghosts come
+    /// back on re-fetch" bug.
+    #[tokio::test]
+    async fn update_book_clears_authors_when_author_field_is_empty() {
+        use crate::db;
+        use crate::models::author::{ActiveModel as AuthorActive, Entity as AuthorEntity};
+        use crate::models::book_authors::{
+            ActiveModel as BookAuthorActive, Column as BACol, Entity as BookAuthorEntity,
+        };
+        use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, Statement};
+
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "PRAGMA foreign_keys = OFF".to_owned(),
+        ))
+        .await
+        .unwrap();
+
+        let book_id = insert_test_book(&db, "Le Seigneur des Anneaux").await;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let a1 = AuthorActive {
+            name: Set("J. R. R. Tolkien".to_owned()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let a2 = AuthorActive {
+            name: Set("Christopher Tolkien".to_owned()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        BookAuthorActive {
+            book_id: Set(book_id),
+            author_id: Set(a1.id),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        BookAuthorActive {
+            book_id: Set(book_id),
+            author_id: Set(a2.id),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        let pre = BookAuthorEntity::find()
+            .filter(BACol::BookId.eq(book_id))
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            pre.len(),
+            2,
+            "setup should have created 2 book_author links"
+        );
+
+        // The Dart→Rust conversion sends both fields when the user clears the
+        // author input: `author = Some("")` and `authors = Some(vec![])`.
+        let payload = Book {
+            id: Some(book_id),
+            title: "Le Seigneur des Anneaux".to_string(),
+            author: Some(String::new()),
+            authors: Some(Vec::new()),
+            ..Default::default()
+        };
+
+        update_book(&db, book_id, payload).await.unwrap();
+
+        let post = BookAuthorEntity::find()
+            .filter(BACol::BookId.eq(book_id))
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            post.len(),
+            0,
+            "explicit empty author update must clear book_authors so the user-removed authors do not resurrect on re-fetch",
         );
     }
 }
