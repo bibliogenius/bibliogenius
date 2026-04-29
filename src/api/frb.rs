@@ -235,7 +235,12 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
 
     match crate::db::init_db(&db_url).await {
         Ok(conn) => match DB.set(conn) {
-            Ok(_) => Ok("Backend initialized successfully".to_string()),
+            Ok(_) => {
+                // ADR-037 §5: purge expired rollback siblings from prior
+                // restores. Best-effort; never blocks startup on FS errors.
+                crate::infrastructure::db::run_startup_maintenance(std::path::Path::new(&db_path));
+                Ok("Backend initialized successfully".to_string())
+            }
             Err(_) => Err("Failed to set database connection".to_string()),
         },
         Err(e) => Err(format!("Database initialization failed: {}", e)),
@@ -6031,4 +6036,220 @@ pub async fn write_backup_ffi(
     .map_err(|e| e.to_string())?;
 
     FrbBackupSummary::try_from_summary(summary)
+}
+
+// ============ Local Backup Restore (.bgbackup) — FFI (ADR-037 §5) ============
+
+/// Subset of the manifest surfaced to the wizard's preview screen. Mirrors
+/// `ManifestSummary` field-by-field but flattened for FFI portability.
+/// Counts cross the FFI as `i64`.
+#[frb(dart_metadata = ("freezed"))]
+pub struct FrbBackupManifestPreview {
+    pub format_version: String,
+    pub schema_version: i64,
+    pub current_schema_version: i64,
+    pub exported_at: String,
+    pub library_uuid: String,
+    pub identity_included: bool,
+    /// `"recovery_code"` or `"passphrase"` -- drives the wording of the
+    /// secret prompt in the wizard.
+    pub unlock_kind: String,
+    pub app_version: String,
+    pub books_count: i64,
+    pub copies_count: i64,
+    pub loans_count: i64,
+    pub contacts_count: i64,
+    pub authors_count: i64,
+    pub tags_count: i64,
+    pub collections_count: i64,
+    pub peers_count: i64,
+    pub sales_count: i64,
+    pub covers_count: i64,
+    pub db_sha256: String,
+}
+
+impl FrbBackupManifestPreview {
+    fn from_manifest(m: crate::api::backup::ManifestSummary) -> Self {
+        let unlock_kind = match m.unlock_kind {
+            crate::api::backup::UnlockKind::RecoveryCode => "recovery_code".to_string(),
+            crate::api::backup::UnlockKind::Passphrase => "passphrase".to_string(),
+        };
+        Self {
+            format_version: m.format_version,
+            schema_version: m.schema_version as i64,
+            current_schema_version: crate::infrastructure::db::SCHEMA_VERSION as i64,
+            exported_at: m.exported_at,
+            library_uuid: m.library_uuid,
+            identity_included: m.identity_included,
+            unlock_kind,
+            app_version: m.app_version,
+            books_count: m.counts.books as i64,
+            copies_count: m.counts.copies as i64,
+            loans_count: m.counts.loans as i64,
+            contacts_count: m.counts.contacts as i64,
+            authors_count: m.counts.authors as i64,
+            tags_count: m.counts.tags as i64,
+            collections_count: m.counts.collections as i64,
+            peers_count: m.counts.peers as i64,
+            sales_count: m.counts.sales as i64,
+            covers_count: m.covers.len() as i64,
+            db_sha256: m.db_sha256,
+        }
+    }
+}
+
+/// Outcome of a successful restore returned to the wizard.
+#[frb(dart_metadata = ("freezed"))]
+pub struct FrbRestoreSummary {
+    /// `"replace"` or `"merge"`.
+    pub mode: String,
+    pub identity_restored: bool,
+    /// Set on Replace + identity restored: caller MUST persist this UUID to
+    /// both Keychain and SharedPreferences (dual-write hardening per
+    /// `e2ee_identity_storage_fragility.md`). On Replace without identity,
+    /// caller MUST clear the UUID from both stores. On Merge, caller MUST
+    /// NOT touch the existing UUID (`null`).
+    pub restored_library_uuid: Option<String>,
+    /// `"clear"` (Replace + no identity), `"set"` (Replace + identity),
+    /// `"keep"` (Merge). Drives the Flutter post-restore action.
+    pub library_uuid_action: String,
+    pub prefs_json: String,
+    pub rollback_path: Option<String>,
+    pub books_after: i64,
+    pub copies_after: i64,
+    pub contacts_after: i64,
+    pub covers_restored: i64,
+}
+
+impl FrbRestoreSummary {
+    fn from_summary(s: crate::api::backup::RestoreSummary) -> Self {
+        let mode = match s.mode {
+            crate::api::backup::RestoreMode::Replace => "replace",
+            crate::api::backup::RestoreMode::Merge => "merge",
+        }
+        .to_string();
+        let library_uuid_action = match (s.mode, s.identity_restored) {
+            (crate::api::backup::RestoreMode::Merge, _) => "keep",
+            (crate::api::backup::RestoreMode::Replace, true) => "set",
+            (crate::api::backup::RestoreMode::Replace, false) => "clear",
+        }
+        .to_string();
+        Self {
+            mode,
+            identity_restored: s.identity_restored,
+            restored_library_uuid: s.restored_library_uuid,
+            library_uuid_action,
+            prefs_json: s.prefs_json,
+            rollback_path: s.rollback_path,
+            books_after: s.books_after,
+            copies_after: s.copies_after,
+            contacts_after: s.contacts_after,
+            covers_restored: s.covers_restored,
+        }
+    }
+}
+
+/// Available rollback file presented in the "Restore previous version" UI.
+#[frb(dart_metadata = ("freezed"))]
+pub struct FrbRollbackInfo {
+    pub path: String,
+    pub created_at: String,
+    pub age_seconds: i64,
+    pub size_bytes: i64,
+}
+
+impl FrbRollbackInfo {
+    fn from_info(i: crate::api::backup::RollbackInfo) -> Self {
+        Self {
+            path: i.path,
+            created_at: i.created_at,
+            age_seconds: i.age_seconds,
+            size_bytes: i.size_bytes,
+        }
+    }
+}
+
+/// Parse `manifest.json` from a `.bgbackup` file without unlocking. Used by
+/// the wizard preview step.
+pub async fn read_manifest_ffi(archive_path: String) -> Result<FrbBackupManifestPreview, String> {
+    use std::path::Path;
+    // Stays on the spawn_blocking pool: parsing the zip + manifest is sync IO.
+    let archive_path = archive_path.clone();
+    let manifest = tokio::task::spawn_blocking(move || {
+        crate::api::backup::read_manifest(Path::new(&archive_path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    Ok(FrbBackupManifestPreview::from_manifest(manifest))
+}
+
+/// Restore a `.bgbackup` archive into the live DB.
+///
+/// `mode` accepts `"replace"` or `"merge"`. `restore_identity` is honoured
+/// only in Replace mode AND when the archive carries `identity.bin`; ignored
+/// otherwise.
+///
+/// **The Flutter caller MUST force-restart the app after this returns.** The
+/// FFI's global SeaORM connection still holds open file descriptors on the
+/// inode that was just renamed to the rollback sibling; reusing it is unsafe.
+/// `db_path` and `cover_dir` are passed explicitly so the caller (which knows
+/// its sandbox layout via `getApplicationSupportDirectory`) is the single
+/// source of truth.
+pub async fn restore_backup_ffi(
+    archive_path: String,
+    secret_bytes: Vec<u8>,
+    mode: String,
+    restore_identity: bool,
+    db_path: String,
+    cover_dir: String,
+) -> Result<FrbRestoreSummary, String> {
+    use std::path::Path;
+    use zeroize::Zeroizing;
+
+    let restore_mode = match mode.as_str() {
+        "replace" => crate::api::backup::RestoreMode::Replace,
+        "merge" => crate::api::backup::RestoreMode::Merge,
+        other => return Err(format!("invalid mode: {other}")),
+    };
+
+    let secret_owned: Zeroizing<Vec<u8>> = Zeroizing::new(secret_bytes);
+
+    let summary = crate::api::backup::restore_backup(
+        Path::new(&archive_path),
+        &secret_owned,
+        restore_mode,
+        restore_identity,
+        Path::new(&db_path),
+        Path::new(&cover_dir),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(FrbRestoreSummary::from_summary(summary))
+}
+
+/// List rollback files available in the directory of `db_path`. Empty list
+/// means no "Restore previous version" card should be shown.
+pub async fn list_available_rollbacks_ffi(db_path: String) -> Result<Vec<FrbRollbackInfo>, String> {
+    use std::path::Path;
+    let path = db_path.clone();
+    let infos = tokio::task::spawn_blocking(move || {
+        crate::api::backup::list_available_rollbacks(Path::new(&path))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(infos.into_iter().map(FrbRollbackInfo::from_info).collect())
+}
+
+/// Swap a rollback file back into the live DB. Same restart constraint as
+/// `restore_backup_ffi`.
+pub async fn restore_from_rollback_ffi(
+    rollback_path: String,
+    db_path: String,
+) -> Result<(), String> {
+    use std::path::Path;
+    crate::api::backup::restore_from_rollback(Path::new(&rollback_path), Path::new(&db_path))
+        .await
+        .map_err(|e| e.to_string())
 }

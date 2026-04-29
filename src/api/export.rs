@@ -625,6 +625,20 @@ pub async fn import_data_upsert(
     State(db): State<DatabaseConnection>,
     Json(backup): Json<ImportBackupData>,
 ) -> impl IntoResponse {
+    let result = run_import_upsert(&db, backup).await;
+    (StatusCode::OK, Json(result))
+}
+
+/// Core upsert logic, callable directly without going through axum.
+///
+/// Returns `ImportResult`. Used by the HTTP handler `import_data_upsert`
+/// and by the local-backup Merge restore path (ADR-037 §5).
+///
+/// Skips peers (local network config), `crypto_keys`, `operation_log`,
+/// `notification`, `relay_config`, `linked_device`, and any other
+/// install-/identity-specific table; these are not present in
+/// `ImportBackupData` to begin with.
+pub async fn run_import_upsert(db: &DatabaseConnection, backup: ImportBackupData) -> ImportResult {
     use sea_orm::IntoActiveModel;
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -647,7 +661,7 @@ pub async fn import_data_upsert(
                         .update_column(author::Column::Name)
                         .to_owned(),
                 )
-                .exec(&db)
+                .exec(db)
                 .await;
             if res.is_ok() {
                 authors_count += 1;
@@ -717,7 +731,7 @@ pub async fn import_data_upsert(
                         ])
                         .to_owned(),
                 )
-                .exec(&db)
+                .exec(db)
                 .await;
             if res.is_ok() {
                 books_count += 1;
@@ -738,7 +752,7 @@ pub async fn import_data_upsert(
                     .to_owned(),
                 )
                 .do_nothing()
-                .exec(&db)
+                .exec(db)
                 .await;
         }
     }
@@ -764,7 +778,7 @@ pub async fn import_data_upsert(
                         ])
                         .to_owned(),
                 )
-                .exec(&db)
+                .exec(db)
                 .await;
             if res.is_ok() {
                 tags_count += 1;
@@ -782,7 +796,7 @@ pub async fn import_data_upsert(
                         .to_owned(),
                 )
                 .do_nothing()
-                .exec(&db)
+                .exec(db)
                 .await;
         }
     }
@@ -835,7 +849,7 @@ pub async fn import_data_upsert(
                         ])
                         .to_owned(),
                 )
-                .exec(&db)
+                .exec(db)
                 .await;
             if res.is_ok() {
                 contacts_count += 1;
@@ -862,7 +876,7 @@ pub async fn import_data_upsert(
                         ])
                         .to_owned(),
                 )
-                .exec(&db)
+                .exec(db)
                 .await;
             if res.is_ok() {
                 copies_count += 1;
@@ -889,7 +903,7 @@ pub async fn import_data_upsert(
                         ])
                         .to_owned(),
                 )
-                .exec(&db)
+                .exec(db)
                 .await;
             if res.is_ok() {
                 loans_count += 1;
@@ -915,7 +929,7 @@ pub async fn import_data_upsert(
                         ])
                         .to_owned(),
                 )
-                .exec(&db)
+                .exec(db)
                 .await;
             if res.is_ok() {
                 sales_count += 1;
@@ -936,7 +950,7 @@ pub async fn import_data_upsert(
                         ])
                         .to_owned(),
                 )
-                .exec(&db)
+                .exec(db)
                 .await;
             if res.is_ok() {
                 collections_count += 1;
@@ -957,7 +971,7 @@ pub async fn import_data_upsert(
                     .to_owned(),
                 )
                 .do_nothing()
-                .exec(&db)
+                .exec(db)
                 .await;
         }
     }
@@ -983,7 +997,7 @@ pub async fn import_data_upsert(
                     ])
                     .to_owned(),
             )
-            .exec(&db)
+            .exec(db)
             .await;
         if res.is_ok() {
             gamification_count += 1;
@@ -1004,7 +1018,7 @@ pub async fn import_data_upsert(
                         ])
                         .to_owned(),
                 )
-                .exec(&db)
+                .exec(db)
                 .await;
             if res.is_ok() {
                 gamification_count += 1;
@@ -1024,7 +1038,7 @@ pub async fn import_data_upsert(
                         ])
                         .to_owned(),
                 )
-                .exec(&db)
+                .exec(db)
                 .await;
             if res.is_ok() {
                 gamification_count += 1;
@@ -1045,7 +1059,7 @@ pub async fn import_data_upsert(
                         ])
                         .to_owned(),
                 )
-                .exec(&db)
+                .exec(db)
                 .await;
             if res.is_ok() {
                 gamification_count += 1;
@@ -1070,7 +1084,7 @@ pub async fn import_data_upsert(
                     ])
                     .to_owned(),
             )
-            .exec(&db)
+            .exec(db)
             .await;
     }
 
@@ -1084,7 +1098,7 @@ pub async fn import_data_upsert(
         + sales_count
         + gamification_count;
 
-    let result = ImportResult {
+    ImportResult {
         success: true,
         books_imported: books_count,
         copies_imported: copies_count,
@@ -1097,9 +1111,7 @@ pub async fn import_data_upsert(
         sales_imported: sales_count,
         gamification_imported: gamification_count,
         message: format!("Successfully upserted {} items", total),
-    };
-
-    (StatusCode::OK, Json(result))
+    }
 }
 
 // --- Helpers ---

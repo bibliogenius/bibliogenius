@@ -19,6 +19,20 @@ pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     Ok(db)
 }
 
+/// Run filesystem-side maintenance that does NOT require an open SeaORM
+/// connection. Currently:
+///
+/// - Garbage-collect `*.rollback-<ts>` and `*.replaced-<ts>` siblings of the
+///   live DB that are older than `ROLLBACK_TTL_SECONDS` (24h, ADR-037 §5).
+///   Younger siblings are kept so the user can still hit "Restore previous
+///   version" within the rollback window.
+///
+/// Best-effort: filesystem errors are logged and swallowed. Called from
+/// `init_backend` after `init_db` succeeds.
+pub fn run_startup_maintenance(db_path: &std::path::Path) {
+    crate::api::backup::purge_expired_rollbacks(db_path);
+}
+
 pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // Create books table (new schema without author field)
     db.execute(Statement::from_string(

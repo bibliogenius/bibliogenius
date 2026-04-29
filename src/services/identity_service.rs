@@ -270,6 +270,24 @@ async fn store_identity_to_db(
     Ok(())
 }
 
+/// Store a `NodeIdentity` reconstructed from raw secret bytes into the
+/// `crypto_keys` table, encrypted with Argon2(`library_uuid`).
+///
+/// Public wrapper used by the local-backup restore path (ADR-037 §5) when
+/// the wizard restores `identity.bin`. Re-encrypts the bytes with a freshly
+/// generated salt under the manifest's `library_uuid`, so the row is
+/// guaranteed to be decryptable on the next launch when Flutter writes the
+/// same UUID to its dual store.
+pub async fn store_identity_bytes(
+    db: &DatabaseConnection,
+    library_uuid: &str,
+    ed_bytes: &[u8; 32],
+    x_bytes: &[u8; 32],
+) -> Result<(), String> {
+    let identity = NodeIdentity::from_bytes(ed_bytes, x_bytes);
+    store_identity_to_db(db, &identity, library_uuid).await
+}
+
 /// Delete all identity keys from `crypto_keys`.
 ///
 /// Used by:

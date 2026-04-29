@@ -95,6 +95,21 @@ pub enum BackupError {
     InvalidInput(String),
     Serialization(String),
     TaskJoin(String),
+    /// HMAC verification failed: either the secret is wrong, or the archive
+    /// was mutated. Surfaced to the UI verbatim, never includes secret data.
+    BadSignature,
+    /// `manifest.format_version` is not understood by this build.
+    FormatVersionUnknown(String),
+    /// Archive's `schema_version` is newer than the running build.
+    SchemaTooNew {
+        archive: u32,
+        current: u32,
+    },
+    /// Decrypted `db.sqlite` plaintext does not match `manifest.db_sha256`.
+    /// Indicates archive corruption or tampering past the HMAC layer.
+    DbHashMismatch,
+    /// Migration replay on the restored DB failed.
+    MigrationFailed(String),
 }
 
 impl std::fmt::Display for BackupError {
@@ -107,6 +122,14 @@ impl std::fmt::Display for BackupError {
             Self::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Self::Serialization(msg) => write!(f, "serialization error: {msg}"),
             Self::TaskJoin(msg) => write!(f, "task join error: {msg}"),
+            Self::BadSignature => write!(f, "bad signature: wrong secret or tampered archive"),
+            Self::FormatVersionUnknown(v) => write!(f, "unknown format_version: {v}"),
+            Self::SchemaTooNew { archive, current } => write!(
+                f,
+                "archive schema_version {archive} is newer than current {current}; update the app first"
+            ),
+            Self::DbHashMismatch => write!(f, "db_sha256 mismatch after decryption"),
+            Self::MigrationFailed(msg) => write!(f, "migration replay failed: {msg}"),
         }
     }
 }
@@ -622,5 +645,1065 @@ impl TempFileGuard {
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+// =============================================================================
+// Reader (.bgbackup) -- ADR-037 §5
+//
+// Symmetric to the writer above. The pipeline guarantees that, at every step,
+// either the live DB at `db_path` is intact, or a `*.rollback-<ts>` sibling is
+// available for `restore_from_rollback`. There is no window where neither is
+// usable.
+//
+// In-process semantics: this module never touches the FFI's global SeaORM
+// connection. It opens its own ephemeral connections on file paths and closes
+// them before returning. The Flutter wizard is expected to force-restart the
+// app after a successful Replace so the new on-disk DB is picked up cleanly
+// (ADR-037 §5 implementation note "Recommandation forte : redémarrage forcé").
+// =============================================================================
+
+/// Restoration mode chosen by the user.
+///
+/// `Replace` performs a full atomic swap of the live DB and rebuilds the cover
+/// directory. `Merge` upserts the archive's catalog rows on top of the live DB,
+/// leaving identity, peers, oplog, notifications, and any install-specific
+/// table untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreMode {
+    Replace,
+    Merge,
+}
+
+/// Result returned to the Flutter wizard after a successful restore.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestoreSummary {
+    pub mode: RestoreMode,
+    /// True iff the archive carried `identity.bin` and the user opted in to
+    /// clone-mode (Replace + `restore_identity == true`).
+    pub identity_restored: bool,
+    /// `Some(uuid)` when the caller MUST persist this `library_uuid` to local
+    /// storage (the Replace + clone-mode path). `None` after Replace without
+    /// clone means the caller MUST clear the local `library_uuid` so the next
+    /// launch generates a fresh one (clean-install path). `None` after Merge
+    /// means the caller MUST NOT touch the existing `library_uuid`.
+    pub restored_library_uuid: Option<String>,
+    /// JSON-encoded prefs payload from the archive. Caller applies a
+    /// whitelist (PR #4 will move this whitelist into Rust). Empty string in
+    /// Merge mode (prefs are intentionally ignored on Merge per ticket).
+    pub prefs_json: String,
+    /// Path of the rollback file created by Replace, surfaced for UI hints.
+    /// `None` for Merge.
+    pub rollback_path: Option<String>,
+    pub books_after: i64,
+    pub copies_after: i64,
+    pub contacts_after: i64,
+    pub covers_restored: i64,
+}
+
+/// Metadata about an existing rollback file shown in the "Restore previous
+/// version" UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackInfo {
+    pub path: String,
+    pub created_at: String,
+    pub age_seconds: i64,
+    pub size_bytes: i64,
+}
+
+/// Maximum age (seconds) of a rollback or replaced sibling kept on disk. After
+/// this, `run_startup_maintenance` purges it. 24h per ADR-037 §5.
+pub const ROLLBACK_TTL_SECONDS: i64 = 24 * 3600;
+
+/// Filename suffix used by `restore_backup` Replace to preserve the previous
+/// live DB.
+pub const ROLLBACK_SUFFIX: &str = ".rollback-";
+/// Filename suffix used by `restore_from_rollback` to preserve the DB it just
+/// replaced.
+pub const REPLACED_SUFFIX: &str = ".replaced-";
+
+// -----------------------------------------------------------------------------
+// Public reader API
+// -----------------------------------------------------------------------------
+
+/// Parse `manifest.json` from an archive without unlocking. Used by the wizard
+/// to display the preview screen before prompting for the secret.
+pub fn read_manifest(archive_path: &Path) -> Result<ManifestSummary, BackupError> {
+    let f = std::fs::File::open(archive_path)?;
+    let mut zip = zip::ZipArchive::new(f)?;
+    let bytes = read_zip_entry_bytes(&mut zip, ENTRY_MANIFEST)?;
+    let manifest: ManifestSummary = serde_json::from_slice(&bytes)?;
+    if manifest.format_version != FORMAT_VERSION {
+        return Err(BackupError::FormatVersionUnknown(manifest.format_version));
+    }
+    Ok(manifest)
+}
+
+/// Verify the archive HMAC against `secret`. Returns `Ok(())` for an intact
+/// archive + correct secret; `Err(BackupError::BadSignature)` for either a
+/// wrong secret OR a single-byte mutation in any signed entry.
+///
+/// Runs Argon2id internally (~0.5-1s); should be invoked off the UI thread.
+pub fn verify_signature(archive_path: &Path, secret: &[u8]) -> Result<(), BackupError> {
+    if secret.is_empty() {
+        return Err(BackupError::InvalidInput("empty secret".into()));
+    }
+    let f = std::fs::File::open(archive_path)?;
+    let mut zip = zip::ZipArchive::new(f)?;
+    let manifest = parse_manifest_from_zip(&mut zip)?;
+    if manifest.format_version != FORMAT_VERSION {
+        return Err(BackupError::FormatVersionUnknown(manifest.format_version));
+    }
+    let (mut k_enc, mut k_mac) = derive_keys_from_secret(secret, &manifest)?;
+    let result = check_signature(&mut zip, &k_mac, &manifest);
+    k_enc.zeroize();
+    k_mac.zeroize();
+    result
+}
+
+/// Restore an archive into `db_path`. Pipeline branches on `mode`; both modes
+/// run pre-checks (manifest parse, HMAC, schema version) before touching disk
+/// state, so a failed unlock or a stale archive never leaves the live DB
+/// inconsistent.
+///
+/// `secret` is treated as sensitive: an internal copy is zeroized as soon as
+/// the master key is derived; the caller remains responsible for clearing the
+/// outer buffer.
+///
+/// `restore_identity` is honoured only in Replace mode and only when
+/// `identity.bin` is present in the archive; it is silently ignored otherwise.
+///
+/// On Replace success, the previous live DB is preserved at
+/// `<db_path>.rollback-<ts>` and surfaced in `RestoreSummary.rollback_path`.
+/// `run_startup_maintenance` purges this file 24h later.
+pub async fn restore_backup(
+    archive_path: &Path,
+    secret: &[u8],
+    mode: RestoreMode,
+    restore_identity: bool,
+    db_path: &Path,
+    cover_dir: &Path,
+) -> Result<RestoreSummary, BackupError> {
+    if secret.is_empty() {
+        return Err(BackupError::InvalidInput("empty secret".into()));
+    }
+    if !archive_path.is_file() {
+        return Err(BackupError::InvalidInput(format!(
+            "archive not found: {}",
+            archive_path.display()
+        )));
+    }
+    if !db_path.is_file() {
+        return Err(BackupError::InvalidInput(format!(
+            "live db not found: {}",
+            db_path.display()
+        )));
+    }
+
+    // The pipeline mixes sync work (Argon2, AES-GCM, zip, file renames)
+    // with async work (SeaORM migrations and crypto_keys ops). We run it
+    // inline on the current runtime rather than splitting between
+    // `spawn_blocking` and the executor: Argon2 dominates (~500-1000ms)
+    // and would have to be re-coordinated across the boundary anyway.
+    // Callers always invoke this from a foreground UI flow with a spinner.
+    let mut secret_z = zeroize::Zeroizing::new(secret.to_vec());
+    let summary = restore_backup_inner(
+        archive_path,
+        &secret_z,
+        mode,
+        restore_identity,
+        db_path,
+        cover_dir,
+    )
+    .await;
+    secret_z.zeroize();
+    let summary = summary?;
+
+    tracing::info!(
+        mode = ?summary.mode,
+        identity_restored = summary.identity_restored,
+        books_after = summary.books_after,
+        covers_restored = summary.covers_restored,
+        rollback_path = ?summary.rollback_path,
+        "restore complete"
+    );
+    Ok(summary)
+}
+
+/// Scan the directory of `db_path` for rollback siblings and return them as a
+/// list ordered most-recent first.
+pub fn list_available_rollbacks(db_path: &Path) -> Vec<RollbackInfo> {
+    let parent = match db_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => Path::new(".").to_path_buf(),
+    };
+    let base = db_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    if base.is_empty() {
+        return Vec::new();
+    }
+    let prefix = format!("{base}{ROLLBACK_SUFFIX}");
+    let now = chrono::Utc::now();
+    let read = match std::fs::read_dir(&parent) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<RollbackInfo> = read
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.starts_with(&prefix))
+                .unwrap_or(false)
+        })
+        .filter_map(|e| {
+            let path = e.path();
+            let name = e.file_name();
+            let name = name.to_str()?;
+            let suffix = name.strip_prefix(&prefix)?;
+            let ts = parse_rollback_timestamp(suffix)?;
+            let age_seconds = (now - ts).num_seconds().max(0);
+            let size_bytes = std::fs::metadata(&path).ok().map(|m| m.len()).unwrap_or(0) as i64;
+            Some(RollbackInfo {
+                path: path.to_string_lossy().into_owned(),
+                created_at: ts.to_rfc3339(),
+                age_seconds,
+                size_bytes,
+            })
+        })
+        .collect();
+    out.sort_by_key(|info| info.age_seconds);
+    out
+}
+
+/// Swap a rollback file back into the live DB position. The DB currently at
+/// `db_path` is preserved at `<db_path>.replaced-<ts>` so the user can chain
+/// reverts within 24h.
+///
+/// **The caller MUST force-restart the app** after this call returns, for the
+/// same reasons as `restore_backup` Replace: the FFI connection's open file
+/// descriptors still point to the now-displaced inode.
+pub async fn restore_from_rollback(
+    rollback_path: &Path,
+    db_path: &Path,
+) -> Result<(), BackupError> {
+    if !rollback_path.is_file() {
+        return Err(BackupError::InvalidInput(format!(
+            "rollback file not found: {}",
+            rollback_path.display()
+        )));
+    }
+    if !db_path.is_file() {
+        return Err(BackupError::InvalidInput(format!(
+            "live db not found: {}",
+            db_path.display()
+        )));
+    }
+    let rollback_owned = rollback_path.to_path_buf();
+    let db_owned = db_path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<(), BackupError> {
+        let ts = chrono::Utc::now();
+        let replaced = sibling_with_suffix(&db_owned, REPLACED_SUFFIX, &ts);
+        // 1. Live DB -> replaced sibling (atomic).
+        rename_db_with_wal(&db_owned, &replaced)?;
+        // 2. Rollback -> live (atomic).
+        rename_db_with_wal(&rollback_owned, &db_owned)?;
+        tracing::info!(
+            rolled_back_from = %rollback_owned.display(),
+            previous_now_at = %replaced.display(),
+            "rollback restored"
+        );
+        Ok(())
+    })
+    .await
+    .map_err(|e| BackupError::TaskJoin(e.to_string()))??;
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Replace + Merge pipelines (private)
+// -----------------------------------------------------------------------------
+
+#[allow(clippy::too_many_lines)]
+async fn restore_backup_inner(
+    archive_path: &Path,
+    secret: &[u8],
+    mode: RestoreMode,
+    restore_identity: bool,
+    db_path: &Path,
+    cover_dir: &Path,
+) -> Result<RestoreSummary, BackupError> {
+    // 1. Pre-checks (manifest, format, schema, HMAC). No disk side-effects yet.
+    let f = std::fs::File::open(archive_path)?;
+    let mut zip = zip::ZipArchive::new(f)?;
+    let manifest = parse_manifest_from_zip(&mut zip)?;
+    if manifest.format_version != FORMAT_VERSION {
+        return Err(BackupError::FormatVersionUnknown(manifest.format_version));
+    }
+    if manifest.schema_version > SCHEMA_VERSION {
+        return Err(BackupError::SchemaTooNew {
+            archive: manifest.schema_version,
+            current: SCHEMA_VERSION,
+        });
+    }
+    let (mut k_enc, mut k_mac) = derive_keys_from_secret(secret, &manifest)?;
+    if let Err(e) = check_signature(&mut zip, &k_mac, &manifest) {
+        k_enc.zeroize();
+        k_mac.zeroize();
+        return Err(e);
+    }
+    k_mac.zeroize(); // No longer needed past this point.
+
+    // 2. Decrypt db.sqlite into a temp file inside the same dir as db_path so
+    //    the eventual rename is atomic (single FS).
+    let ts = chrono::Utc::now();
+    let tmp_db_path = sibling_with_suffix(db_path, ".restore-", &ts);
+    let _tmp_guard = TempFileGuard::new(tmp_db_path.clone());
+
+    let enc_db = read_zip_entry_bytes(&mut zip, ENTRY_DB)?;
+    let mut db_plaintext = unseal_entry(&k_enc, &enc_db)?;
+    drop(enc_db);
+
+    // 3. Verify db_sha256 against the manifest BEFORE writing anything.
+    let computed_hash = sha256_hex(&db_plaintext);
+    if !ct_eq_str(&computed_hash, &manifest.db_sha256) {
+        db_plaintext.zeroize();
+        k_enc.zeroize();
+        return Err(BackupError::DbHashMismatch);
+    }
+    std::fs::write(&tmp_db_path, &db_plaintext)?;
+    db_plaintext.zeroize();
+
+    // 4. Build the cover plaintext map (sha256 -> bytes), needed by both modes
+    //    to (re)write covers from the archive.
+    let cover_plaintext = collect_cover_plaintext(&mut zip, &k_enc, &manifest)?;
+
+    // 5. Decrypt prefs.json + identity.bin if present.
+    let enc_prefs = read_zip_entry_bytes(&mut zip, ENTRY_PREFS)?;
+    let mut prefs_bytes = unseal_entry(&k_enc, &enc_prefs)?;
+    let prefs_json = String::from_utf8_lossy(&prefs_bytes).into_owned();
+    prefs_bytes.zeroize();
+    drop(enc_prefs);
+
+    let identity_packed: Option<zeroize::Zeroizing<Vec<u8>>> = if manifest.identity_included {
+        let enc_id = read_zip_entry_bytes(&mut zip, ENTRY_IDENTITY)?;
+        let plain = unseal_entry(&k_enc, &enc_id)?;
+        if plain.len() != IDENTITY_PACKED_LEN {
+            k_enc.zeroize();
+            return Err(BackupError::Crypto("identity payload length".into()));
+        }
+        Some(zeroize::Zeroizing::new(plain))
+    } else {
+        None
+    };
+    drop(zip);
+    k_enc.zeroize();
+
+    // 6. Mode-specific writes.
+    let summary = match mode {
+        RestoreMode::Replace => {
+            apply_replace(
+                db_path,
+                cover_dir,
+                &tmp_db_path,
+                &manifest,
+                &cover_plaintext,
+                prefs_json.clone(),
+                identity_packed.as_ref().map(|z| z.as_slice()),
+                restore_identity,
+                &ts,
+            )
+            .await?
+        }
+        RestoreMode::Merge => {
+            apply_merge(
+                db_path,
+                cover_dir,
+                &tmp_db_path,
+                &manifest,
+                &cover_plaintext,
+            )
+            .await?
+        }
+    };
+
+    // 7. tmp_db_path is removed by `_tmp_guard` on drop.
+    Ok(summary)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_replace(
+    db_path: &Path,
+    cover_dir: &Path,
+    tmp_db_path: &Path,
+    manifest: &ManifestSummary,
+    cover_plaintext: &std::collections::HashMap<String, (Vec<u8>, String)>,
+    prefs_json: String,
+    identity_packed: Option<&[u8]>,
+    restore_identity_opt: bool,
+    ts: &chrono::DateTime<chrono::Utc>,
+) -> Result<RestoreSummary, BackupError> {
+    // 1. Migrate the tmp DB forward to the running schema_version. We do this
+    //    BEFORE the swap so a migration failure leaves the live DB untouched.
+    if manifest.schema_version < SCHEMA_VERSION {
+        run_migrations_on_path(tmp_db_path)
+            .await
+            .map_err(|e| BackupError::MigrationFailed(e.to_string()))?;
+    }
+
+    // 2. Swap: live -> rollback, tmp -> live. Both renames are atomic on the
+    //    same filesystem (we placed tmp next to live for that reason).
+    let rollback_path = sibling_with_suffix(db_path, ROLLBACK_SUFFIX, ts);
+    rename_db_with_wal(db_path, &rollback_path)?;
+    if let Err(e) = rename_db_with_wal(tmp_db_path, db_path) {
+        // Roll back the first rename: live is still recoverable.
+        let _ = rename_db_with_wal(&rollback_path, db_path);
+        return Err(e.into());
+    }
+
+    // 3. Identity handling on the freshly restored live DB.
+    let identity_restored = match (restore_identity_opt, identity_packed) {
+        (true, Some(packed)) => {
+            // Re-encrypt identity bytes with the manifest's library_uuid to
+            // guarantee the row is decryptable on next launch when Flutter
+            // writes the same UUID to its own storage. This avoids the
+            // recovery prompt in `IdentityService::init` even if the
+            // backup's `crypto_keys` row was already correct.
+            let ed_bytes: [u8; 32] = packed[..32]
+                .try_into()
+                .map_err(|_| BackupError::Crypto("identity ed slice".into()))?;
+            let x_bytes: [u8; 32] = packed[32..]
+                .try_into()
+                .map_err(|_| BackupError::Crypto("identity x slice".into()))?;
+            rewrite_crypto_keys(db_path, &manifest.library_uuid, &ed_bytes, &x_bytes).await?;
+            true
+        }
+        _ => {
+            // Either user opted out, or archive has no identity. Either way,
+            // the row sitting in the restored DB was encrypted with the OLD
+            // library_uuid; it is no longer decryptable from the new local
+            // identity. Wipe it so the next launch generates a fresh
+            // NodeIdentity (clean-install path).
+            clear_crypto_keys(db_path).await?;
+            false
+        }
+    };
+
+    // 4. Rebuild the cover directory: wipe everything inside, then write the
+    //    archive's covers verbatim. Hub-hosted covers (https URLs) live in
+    //    the books table, not in cover_dir, so they are unaffected.
+    let _ = std::fs::create_dir_all(cover_dir);
+    wipe_cover_dir(cover_dir)?;
+    let covers_restored = write_covers(cover_dir, cover_plaintext)?;
+
+    // 5. Read counts from the restored DB.
+    let counts = count_after(db_path).await?;
+
+    let restored_library_uuid = if identity_restored {
+        Some(manifest.library_uuid.clone())
+    } else {
+        None
+    };
+
+    Ok(RestoreSummary {
+        mode: RestoreMode::Replace,
+        identity_restored,
+        restored_library_uuid,
+        prefs_json,
+        rollback_path: Some(rollback_path.to_string_lossy().into_owned()),
+        books_after: counts.0,
+        copies_after: counts.1,
+        contacts_after: counts.2,
+        covers_restored,
+    })
+}
+
+async fn apply_merge(
+    db_path: &Path,
+    cover_dir: &Path,
+    tmp_db_path: &Path,
+    _manifest: &ManifestSummary,
+    cover_plaintext: &std::collections::HashMap<String, (Vec<u8>, String)>,
+) -> Result<RestoreSummary, BackupError> {
+    // Open a read-only connection on the tmp DB to load the merge whitelist.
+    let import_payload = load_merge_payload(tmp_db_path).await?;
+
+    // Open a writable connection on the live DB and run the existing upsert.
+    // Multiple connections on the same SQLite file are supported (WAL mode);
+    // the FFI's live connection sees the new rows on its next read.
+    apply_upsert(db_path, import_payload).await?;
+
+    // Additive cover restore: write entries that don't already exist on disk.
+    let _ = std::fs::create_dir_all(cover_dir);
+    let covers_restored = write_covers_additive(cover_dir, cover_plaintext)?;
+
+    let counts = count_after(db_path).await?;
+
+    Ok(RestoreSummary {
+        mode: RestoreMode::Merge,
+        identity_restored: false,
+        restored_library_uuid: None,
+        prefs_json: String::new(),
+        rollback_path: None,
+        books_after: counts.0,
+        copies_after: counts.1,
+        contacts_after: counts.2,
+        covers_restored,
+    })
+}
+
+// -----------------------------------------------------------------------------
+// DB helpers (open ephemeral connection on a path)
+// -----------------------------------------------------------------------------
+
+/// Migrate the DB at `path` forward to `SCHEMA_VERSION`. Idempotent: each
+/// individual migration in `run_migrations` is guarded by `IF NOT EXISTS`
+/// or equivalent.
+async fn run_migrations_on_path(path: &Path) -> Result<(), sea_orm::DbErr> {
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let db = sea_orm::Database::connect(&url).await?;
+    crate::infrastructure::db::run_migrations(&db).await?;
+    db.close().await?;
+    Ok(())
+}
+
+async fn rewrite_crypto_keys(
+    db_path: &Path,
+    library_uuid: &str,
+    ed_bytes: &[u8; 32],
+    x_bytes: &[u8; 32],
+) -> Result<(), BackupError> {
+    let url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db = sea_orm::Database::connect(&url)
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    db.execute_unprepared("DELETE FROM crypto_keys WHERE user_id = 0")
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    crate::services::identity_service::store_identity_bytes(&db, library_uuid, ed_bytes, x_bytes)
+        .await
+        .map_err(BackupError::Db)?;
+    db.close()
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    Ok(())
+}
+
+async fn clear_crypto_keys(db_path: &Path) -> Result<(), BackupError> {
+    let url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db = sea_orm::Database::connect(&url)
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    db.execute_unprepared("DELETE FROM crypto_keys WHERE user_id = 0")
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    db.close()
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    Ok(())
+}
+
+async fn count_after(db_path: &Path) -> Result<(i64, i64, i64), BackupError> {
+    let url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db = sea_orm::Database::connect(&url)
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    let books = book::Entity::find()
+        .count(&db)
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))? as i64;
+    let copies = copy::Entity::find()
+        .count(&db)
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))? as i64;
+    let contacts = contact::Entity::find()
+        .count(&db)
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))? as i64;
+    db.close()
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    Ok((books, copies, contacts))
+}
+
+async fn load_merge_payload(
+    tmp_db_path: &Path,
+) -> Result<crate::api::export::ImportBackupData, BackupError> {
+    use crate::api::export::ImportBackupData;
+    use crate::models::{
+        author, book, book_authors, book_tags, collection, collection_book, contact, copy,
+        gamification_achievements, gamification_config, gamification_progress,
+        gamification_streaks, library_config, loan, sale, tag,
+    };
+
+    let url = format!("sqlite://{}?mode=ro", tmp_db_path.display());
+    let db = sea_orm::Database::connect(&url)
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+
+    // Models in the merge whitelist (per ticket §"Pipeline Merge"). Not loaded:
+    // peers, crypto_keys, peer_book, operation_log, notification, relay_config,
+    // linked_device, installation_profile, user.
+    let library_config = library_config::Entity::find()
+        .one(&db)
+        .await
+        .unwrap_or(None);
+    let books_models = book::Entity::find().all(&db).await.unwrap_or_default();
+    let authors = author::Entity::find().all(&db).await.unwrap_or_default();
+    let book_authors = book_authors::Entity::find()
+        .all(&db)
+        .await
+        .unwrap_or_default();
+    let copies = copy::Entity::find().all(&db).await.unwrap_or_default();
+    let contacts_models = contact::Entity::find().all(&db).await.unwrap_or_default();
+    let loans = loan::Entity::find().all(&db).await.unwrap_or_default();
+    let sales = sale::Entity::find().all(&db).await.unwrap_or_default();
+    let tags_models = tag::Entity::find().all(&db).await.unwrap_or_default();
+    let book_tags = book_tags::Entity::find().all(&db).await.unwrap_or_default();
+    let collections = collection::Entity::find()
+        .all(&db)
+        .await
+        .unwrap_or_default();
+    let collection_books = collection_book::Entity::find()
+        .all(&db)
+        .await
+        .unwrap_or_default();
+    let gamification_config_row = gamification_config::Entity::find()
+        .one(&db)
+        .await
+        .unwrap_or(None);
+    let gamification_progress = gamification_progress::Entity::find()
+        .all(&db)
+        .await
+        .unwrap_or_default();
+    let gamification_achievements = gamification_achievements::Entity::find()
+        .all(&db)
+        .await
+        .unwrap_or_default();
+    let gamification_streaks = gamification_streaks::Entity::find()
+        .all(&db)
+        .await
+        .unwrap_or_default();
+    db.close()
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+
+    let books = books_models
+        .into_iter()
+        .map(book_model_to_import_book)
+        .collect();
+    let contacts = contacts_models
+        .into_iter()
+        .map(contact_model_to_import_contact)
+        .collect();
+    let tags = tags_models
+        .into_iter()
+        .map(tag_model_to_import_tag)
+        .collect();
+
+    Ok(ImportBackupData {
+        version: Some(FORMAT_VERSION.to_string()),
+        exported_at: None,
+        library_config,
+        books: Some(books),
+        authors: Some(authors),
+        book_authors: Some(book_authors),
+        copies: Some(copies),
+        contacts: Some(contacts),
+        loans: Some(loans),
+        sales: Some(sales),
+        tags: Some(tags),
+        book_tags: Some(book_tags),
+        collections: Some(collections),
+        collection_books: Some(collection_books),
+        // Peers excluded by the merge whitelist; sending None makes the
+        // existing skip in `run_import_upsert` step 12 trivially apply.
+        peers: None,
+        gamification_config: gamification_config_row,
+        gamification_progress: Some(gamification_progress),
+        gamification_achievements: Some(gamification_achievements),
+        gamification_streaks: Some(gamification_streaks),
+    })
+}
+
+async fn apply_upsert(
+    db_path: &Path,
+    payload: crate::api::export::ImportBackupData,
+) -> Result<(), BackupError> {
+    let url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db = sea_orm::Database::connect(&url)
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    let _ = crate::api::export::run_import_upsert(&db, payload).await;
+    db.close()
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    Ok(())
+}
+
+// Conversions Model -> Import* mirroring the JSON roundtrip we'd do via
+// serde. Keeps the merge path purely in-process (no JSON intermediate).
+
+fn book_model_to_import_book(m: crate::models::book::Model) -> crate::api::export::ImportBook {
+    crate::api::export::ImportBook {
+        id: Some(m.id),
+        title: m.title,
+        isbn: m.isbn,
+        summary: m.summary,
+        publisher: m.publisher,
+        publication_year: m.publication_year,
+        dewey_decimal: m.dewey_decimal,
+        lcc: m.lcc,
+        subjects: m.subjects,
+        marc_record: m.marc_record,
+        cataloguing_notes: m.cataloguing_notes,
+        source_data: m.source_data,
+        shelf_position: m.shelf_position,
+        reading_status: m.reading_status,
+        finished_reading_at: m.finished_reading_at,
+        started_reading_at: m.started_reading_at,
+        cover_url: m.cover_url,
+        created_at: Some(m.created_at),
+        updated_at: Some(m.updated_at),
+        user_rating: m.user_rating,
+        owned: m.owned,
+        price: m.price,
+        digital_formats: m.digital_formats,
+        private: m.private,
+        page_count: m.page_count,
+        loan_duration_days: m.loan_duration_days,
+        author: None,
+    }
+}
+
+fn contact_model_to_import_contact(
+    m: crate::models::contact::Model,
+) -> crate::api::export::ImportContact {
+    crate::api::export::ImportContact {
+        id: Some(m.id),
+        r#type: m.r#type,
+        name: m.name,
+        first_name: m.first_name,
+        email: m.email,
+        phone: m.phone,
+        address: m.address,
+        street_address: m.street_address,
+        postal_code: m.postal_code,
+        city: m.city,
+        country: m.country,
+        latitude: m.latitude,
+        longitude: m.longitude,
+        notes: m.notes,
+        user_id: m.user_id,
+        library_owner_id: m.library_owner_id,
+        is_active: m.is_active,
+        created_at: Some(m.created_at),
+        updated_at: Some(m.updated_at),
+    }
+}
+
+fn tag_model_to_import_tag(m: crate::models::tag::Model) -> crate::api::export::ImportTag {
+    crate::api::export::ImportTag {
+        id: Some(m.id),
+        name: m.name,
+        parent_id: m.parent_id,
+        path: m.path,
+        created_at: Some(m.created_at),
+        updated_at: Some(m.updated_at),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Crypto / zip helpers
+// -----------------------------------------------------------------------------
+
+fn parse_manifest_from_zip<R: std::io::Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+) -> Result<ManifestSummary, BackupError> {
+    let bytes = read_zip_entry_bytes(zip, ENTRY_MANIFEST)?;
+    let manifest: ManifestSummary = serde_json::from_slice(&bytes)?;
+    Ok(manifest)
+}
+
+fn read_zip_entry_bytes<R: std::io::Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    name: &str,
+) -> Result<Vec<u8>, BackupError> {
+    use std::io::Read;
+    let mut entry = zip
+        .by_name(name)
+        .map_err(|e| BackupError::Zip(format!("missing entry {name}: {e}")))?;
+    let mut buf = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+fn derive_keys_from_secret(
+    secret: &[u8],
+    manifest: &ManifestSummary,
+) -> Result<([u8; 32], [u8; 32]), BackupError> {
+    let salt_vec = B64
+        .decode(&manifest.argon2.salt_b64)
+        .map_err(|e| BackupError::Crypto(format!("invalid salt b64: {e}")))?;
+    let salt: [u8; 32] = salt_vec
+        .try_into()
+        .map_err(|_| BackupError::Crypto("salt size".into()))?;
+    let mut master = derive_key_from_password(secret, &salt)?;
+    let pair = derive_subkeys(&master)?;
+    master.zeroize();
+    Ok(pair)
+}
+
+fn check_signature<R: std::io::Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    k_mac: &[u8; 32],
+    manifest: &ManifestSummary,
+) -> Result<(), BackupError> {
+    let manifest_bytes = read_zip_entry_bytes(zip, ENTRY_MANIFEST)?;
+    let enc_db = read_zip_entry_bytes(zip, ENTRY_DB)?;
+    let enc_prefs = read_zip_entry_bytes(zip, ENTRY_PREFS)?;
+    let enc_identity = if manifest.identity_included {
+        Some(read_zip_entry_bytes(zip, ENTRY_IDENTITY)?)
+    } else {
+        None
+    };
+
+    // Cover entries are HMAC'd in the same sorted order the writer used.
+    let mut cover_names: Vec<String> = (0..zip.len())
+        .filter_map(|i| zip.by_index(i).ok().map(|e| e.name().to_string()))
+        .filter(|n| n.starts_with("covers/"))
+        .collect();
+    cover_names.sort();
+    let mut enc_covers: Vec<Vec<u8>> = Vec::with_capacity(cover_names.len());
+    for name in &cover_names {
+        enc_covers.push(read_zip_entry_bytes(zip, name)?);
+    }
+
+    let stored_sig = read_zip_entry_bytes(zip, ENTRY_SIGNATURE)?;
+
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(k_mac)
+        .map_err(|e| BackupError::Crypto(e.to_string()))?;
+    mac.update(&manifest_bytes);
+    mac.update(&enc_db);
+    mac.update(&enc_prefs);
+    if let Some(ei) = &enc_identity {
+        mac.update(ei);
+    }
+    for ct in &enc_covers {
+        mac.update(ct);
+    }
+    mac.verify_slice(&stored_sig)
+        .map_err(|_| BackupError::BadSignature)
+}
+
+fn unseal_entry(key: &[u8; 32], sealed: &[u8]) -> Result<Vec<u8>, BackupError> {
+    if sealed.len() < 12 + 16 {
+        return Err(BackupError::Crypto("entry too short".into()));
+    }
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&sealed[..12]);
+    let ciphertext = &sealed[12..];
+    Ok(crate::crypto::encryption::decrypt_aes_gcm(
+        key, &nonce, ciphertext,
+    )?)
+}
+
+fn collect_cover_plaintext<R: std::io::Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    k_enc: &[u8; 32],
+    manifest: &ManifestSummary,
+) -> Result<std::collections::HashMap<String, (Vec<u8>, String)>, BackupError> {
+    // Map sha256 -> (plaintext bytes, extension). The manifest already lists
+    // the expected covers; iterating it lets us tolerate a zip with more
+    // entries (we only consider the manifest-declared ones).
+    let mut out: std::collections::HashMap<String, (Vec<u8>, String)> =
+        std::collections::HashMap::with_capacity(manifest.covers.len());
+    for cover in &manifest.covers {
+        // The writer's entry name was `covers/<sha256>.<ext>` (any ext). We
+        // probe a few common extensions and fall back to a directory scan.
+        let entry_name = find_cover_entry_name(zip, &cover.sha256)?;
+        let enc = read_zip_entry_bytes(zip, &entry_name)?;
+        let plain = unseal_entry(k_enc, &enc)?;
+        // Verify cover plaintext sha256 matches the manifest entry.
+        if !ct_eq_str(&sha256_hex(&plain), &cover.sha256) {
+            return Err(BackupError::Crypto(format!(
+                "cover hash mismatch for {}",
+                cover.sha256
+            )));
+        }
+        let ext = entry_name
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_string())
+            .unwrap_or_else(|| "bin".to_string());
+        out.insert(cover.sha256.clone(), (plain, ext));
+    }
+    Ok(out)
+}
+
+fn find_cover_entry_name<R: std::io::Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    sha256: &str,
+) -> Result<String, BackupError> {
+    let prefix = format!("covers/{sha256}.");
+    for i in 0..zip.len() {
+        if let Ok(entry) = zip.by_index(i) {
+            let name = entry.name().to_string();
+            if name.starts_with(&prefix) {
+                return Ok(name);
+            }
+        }
+    }
+    Err(BackupError::Zip(format!("cover entry not found: {sha256}")))
+}
+
+fn write_covers(
+    cover_dir: &Path,
+    plaintext_map: &std::collections::HashMap<String, (Vec<u8>, String)>,
+) -> Result<i64, BackupError> {
+    let mut n: i64 = 0;
+    for (sha, (bytes, ext)) in plaintext_map {
+        let dest = cover_dir.join(format!("{sha}.{ext}"));
+        std::fs::write(&dest, bytes)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+fn write_covers_additive(
+    cover_dir: &Path,
+    plaintext_map: &std::collections::HashMap<String, (Vec<u8>, String)>,
+) -> Result<i64, BackupError> {
+    let mut n: i64 = 0;
+    for (sha, (bytes, ext)) in plaintext_map {
+        let dest = cover_dir.join(format!("{sha}.{ext}"));
+        if dest.exists() {
+            continue;
+        }
+        std::fs::write(&dest, bytes)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+fn wipe_cover_dir(cover_dir: &Path) -> std::io::Result<()> {
+    let read = match std::fs::read_dir(cover_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in read {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Filesystem helpers (rename + GC)
+// -----------------------------------------------------------------------------
+
+fn sibling_with_suffix(p: &Path, suffix: &str, ts: &chrono::DateTime<chrono::Utc>) -> PathBuf {
+    let stamp = ts.format("%Y%m%dT%H%M%SZ").to_string();
+    let mut s = p.as_os_str().to_owned();
+    s.push(suffix);
+    s.push(stamp);
+    PathBuf::from(s)
+}
+
+fn sibling_aux(p: &Path, suffix: &str) -> PathBuf {
+    let mut s = p.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Rename `from` to `to`, then move the SQLite WAL/SHM siblings alongside if
+/// they exist. Both target FS positions must live on the same filesystem as
+/// the source so each rename is atomic (POSIX `renameat`); cross-FS errors
+/// (`EXDEV`) bubble up rather than triggering a copy+delete fallback.
+fn rename_db_with_wal(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)?;
+    let wal_from = sibling_aux(from, "-wal");
+    let wal_to = sibling_aux(to, "-wal");
+    if wal_from.exists() {
+        let _ = std::fs::rename(&wal_from, &wal_to);
+    }
+    let shm_from = sibling_aux(from, "-shm");
+    let shm_to = sibling_aux(to, "-shm");
+    if shm_from.exists() {
+        let _ = std::fs::rename(&shm_from, &shm_to);
+    }
+    Ok(())
+}
+
+fn parse_rollback_timestamp(suffix: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    // Format from `sibling_with_suffix`: `YYYYMMDDTHHMMSSZ`.
+    let parsed = chrono::NaiveDateTime::parse_from_str(suffix, "%Y%m%dT%H%M%SZ").ok()?;
+    Some(parsed.and_utc())
+}
+
+/// Equality on hex SHA-256 strings. Both values are non-secret (the manifest
+/// is in clear and the plaintext hash is recomputed from public bytes), so a
+/// constant-time comparison would not add real protection here. The HMAC on
+/// the archive itself, which IS keyed and security-critical, goes through
+/// `Mac::verify_slice` which is constant-time internally.
+fn ct_eq_str(a: &str, b: &str) -> bool {
+    a == b
+}
+
+/// Garbage-collect rollback / replaced siblings older than 24h. Called by
+/// `infrastructure::db::run_startup_maintenance` at app launch.
+pub fn purge_expired_rollbacks(db_path: &Path) {
+    let parent = match db_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => Path::new(".").to_path_buf(),
+    };
+    let Some(base) = db_path.file_name().and_then(|s| s.to_str()) else {
+        return;
+    };
+    let prefixes = [
+        format!("{base}{ROLLBACK_SUFFIX}"),
+        format!("{base}{REPLACED_SUFFIX}"),
+    ];
+    let now = chrono::Utc::now();
+    let entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(&parent) {
+        Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+        Err(_) => return,
+    };
+    for entry in entries {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        let Some((stamp, _)) = prefixes
+            .iter()
+            .find_map(|p| name_str.strip_prefix(p).map(|s| (s, p)))
+        else {
+            continue;
+        };
+        let Some(ts) = parse_rollback_timestamp(stamp) else {
+            continue;
+        };
+        let age = (now - ts).num_seconds();
+        let path = entry.path();
+        if age > ROLLBACK_TTL_SECONDS {
+            if std::fs::remove_file(&path).is_ok() {
+                let _ = std::fs::remove_file(sibling_aux(&path, "-wal"));
+                let _ = std::fs::remove_file(sibling_aux(&path, "-shm"));
+                tracing::info!(
+                    path = %path.display(),
+                    age_seconds = age,
+                    "purged expired rollback"
+                );
+            }
+        } else {
+            tracing::debug!(
+                path = %path.display(),
+                age_seconds = age,
+                "kept rollback"
+            );
+        }
     }
 }
