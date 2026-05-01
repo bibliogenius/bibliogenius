@@ -143,7 +143,12 @@ pub struct HubCatalog {
 }
 
 /// A single entry in the enriched catalog (ISBN + title + author + optional cover).
-/// Books without ISBN use `book_id` as an alternative key.
+///
+/// `book_id` is the owner's local primary key. The current writer
+/// (`hub_directory_sync_catalog`) always populates it because the hub's
+/// cover GC (ADR-033) needs it to identify orphan `covers/{node}/{id}.jpg`
+/// files. Kept Optional so the type still deserializes catalogs produced
+/// by older clients (pre-ADR-033) that omitted the field.
 ///
 /// `added_at` carries the owner's `books.created_at` so every follower agrees
 /// on whether an entry is recent (replaces the per-viewer `peer_books.first_seen_at`

@@ -4811,7 +4811,10 @@ pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), St
 
 /// Reads all owned books from the local database, collects title, author,
 /// and cover data, and pushes the enriched catalog to the hub.
-/// Books without ISBN are included using book_id as an alternative key.
+/// Every entry carries its local `book_id` so the hub-side cover GC
+/// (ADR-033) can diff the catalog against the `covers/{node}/{id}.jpg`
+/// files on disk. Books without ISBN are still included; the entry is
+/// keyed by `book_id` alone in that case.
 /// Local cover images are resized and uploaded as thumbnails (best-effort).
 /// Returns the number of entries pushed.
 pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
@@ -4856,12 +4859,11 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
             .to_string();
         let book_id_val = book.id;
         let book_updated_at = book.updated_at.clone();
-        // For no-ISBN books, include book_id as alternative key
-        let book_id = if isbn.is_empty() {
-            Some(book_id_val)
-        } else {
-            None
-        };
+        // Always include book_id: the hub's cover GC (ADR-033) uses it to
+        // diff catalog entries against `covers/{node}/{book_id}.jpg` files
+        // on disk. Omitting it on ISBN-bearing entries silently disables GC
+        // and leaks orphan covers (see `skipped_empty_catalog` warnings).
+        let book_id = Some(book_id_val);
 
         // Skip books with neither ISBN nor title (unusable entries)
         if isbn.is_empty() && book.title.is_empty() {
