@@ -26,7 +26,7 @@
 // Section: imports
 
 use flutter_rust_bridge::for_generated::byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
-use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
+use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
 use flutter_rust_bridge::{Handler, IntoIntoDart};
 
 // Section: boilerplate
@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 309772506;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 657785131;
 
 // Section: executor
 
@@ -3983,6 +3983,41 @@ fn wire__crate__api__frb__is_mdns_available_impl(
         },
     )
 }
+fn wire__crate__api__frb__latest_user_data_change_at_ffi_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "latest_user_data_change_at_ffi",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::latest_user_data_change_at_ffi().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__frb__list_available_rollbacks_ffi_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -5342,6 +5377,7 @@ fn wire__crate__api__frb__restore_backup_ffi_impl(
             let api_secret_bytes = <Vec<u8>>::sse_decode(&mut deserializer);
             let api_mode = <String>::sse_decode(&mut deserializer);
             let api_restore_identity = <bool>::sse_decode(&mut deserializer);
+            let api_local_library_uuid = <Option<String>>::sse_decode(&mut deserializer);
             let api_db_path = <String>::sse_decode(&mut deserializer);
             let api_cover_dir = <String>::sse_decode(&mut deserializer);
             deserializer.end();
@@ -5353,6 +5389,7 @@ fn wire__crate__api__frb__restore_backup_ffi_impl(
                             api_secret_bytes,
                             api_mode,
                             api_restore_identity,
+                            api_local_library_uuid,
                             api_db_path,
                             api_cover_dir,
                         )
@@ -7624,6 +7661,7 @@ impl SseDecode for crate::api::frb::FrbRestoreSummary {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_mode = <String>::sse_decode(deserializer);
         let mut var_identityRestored = <bool>::sse_decode(deserializer);
+        let mut var_sameDevice = <bool>::sse_decode(deserializer);
         let mut var_restoredLibraryUuid = <Option<String>>::sse_decode(deserializer);
         let mut var_libraryUuidAction = <String>::sse_decode(deserializer);
         let mut var_prefsJson = <String>::sse_decode(deserializer);
@@ -7635,6 +7673,7 @@ impl SseDecode for crate::api::frb::FrbRestoreSummary {
         return crate::api::frb::FrbRestoreSummary {
             mode: var_mode,
             identity_restored: var_identityRestored,
+            same_device: var_sameDevice,
             restored_library_uuid: var_restoredLibraryUuid,
             library_uuid_action: var_libraryUuidAction,
             prefs_json: var_prefsJson,
@@ -8652,172 +8691,178 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        108 => wire__crate__api__frb__list_available_rollbacks_ffi_impl(
+        108 => wire__crate__api__frb__latest_user_data_change_at_ffi_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        109 => wire__crate__api__frb__lookup_book_metadata_impl(port, ptr, rust_vec_len, data_len),
-        110 => wire__crate__api__frb__memory_game_available_difficulties_impl(
+        109 => wire__crate__api__frb__list_available_rollbacks_ffi_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        111 => wire__crate__api__frb__memory_game_finish_impl(port, ptr, rust_vec_len, data_len),
-        112 => {
+        110 => wire__crate__api__frb__lookup_book_metadata_impl(port, ptr, rust_vec_len, data_len),
+        111 => wire__crate__api__frb__memory_game_available_difficulties_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        112 => wire__crate__api__frb__memory_game_finish_impl(port, ptr, rust_vec_len, data_len),
+        113 => {
             wire__crate__api__frb__memory_game_leaderboard_impl(port, ptr, rust_vec_len, data_len)
         }
-        113 => wire__crate__api__frb__memory_game_refresh_leaderboard_impl(
+        114 => wire__crate__api__frb__memory_game_refresh_leaderboard_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        114 => {
+        115 => {
             wire__crate__api__frb__memory_game_reset_scores_impl(port, ptr, rust_vec_len, data_len)
         }
-        115 => wire__crate__api__frb__memory_game_setup_impl(port, ptr, rust_vec_len, data_len),
-        116 => {
+        116 => wire__crate__api__frb__memory_game_setup_impl(port, ptr, rust_vec_len, data_len),
+        117 => {
             wire__crate__api__frb__memory_game_top_scores_impl(port, ptr, rust_vec_len, data_len)
         }
-        117 => wire__crate__api__frb__notifications_dismiss_impl(port, ptr, rust_vec_len, data_len),
-        118 => {
+        118 => wire__crate__api__frb__notifications_dismiss_impl(port, ptr, rust_vec_len, data_len),
+        119 => {
             wire__crate__api__frb__notifications_dismiss_all_impl(port, ptr, rust_vec_len, data_len)
         }
-        119 => wire__crate__api__frb__notifications_list_impl(port, ptr, rust_vec_len, data_len),
-        120 => wire__crate__api__frb__notifications_mark_all_read_impl(
+        120 => wire__crate__api__frb__notifications_list_impl(port, ptr, rust_vec_len, data_len),
+        121 => wire__crate__api__frb__notifications_mark_all_read_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        121 => {
+        122 => {
             wire__crate__api__frb__notifications_mark_read_impl(port, ptr, rust_vec_len, data_len)
         }
-        122 => wire__crate__api__frb__notifications_prune_impl(port, ptr, rust_vec_len, data_len),
-        123 => wire__crate__api__frb__notifications_unread_count_impl(
+        123 => wire__crate__api__frb__notifications_prune_impl(port, ptr, rust_vec_len, data_len),
+        124 => wire__crate__api__frb__notifications_unread_count_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        124 => wire__crate__api__frb__open_blob_impl(port, ptr, rust_vec_len, data_len),
-        125 => wire__crate__api__frb__operation_log_entity_types_impl(
+        125 => wire__crate__api__frb__open_blob_impl(port, ptr, rust_vec_len, data_len),
+        126 => wire__crate__api__frb__operation_log_entity_types_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        126 => wire__crate__api__frb__operation_log_list_impl(port, ptr, rust_vec_len, data_len),
-        127 => wire__crate__api__frb__operation_log_stats_impl(port, ptr, rust_vec_len, data_len),
-        128 => wire__crate__api__frb__parse_invite_link_ffi_impl(port, ptr, rust_vec_len, data_len),
-        129 => wire__crate__api__frb__parse_qr_payload_ffi_impl(port, ptr, rust_vec_len, data_len),
-        130 => {
+        127 => wire__crate__api__frb__operation_log_list_impl(port, ptr, rust_vec_len, data_len),
+        128 => wire__crate__api__frb__operation_log_stats_impl(port, ptr, rust_vec_len, data_len),
+        129 => wire__crate__api__frb__parse_invite_link_ffi_impl(port, ptr, rust_vec_len, data_len),
+        130 => wire__crate__api__frb__parse_qr_payload_ffi_impl(port, ptr, rust_vec_len, data_len),
+        131 => {
             wire__crate__api__frb__peers_relay_debug_info_impl(port, ptr, rust_vec_len, data_len)
         }
-        131 => wire__crate__api__frb__puzzle_available_difficulties_impl(
+        132 => wire__crate__api__frb__puzzle_available_difficulties_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        132 => wire__crate__api__frb__puzzle_finish_impl(port, ptr, rust_vec_len, data_len),
-        133 => {
+        133 => wire__crate__api__frb__puzzle_finish_impl(port, ptr, rust_vec_len, data_len),
+        134 => {
             wire__crate__api__frb__puzzle_game_leaderboard_impl(port, ptr, rust_vec_len, data_len)
         }
-        134 => wire__crate__api__frb__puzzle_game_refresh_leaderboard_impl(
+        135 => wire__crate__api__frb__puzzle_game_refresh_leaderboard_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        135 => {
+        136 => {
             wire__crate__api__frb__puzzle_game_reset_scores_impl(port, ptr, rust_vec_len, data_len)
         }
-        136 => wire__crate__api__frb__puzzle_setup_impl(port, ptr, rust_vec_len, data_len),
-        137 => wire__crate__api__frb__puzzle_top_scores_impl(port, ptr, rust_vec_len, data_len),
-        138 => wire__crate__api__frb__read_manifest_ffi_impl(port, ptr, rust_vec_len, data_len),
-        139 => {
+        137 => wire__crate__api__frb__puzzle_setup_impl(port, ptr, rust_vec_len, data_len),
+        138 => wire__crate__api__frb__puzzle_top_scores_impl(port, ptr, rust_vec_len, data_len),
+        139 => wire__crate__api__frb__read_manifest_ffi_impl(port, ptr, rust_vec_len, data_len),
+        140 => {
             wire__crate__api__frb__refresh_all_leaderboards_impl(port, ptr, rust_vec_len, data_len)
         }
-        140 => wire__crate__api__frb__remove_book_from_collection_impl(
+        141 => wire__crate__api__frb__remove_book_from_collection_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        141 => wire__crate__api__frb__rename_subject_impl(port, ptr, rust_vec_len, data_len),
-        142 => wire__crate__api__frb__reorder_books_impl(port, ptr, rust_vec_len, data_len),
-        143 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
-        144 => wire__crate__api__frb__restore_backup_ffi_impl(port, ptr, rust_vec_len, data_len),
-        145 => {
+        142 => wire__crate__api__frb__rename_subject_impl(port, ptr, rust_vec_len, data_len),
+        143 => wire__crate__api__frb__reorder_books_impl(port, ptr, rust_vec_len, data_len),
+        144 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
+        145 => wire__crate__api__frb__restore_backup_ffi_impl(port, ptr, rust_vec_len, data_len),
+        146 => {
             wire__crate__api__frb__restore_from_rollback_ffi_impl(port, ptr, rust_vec_len, data_len)
         }
-        146 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
-        147 => wire__crate__api__frb__seal_blob_impl(port, ptr, rust_vec_len, data_len),
-        148 => wire__crate__api__frb__search_all_covers_by_title_impl(
+        147 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
+        148 => wire__crate__api__frb__seal_blob_impl(port, ptr, rust_vec_len, data_len),
+        149 => wire__crate__api__frb__search_all_covers_by_title_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        149 => wire__crate__api__frb__search_all_covers_for_book_impl(
+        150 => wire__crate__api__frb__search_all_covers_for_book_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        150 => wire__crate__api__frb__search_cover_by_title_impl(port, ptr, rust_vec_len, data_len),
-        151 => wire__crate__api__frb__search_cover_for_book_impl(port, ptr, rust_vec_len, data_len),
-        152 => {
+        151 => wire__crate__api__frb__search_cover_by_title_impl(port, ptr, rust_vec_len, data_len),
+        152 => wire__crate__api__frb__search_cover_for_book_impl(port, ptr, rust_vec_len, data_len),
+        153 => {
             wire__crate__api__frb__set_book_loan_duration_impl(port, ptr, rust_vec_len, data_len)
         }
-        153 => wire__crate__api__frb__set_hub_url_ffi_impl(port, ptr, rust_vec_len, data_len),
-        154 => wire__crate__api__frb__set_peer_delta_cursor_impl(port, ptr, rust_vec_len, data_len),
-        155 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
-        156 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
-        157 => {
+        154 => wire__crate__api__frb__set_hub_url_ffi_impl(port, ptr, rust_vec_len, data_len),
+        155 => wire__crate__api__frb__set_peer_delta_cursor_impl(port, ptr, rust_vec_len, data_len),
+        156 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
+        157 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
+        158 => {
             wire__crate__api__frb__subscribe_catalog_changes_impl(port, ptr, rust_vec_len, data_len)
         }
-        158 => wire__crate__api__frb__subscribe_leaderboard_changes_impl(
+        159 => wire__crate__api__frb__subscribe_leaderboard_changes_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        159 => {
+        160 => {
             wire__crate__api__frb__subscribe_profile_changes_impl(port, ptr, rust_vec_len, data_len)
         }
-        160 => {
+        161 => {
             wire__crate__api__frb__subscribe_relay_nudges_impl(port, ptr, rust_vec_len, data_len)
         }
-        161 => wire__crate__api__frb__try_peer_avatar_pull_impl(port, ptr, rust_vec_len, data_len),
-        162 => {
+        162 => wire__crate__api__frb__try_peer_avatar_pull_impl(port, ptr, rust_vec_len, data_len),
+        163 => {
             wire__crate__api__frb__try_peer_catalog_delta_impl(port, ptr, rust_vec_len, data_len)
         }
-        163 => wire__crate__api__frb__try_peer_catalog_delta_detailed_impl(
+        164 => wire__crate__api__frb__try_peer_catalog_delta_detailed_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        164 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
-        165 => {
+        165 => wire__crate__api__frb__update_book_impl(port, ptr, rust_vec_len, data_len),
+        166 => {
             wire__crate__api__frb__update_book_collections_impl(port, ptr, rust_vec_len, data_len)
         }
-        166 => wire__crate__api__frb__update_book_note_impl(port, ptr, rust_vec_len, data_len),
-        167 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
-        168 => {
+        167 => wire__crate__api__frb__update_book_note_impl(port, ptr, rust_vec_len, data_len),
+        168 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
+        169 => {
             wire__crate__api__frb__update_library_name_ffi_impl(port, ptr, rust_vec_len, data_len)
         }
-        169 => wire__crate__api__frb__update_loan_settings_impl(port, ptr, rust_vec_len, data_len),
-        170 => {
+        170 => wire__crate__api__frb__update_loan_settings_impl(port, ptr, rust_vec_len, data_len),
+        171 => {
             wire__crate__api__frb__update_peer_library_uuid_impl(port, ptr, rust_vec_len, data_len)
         }
-        171 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
-        172 => wire__crate__api__frb__write_backup_ffi_impl(port, ptr, rust_vec_len, data_len),
+        172 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
+        173 => wire__crate__api__frb__write_backup_ffi_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -10030,6 +10075,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbRestoreSummary {
         [
             self.mode.into_into_dart().into_dart(),
             self.identity_restored.into_into_dart().into_dart(),
+            self.same_device.into_into_dart().into_dart(),
             self.restored_library_uuid.into_into_dart().into_dart(),
             self.library_uuid_action.into_into_dart().into_dart(),
             self.prefs_json.into_into_dart().into_dart(),
@@ -10900,6 +10946,7 @@ impl SseEncode for crate::api::frb::FrbRestoreSummary {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.mode, serializer);
         <bool>::sse_encode(self.identity_restored, serializer);
+        <bool>::sse_encode(self.same_device, serializer);
         <Option<String>>::sse_encode(self.restored_library_uuid, serializer);
         <String>::sse_encode(self.library_uuid_action, serializer);
         <String>::sse_encode(self.prefs_json, serializer);
@@ -11493,7 +11540,7 @@ mod io {
     use flutter_rust_bridge::for_generated::byteorder::{
         NativeEndian, ReadBytesExt, WriteBytesExt,
     };
-    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
+    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate
@@ -11517,7 +11564,7 @@ mod web {
     };
     use flutter_rust_bridge::for_generated::wasm_bindgen;
     use flutter_rust_bridge::for_generated::wasm_bindgen::prelude::*;
-    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
+    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate

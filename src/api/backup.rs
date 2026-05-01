@@ -683,11 +683,20 @@ pub struct RestoreSummary {
     /// True iff the archive carried `identity.bin` and the user opted in to
     /// clone-mode (Replace + `restore_identity == true`).
     pub identity_restored: bool,
+    /// True iff the caller passed a `local_library_uuid` matching the
+    /// archive's manifest UUID -- i.e. the user is restoring a backup
+    /// produced by THIS device. The Replace path then preserves the live
+    /// `crypto_keys` row instead of wiping it (same device, same identity,
+    /// same encryption key); the caller MUST NOT touch local storage.
+    /// Always `false` for Merge.
+    pub same_device: bool,
     /// `Some(uuid)` when the caller MUST persist this `library_uuid` to local
     /// storage (the Replace + clone-mode path). `None` after Replace without
-    /// clone means the caller MUST clear the local `library_uuid` so the next
-    /// launch generates a fresh one (clean-install path). `None` after Merge
-    /// means the caller MUST NOT touch the existing `library_uuid`.
+    /// clone AND when the caller is on a different device means the caller
+    /// MUST clear the local `library_uuid` so the next launch generates a
+    /// fresh one (clean-install path). `None` after Merge or Replace
+    /// same-device means the caller MUST NOT touch the existing
+    /// `library_uuid`.
     pub restored_library_uuid: Option<String>,
     /// JSON-encoded prefs payload from the archive. Caller applies a
     /// whitelist (PR #4 will move this whitelist into Rust). Empty string in
@@ -774,6 +783,13 @@ pub fn verify_signature(archive_path: &Path, secret: &[u8]) -> Result<(), Backup
 /// `restore_identity` is honoured only in Replace mode and only when
 /// `identity.bin` is present in the archive; it is silently ignored otherwise.
 ///
+/// `local_library_uuid` lets the caller signal "this device's current
+/// `library_uuid`". When the archive's manifest UUID matches, the Replace
+/// path preserves the existing `crypto_keys` row -- typical auto-backup
+/// case where the archive was produced by THIS device with the same
+/// identity (ADR-037 §5 same-device path). `None` falls back to the
+/// pre-existing behaviour (wipe `crypto_keys` unless full clone-mode).
+///
 /// On Replace success, the previous live DB is preserved at
 /// `<db_path>.rollback-<ts>` and surfaced in `RestoreSummary.rollback_path`.
 /// `run_startup_maintenance` purges this file 24h later.
@@ -782,6 +798,7 @@ pub async fn restore_backup(
     secret: &[u8],
     mode: RestoreMode,
     restore_identity: bool,
+    local_library_uuid: Option<String>,
     db_path: &Path,
     cover_dir: &Path,
 ) -> Result<RestoreSummary, BackupError> {
@@ -813,6 +830,7 @@ pub async fn restore_backup(
         &secret_z,
         mode,
         restore_identity,
+        local_library_uuid,
         db_path,
         cover_dir,
     )
@@ -930,6 +948,7 @@ async fn restore_backup_inner(
     secret: &[u8],
     mode: RestoreMode,
     restore_identity: bool,
+    local_library_uuid: Option<String>,
     db_path: &Path,
     cover_dir: &Path,
 ) -> Result<RestoreSummary, BackupError> {
@@ -1011,6 +1030,7 @@ async fn restore_backup_inner(
                 prefs_json.clone(),
                 identity_packed.as_ref().map(|z| z.as_slice()),
                 restore_identity,
+                local_library_uuid.as_deref(),
                 &ts,
             )
             .await?
@@ -1041,6 +1061,7 @@ async fn apply_replace(
     prefs_json: String,
     identity_packed: Option<&[u8]>,
     restore_identity_opt: bool,
+    local_library_uuid: Option<&str>,
     ts: &chrono::DateTime<chrono::Utc>,
 ) -> Result<RestoreSummary, BackupError> {
     // 1. Migrate the tmp DB forward to the running schema_version. We do this
@@ -1062,13 +1083,24 @@ async fn apply_replace(
     }
 
     // 3. Identity handling on the freshly restored live DB.
+    //
+    // Three cases:
+    //   - Replace + clone-mode: re-encrypt archive's identity bytes with
+    //     manifest UUID. Caller persists the manifest UUID locally.
+    //   - Replace + same-device (typical auto-backup restore): the archive's
+    //     `crypto_keys` row was encrypted with the same `library_uuid` the
+    //     device still carries, so the live `NodeIdentity` decrypts it
+    //     unchanged. Skip both `rewrite_crypto_keys` and `clear_crypto_keys`.
+    //     Caller does not touch local storage. Preserves peer relationships
+    //     across catalog rollback (ADR-037 §5).
+    //   - Replace + cross-device + no clone: wipe the row so the next launch
+    //     generates a fresh NodeIdentity (clean-install path).
+    let same_device = match local_library_uuid {
+        Some(local) => local == manifest.library_uuid.as_str(),
+        None => false,
+    };
     let identity_restored = match (restore_identity_opt, identity_packed) {
         (true, Some(packed)) => {
-            // Re-encrypt identity bytes with the manifest's library_uuid to
-            // guarantee the row is decryptable on next launch when Flutter
-            // writes the same UUID to its own storage. This avoids the
-            // recovery prompt in `IdentityService::init` even if the
-            // backup's `crypto_keys` row was already correct.
             let ed_bytes: [u8; 32] = packed[..32]
                 .try_into()
                 .map_err(|_| BackupError::Crypto("identity ed slice".into()))?;
@@ -1078,12 +1110,13 @@ async fn apply_replace(
             rewrite_crypto_keys(db_path, &manifest.library_uuid, &ed_bytes, &x_bytes).await?;
             true
         }
+        _ if same_device => {
+            // No-op: the row in the restored DB was written by THIS device's
+            // previous self with the same `library_uuid`. The local
+            // NodeIdentity is intact and decrypts the row as-is.
+            false
+        }
         _ => {
-            // Either user opted out, or archive has no identity. Either way,
-            // the row sitting in the restored DB was encrypted with the OLD
-            // library_uuid; it is no longer decryptable from the new local
-            // identity. Wipe it so the next launch generates a fresh
-            // NodeIdentity (clean-install path).
             clear_crypto_keys(db_path).await?;
             false
         }
@@ -1108,6 +1141,7 @@ async fn apply_replace(
     Ok(RestoreSummary {
         mode: RestoreMode::Replace,
         identity_restored,
+        same_device,
         restored_library_uuid,
         prefs_json,
         rollback_path: Some(rollback_path.to_string_lossy().into_owned()),
@@ -1142,6 +1176,7 @@ async fn apply_merge(
     Ok(RestoreSummary {
         mode: RestoreMode::Merge,
         identity_restored: false,
+        same_device: false,
         restored_library_uuid: None,
         prefs_json: String::new(),
         rollback_path: None,
@@ -1705,5 +1740,40 @@ pub fn purge_expired_rollbacks(db_path: &Path) {
                 "kept rollback"
             );
         }
+    }
+}
+
+/// Returns the highest `updated_at` across the four user-facing tables that
+/// together represent a catalog change: `books`, `copies`, `loans`, and
+/// `library_config`. Returns `None` when all four tables are empty (fresh
+/// install before any seeding).
+///
+/// Used by the auto-backup scheduler (ADR-037 §6) as the watermark for the
+/// "skip-if-unchanged" check. ISO 8601 timestamps are lexicographically
+/// ordered, so plain `MAX(...)` is sufficient; no dedicated index is needed
+/// (sub-millisecond on realistic library sizes).
+pub async fn latest_user_data_change_at(
+    db: &DatabaseConnection,
+) -> Result<Option<String>, BackupError> {
+    use sea_orm::Statement;
+    let stmt = Statement::from_string(
+        db.get_database_backend(),
+        "SELECT MAX(updated_at) AS m FROM (\
+             SELECT updated_at FROM books \
+             UNION ALL SELECT updated_at FROM copies \
+             UNION ALL SELECT updated_at FROM loans \
+             UNION ALL SELECT updated_at FROM library_config\
+         )"
+        .to_owned(),
+    );
+    let row = db
+        .query_one(stmt)
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    match row {
+        Some(r) => r
+            .try_get::<Option<String>>("", "m")
+            .map_err(|e| BackupError::Db(e.to_string())),
+        None => Ok(None),
     }
 }

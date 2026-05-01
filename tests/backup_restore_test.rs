@@ -130,8 +130,7 @@ async fn open_existing(path: &Path) -> DatabaseConnection {
 /// Initialize a clean live DB at `path`, then close the connection so the
 /// reader can rename the file freely.
 async fn make_live_db(path: &Path) -> DatabaseConnection {
-    let db = open_db(path).await;
-    db
+    open_db(path).await
 }
 
 /// Patch a single entry inside an existing zip archive. Used to fabricate
@@ -251,6 +250,7 @@ async fn replace_round_trip_keeps_books_and_creates_rollback() {
         TEST_SECRET,
         RestoreMode::Replace,
         false,
+        None,
         &live_db_path,
         &cover_dir,
     )
@@ -264,6 +264,7 @@ async fn replace_round_trip_keeps_books_and_creates_rollback() {
     );
     assert!(summary.rollback_path.is_some());
     assert!(!summary.identity_restored);
+    assert!(!summary.same_device, "no local UUID passed -> cross-device path");
     assert_eq!(summary.restored_library_uuid, None);
 
     // Rollback file actually exists on disk.
@@ -309,6 +310,7 @@ async fn replace_with_identity_repopulates_crypto_keys() {
         TEST_SECRET,
         RestoreMode::Replace,
         true,
+        None,
         &live_db_path,
         &cover_dir,
     )
@@ -347,6 +349,7 @@ async fn replace_without_identity_clears_crypto_keys() {
         TEST_SECRET,
         RestoreMode::Replace,
         false,
+        None,
         &live_db_path,
         &cover_dir,
     )
@@ -360,6 +363,92 @@ async fn replace_without_identity_clears_crypto_keys() {
     assert_eq!(
         n, 0,
         "crypto_keys must be cleared after Replace + no identity"
+    );
+    live_after.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replace_same_device_preserves_crypto_keys() {
+    // Regression: ADR-037 §5 same-device path. The user restores an
+    // auto-backup produced by THIS device; identity_included is false but
+    // the local library_uuid still matches the manifest. Wiping crypto_keys
+    // would gratuitously reset the device's working identity and trigger
+    // the post-restore "Vérification de sécurité" recovery dialog. The
+    // fix: when caller passes the matching local UUID, keep crypto_keys
+    // and signal "keep" via library_uuid_action so the Flutter caller
+    // does not touch its own storage either.
+    let tmp = TempDir::new().unwrap();
+    let archive =
+        make_test_archive(&tmp, "same-device", TEST_SECRET, TEST_LIBRARY_UUID, None, &[]).await;
+    let live_db_path = tmp.path().join("live.sqlite");
+    let live = make_live_db(&live_db_path).await;
+    live.close().await.unwrap();
+    let cover_dir = tmp.path().join("live-covers");
+    std::fs::create_dir_all(&cover_dir).unwrap();
+
+    let summary = restore_backup(
+        &archive,
+        TEST_SECRET,
+        RestoreMode::Replace,
+        false,
+        Some(TEST_LIBRARY_UUID.to_string()),
+        &live_db_path,
+        &cover_dir,
+    )
+    .await
+    .expect("restore");
+
+    assert!(
+        summary.same_device,
+        "matching local UUID should be detected as same-device"
+    );
+    assert!(!summary.identity_restored);
+    assert_eq!(summary.restored_library_uuid, None);
+
+    let live_after = open_existing(&live_db_path).await;
+    let n = count_crypto_keys(&live_after).await;
+    assert!(
+        n > 0,
+        "same-device Replace must preserve the archive's crypto_keys row \
+         instead of wiping it ({n} rows kept)"
+    );
+    live_after.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replace_cross_device_uuid_mismatch_still_clears() {
+    // Belt-and-suspenders for the same-device fix: passing a local UUID
+    // that does not match the archive's must keep the legacy clear path.
+    let tmp = TempDir::new().unwrap();
+    let archive =
+        make_test_archive(&tmp, "cross", TEST_SECRET, TEST_LIBRARY_UUID, None, &[]).await;
+    let live_db_path = tmp.path().join("live.sqlite");
+    let live = make_live_db(&live_db_path).await;
+    live.close().await.unwrap();
+    let cover_dir = tmp.path().join("live-covers");
+    std::fs::create_dir_all(&cover_dir).unwrap();
+
+    let summary = restore_backup(
+        &archive,
+        TEST_SECRET,
+        RestoreMode::Replace,
+        false,
+        Some("00000000-0000-0000-0000-deadbeefdead".to_string()),
+        &live_db_path,
+        &cover_dir,
+    )
+    .await
+    .expect("restore");
+
+    assert!(
+        !summary.same_device,
+        "different local UUID must NOT be flagged as same-device"
+    );
+    let live_after = open_existing(&live_db_path).await;
+    let n = count_crypto_keys(&live_after).await;
+    assert_eq!(
+        n, 0,
+        "cross-device Replace must still wipe crypto_keys (legacy path)"
     );
     live_after.close().await.unwrap();
 }
@@ -379,6 +468,7 @@ async fn replace_returns_bad_signature_for_wrong_secret() {
         b"definitely wrong",
         RestoreMode::Replace,
         false,
+        None,
         &live_db_path,
         &cover_dir,
     )
@@ -425,6 +515,7 @@ async fn schema_too_new_returns_clear_error() {
         TEST_SECRET,
         RestoreMode::Replace,
         false,
+        None,
         &live_db_path,
         &cover_dir,
     )
@@ -495,6 +586,7 @@ async fn merge_does_not_touch_crypto_keys_or_existing_books() {
         TEST_SECRET,
         RestoreMode::Merge,
         false,
+        None,
         &live_db_path,
         &cover_dir,
     )

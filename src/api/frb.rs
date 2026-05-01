@@ -6104,14 +6104,22 @@ pub struct FrbRestoreSummary {
     /// `"replace"` or `"merge"`.
     pub mode: String,
     pub identity_restored: bool,
+    /// True iff the caller passed a `local_library_uuid` matching the
+    /// archive's manifest UUID -- the typical auto-backup restore on the
+    /// device that produced the archive. The Replace path then preserves
+    /// `crypto_keys` and the Flutter caller leaves local storage alone
+    /// (ADR-037 §5).
+    pub same_device: bool,
     /// Set on Replace + identity restored: caller MUST persist this UUID to
     /// both Keychain and SharedPreferences (dual-write hardening per
-    /// `e2ee_identity_storage_fragility.md`). On Replace without identity,
-    /// caller MUST clear the UUID from both stores. On Merge, caller MUST
-    /// NOT touch the existing UUID (`null`).
+    /// `e2ee_identity_storage_fragility.md`). On Replace without identity
+    /// AND cross-device, caller MUST clear the UUID from both stores. On
+    /// Merge or Replace same-device, caller MUST NOT touch the existing
+    /// UUID (`null`).
     pub restored_library_uuid: Option<String>,
-    /// `"clear"` (Replace + no identity), `"set"` (Replace + identity),
-    /// `"keep"` (Merge). Drives the Flutter post-restore action.
+    /// `"clear"` (Replace + cross-device + no identity), `"set"`
+    /// (Replace + identity), `"keep"` (Merge or Replace same-device).
+    /// Drives the Flutter post-restore action.
     pub library_uuid_action: String,
     pub prefs_json: String,
     pub rollback_path: Option<String>,
@@ -6128,15 +6136,24 @@ impl FrbRestoreSummary {
             crate::api::backup::RestoreMode::Merge => "merge",
         }
         .to_string();
-        let library_uuid_action = match (s.mode, s.identity_restored) {
-            (crate::api::backup::RestoreMode::Merge, _) => "keep",
-            (crate::api::backup::RestoreMode::Replace, true) => "set",
-            (crate::api::backup::RestoreMode::Replace, false) => "clear",
-        }
-        .to_string();
+        // Replace + same_device collapses to "keep": the local
+        // `library_uuid` already matches the manifest's, so the caller
+        // must not touch its own storage. Replace + clone-mode still
+        // returns "set" (caller writes the manifest UUID locally), and
+        // Replace + cross-device + no clone returns "clear" (caller
+        // wipes its UUID so the next launch generates a fresh one).
+        let library_uuid_action =
+            match (s.mode, s.identity_restored, s.same_device) {
+                (crate::api::backup::RestoreMode::Merge, _, _) => "keep",
+                (crate::api::backup::RestoreMode::Replace, true, _) => "set",
+                (crate::api::backup::RestoreMode::Replace, false, true) => "keep",
+                (crate::api::backup::RestoreMode::Replace, false, false) => "clear",
+            }
+            .to_string();
         Self {
             mode,
             identity_restored: s.identity_restored,
+            same_device: s.same_device,
             restored_library_uuid: s.restored_library_uuid,
             library_uuid_action,
             prefs_json: s.prefs_json,
@@ -6196,11 +6213,16 @@ pub async fn read_manifest_ffi(archive_path: String) -> Result<FrbBackupManifest
 /// `db_path` and `cover_dir` are passed explicitly so the caller (which knows
 /// its sandbox layout via `getApplicationSupportDirectory`) is the single
 /// source of truth.
+/// `local_library_uuid`: pass the device's current `library_uuid` so the
+/// Replace path can detect a same-device restore and keep `crypto_keys`
+/// intact (ADR-037 §5). `None` falls back to the cross-device behaviour
+/// (wipe identity unless full clone-mode).
 pub async fn restore_backup_ffi(
     archive_path: String,
     secret_bytes: Vec<u8>,
     mode: String,
     restore_identity: bool,
+    local_library_uuid: Option<String>,
     db_path: String,
     cover_dir: String,
 ) -> Result<FrbRestoreSummary, String> {
@@ -6220,6 +6242,7 @@ pub async fn restore_backup_ffi(
         &secret_owned,
         restore_mode,
         restore_identity,
+        local_library_uuid,
         Path::new(&db_path),
         Path::new(&cover_dir),
     )
@@ -6250,6 +6273,17 @@ pub async fn restore_from_rollback_ffi(
 ) -> Result<(), String> {
     use std::path::Path;
     crate::api::backup::restore_from_rollback(Path::new(&rollback_path), Path::new(&db_path))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Watermark used by the Flutter `BackupSchedulerService` to skip a 24h tick
+/// when no catalog change happened. Returns the highest `updated_at` across
+/// `books`, `copies`, `loans`, `library_config`, or `None` for a fresh DB
+/// (ADR-037 §6).
+pub async fn latest_user_data_change_at_ffi() -> Result<Option<String>, String> {
+    let db_conn = db().ok_or("Database not initialized")?;
+    crate::api::backup::latest_user_data_change_at(db_conn)
         .await
         .map_err(|e| e.to_string())
 }
