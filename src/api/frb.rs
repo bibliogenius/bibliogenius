@@ -6144,14 +6144,13 @@ impl FrbRestoreSummary {
         // returns "set" (caller writes the manifest UUID locally), and
         // Replace + cross-device + no clone returns "clear" (caller
         // wipes its UUID so the next launch generates a fresh one).
-        let library_uuid_action =
-            match (s.mode, s.identity_restored, s.same_device) {
-                (crate::api::backup::RestoreMode::Merge, _, _) => "keep",
-                (crate::api::backup::RestoreMode::Replace, true, _) => "set",
-                (crate::api::backup::RestoreMode::Replace, false, true) => "keep",
-                (crate::api::backup::RestoreMode::Replace, false, false) => "clear",
-            }
-            .to_string();
+        let library_uuid_action = match (s.mode, s.identity_restored, s.same_device) {
+            (crate::api::backup::RestoreMode::Merge, _, _) => "keep",
+            (crate::api::backup::RestoreMode::Replace, true, _) => "set",
+            (crate::api::backup::RestoreMode::Replace, false, true) => "keep",
+            (crate::api::backup::RestoreMode::Replace, false, false) => "clear",
+        }
+        .to_string();
         Self {
             mode,
             identity_restored: s.identity_restored,

@@ -264,7 +264,10 @@ async fn replace_round_trip_keeps_books_and_creates_rollback() {
     );
     assert!(summary.rollback_path.is_some());
     assert!(!summary.identity_restored);
-    assert!(!summary.same_device, "no local UUID passed -> cross-device path");
+    assert!(
+        !summary.same_device,
+        "no local UUID passed -> cross-device path"
+    );
     assert_eq!(summary.restored_library_uuid, None);
 
     // Rollback file actually exists on disk.
@@ -378,8 +381,15 @@ async fn replace_same_device_preserves_crypto_keys() {
     // and signal "keep" via library_uuid_action so the Flutter caller
     // does not touch its own storage either.
     let tmp = TempDir::new().unwrap();
-    let archive =
-        make_test_archive(&tmp, "same-device", TEST_SECRET, TEST_LIBRARY_UUID, None, &[]).await;
+    let archive = make_test_archive(
+        &tmp,
+        "same-device",
+        TEST_SECRET,
+        TEST_LIBRARY_UUID,
+        None,
+        &[],
+    )
+    .await;
     let live_db_path = tmp.path().join("live.sqlite");
     let live = make_live_db(&live_db_path).await;
     live.close().await.unwrap();
@@ -420,8 +430,7 @@ async fn replace_cross_device_uuid_mismatch_still_clears() {
     // Belt-and-suspenders for the same-device fix: passing a local UUID
     // that does not match the archive's must keep the legacy clear path.
     let tmp = TempDir::new().unwrap();
-    let archive =
-        make_test_archive(&tmp, "cross", TEST_SECRET, TEST_LIBRARY_UUID, None, &[]).await;
+    let archive = make_test_archive(&tmp, "cross", TEST_SECRET, TEST_LIBRARY_UUID, None, &[]).await;
     let live_db_path = tmp.path().join("live.sqlite");
     let live = make_live_db(&live_db_path).await;
     live.close().await.unwrap();
