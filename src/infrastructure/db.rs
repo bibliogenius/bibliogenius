@@ -1857,6 +1857,18 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         Err(e) => tracing::warn!("Migration 075 backfill skipped: {e}"),
     }
 
+    // Migration 076: Soft-delete column for notifications. Replaces the
+    // previous hard DELETE on dismiss so the dedup check in
+    // `check_loan_reminders` (which probes `exists(event_type, ref_type,
+    // ref_id)`) keeps seeing a dismissed reminder and does not recreate it
+    // on the next 30s poll. NULL = active, ISO 8601 timestamp = dismissed.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE notifications ADD COLUMN dismissed_at TEXT".to_owned(),
+        ))
+        .await;
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;

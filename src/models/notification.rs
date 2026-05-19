@@ -15,6 +15,7 @@ pub struct Model {
     pub ref_id: Option<String>,
     pub read_at: Option<String>,
     pub created_at: String,
+    pub dismissed_at: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

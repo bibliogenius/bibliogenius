@@ -170,6 +170,80 @@ async fn test_dismiss_nonexistent_returns_false() {
     assert!(!repo.dismiss(9999).await.unwrap());
 }
 
+// Regression: dismissing a loan reminder must hide it from the UI but
+// still anchor dedup so `check_loan_reminders` doesn't recreate it on
+// the next 30s poll.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_dismiss_is_soft_and_keeps_dedup_anchor() {
+    let repo = setup().await;
+
+    let row = repo
+        .create(CreateNotification {
+            event_type: NotificationEventType::LoanDueReminder,
+            title: "Rappel de prêt".to_string(),
+            body: Some("«Le Petit Prince» · Retour dans 3 jours - Alice".to_string()),
+            ref_type: Some("loan".to_string()),
+            ref_id: Some("42".to_string()),
+        })
+        .await
+        .unwrap();
+
+    assert!(repo.dismiss(row.id).await.unwrap());
+
+    // UI surface: hidden
+    assert_eq!(repo.list(None, 0, 100).await.unwrap().len(), 0);
+    assert_eq!(repo.unread_count(None).await.unwrap(), 0);
+
+    // Dedup surface: still visible
+    assert!(
+        repo.exists("loan_due_reminder", "loan", "42")
+            .await
+            .unwrap(),
+        "dismissed reminder must keep anchoring exists() so the 30s poll does not recreate it",
+    );
+
+    // Idempotency: dismissing twice does not flip the result back.
+    assert!(!repo.dismiss(row.id).await.unwrap());
+}
+
+// Regression: clearing every notification via the trash icon must not
+// reopen the door for the polling job to recreate identical loan
+// reminders for the same active loan.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_dismiss_all_keeps_dedup_anchor() {
+    let repo = setup().await;
+
+    repo.create(CreateNotification {
+        event_type: NotificationEventType::LoanDueReminder,
+        title: "Rappel de prêt".to_string(),
+        body: Some("«A» · Retour dans 2 jours - Bob".to_string()),
+        ref_type: Some("loan".to_string()),
+        ref_id: Some("1".to_string()),
+    })
+    .await
+    .unwrap();
+    repo.create(CreateNotification {
+        event_type: NotificationEventType::LoanDueToday,
+        title: "Retour prévu aujourd'hui".to_string(),
+        body: Some("«B» doit être rendu aujourd'hui - Carol".to_string()),
+        ref_type: Some("loan".to_string()),
+        ref_id: Some("2".to_string()),
+    })
+    .await
+    .unwrap();
+
+    let dismissed = repo.dismiss_all().await.unwrap();
+    assert_eq!(dismissed, 2);
+
+    assert_eq!(repo.list(None, 0, 100).await.unwrap().len(), 0);
+    assert!(repo.exists("loan_due_reminder", "loan", "1").await.unwrap());
+    assert!(repo.exists("loan_due_today", "loan", "2").await.unwrap());
+
+    // A different loan (or a stepped-up event_type for the same loan)
+    // must remain free to fire.
+    assert!(!repo.exists("loan_due_today", "loan", "1").await.unwrap());
+}
+
 // -- Exists (dedup) --
 
 #[tokio::test(flavor = "multi_thread")]

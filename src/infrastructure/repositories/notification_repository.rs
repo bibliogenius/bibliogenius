@@ -71,7 +71,9 @@ impl NotificationRepository for SeaOrmNotificationRepository {
         offset: u64,
         limit: u64,
     ) -> Result<Vec<NotificationRow>, DomainError> {
-        let mut query = notification::Entity::find().order_by_desc(notification::Column::CreatedAt);
+        let mut query = notification::Entity::find()
+            .filter(notification::Column::DismissedAt.is_null())
+            .order_by_desc(notification::Column::CreatedAt);
 
         if let Some(cat) = category {
             query = query.filter(notification::Column::Category.eq(cat));
@@ -87,7 +89,9 @@ impl NotificationRepository for SeaOrmNotificationRepository {
     }
 
     async fn unread_count(&self, category: Option<&str>) -> Result<i64, DomainError> {
-        let mut query = notification::Entity::find().filter(notification::Column::ReadAt.is_null());
+        let mut query = notification::Entity::find()
+            .filter(notification::Column::ReadAt.is_null())
+            .filter(notification::Column::DismissedAt.is_null());
 
         if let Some(cat) = category {
             query = query.filter(notification::Column::Category.eq(cat));
@@ -115,26 +119,40 @@ impl NotificationRepository for SeaOrmNotificationRepository {
             .db
             .execute(Statement::from_sql_and_values(
                 self.db.get_database_backend(),
-                "UPDATE notifications SET read_at = $1 WHERE read_at IS NULL",
+                "UPDATE notifications SET read_at = $1 \
+                 WHERE read_at IS NULL AND dismissed_at IS NULL",
                 [now.into()],
             ))
             .await?;
         Ok(result.rows_affected() as i64)
     }
 
+    // Soft-delete: stamp `dismissed_at` so the row stays around to anchor
+    // `exists()`-based dedup (notably the `check_loan_reminders` 30s poll).
+    // `list()` and `unread_count()` filter dismissed rows out, so the UI
+    // still treats it as gone.
     async fn dismiss(&self, id: i32) -> Result<bool, DomainError> {
-        let result = notification::Entity::delete_by_id(id)
-            .exec(&self.db)
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = self
+            .db
+            .execute(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "UPDATE notifications SET dismissed_at = $1 \
+                 WHERE id = $2 AND dismissed_at IS NULL",
+                [now.into(), id.into()],
+            ))
             .await?;
-        Ok(result.rows_affected > 0)
+        Ok(result.rows_affected() > 0)
     }
 
     async fn dismiss_all(&self) -> Result<i64, DomainError> {
+        let now = chrono::Utc::now().to_rfc3339();
         let result = self
             .db
-            .execute(Statement::from_string(
+            .execute(Statement::from_sql_and_values(
                 self.db.get_database_backend(),
-                "DELETE FROM notifications".to_owned(),
+                "UPDATE notifications SET dismissed_at = $1 WHERE dismissed_at IS NULL",
+                [now.into()],
             ))
             .await?;
         Ok(result.rows_affected() as i64)
@@ -156,30 +174,35 @@ impl NotificationRepository for SeaOrmNotificationRepository {
             .await?;
         total_deleted += r.rows_affected();
 
-        // 2. TTL read: delete read items older than TTL_READ_DAYS after read_at
+        // 2. TTL read/dismissed: delete consumed items older than
+        //    TTL_READ_DAYS after the timestamp that marked them consumed.
         let cutoff_read = (chrono::Utc::now() - chrono::Duration::days(TTL_READ_DAYS)).to_rfc3339();
         let r = self
             .db
             .execute(Statement::from_sql_and_values(
                 self.db.get_database_backend(),
-                "DELETE FROM notifications WHERE read_at IS NOT NULL AND read_at < $1",
+                "DELETE FROM notifications \
+                 WHERE (read_at IS NOT NULL AND read_at < $1) \
+                    OR (dismissed_at IS NOT NULL AND dismissed_at < $1)",
                 [cutoff_read.into()],
             ))
             .await?;
         total_deleted += r.rows_affected();
 
-        // 3. Cap total: if still over MAX_NOTIFICATIONS, delete oldest (read first, then unread)
+        // 3. Cap total: if still over MAX_NOTIFICATIONS, delete oldest
+        //    (consumed first — read or dismissed — then unread).
         let count = notification::Entity::find().count(&self.db).await?;
         if count > MAX_NOTIFICATIONS {
             let excess = count - MAX_NOTIFICATIONS;
-            // Delete oldest read first
+            // Delete oldest consumed (read or dismissed) first
             let r = self
                 .db
                 .execute(Statement::from_sql_and_values(
                     self.db.get_database_backend(),
                     format!(
                         "DELETE FROM notifications WHERE id IN (
-                            SELECT id FROM notifications WHERE read_at IS NOT NULL
+                            SELECT id FROM notifications
+                            WHERE read_at IS NOT NULL OR dismissed_at IS NOT NULL
                             ORDER BY created_at ASC LIMIT {}
                         )",
                         excess
