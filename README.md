@@ -1,5 +1,7 @@
 # BiblioGenius - Rust Server
 
+> **Canonical repository: [Codeberg](https://codeberg.org/bibliogenius/bibliogenius).** The GitHub copy is a read-only mirror, automatically synced from Codeberg. Please open issues and pull requests on Codeberg.
+
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Version](https://img.shields.io/badge/version-0.7.0--alpha-blue)](https://github.com/bibliogenius/bibliogenius/releases)
 
