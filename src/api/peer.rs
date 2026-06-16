@@ -2429,13 +2429,21 @@ pub async fn connect(
 
 /// Upsert peer books cache: stores `added_at` from the owner peer so the
 /// "new" badge is consistent across all viewers (no longer derived from
-/// the local cache observation time). Removes books no longer in the
-/// fresh list. Returns the number of books in the fresh list.
+/// the local cache observation time). Returns the number of books in the
+/// fresh list.
+///
+/// `is_full_snapshot` controls the delete-absent pass: when `true` the batch
+/// is the peer's complete catalog and rows missing from it are deleted (the
+/// owner removed those books). When `false` the batch is only a subset (a
+/// single paginated page, or a relay page loop cut short by a timeout), so the
+/// upsert is purely additive — deleting absent rows would drain the cache and
+/// leave the viewer staring at "no books".
 async fn upsert_peer_books_cache(
     db: &DatabaseConnection,
     peer_id: i32,
     node_id: Option<&str>,
     books: Vec<crate::models::Book>,
+    is_full_snapshot: bool,
 ) -> usize {
     let now = chrono::Utc::now().to_rfc3339();
     let count = books.len();
@@ -2543,10 +2551,14 @@ async fn upsert_peer_books_cache(
         }
     }
 
-    // 3. Delete books no longer in the fresh list
-    for (remote_id, entry) in &existing_map {
-        if !fresh_ids.contains(remote_id) {
-            let _ = peer_book::Entity::delete_by_id(entry.id).exec(db).await;
+    // 3. Delete books no longer in the fresh list — ONLY when this batch is a
+    // complete snapshot. A partial fetch lists a subset, so pruning everything
+    // absent from it would wipe books the peer still owns (cache drain).
+    if is_full_snapshot {
+        for (remote_id, entry) in &existing_map {
+            if !fresh_ids.contains(remote_id) {
+                let _ = peer_book::Entity::delete_by_id(entry.id).exec(db).await;
+            }
         }
     }
 
@@ -2737,8 +2749,10 @@ async fn sync_peer_internal(
         .await
         .map_err(|_| "Invalid response format".to_string())?;
 
-    // Upsert books cache (preserves first_seen_at for existing entries)
-    let count = upsert_peer_books_cache(db, peer_id, None, data.books).await;
+    // Upsert books cache (preserves first_seen_at for existing entries).
+    // `/api/books?owned_only=true` returns the peer's full catalog, so this is
+    // a complete snapshot: prune books the peer no longer owns.
+    let count = upsert_peer_books_cache(db, peer_id, None, data.books, true).await;
 
     // Sync gamification stats if both sides have the module enabled
     sync_peer_gamification_stats(db, peer_id, peer_url, &client, shares_gamification).await;
@@ -4417,8 +4431,10 @@ pub async fn sync_peer(
 
                 match response.json::<BooksResponse>().await {
                     Ok(data) => {
-                        // Upsert books cache (preserves first_seen_at)
-                        let count = upsert_peer_books_cache(&db, peer.id, None, data.books).await;
+                        // Upsert books cache (preserves first_seen_at).
+                        // Full `/api/books?owned_only=true` catalog → snapshot.
+                        let count =
+                            upsert_peer_books_cache(&db, peer.id, None, data.books, true).await;
 
                         // Sync gamification stats
                         sync_peer_gamification_stats(
@@ -4883,7 +4899,9 @@ pub async fn sync_peer_by_url(
             .await
             .unwrap_or(0) as usize
     } else {
-        upsert_peer_books_cache(&db, peer.id, None, books).await
+        // The E2EE book_sync response carries the peer's whole catalog in one
+        // payload (or "unchanged", handled above), so this is a full snapshot.
+        upsert_peer_books_cache(&db, peer.id, None, books, true).await
     };
 
     // 6. Sync gamification stats
@@ -8055,8 +8073,16 @@ pub async fn cache_books_by_id(
         }
     };
 
-    // 3-4. Upsert books cache (preserves first_seen_at)
-    let count = upsert_peer_books_cache(&db, peer.id, None, books).await;
+    // 3-4. Upsert books cache (preserves first_seen_at).
+    // The caller (Flutter) sets `is_full_snapshot` only when it has loaded the
+    // peer's entire catalog (all pages / a completed relay page loop). A
+    // partial batch (page 0 while the rest streams in, or a truncated relay
+    // fetch) defaults to additive so it never drains the cache.
+    let is_full_snapshot = payload
+        .get("is_full_snapshot")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let count = upsert_peer_books_cache(&db, peer.id, None, books, is_full_snapshot).await;
 
     (
         StatusCode::OK,
@@ -8242,7 +8268,7 @@ mod added_at_tests {
                 ..Default::default()
             },
         ];
-        upsert_peer_books_cache(&db, peer_id, None, books).await;
+        upsert_peer_books_cache(&db, peer_id, None, books, true).await;
 
         let fetch = |remote_id: i32| {
             let db = db.clone();
@@ -8282,13 +8308,84 @@ mod added_at_tests {
             available_copies: Some(0),
             ..Default::default()
         }];
-        upsert_peer_books_cache(&db, peer_id, None, updated).await;
+        upsert_peer_books_cache(&db, peer_id, None, updated, true).await;
         let refreshed = fetch(12).await;
         assert_eq!(
             refreshed.available_copies,
             Some(0),
             "update must refresh available_copies to reflect the current loan state",
         );
+    }
+
+    /// A PARTIAL fetch (`is_full_snapshot = false`) must be additive: books
+    /// already cached but absent from the partial batch MUST survive. This is
+    /// the cache-drain bug guard — a paginated first page or a relay loop cut
+    /// short by a timeout must never wipe the rest of the catalog.
+    #[tokio::test]
+    async fn upsert_peer_books_cache_partial_fetch_keeps_absent_books() {
+        let db = setup().await;
+        let peer_id = insert_peer(&db).await;
+
+        // Cache three books from a previous full sync.
+        insert_peer_book(&db, peer_id, 1, "Alpha", None).await;
+        insert_peer_book(&db, peer_id, 2, "Beta", None).await;
+        insert_peer_book(&db, peer_id, 3, "Gamma", None).await;
+
+        // A partial batch arrives carrying only the first book.
+        let partial = vec![crate::models::Book {
+            id: Some(1),
+            title: "Alpha".to_string(),
+            ..Default::default()
+        }];
+        upsert_peer_books_cache(&db, peer_id, None, partial, false).await;
+
+        let remaining = peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .count(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            remaining, 3,
+            "partial fetch must not delete books absent from the batch",
+        );
+    }
+
+    /// A FULL snapshot (`is_full_snapshot = true`) IS authoritative: books
+    /// the owner removed (absent from the complete batch) must be pruned.
+    #[tokio::test]
+    async fn upsert_peer_books_cache_full_snapshot_prunes_absent_books() {
+        let db = setup().await;
+        let peer_id = insert_peer(&db).await;
+
+        insert_peer_book(&db, peer_id, 1, "Alpha", None).await;
+        insert_peer_book(&db, peer_id, 2, "Beta", None).await;
+        insert_peer_book(&db, peer_id, 3, "Gamma", None).await;
+
+        // Full catalog: the owner now only has books 1 and 3 (book 2 deleted).
+        let snapshot = vec![
+            crate::models::Book {
+                id: Some(1),
+                title: "Alpha".to_string(),
+                ..Default::default()
+            },
+            crate::models::Book {
+                id: Some(3),
+                title: "Gamma".to_string(),
+                ..Default::default()
+            },
+        ];
+        upsert_peer_books_cache(&db, peer_id, None, snapshot, true).await;
+
+        let ids: Vec<i32> = peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .all(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.remote_book_id)
+            .collect();
+        assert_eq!(ids.len(), 2, "full snapshot must prune the removed book");
+        assert!(!ids.contains(&2), "book 2 was deleted by the owner");
     }
 
     /// `redact_for_peer` strips personal fields but MUST keep `added_at`:
@@ -8328,7 +8425,7 @@ mod added_at_tests {
             added_at: Some("2026-04-15T12:00:00+00:00".to_string()),
             ..Default::default()
         }];
-        upsert_peer_books_cache(&db, peer_id, None, books).await;
+        upsert_peer_books_cache(&db, peer_id, None, books, true).await;
 
         let row = peer_book::Entity::find()
             .filter(peer_book::Column::PeerId.eq(peer_id))
@@ -8357,7 +8454,7 @@ mod added_at_tests {
             added_at: Some("2026-04-15T09:30:00+00:00".to_string()),
             ..Default::default()
         }];
-        upsert_peer_books_cache(&db, peer_id, None, books).await;
+        upsert_peer_books_cache(&db, peer_id, None, books, true).await;
 
         let row = peer_book::Entity::find()
             .filter(peer_book::Column::PeerId.eq(peer_id))
