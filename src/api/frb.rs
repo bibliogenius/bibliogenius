@@ -2022,7 +2022,16 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                 let server_port = actual_port;
                 tokio::spawn(async move {
                     tracing::info!("🚀 FFI Server task starting on port {}", server_port);
-                    match axum::serve(listener, app).await {
+                    // connect_info exposes the caller's SocketAddr in request
+                    // extensions, which the LoopbackOnly guard on device
+                    // management endpoints relies on (also aligns this FFI
+                    // server with the standalone and desktop entry points).
+                    match axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .await
+                    {
                         Ok(()) => {
                             tracing::warn!(
                                 "⚠️ FFI Server task exited normally on port {} (this is unexpected)",

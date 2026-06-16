@@ -11,6 +11,7 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::auth::LoopbackOnly;
 use crate::infrastructure::AppState;
 use crate::services::device_pairing_service::PairingAcceptInput;
 use crate::services::device_sync_service::RemoteOp;
@@ -34,6 +35,7 @@ pub struct GenerateOfferInput {
 
 /// POST /api/devices/pair/offer - Generate a 6-digit pairing offer
 pub async fn generate_offer(
+    _local: LoopbackOnly,
     State(state): State<AppState>,
     Json(input): Json<GenerateOfferInput>,
 ) -> impl IntoResponse {
@@ -69,6 +71,7 @@ pub async fn accept_offer(
 
 /// POST /api/devices/register - Register a linked device directly (used by acceptor after pairing)
 pub async fn register_device(
+    _local: LoopbackOnly,
     State(state): State<AppState>,
     Json(input): Json<RegisterDeviceInput>,
 ) -> impl IntoResponse {
@@ -104,7 +107,10 @@ pub struct RegisterDeviceInput {
 }
 
 /// GET /api/devices - List all linked devices
-pub async fn list_devices(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn list_devices(
+    _local: LoopbackOnly,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     match state.device_pairing.list_devices().await {
         Ok(devices) => (StatusCode::OK, Json(json!(devices))).into_response(),
         Err(e) => (
@@ -117,6 +123,7 @@ pub async fn list_devices(State(state): State<AppState>) -> impl IntoResponse {
 
 /// DELETE /api/devices/:id - Remove a linked device
 pub async fn remove_device(
+    _local: LoopbackOnly,
     State(state): State<AppState>,
     Path(id): Path<i32>,
 ) -> impl IntoResponse {
@@ -136,6 +143,7 @@ pub async fn remove_device(
 
 /// POST /api/devices/sync/:id - Trigger sync with a specific linked device (LAN only)
 pub async fn trigger_sync(
+    _local: LoopbackOnly,
     State(state): State<AppState>,
     Path(device_id): Path<i32>,
     body: Option<Json<TriggerSyncInput>>,
@@ -374,7 +382,10 @@ pub async fn trigger_sync(
 }
 
 /// GET /api/devices/sync/pending-review - List operations pending review
-pub async fn sync_pending_review(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn sync_pending_review(
+    _local: LoopbackOnly,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     match state.device_sync.get_pending_review_ops().await {
         Ok(ops) => {
             let payload: Vec<serde_json::Value> = ops
@@ -409,6 +420,7 @@ pub struct SyncApproveRejectInput {
 
 /// POST /api/devices/sync/approve - Approve pending review operations
 pub async fn sync_approve(
+    _local: LoopbackOnly,
     State(state): State<AppState>,
     Json(input): Json<SyncApproveRejectInput>,
 ) -> impl IntoResponse {
@@ -436,6 +448,7 @@ pub async fn sync_approve(
 
 /// POST /api/devices/sync/reject - Reject pending review operations
 pub async fn sync_reject(
+    _local: LoopbackOnly,
     State(state): State<AppState>,
     Json(input): Json<SyncApproveRejectInput>,
 ) -> impl IntoResponse {

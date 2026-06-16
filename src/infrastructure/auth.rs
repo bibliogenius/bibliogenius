@@ -9,10 +9,11 @@ use std::env;
 
 use axum::{
     async_trait,
-    extract::{FromRequestParts, Json},
+    extract::{ConnectInfo, FromRequestParts, Json},
     http::{StatusCode, request::Parts},
 };
 use serde_json::json;
+use std::net::SocketAddr;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -52,6 +53,42 @@ where
                 Json(json!({ "error": "Invalid or expired token" })),
             )
         })
+    }
+}
+
+/// Extractor that admits a request only when it originates from loopback
+/// (127.0.0.1 / ::1).
+///
+/// Device-management endpoints are served on the same 0.0.0.0 listener as peer
+/// traffic, but they are only ever called by the local client (via FFI, or over
+/// 127.0.0.1 for `/devices/register` and `/devices/sync/:id`). Guarding them
+/// keeps the LAN from listing/deleting linked devices or driving sync. Requires
+/// the server to be started with `into_make_service_with_connect_info`; if the
+/// peer address is unavailable the request is rejected (fail closed).
+pub struct LoopbackOnly;
+
+#[async_trait]
+impl<S> FromRequestParts<S> for LoopbackOnly
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let is_loopback = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| addr.ip().is_loopback())
+            .unwrap_or(false);
+
+        if is_loopback {
+            Ok(LoopbackOnly)
+        } else {
+            Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "This endpoint is local-only" })),
+            ))
+        }
     }
 }
 

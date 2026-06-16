@@ -20,6 +20,39 @@ use crate::services::IdentityService;
 
 const PAIRING_CODE_TTL_SECS: i64 = 300; // 5 minutes
 
+/// Brute-force protection for `accept_offer`. A 6-digit code is only 1M
+/// combinations, so without a limiter an attacker on the LAN could try every
+/// code while an offer is live. We cap failed accepts within a sliding window.
+const MAX_FAILED_ACCEPTS: usize = 10;
+const FAILED_ACCEPT_WINDOW_SECS: i64 = 60;
+
+/// Both Ed25519 and X25519 public keys are exactly 32 bytes.
+const PUBLIC_KEY_LEN: usize = 32;
+
+/// Validate the acceptor-provided public keys before persisting them.
+///
+/// X25519 keys are validated by length only (every 32-byte value is a valid
+/// Montgomery u-coordinate). Ed25519 keys are additionally checked to be a
+/// valid curve point so a malformed key cannot be stored and later blow up
+/// signature verification on the sync path.
+fn validate_public_keys(ed25519: &[u8], x25519: &[u8]) -> Result<(), String> {
+    if x25519.len() != PUBLIC_KEY_LEN {
+        return Err(format!(
+            "Invalid X25519 public key length: expected {PUBLIC_KEY_LEN}, got {}",
+            x25519.len()
+        ));
+    }
+    let ed_bytes: [u8; PUBLIC_KEY_LEN] = ed25519.try_into().map_err(|_| {
+        format!(
+            "Invalid Ed25519 public key length: expected {PUBLIC_KEY_LEN}, got {}",
+            ed25519.len()
+        )
+    })?;
+    ed25519_dalek::VerifyingKey::from_bytes(&ed_bytes)
+        .map_err(|_| "Invalid Ed25519 public key (not a valid curve point)".to_string())?;
+    Ok(())
+}
+
 /// A pairing offer waiting for an acceptor
 struct PairingOffer {
     expires_at: DateTime<Utc>,
@@ -63,6 +96,9 @@ pub struct PairingConfirmation {
 /// Service managing device pairing codes and linked device lifecycle
 pub struct DevicePairingService {
     offers: Arc<Mutex<HashMap<String, PairingOffer>>>,
+    /// Timestamps of recent failed accepts, pruned to the sliding window.
+    /// Bounded by `MAX_FAILED_ACCEPTS` once pruning kicks in.
+    failed_accepts: Arc<Mutex<Vec<DateTime<Utc>>>>,
     identity_service: Arc<IdentityService>,
     linked_device_repo: Arc<dyn LinkedDeviceRepository>,
 }
@@ -74,9 +110,30 @@ impl DevicePairingService {
     ) -> Self {
         Self {
             offers: Arc::new(Mutex::new(HashMap::new())),
+            failed_accepts: Arc::new(Mutex::new(Vec::new())),
             identity_service,
             linked_device_repo,
         }
+    }
+
+    /// Reject when too many accepts have failed within the sliding window.
+    /// Prunes expired entries as a side effect.
+    fn check_not_rate_limited(&self) -> Result<(), String> {
+        let cutoff = Utc::now() - chrono::Duration::seconds(FAILED_ACCEPT_WINDOW_SECS);
+        let mut attempts = self.failed_accepts.lock().unwrap();
+        attempts.retain(|t| *t > cutoff);
+        if attempts.len() >= MAX_FAILED_ACCEPTS {
+            return Err("Too many pairing attempts, try again later".to_string());
+        }
+        Ok(())
+    }
+
+    fn record_failed_accept(&self) {
+        self.failed_accepts.lock().unwrap().push(Utc::now());
+    }
+
+    fn clear_failed_accepts(&self) {
+        self.failed_accepts.lock().unwrap().clear();
     }
 
     /// Generate a 6-digit pairing offer.
@@ -140,14 +197,32 @@ impl DevicePairingService {
         &self,
         input: PairingAcceptInput,
     ) -> Result<PairingConfirmation, String> {
+        // Brute-force protection: bail out before consuming an offer if the
+        // caller has already failed too many times recently.
+        self.check_not_rate_limited()?;
+
+        // Reject malformed keys before touching the offer store. A bad key here
+        // would otherwise be persisted and later fail on the E2EE sync path.
+        if let Err(e) = validate_public_keys(&input.ed25519_public_key, &input.x25519_public_key) {
+            self.record_failed_accept();
+            return Err(e);
+        }
+
         let offer = {
             let mut store = self.offers.lock().unwrap();
             store.remove(&input.code)
         };
 
-        let offer = offer.ok_or_else(|| "Invalid pairing code".to_string())?;
+        let offer = match offer {
+            Some(o) => o,
+            None => {
+                self.record_failed_accept();
+                return Err("Invalid pairing code".to_string());
+            }
+        };
 
         if Utc::now() > offer.expires_at {
+            self.record_failed_accept();
             return Err("Pairing code expired".to_string());
         }
 
@@ -164,6 +239,9 @@ impl DevicePairingService {
             })
             .await
             .map_err(|e| format!("Failed to register device: {e}"))?;
+
+        // Successful pairing clears the brute-force counter.
+        self.clear_failed_accepts();
 
         Ok(PairingConfirmation {
             device_id: device.id.unwrap_or(0),
@@ -191,6 +269,14 @@ mod tests {
     use super::*;
     use crate::infrastructure::SeaOrmLinkedDeviceRepository;
     use crate::infrastructure::db::init_db;
+
+    /// A real, valid Ed25519 public key (derived from a fixed seed).
+    fn valid_ed25519() -> Vec<u8> {
+        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+            .verifying_key()
+            .to_bytes()
+            .to_vec()
+    }
 
     async fn setup() -> (Arc<IdentityService>, Arc<dyn LinkedDeviceRepository>) {
         let db = init_db("sqlite::memory:").await.unwrap();
@@ -242,7 +328,7 @@ mod tests {
             .accept_offer(PairingAcceptInput {
                 code: offer.code,
                 device_name: "My iPhone".to_string(),
-                ed25519_public_key: vec![1; 32],
+                ed25519_public_key: valid_ed25519(),
                 x25519_public_key: vec![2; 32],
                 relay_url: None,
                 mailbox_id: None,
@@ -290,7 +376,7 @@ mod tests {
             .accept_offer(PairingAcceptInput {
                 code: "111111".to_string(),
                 device_name: "Other".to_string(),
-                ed25519_public_key: vec![1; 32],
+                ed25519_public_key: valid_ed25519(),
                 x25519_public_key: vec![2; 32],
                 relay_url: None,
                 mailbox_id: None,
@@ -311,7 +397,7 @@ mod tests {
             .accept_offer(PairingAcceptInput {
                 code: "999999".to_string(),
                 device_name: "Other".to_string(),
-                ed25519_public_key: vec![1; 32],
+                ed25519_public_key: valid_ed25519(),
                 x25519_public_key: vec![2; 32],
                 relay_url: None,
                 mailbox_id: None,
@@ -339,7 +425,7 @@ mod tests {
             .accept_offer(PairingAcceptInput {
                 code: code.clone(),
                 device_name: "iPhone".to_string(),
-                ed25519_public_key: vec![1; 32],
+                ed25519_public_key: valid_ed25519(),
                 x25519_public_key: vec![2; 32],
                 relay_url: None,
                 mailbox_id: None,
@@ -353,7 +439,7 @@ mod tests {
             .accept_offer(PairingAcceptInput {
                 code,
                 device_name: "iPad".to_string(),
-                ed25519_public_key: vec![3; 32],
+                ed25519_public_key: valid_ed25519(),
                 x25519_public_key: vec![4; 32],
                 relay_url: None,
                 mailbox_id: None,
@@ -378,7 +464,7 @@ mod tests {
             .accept_offer(PairingAcceptInput {
                 code: offer.code,
                 device_name: "iPhone".to_string(),
-                ed25519_public_key: vec![1; 32],
+                ed25519_public_key: valid_ed25519(),
                 x25519_public_key: vec![2; 32],
                 relay_url: None,
                 mailbox_id: None,
@@ -398,5 +484,100 @@ mod tests {
         // List should be empty
         let devices = svc.list_devices().await.unwrap();
         assert!(devices.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_accept_rejects_malformed_ed25519_key() {
+        let (id_svc, repo) = setup().await;
+        let svc = DevicePairingService::new(id_svc, repo.clone());
+
+        let offer = svc
+            .generate_offer("Mac".to_string(), "lib-uuid".to_string(), None, None, None)
+            .unwrap();
+
+        // 31-byte Ed25519 key (wrong length) must be rejected.
+        let result = svc
+            .accept_offer(PairingAcceptInput {
+                code: offer.code,
+                device_name: "iPhone".to_string(),
+                ed25519_public_key: vec![1; 31],
+                x25519_public_key: vec![2; 32],
+                relay_url: None,
+                mailbox_id: None,
+                relay_write_token: None,
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Ed25519"));
+        // The offer must NOT have been consumed by a rejected accept.
+        let devices = repo.find_all().await.unwrap();
+        assert!(devices.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_accept_rejects_short_x25519_key() {
+        let (id_svc, repo) = setup().await;
+        let svc = DevicePairingService::new(id_svc, repo);
+
+        let offer = svc
+            .generate_offer("Mac".to_string(), "lib-uuid".to_string(), None, None, None)
+            .unwrap();
+
+        let result = svc
+            .accept_offer(PairingAcceptInput {
+                code: offer.code,
+                device_name: "iPhone".to_string(),
+                ed25519_public_key: valid_ed25519(),
+                x25519_public_key: vec![2; 16],
+                relay_url: None,
+                mailbox_id: None,
+                relay_write_token: None,
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("X25519"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rate_limit_blocks_brute_force() {
+        let (id_svc, repo) = setup().await;
+        let svc = DevicePairingService::new(id_svc, repo);
+
+        // Hammer with wrong codes (valid keys, so we reach the code check).
+        for _ in 0..MAX_FAILED_ACCEPTS {
+            let r = svc
+                .accept_offer(PairingAcceptInput {
+                    code: "000000".to_string(),
+                    device_name: "Attacker".to_string(),
+                    ed25519_public_key: valid_ed25519(),
+                    x25519_public_key: vec![2; 32],
+                    relay_url: None,
+                    mailbox_id: None,
+                    relay_write_token: None,
+                })
+                .await;
+            assert!(r.is_err());
+            assert!(r.unwrap_err().contains("Invalid"));
+        }
+
+        // Now even a brand-new valid offer cannot be accepted: locked out.
+        let offer = svc
+            .generate_offer("Mac".to_string(), "lib-uuid".to_string(), None, None, None)
+            .unwrap();
+        let blocked = svc
+            .accept_offer(PairingAcceptInput {
+                code: offer.code,
+                device_name: "iPhone".to_string(),
+                ed25519_public_key: valid_ed25519(),
+                x25519_public_key: vec![2; 32],
+                relay_url: None,
+                mailbox_id: None,
+                relay_write_token: None,
+            })
+            .await;
+        assert!(blocked.is_err());
+        assert!(blocked.unwrap_err().contains("Too many"));
     }
 }
