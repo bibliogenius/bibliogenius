@@ -20,6 +20,7 @@ pub mod leaderboard_events;
 pub mod loan_service;
 pub mod lookup_service;
 pub mod mdns;
+pub mod metadata_fill_service;
 pub mod notification_service;
 pub mod nudge_events;
 pub mod oplog_pruner;

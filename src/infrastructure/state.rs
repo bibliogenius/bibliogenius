@@ -6,19 +6,20 @@ use tokio::sync::OnceCell;
 
 use crate::domain::{
     AuthorRepository, BookRepository, CollectionRepository, CopyRepository, GamificationRepository,
-    LinkedDeviceRepository, LoanSettingsRepository, NotificationRepository,
+    LinkedDeviceRepository, LoanSettingsRepository, MetadataFillRepository, NotificationRepository,
 };
 use crate::infrastructure::nonce_store::SqliteNonceStore;
 use crate::infrastructure::{
     SeaOrmAuthorRepository, SeaOrmBookRepository, SeaOrmCollectionRepository, SeaOrmCopyRepository,
     SeaOrmGamificationRepository, SeaOrmLinkedDeviceRepository, SeaOrmLoanSettingsRepository,
-    SeaOrmNotificationRepository,
+    SeaOrmMetadataFillRepository, SeaOrmNotificationRepository,
 };
 use crate::services::IdentityService;
 use crate::services::crypto_service::CryptoService;
 use crate::services::device_pairing_service::DevicePairingService;
 use crate::services::device_sync_service::DeviceSyncService;
 use crate::services::hub_directory_service::HubDirectoryService;
+use crate::services::metadata_fill_service::MetadataFillManager;
 
 /// Pending relay request-response entry (ADR-012).
 /// When a relay request is sent with a `correlation_id`, a oneshot sender is stored here.
@@ -69,6 +70,11 @@ pub struct AppState {
     pub notification_repo: Arc<dyn NotificationRepository>,
     /// Loan settings repository (loan duration configuration)
     pub loan_settings_repo: Arc<dyn LoanSettingsRepository>,
+    /// Bulk metadata gap-fill repository (ADR-041): completeness stat, work-list,
+    /// None-only apply, run/undo journal.
+    pub metadata_fill_repo: Arc<dyn MetadataFillRepository>,
+    /// Bulk metadata gap-fill run manager (single-run guard + cancellation).
+    pub metadata_fill: Arc<MetadataFillManager>,
     /// Identity service for E2EE key management
     pub identity_service: Arc<IdentityService>,
     /// Crypto service for E2EE seal/open (lazily initialized after identity is ready)
@@ -114,6 +120,7 @@ impl AppState {
         let linked_device_repo = Arc::new(SeaOrmLinkedDeviceRepository::new(db.clone()));
         let notification_repo = Arc::new(SeaOrmNotificationRepository::new(db.clone()));
         let loan_settings_repo = Arc::new(SeaOrmLoanSettingsRepository::new(db.clone()));
+        let metadata_fill_repo = Arc::new(SeaOrmMetadataFillRepository::new(db.clone()));
 
         // Reuse the FFI-initialized pairing service so code generation
         // and HTTP acceptance share the same in-memory offer store.
@@ -142,6 +149,8 @@ impl AppState {
             linked_device_repo,
             notification_repo,
             loan_settings_repo,
+            metadata_fill_repo,
+            metadata_fill: Arc::new(MetadataFillManager::new()),
             identity_service,
             crypto_service: Arc::new(OnceCell::new()),
             device_pairing,

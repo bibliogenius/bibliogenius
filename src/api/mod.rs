@@ -21,6 +21,7 @@ pub mod invite_page;
 pub mod library;
 pub mod loan;
 pub mod lookup;
+pub mod metadata_fill;
 pub mod peer;
 pub mod profile;
 pub mod public_stats;
@@ -286,6 +287,26 @@ fn build_routes() -> Router<AppState> {
         .route("/statistics/sales", get(sales::get_sales_statistics))
         // Lookup
         .route("/lookup/:isbn", get(lookup::lookup_book))
+        // Bulk metadata gap-fill (ADR-041)
+        .route("/metadata-fill/stats", get(metadata_fill::get_stats))
+        .route("/metadata-fill/start", post(metadata_fill::start))
+        .route("/metadata-fill/progress", get(metadata_fill::get_progress))
+        .route("/metadata-fill/cancel", post(metadata_fill::cancel))
+        .route("/metadata-fill/recent", get(metadata_fill::get_recent))
+        .route("/metadata-fill/no-isbn", get(metadata_fill::get_no_isbn))
+        .route(
+            "/metadata-fill/incomplete",
+            get(metadata_fill::get_incomplete),
+        )
+        .route(
+            "/metadata-fill/undo/field/:journal_id",
+            post(metadata_fill::undo_field),
+        )
+        .route("/metadata-fill/undo/book", post(metadata_fill::undo_book))
+        .route(
+            "/metadata-fill/undo/run/:batch_id",
+            post(metadata_fill::undo_run),
+        )
         // Data Import/Export
         .route("/import/file", axum::routing::post(data::import_file))
         // Setup & Config

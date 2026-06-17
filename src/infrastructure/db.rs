@@ -8,7 +8,7 @@ use crate::utils::default_library_name::compute_default_library_name_seed;
 /// can decide whether to migrate the archived DB forward or refuse a
 /// future-version archive. **Bump this constant whenever a new migration
 /// is appended to `run_migrations`.**
-pub const SCHEMA_VERSION: u32 = 75;
+pub const SCHEMA_VERSION: u32 = 77;
 
 pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     let db = Database::connect(database_url).await?;
@@ -1868,6 +1868,46 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             "ALTER TABLE notifications ADD COLUMN dismissed_at TEXT".to_owned(),
         ))
         .await;
+
+    // Migration 077: Bulk metadata gap-fill journal + run state (ADR-041).
+    // `metadata_fill_run` persists one row per bulk "Compléter ma bibliothèque"
+    // run so progress survives a kill/restart and a run can resume from its
+    // cursor. `metadata_fill_journal` records every field this feature wrote so
+    // a fill can be undone safely (revert only if the value is still ours).
+    for stmt in [
+        r#"CREATE TABLE IF NOT EXISTS metadata_fill_run (
+            batch_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            total INTEGER NOT NULL DEFAULT 0,
+            done INTEGER NOT NULL DEFAULT 0,
+            filled INTEGER NOT NULL DEFAULT 0,
+            skipped INTEGER NOT NULL DEFAULT 0,
+            errored INTEGER NOT NULL DEFAULT 0,
+            cursor_book_id INTEGER NOT NULL DEFAULT 0,
+            current_title TEXT,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS metadata_fill_journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            book_id INTEGER NOT NULL,
+            field TEXT NOT NULL,
+            value_set TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            undone_at TEXT
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_mfj_batch ON metadata_fill_journal(batch_id)",
+        "CREATE INDEX IF NOT EXISTS idx_mfj_active ON metadata_fill_journal(undone_at, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_mfj_book ON metadata_fill_journal(book_id)",
+    ] {
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                stmt.to_owned(),
+            ))
+            .await;
+    }
 
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
