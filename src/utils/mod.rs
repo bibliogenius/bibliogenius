@@ -3,6 +3,8 @@ pub mod cover_url;
 pub mod default_library_name;
 pub mod etag;
 pub mod hub_url;
+pub mod isbn;
+pub mod lang;
 pub mod leaderboard_relay;
 pub mod library_helpers;
 pub mod net;

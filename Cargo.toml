@@ -53,6 +53,10 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 quick-xml = { version = "0.31", features = ["serialize"] }
 uuid = { version = "1.4", features = ["v4", "fast-rng", "macro-diagnostics"] }
+# ISBN-10 ↔ ISBN-13 conversion (same crate already used by librius)
+isbn2 = "0.4.0"
+# Natural-language detection (last-resort summary/title language signal, ADR-040)
+whatlang = "0.18"
 # Invalid lines removed
 
 

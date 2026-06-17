@@ -2,6 +2,8 @@ use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
+use super::API_USER_AGENT;
+
 /// Deserialize a JSON array where elements may be strings OR numbers.
 /// Inventaire stores most claims as strings (URIs), but numeric claims
 /// like wdt:P1104 (page count) are returned as bare integers.
@@ -99,11 +101,9 @@ pub struct Claims {
     pub page_count: Option<Vec<String>>,
 }
 
-const USER_AGENT: &str = "BiblioGenius/1.0 (federico@bibliogenius.org)";
-
 pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<InventaireMetadata, String> {
     let client = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
+        .user_agent(API_USER_AGENT)
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| format!("Failed to build client: {}", e))?;
@@ -349,7 +349,7 @@ pub async fn search_inventaire_with_lang(
     lang: Option<&str>,
 ) -> Result<Vec<InventaireSearchResult>, String> {
     let client = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
+        .user_agent(API_USER_AGENT)
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| format!("Failed to build client: {}", e))?;
@@ -410,7 +410,7 @@ pub async fn enrich_search_results(
     }
 
     let client = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
+        .user_agent(API_USER_AGENT)
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| format!("Failed to build client: {}", e))?;
@@ -751,7 +751,7 @@ pub struct EditionCover {
 /// Used by cover search to get multiple cover variants for a single work.
 pub async fn fetch_work_edition_covers(work_uri: &str) -> Vec<EditionCover> {
     let client = match reqwest::Client::builder()
-        .user_agent(USER_AGENT)
+        .user_agent(API_USER_AGENT)
         .timeout(std::time::Duration::from_secs(5))
         .build()
     {
@@ -814,7 +814,7 @@ pub async fn fetch_work_edition_covers(work_uri: &str) -> Vec<EditionCover> {
 /// Lightweight cover-only lookup: fetch the edition entity and extract its image URL.
 pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
     let client = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
+        .user_agent(API_USER_AGENT)
         .timeout(std::time::Duration::from_secs(3))
         .build()
         .ok()?;

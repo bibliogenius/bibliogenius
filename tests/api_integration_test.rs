@@ -1287,7 +1287,10 @@ async fn test_upsert_cache_uuid_change_different_ids() {
     assert_eq!(count_before, 3, "Should have 3 old cached books");
 
     // Simulate uuid change: peer was reset, new books have IDs 1, 2, 3
+    // A uuid change triggers a full catalog re-sync, so the client posts a full
+    // snapshot — only then is the cache pruned of entries absent from the batch.
     let new_books = serde_json::json!({
+        "is_full_snapshot": true,
         "books": [
             {"id": 1, "title": "New Book X", "isbn": "111", "owned": true},
             {"id": 2, "title": "New Book Y", "isbn": "222", "owned": true},
@@ -1345,8 +1348,10 @@ async fn test_upsert_cache_uuid_change_overlapping_ids() {
     insert_peer_book_cache(&db, peer_id, 2, "Old Title 2").await;
     insert_peer_book_cache(&db, peer_id, 3, "Old Title 3").await;
 
-    // New books with same IDs but different content (peer reset, fresh DB)
+    // New books with same IDs but different content (peer reset, fresh DB).
+    // Full re-sync after a uuid change → full snapshot, so absent ID 3 is pruned.
     let new_books = serde_json::json!({
+        "is_full_snapshot": true,
         "books": [
             {"id": 1, "title": "Fresh Title 1", "isbn": "AAA", "owned": true},
             {"id": 2, "title": "Fresh Title 2", "isbn": "BBB", "owned": true}

@@ -79,7 +79,11 @@ async fn watermark_picks_max_across_tables() {
     let conn = setup_test_db(&tmp).await;
 
     let older = "2025-01-01T00:00:00+00:00";
-    let newer = "2026-06-01T00:00:00+00:00";
+    // Far-future RFC 3339 timestamp: must beat the `library_config` seed row,
+    // which `init_db` writes with SQLite's `datetime('now')`. A near-future date
+    // here is a time bomb — once real `now()` passes it, the seed becomes the MAX
+    // and this assertion breaks (the sibling tests use 2099 for the same reason).
+    let newer = "2099-01-01T00:00:00+00:00";
 
     book::ActiveModel {
         title: Set("Older".into()),

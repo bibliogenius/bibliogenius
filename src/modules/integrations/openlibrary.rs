@@ -2,6 +2,8 @@ use crate::inventaire_client::AuthorMetadata;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::API_USER_AGENT;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BookMetadata {
     pub title: String,
@@ -52,6 +54,7 @@ pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
     );
 
     let client = reqwest::Client::builder()
+        .user_agent(API_USER_AGENT)
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
@@ -130,6 +133,7 @@ pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
 /// Tries edition-level description first, then follows to the parent work.
 async fn fetch_description(isbn: &str) -> Option<String> {
     let client = reqwest::Client::builder()
+        .user_agent(API_USER_AGENT)
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .ok()?;
@@ -174,7 +178,10 @@ pub async fn search_books(query: &str) -> Result<Vec<BookMetadata>, String> {
         query
     );
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent(API_USER_AGENT)
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     let resp = client
         .get(&url)
         .send()
@@ -255,6 +262,7 @@ pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
     let check_url = format!("{}?default=false", &cover_url);
 
     let client = reqwest::Client::builder()
+        .user_agent(API_USER_AGENT)
         .timeout(std::time::Duration::from_secs(3))
         .build()
         .ok()?;
