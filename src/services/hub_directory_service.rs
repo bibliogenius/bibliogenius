@@ -850,6 +850,38 @@ impl HubDirectoryService {
         Ok(PushCatalogOutcome::Pushed)
     }
 
+    /// DEBUG (catalog desync investigation): best-effort beacon so a failing
+    /// catalog sync self-reports into the hub's `hub_events` table (retrievable
+    /// via DB backups) without access to the device log. Swallows every error:
+    /// observability must never change the sync outcome or surface to the user.
+    pub async fn report_sync_diag(
+        &self,
+        db: &DatabaseConnection,
+        phase: &str,
+        ok: bool,
+        detail: &str,
+    ) {
+        let Ok(Some(cfg)) = Self::get_config(db).await else {
+            return;
+        };
+        let Ok(hub_url) = Self::hub_base_url() else {
+            return;
+        };
+        // Cap detail so the beacon and the stored row stay small.
+        let detail: String = detail.chars().take(300).collect();
+        let _ = self
+            .http_client
+            .post(format!("{hub_url}/api/directory/catalog/diag"))
+            .header("Authorization", format!("Bearer {}", cfg.write_token))
+            .json(&serde_json::json!({
+                "phase": phase,
+                "ok": ok,
+                "detail": detail,
+            }))
+            .send()
+            .await;
+    }
+
     /// Uploads a cover thumbnail to the hub.
     ///
     /// Returns the public URL where the cover can be fetched.

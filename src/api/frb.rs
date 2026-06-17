@@ -4827,6 +4827,25 @@ pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), St
 /// Local cover images are resized and uploaded as thumbnails (best-effort).
 /// Returns the number of entries pushed.
 pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
+    let result = hub_directory_sync_catalog_inner().await;
+    if let Err(ref e) = result {
+        // Best-effort diagnostic beacon: a sync that fails before/at the push
+        // is otherwise invisible server-side (the POST never lands). Report the
+        // failure into the hub's hub_events table so it surfaces in DB backups
+        // without needing the device log. Never alters the returned result.
+        if let Ok(db) = hub_db() {
+            hub_directory_svc()
+                .report_sync_diag(db, "sync_catalog", false, e)
+                .await;
+        }
+    }
+    result
+}
+
+/// Inner worker for [`hub_directory_sync_catalog`]: builds the enriched
+/// catalog and pushes it to the hub. Kept separate so the public entry point
+/// can beacon any failure for diagnosis without changing the FFI contract.
+async fn hub_directory_sync_catalog_inner() -> Result<i32, String> {
     use crate::models::book::{Column as BookColumn, Entity as BookEntity};
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
