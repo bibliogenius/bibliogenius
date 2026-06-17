@@ -16,7 +16,6 @@ pub mod export;
 pub mod frb; // FFI API for flutter_rust_bridge
 pub mod gamification;
 pub mod health;
-pub mod hub;
 pub mod integrations;
 pub mod invite_page;
 pub mod library;
