@@ -54,6 +54,7 @@ fn validate_public_keys(ed25519: &[u8], x25519: &[u8]) -> Result<(), String> {
 }
 
 /// A pairing offer waiting for an acceptor
+#[derive(Clone)]
 struct PairingOffer {
     expires_at: DateTime<Utc>,
     library_uuid: String,
@@ -182,6 +183,8 @@ impl DevicePairingService {
             );
         }
 
+        tracing::info!(%expires_at, "Device pairing offer generated (5-min TTL)");
+
         Ok(PairingOfferResponse {
             code: code_str,
             expires_in: PAIRING_CODE_TTL_SECS as u64,
@@ -205,28 +208,39 @@ impl DevicePairingService {
         // would otherwise be persisted and later fail on the E2EE sync path.
         if let Err(e) = validate_public_keys(&input.ed25519_public_key, &input.x25519_public_key) {
             self.record_failed_accept();
+            tracing::warn!("Device pairing accept rejected: {e}");
             return Err(e);
         }
 
+        // Peek the offer WITHOUT consuming it. The code is one-time use but must
+        // survive a transient failure: if registration below fails or the HTTP
+        // response is lost, the acceptor must be able to retry the same code
+        // within its TTL instead of being told "Invalid" and forced to restart.
+        // The code is removed only after the device is successfully persisted.
         let offer = {
-            let mut store = self.offers.lock().unwrap();
-            store.remove(&input.code)
+            let store = self.offers.lock().unwrap();
+            store.get(&input.code).cloned()
         };
 
         let offer = match offer {
             Some(o) => o,
             None => {
                 self.record_failed_accept();
+                tracing::warn!("Device pairing accept failed: invalid (unknown) code");
                 return Err("Invalid pairing code".to_string());
             }
         };
 
         if Utc::now() > offer.expires_at {
+            // Drop the dead entry so the store doesn't accumulate expired offers.
+            self.offers.lock().unwrap().remove(&input.code);
             self.record_failed_accept();
+            tracing::warn!("Device pairing accept failed: code expired");
             return Err("Pairing code expired".to_string());
         }
 
-        // Register the acceptor device in our linked_devices table
+        // Register the acceptor device in our linked_devices table. On failure
+        // the offer is intentionally left in place so the acceptor can retry.
         let device = self
             .linked_device_repo
             .create(CreateLinkedDeviceInput {
@@ -238,10 +252,18 @@ impl DevicePairingService {
                 relay_write_token: input.relay_write_token,
             })
             .await
-            .map_err(|e| format!("Failed to register device: {e}"))?;
+            .map_err(|e| {
+                tracing::error!("Device pairing accept: registration failed: {e}");
+                format!("Failed to register device: {e}")
+            })?;
 
-        // Successful pairing clears the brute-force counter.
+        // Success: consume the code (one-time use) and clear the brute-force counter.
+        self.offers.lock().unwrap().remove(&input.code);
         self.clear_failed_accepts();
+        tracing::info!(
+            device_id = device.id.unwrap_or(0),
+            "Device pairing succeeded"
+        );
 
         Ok(PairingConfirmation {
             device_id: device.id.unwrap_or(0),
@@ -579,5 +601,68 @@ mod tests {
             .await;
         assert!(blocked.is_err());
         assert!(blocked.unwrap_err().contains("Too many"));
+    }
+
+    /// A repository whose `create` always fails, to exercise retry-safety.
+    struct FailingLinkedDeviceRepository;
+
+    #[async_trait::async_trait]
+    impl LinkedDeviceRepository for FailingLinkedDeviceRepository {
+        async fn find_all(&self) -> Result<Vec<LinkedDevice>, DomainError> {
+            Ok(vec![])
+        }
+        async fn find_by_id(&self, _id: i32) -> Result<Option<LinkedDevice>, DomainError> {
+            Ok(None)
+        }
+        async fn create(
+            &self,
+            _input: CreateLinkedDeviceInput,
+        ) -> Result<LinkedDevice, DomainError> {
+            Err(DomainError::Database(
+                "simulated registration failure".to_string(),
+            ))
+        }
+        async fn update_last_synced(&self, _id: i32, _ts: &str) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn delete(&self, _id: i32) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    /// Retry-safety: a transient registration failure must NOT consume the code.
+    /// The acceptor can retry the same code within its TTL instead of restarting.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_accept_retries_after_registration_failure() {
+        let db = init_db("sqlite::memory:").await.unwrap();
+        let id_svc = Arc::new(IdentityService::new(db.clone()));
+        id_svc
+            .init("test-library-uuid")
+            .await
+            .expect("identity init failed");
+        let repo: Arc<dyn LinkedDeviceRepository> = Arc::new(FailingLinkedDeviceRepository);
+        let svc = DevicePairingService::new(id_svc, repo);
+
+        let offer = svc
+            .generate_offer("Mac".to_string(), "lib-uuid".to_string(), None, None, None)
+            .unwrap();
+        let code = offer.code.clone();
+
+        let r = svc
+            .accept_offer(PairingAcceptInput {
+                code: code.clone(),
+                device_name: "iPhone".to_string(),
+                ed25519_public_key: valid_ed25519(),
+                x25519_public_key: vec![2; 32],
+                relay_url: None,
+                mailbox_id: None,
+                relay_write_token: None,
+            })
+            .await;
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("Failed to register"));
+
+        // The code must still be present for a retry (not burned by the failure).
+        assert!(svc.offers.lock().unwrap().contains_key(&code));
     }
 }

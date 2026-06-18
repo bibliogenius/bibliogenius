@@ -59,12 +59,18 @@ pub async fn accept_offer(
     match state.device_pairing.accept_offer(input).await {
         Ok(confirmation) => (StatusCode::OK, Json(json!(confirmation))).into_response(),
         Err(e) => {
-            let status = if e.contains("expired") || e.contains("Invalid") {
-                StatusCode::BAD_REQUEST
+            // Map to an HTTP status + a machine-readable code so the client can
+            // show a precise, translated message instead of a raw exception.
+            let (status, code) = if e.contains("Too many") {
+                (StatusCode::TOO_MANY_REQUESTS, "rate_limited")
+            } else if e.contains("expired") {
+                (StatusCode::BAD_REQUEST, "expired")
+            } else if e.contains("Invalid") {
+                (StatusCode::BAD_REQUEST, "invalid")
             } else {
-                StatusCode::INTERNAL_SERVER_ERROR
+                (StatusCode::INTERNAL_SERVER_ERROR, "registration_failed")
             };
-            (status, Json(json!({"error": e}))).into_response()
+            (status, Json(json!({"error": e, "code": code}))).into_response()
         }
     }
 }
