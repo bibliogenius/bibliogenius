@@ -622,14 +622,27 @@ pub async fn enrich_missing_covers(
     let mut enriched = 0i32;
 
     for (book_id, isbn) in &books {
-        if let Some(url) = find_cover_url(
+        let mut found = find_cover_url(
             isbn,
             enable_inventaire,
             enable_google,
             gb_api_key.as_deref(),
         )
-        .await
-        {
+        .await;
+
+        // Fallback: the owned edition's exact ISBN may not be catalogued even
+        // when the work is (frequent for French editions whose sibling editions
+        // carry the cover). Look the title up in Inventaire's work index, but
+        // accept a cover only when both the title and the author match — there is
+        // no user confirmation on this path. Requires the book to have an author.
+        if found.is_none() && enable_inventaire {
+            let (title, author) = fetch_book_title_author(db, *book_id).await;
+            if let (Some(title), Some(author)) = (title, author) {
+                found = find_cover_by_title_for_author(&title, &author, isbn).await;
+            }
+        }
+
+        if let Some(url) = found {
             book_repo
                 .update_cover_url(*book_id, &url)
                 .await
@@ -731,26 +744,12 @@ pub async fn search_cover_by_title(
             let Some(ref image_url) = result.image else {
                 continue;
             };
-
-            if let Some(ref al) = author_lower {
-                // Verify author: check authors field, then description
-                let authors_match = result.authors.as_ref().is_some_and(|authors| {
-                    authors.iter().any(|ra| {
-                        let ra_lower = ra.to_lowercase();
-                        ra_lower.contains(al) || al.contains(&ra_lower)
-                    })
-                });
-                let desc_match = !authors_match
-                    && result
-                        .description
-                        .as_ref()
-                        .is_some_and(|d| d.to_lowercase().contains(al));
-
-                if !authors_match && !desc_match {
-                    continue;
-                }
+            // The lightweight search results never carry author/description data,
+            // so gate on the work label matching the searched title instead of an
+            // author check that could never pass.
+            if !title_label_relevant(title, &result.label) {
+                continue;
             }
-            // No author to verify, or author matched
             return Ok(Some(image_url.clone()));
         }
     }
@@ -927,62 +926,68 @@ pub async fn search_all_covers_by_title(
 ) -> Result<Vec<CoverCandidate>, ServiceError> {
     let author_lower = author.filter(|a| !a.is_empty()).map(|a| a.to_lowercase());
 
-    // Get the book's language from DB (stored in source_data JSON) for sorting covers.
-    // Try "languages" array (OpenLibrary/BNF) then "language" string (Google Books).
-    // Fallback to "fr" (consistent with Inventaire search default).
-    let book_lang: String = BookEntity::find()
+    // Resolve the book's language to bias both the Inventaire search and the
+    // cover sort. Prefer a language already on the record (source_data), then fall
+    // back to the ADR-040 detection cascade (ISBN registration group → title via
+    // whatlang). Normalized to ISO 639-1: that is the only form Inventaire's search
+    // accepts — it returns nothing for a 639-3 code like "spa", which is exactly why
+    // a French-interface search hid the covers of non-French books.
+    let book_model = BookEntity::find()
         .filter(crate::models::book::Column::Title.eq(title))
         .one(db)
         .await
         .ok()
-        .flatten()
-        .and_then(|b| {
-            b.source_data.as_ref().and_then(|sd| {
-                serde_json::from_str::<serde_json::Value>(sd)
-                    .ok()
-                    .and_then(|json| {
-                        json.get("languages")
-                            .and_then(|l| l.as_array())
-                            .and_then(|arr| arr.first())
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                            .or_else(|| {
-                                json.get("language")
-                                    .and_then(|l| l.as_str())
-                                    .map(|s| s.to_string())
-                            })
-                    })
-            })
+        .flatten();
+    let sd_lang = book_model.as_ref().and_then(|b| {
+        b.source_data.as_ref().and_then(|sd| {
+            serde_json::from_str::<serde_json::Value>(sd)
+                .ok()
+                .and_then(|json| {
+                    json.get("languages")
+                        .and_then(|l| l.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            json.get("language")
+                                .and_then(|l| l.as_str())
+                                .map(|s| s.to_string())
+                        })
+                })
         })
+    });
+    let isbn = book_model
+        .as_ref()
+        .and_then(|b| b.isbn.clone())
+        .unwrap_or_default();
+    let book_lang: String = sd_lang
+        .or_else(|| crate::utils::lang::target_summary_language(&isbn, title, &[]))
+        .map(|c| crate::utils::lang::to_iso639_1(&c))
         .unwrap_or_else(|| "fr".to_string());
 
     let inv_fut = {
         let title = title.to_string();
-        let author_lower = author_lower.clone();
-        let author_for_query = author.filter(|a| !a.is_empty()).map(|s| s.to_string());
+        let lang = book_lang.clone();
         async move {
             let mut results = Vec::new();
-            let search_query = match &author_for_query {
-                Some(a) => format!("{} {}", title, a),
-                None => title.clone(),
-            };
+            // Search by title only, in the book's language. Appending the author
+            // degrades Inventaire's full-text match on the work label (the label
+            // carries no author), which dropped the correct work entirely. We do not
+            // filter on author here: this feeds a user-confirmed picker, and the
+            // lightweight search results never carry author/description data anyway
+            // (those fields are only populated by the heavier enrich step).
             if let Ok(items) =
-                crate::modules::integrations::inventaire::search_inventaire(&search_query).await
+                crate::modules::integrations::inventaire::search_inventaire_with_lang(
+                    &title,
+                    Some(&lang),
+                )
+                .await
             {
                 for item in &items {
-                    // Author filter: skip items that don't match the expected author
-                    if let Some(ref al) = author_lower {
-                        let authors_match = item.authors.as_ref().is_some_and(|authors| {
-                            authors.iter().any(|ra| author_tokens_match(al, ra))
-                        });
-                        let desc_match = !authors_match
-                            && item
-                                .description
-                                .as_ref()
-                                .is_some_and(|d| d.to_lowercase().contains(al));
-                        if !authors_match && !desc_match {
-                            continue;
-                        }
+                    // Relevance guard: Inventaire's fuzzy search appends popular
+                    // works; keep only those whose label is the title we asked for.
+                    if !title_label_relevant(&title, &item.label) {
+                        continue;
                     }
 
                     // Fetch edition covers (with language) for this matching work
@@ -1136,6 +1141,87 @@ async fn find_cover_url(
     }
 
     None
+}
+
+/// Title-based cover fallback for silent/automatic paths. When the exact ISBN
+/// edition is not catalogued (common for French editions whose sibling editions
+/// are), look the title up in Inventaire's work index and accept a cover ONLY
+/// when a work's normalized label matches the title AND its resolved author
+/// matches `author`. Returns `None` on any doubt: a path the user does not
+/// confirm must never guess a cover.
+async fn find_cover_by_title_for_author(title: &str, author: &str, isbn: &str) -> Option<String> {
+    // Search in the book's language (ADR-040 cascade → ISO 639-1) so a non-French
+    // book's work is returned under a label that matches its title; a French search
+    // would return a translated label and fail the title guard below.
+    let lang = crate::utils::lang::target_summary_language(isbn, title, &[])
+        .map(|c| crate::utils::lang::to_iso639_1(&c))
+        .unwrap_or_else(|| "fr".to_string());
+    let results =
+        crate::modules::integrations::inventaire::search_inventaire_with_lang(title, Some(&lang))
+            .await
+            .ok()?;
+    let wanted = normalize_title(title);
+    for item in &results {
+        // Strict on a silent path: exact normalized label (no subtitle leniency),
+        // a present image, and a verified author.
+        if normalize_title(&item.label) != wanted {
+            continue;
+        }
+        let Some(ref image_url) = item.image else {
+            continue;
+        };
+        let authors = crate::modules::integrations::inventaire::fetch_work_authors(&item.uri).await;
+        if authors.iter().any(|ra| author_tokens_match(author, ra)) {
+            return Some(image_url.clone());
+        }
+    }
+    None
+}
+
+/// Comma-joined author names linked to a book, or `None` when the book has no
+/// author. Used to verify a title-based cover match on the silent bulk path.
+async fn fetch_book_author_names(db: &DatabaseConnection, book_id: i32) -> Option<String> {
+    use crate::models::{author, book_authors};
+    let links = book_authors::Entity::find()
+        .filter(book_authors::Column::BookId.eq(book_id))
+        .all(db)
+        .await
+        .ok()?;
+    if links.is_empty() {
+        return None;
+    }
+    let ids: Vec<i32> = links.iter().map(|l| l.author_id).collect();
+    let names: Vec<String> = author::Entity::find()
+        .filter(author::Column::Id.is_in(ids))
+        .all(db)
+        .await
+        .ok()?
+        .into_iter()
+        .map(|a| a.name)
+        .filter(|n| !n.trim().is_empty())
+        .collect();
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(", "))
+    }
+}
+
+/// Fetch a book's title and comma-joined author names by id, for the bulk title
+/// fallback (both are required before a title-based cover is considered).
+async fn fetch_book_title_author(
+    db: &DatabaseConnection,
+    book_id: i32,
+) -> (Option<String>, Option<String>) {
+    let title = BookEntity::find_by_id(book_id)
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .map(|b| b.title)
+        .filter(|t| !t.trim().is_empty());
+    let author = fetch_book_author_names(db, book_id).await;
+    (title, author)
 }
 
 /// One-time cleanup: re-validate OpenLibrary cover URLs stored before the
@@ -1299,6 +1385,40 @@ fn author_tokens_match(query_author: &str, candidate_author: &str) -> bool {
     q_tokens.iter().all(|t| c.contains(t))
 }
 
+/// Normalize a title for matching: lowercase, fold common Latin accents, and
+/// collapse internal whitespace. Lets us compare a book's title against an
+/// Inventaire work label without being defeated by accents, casing or spacing.
+fn normalize_title(s: &str) -> String {
+    let folded: String = s
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ó' | 'ò' | 'ô' | 'ö' | 'õ' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' => 'u',
+            'ç' => 'c',
+            'ñ' => 'n',
+            _ => c,
+        })
+        .collect();
+    folded.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Relevance guard for title-based cover search: keep an Inventaire work only
+/// when its label is the same title we searched for. Lenient (containment both
+/// ways) so subtitle differences like "Title: Subtitle" still match; used by the
+/// user-confirmed picker where the human makes the final call.
+fn title_label_relevant(query_title: &str, work_label: &str) -> bool {
+    let q = normalize_title(query_title);
+    let l = normalize_title(work_label);
+    if q.is_empty() || l.is_empty() {
+        return false;
+    }
+    q == l || l.contains(&q) || q.contains(&l)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1341,6 +1461,58 @@ mod tests {
     #[test]
     fn test_author_tokens_match_accented_names() {
         assert!(author_tokens_match("Emile Zola", "Zola, Emile"));
+    }
+
+    #[test]
+    fn test_normalize_title_folds_accents_case_and_spacing() {
+        assert_eq!(normalize_title("Vaincre à Rome"), "vaincre a rome");
+        assert_eq!(normalize_title("  L'Étranger  "), "l'etranger");
+        assert_eq!(normalize_title("À la recherche"), "a la recherche");
+    }
+
+    #[test]
+    fn test_title_label_relevant_exact_accent_insensitive() {
+        // The real Vaincre à Rome case: book title vs Inventaire work label.
+        assert!(title_label_relevant("Vaincre à Rome", "Vaincre à Rome"));
+        assert!(title_label_relevant("Vaincre a Rome", "Vaincre à Rome"));
+    }
+
+    #[test]
+    fn test_title_label_relevant_allows_subtitle() {
+        assert!(title_label_relevant("Dune", "Dune: Le cycle de Dune"));
+        assert!(title_label_relevant("Dune: Le cycle de Dune", "Dune"));
+    }
+
+    #[test]
+    fn test_title_label_relevant_rejects_unrelated() {
+        // Inventaire's fuzzy search appends popular works; these must be filtered.
+        assert!(!title_label_relevant("Vaincre à Rome", "Roméo et Juliette"));
+        assert!(!title_label_relevant(
+            "Vaincre à Rome",
+            "À l'Ouest, rien de nouveau"
+        ));
+        assert!(!title_label_relevant("Vaincre à Rome", ""));
+    }
+
+    #[tokio::test]
+    #[ignore] // Flaky in CI due to external network request
+    async fn test_find_cover_by_title_for_author_recovers_sibling_edition() {
+        // The owned edition 9782330153632 is not catalogued on Inventaire, but the
+        // work "Vaincre à Rome" by Sylvain Coher is. Title + author must recover a
+        // cover the exact-ISBN lookup misses.
+        let url =
+            find_cover_by_title_for_author("Vaincre à Rome", "Sylvain Coher", "9782330153632")
+                .await;
+        assert!(url.is_some(), "expected a cover via work/title fallback");
+
+        // A wrong author on the same title must be rejected: no silent mismatch
+        // on the automatic path.
+        let wrong =
+            find_cover_by_title_for_author("Vaincre à Rome", "Victor Hugo", "9782330153632").await;
+        assert!(
+            wrong.is_none(),
+            "must not accept a cover for the wrong author"
+        );
     }
 
     async fn insert_test_book(db: &DatabaseConnection, title: &str) -> i32 {

@@ -289,6 +289,39 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    #[ignore] // Flaky in CI due to external network request
+    async fn test_fetch_work_authors_resolves_names() {
+        // Work "Vaincre à Rome" (Sylvain Coher): the edition the user owns is not
+        // catalogued, but the work is — this resolver verifies the author so the
+        // title-based cover fallback can trust the match.
+        let authors = fetch_work_authors("inv:9f88ec825979fd6543e08ae0feded3c0").await;
+        assert!(
+            authors.iter().any(|a| a == "Sylvain Coher"),
+            "expected Sylvain Coher, got {:?}",
+            authors
+        );
+    }
+
+    #[tokio::test]
+    #[ignore] // Flaky in CI due to external network request
+    async fn test_search_with_lang_recovers_non_french_work() {
+        // A Spanish book whose title has the author baked in. Searched in French
+        // (the interface default) the canonical work comes back under its French
+        // label and is missed; searched in the book's language its Spanish label
+        // matches and the cover is reachable.
+        let title = "La familia de Pascual Duarte de Camilo José Cela";
+        let es = search_inventaire_with_lang(title, Some("es"))
+            .await
+            .expect("es search");
+        assert!(
+            es.iter()
+                .any(|r| r.label == "La familia de Pascual Duarte" && r.image.is_some()),
+            "es search should surface the canonical work with a cover, got {:?}",
+            es.iter().map(|r| &r.label).collect::<Vec<_>>()
+        );
+    }
 }
 
 async fn fetch_entity(client: &reqwest::Client, uri: &str) -> Result<InventaireEntity, String> {
@@ -822,6 +855,43 @@ pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
     let uri = format!("isbn:{}", isbn);
     let entity = fetch_entity(&client, &uri).await.ok()?;
     get_entity_image_url(&entity)
+}
+
+/// Resolve the author display names of a work entity (claims `wdt:P50` → author
+/// entity labels). Verification helper for title-based cover lookups: confirms a
+/// title-matched work actually belongs to the expected author before its cover is
+/// accepted on a silent/automatic path. Returns an empty vec on any failure.
+pub async fn fetch_work_authors(work_uri: &str) -> Vec<String> {
+    let client = match reqwest::Client::builder()
+        .user_agent(API_USER_AGENT)
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let work = match fetch_entity(&client, work_uri).await {
+        Ok(w) => w,
+        Err(_) => return Vec::new(),
+    };
+    let Some(author_uris) = work.claims.authors.as_ref() else {
+        return Vec::new();
+    };
+
+    let mut names = Vec::new();
+    for uri in author_uris {
+        if let Ok(author) = fetch_entity(&client, uri).await
+            && let Some(name) = author
+                .labels
+                .get("fr")
+                .or_else(|| author.labels.get("en"))
+                .or_else(|| author.labels.values().next())
+        {
+            names.push(name.clone());
+        }
+    }
+    names
 }
 
 pub async fn fetch_entities_batch(

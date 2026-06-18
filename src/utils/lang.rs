@@ -151,9 +151,72 @@ pub fn target_summary_language(isbn: &str, title: &str, user_langs: &[String]) -
     user_langs.first().map(|s| base_lang(s).to_lowercase())
 }
 
+/// Normalize a language code to ISO 639-1 (two letters). `target_summary_language`
+/// can yield a 639-3 code on its `whatlang` branch (e.g. "spa", "fra"), but some
+/// consumers — notably Inventaire's `/api/search?lang=` — only accept 639-1 and
+/// return nothing for a 639-3 code. Already-two-letter input is returned lower-
+/// cased; an unmapped 639-3 code is returned unchanged (callers degrade gracefully).
+/// Covers the languages a personal library realistically holds; extend as needed.
+pub fn to_iso639_1(code: &str) -> String {
+    let c = code.trim().to_lowercase();
+    if c.len() == 2 {
+        return c;
+    }
+    match c.as_str() {
+        "eng" => "en",
+        "fra" | "fre" => "fr",
+        "spa" => "es",
+        "ita" => "it",
+        "deu" | "ger" => "de",
+        "por" => "pt",
+        "nld" | "dut" => "nl",
+        "cat" => "ca",
+        "rus" => "ru",
+        "ukr" => "uk",
+        "pol" => "pl",
+        "ces" | "cze" => "cs",
+        "slk" | "slo" => "sk",
+        "slv" => "sl",
+        "hrv" => "hr",
+        "srp" => "sr",
+        "ron" | "rum" => "ro",
+        "ell" | "gre" => "el",
+        "bul" => "bg",
+        "swe" => "sv",
+        "dan" => "da",
+        "nob" | "nor" => "nb",
+        "fin" => "fi",
+        "hun" => "hu",
+        "tur" => "tr",
+        "ara" => "ar",
+        "heb" => "he",
+        "jpn" => "ja",
+        "kor" => "ko",
+        "cmn" | "zho" | "chi" => "zh",
+        "vie" => "vi",
+        "ind" => "id",
+        "lat" => "la",
+        _ => return c,
+    }
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_iso639_1_normalizes_639_3_and_passes_through_639_1() {
+        // 639-3 (whatlang) → 639-1 (Inventaire search).
+        assert_eq!(to_iso639_1("spa"), "es");
+        assert_eq!(to_iso639_1("fra"), "fr");
+        assert_eq!(to_iso639_1("eng"), "en");
+        // Already 639-1 → lower-cased pass-through.
+        assert_eq!(to_iso639_1("ES"), "es");
+        assert_eq!(to_iso639_1("fr"), "fr");
+        // Unmapped code is returned unchanged (caller degrades gracefully).
+        assert_eq!(to_iso639_1("xyz"), "xyz");
+    }
 
     // ── Matching ─────────────────────────────────────────────────────
 
