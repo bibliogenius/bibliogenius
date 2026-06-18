@@ -186,10 +186,36 @@ pub async fn fetch_cover_url(isbn: &str, api_key: Option<&str>) -> Option<String
     None
 }
 
+/// Outcome of a Google Books search.
+///
+/// `quota_exceeded` is set when Google answers HTTP 429. Without an API key all
+/// anonymous requests share a single global Google project whose daily quota is
+/// routinely saturated, so an empty `books` list is otherwise indistinguishable
+/// from "no match". Callers use this flag to surface an honest "limite atteinte"
+/// notice instead of a silent empty result.
+#[derive(Debug, Default)]
+pub struct GoogleBooksSearchResult {
+    pub books: Vec<crate::models::book::Model>,
+    pub quota_exceeded: bool,
+}
+
+const GOOGLE_BOOKS_VOLUMES_URL: &str = "https://www.googleapis.com/books/v1/volumes";
+
 pub async fn search_books(
     query: &crate::api::search::SearchQuery,
     api_key: Option<&str>,
-) -> Vec<crate::models::book::Model> {
+) -> GoogleBooksSearchResult {
+    search_books_at(GOOGLE_BOOKS_VOLUMES_URL, query, api_key).await
+}
+
+/// Implementation of [`search_books`] with an injectable endpoint so the
+/// quota/parse branches can be exercised against a mock server in tests.
+async fn search_books_at(
+    volumes_url: &str,
+    query: &crate::api::search::SearchQuery,
+    api_key: Option<&str>,
+) -> GoogleBooksSearchResult {
+    let mut result = GoogleBooksSearchResult::default();
     let mut q_parts = Vec::new();
 
     if let Some(q) = &query.q {
@@ -210,7 +236,7 @@ pub async fn search_books(
     }
 
     if q_parts.is_empty() {
-        return Vec::new();
+        return result;
     }
 
     let q_str = q_parts.join("+"); // Google Books uses + or space
@@ -219,10 +245,7 @@ pub async fn search_books(
     } else {
         15
     };
-    let base_url = format!(
-        "https://www.googleapis.com/books/v1/volumes?q={}&maxResults={}",
-        q_str, max_results
-    );
+    let base_url = format!("{}?q={}&maxResults={}", volumes_url, q_str, max_results);
     let url = append_api_key(&base_url, api_key);
 
     let client = reqwest::Client::builder()
@@ -230,13 +253,11 @@ pub async fn search_books(
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let mut books = Vec::new();
-
     let resp = match client.get(&url).send().await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("Google Books search request failed: {}", e);
-            return books;
+            return result;
         }
     };
 
@@ -249,18 +270,19 @@ pub async fn search_books(
         } else {
             tracing::warn!("Google Books search quota exceeded for your API key");
         }
-        return books;
+        result.quota_exceeded = true;
+        return result;
     }
     if !status.is_success() {
         tracing::warn!("Google Books search error: HTTP {}", status);
-        return books;
+        return result;
     }
 
     let parsed = match resp.json::<GoogleBooksResponse>().await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("Google Books response parse error: {}", e);
-            return books;
+            return result;
         }
     };
 
@@ -325,14 +347,14 @@ pub async fn search_books(
                 loan_duration_days: None,
                 hub_cover_upload_failed_at: None,
             };
-            books.push(book);
+            result.books.push(book);
         }
     }
 
     // Deduplicate results - Google Books often returns the same book multiple times
     // (different formats like hardcover/paperback/ebook with identical data)
     let mut seen = std::collections::HashSet::new();
-    books.retain(|book| {
+    result.books.retain(|book| {
         // Create dedup key: prefer ISBN, fallback to title+publisher+year
         let key = if let Some(ref isbn) = book.isbn {
             isbn.clone()
@@ -347,5 +369,91 @@ pub async fn search_books(
         seen.insert(key)
     });
 
-    books
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn query(q: &str) -> crate::api::search::SearchQuery {
+        crate::api::search::SearchQuery {
+            title: None,
+            author: None,
+            publisher: None,
+            year_min: None,
+            year_max: None,
+            tags: None,
+            q: Some(q.to_string()),
+            subjects: None,
+            sources: None,
+            autocomplete: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn quota_exceeded_flag_set_on_429() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/books/v1/volumes"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/books/v1/volumes", server.uri());
+        let result = search_books_at(&url, &query("Martin Eden"), None).await;
+
+        assert!(result.quota_exceeded, "429 must set quota_exceeded");
+        assert!(result.books.is_empty(), "no books on quota error");
+    }
+
+    #[tokio::test]
+    async fn quota_flag_clear_on_success_with_items() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "items": [{
+                "volumeInfo": {
+                    "title": "Martin Eden",
+                    "authors": ["Jack London"],
+                    "industryIdentifiers": [
+                        {"type": "ISBN_13", "identifier": "9782070123456"}
+                    ]
+                }
+            }]
+        });
+        Mock::given(method("GET"))
+            .and(path("/books/v1/volumes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/books/v1/volumes", server.uri());
+        let result = search_books_at(&url, &query("Martin Eden"), None).await;
+
+        assert!(!result.quota_exceeded, "200 must not set quota_exceeded");
+        assert_eq!(result.books.len(), 1);
+        assert_eq!(result.books[0].title, "Martin Eden");
+    }
+
+    #[tokio::test]
+    async fn quota_flag_clear_on_empty_query() {
+        // An empty query never hits the network, so it is "no match", not a quota error.
+        let empty = crate::api::search::SearchQuery {
+            title: None,
+            author: None,
+            publisher: None,
+            year_min: None,
+            year_max: None,
+            tags: None,
+            q: None,
+            subjects: None,
+            sources: None,
+            autocomplete: None,
+        };
+        let result = search_books_at("http://127.0.0.1:0/books/v1/volumes", &empty, None).await;
+        assert!(!result.quota_exceeded);
+        assert!(result.books.is_empty());
+    }
 }

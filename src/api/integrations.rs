@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
 };
 use sea_orm::DatabaseConnection;
@@ -634,7 +634,7 @@ pub async fn search_unified(
                 .await
                 .unwrap_or_default()
             } else {
-                Vec::new()
+                crate::modules::integrations::google_books::GoogleBooksSearchResult::default()
             }
         }
     );
@@ -980,7 +980,11 @@ pub async fn search_unified(
     results.extend(ol_processed_results);
 
     // Process Google Books Results
-    for model in gb_res {
+    // Capture the quota flag before consuming `books`: a 429 (saturated anonymous
+    // quota) is reported to the client via a response header so the UI can show an
+    // honest "limite atteinte" notice instead of a silent empty result.
+    let gb_quota_exceeded = gb_res.quota_exceeded;
+    for model in gb_res.books {
         // Convert Model to Book DTO
         let mut dto = book::Book::from(model.clone());
 
@@ -1202,7 +1206,19 @@ pub async fn search_unified(
         })
         .collect();
 
-    (StatusCode::OK, Json(results)).into_response()
+    // Report a saturated Google Books quota (HTTP 429) to the client via a
+    // response header. The body stays a bare JSON array, so existing parsing is
+    // untouched; the UI reads this header to show an honest "limite atteinte"
+    // notice instead of an indistinguishable empty result.
+    let mut headers = HeaderMap::new();
+    if gb_quota_exceeded {
+        headers.insert(
+            "x-bibliogenius-notices",
+            HeaderValue::from_static("google_books_quota"),
+        );
+    }
+
+    (StatusCode::OK, headers, Json(results)).into_response()
 }
 
 /// Extract edition_count from a book's source_data JSON (OpenLibrary popularity signal).

@@ -769,7 +769,9 @@ pub async fn search_cover_by_title(
             autocomplete: Some(true),
         };
         let books =
-            crate::modules::integrations::google_books::search_books(&query, google_api_key).await;
+            crate::modules::integrations::google_books::search_books(&query, google_api_key)
+                .await
+                .books;
         tracing::info!(
             "search_cover_by_title: Google Books returned {} results",
             books.len()
@@ -1043,7 +1045,8 @@ pub async fn search_all_covers_by_title(
             };
             let books =
                 crate::modules::integrations::google_books::search_books(&query, gb_key.as_deref())
-                    .await;
+                    .await
+                    .books;
             let mut results = Vec::new();
             for book in &books {
                 let Some(ref cover_url) = book.cover_url else {
