@@ -202,7 +202,18 @@ pub async fn recent(state: &AppState, limit: u64) -> Result<Vec<RecentFilledBook
 /// the in-flight batch id instead of starting a second run. `languages` is the
 /// user's reading-language config (comma-joined), forwarded to the lookup for
 /// summary-language coherence (ADR-040).
-pub async fn start(state: &AppState, languages: Option<String>) -> Result<String, String> {
+///
+/// `lot_limit` bounds how many books this invocation processes before pausing
+/// the run as `interrupted` (resumable via "Continuer"); `None` runs the whole
+/// backlog to completion. It is a per-invocation quota, not persisted: the run's
+/// `total` stays the full backlog and the cursor advances across lots, so
+/// successive "Continuer" calls walk the backlog instead of re-attempting the
+/// same books. This is the "small batches" nudge (no migration, ADR-041).
+pub async fn start(
+    state: &AppState,
+    languages: Option<String>,
+    lot_limit: Option<u64>,
+) -> Result<String, String> {
     let repo = state.metadata_fill_repo.clone();
     let manager = state.metadata_fill.clone();
 
@@ -248,6 +259,7 @@ pub async fn start(state: &AppState, languages: Option<String>) -> Result<String
             languages,
             cancel,
             start_cursor,
+            lot_limit,
         )
         .await;
     });
@@ -311,6 +323,7 @@ async fn run_fill_loop(
     languages: Option<String>,
     cancel: Arc<AtomicBool>,
     start_cursor: i32,
+    lot_limit: Option<u64>,
 ) {
     // Reload counters so a resumed run keeps accumulating rather than resetting.
     let mut run = match repo.get_run(&batch_id).await {
@@ -322,6 +335,8 @@ async fn run_fill_loop(
     };
     let mut cursor = start_cursor;
     let mut consecutive_fail: u32 = 0;
+    // Books processed *this invocation* (resets each spawn), bounding the lot.
+    let mut processed_this_lot: u64 = 0;
 
     'outer: loop {
         if cancel.load(Ordering::SeqCst) {
@@ -392,6 +407,14 @@ async fn run_fill_loop(
             cursor = book.id;
             run.cursor_book_id = cursor;
             let _ = repo.update_run_progress(&run).await;
+
+            // Pause once this lot's quota is met: mark the run resumable so the
+            // UI can offer "Continuer" the next lot from the advanced cursor.
+            processed_this_lot += 1;
+            if lot_limit.is_some_and(|n| processed_this_lot >= n) {
+                let _ = repo.set_run_status(&batch_id, "interrupted").await;
+                break 'outer;
+            }
         }
     }
 

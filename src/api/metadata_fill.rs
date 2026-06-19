@@ -43,14 +43,18 @@ pub async fn get_stats(State(state): State<AppState>) -> impl IntoResponse {
 pub struct StartBody {
     /// Comma-joined reading languages for summary coherence (ADR-040).
     pub languages: Option<String>,
+    /// Per-invocation lot quota; `None` runs the whole backlog (ADR-041).
+    pub lot_limit: Option<u64>,
 }
 
 pub async fn start(
     State(state): State<AppState>,
     body: Option<Json<StartBody>>,
 ) -> impl IntoResponse {
-    let languages = body.and_then(|b| b.0.languages);
-    match svc::start(&state, languages).await {
+    let (languages, lot_limit) = body
+        .map(|b| (b.0.languages, b.0.lot_limit))
+        .unwrap_or((None, None));
+    match svc::start(&state, languages, lot_limit).await {
         Ok(batch_id) => (StatusCode::OK, Json(json!({ "batch_id": batch_id }))).into_response(),
         Err(e) => err(e).into_response(),
     }

@@ -1075,8 +1075,18 @@ pub async fn metadata_fill_stats() -> Result<FrbCompletenessStats, String> {
 
 /// Start (or resume) the bulk fill. Returns the batch id. `languages` is the
 /// user's reading-language config (comma-joined) for summary coherence.
-pub async fn metadata_fill_start(languages: Option<String>) -> Result<String, String> {
-    crate::services::metadata_fill_service::start(fill_state()?, languages).await
+/// `lot_limit` caps how many books this invocation processes before pausing the
+/// run as resumable (the "small batches" nudge); `None` runs to completion.
+pub async fn metadata_fill_start(
+    languages: Option<String>,
+    lot_limit: Option<u32>,
+) -> Result<String, String> {
+    crate::services::metadata_fill_service::start(
+        fill_state()?,
+        languages,
+        lot_limit.map(|l| l as u64),
+    )
+    .await
 }
 
 /// Current/last run progress (None if a run has never been started).

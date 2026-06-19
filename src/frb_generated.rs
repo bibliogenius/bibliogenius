@@ -4594,11 +4594,14 @@ fn wire__crate__api__frb__metadata_fill_start_impl(
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_languages = <Option<String>>::sse_decode(&mut deserializer);
+            let api_lot_limit = <Option<u32>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
                     (move || async move {
-                        let output_ok = crate::api::frb::metadata_fill_start(api_languages).await?;
+                        let output_ok =
+                            crate::api::frb::metadata_fill_start(api_languages, api_lot_limit)
+                                .await?;
                         Ok(output_ok)
                     })()
                     .await,
