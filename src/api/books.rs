@@ -892,7 +892,17 @@ pub async fn get_book_cover(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let raw = tokio::fs::read(cover_path)
+    // Re-base onto the current covers dir when registered (FFI mode): iOS may
+    // have reassigned the data-container UUID across an update, leaving the
+    // persisted absolute path pointing at a dead container even though the file
+    // survives under the new one. In server-binary mode the covers dir is not
+    // registered, so the stored path is read as-is (paths are stable there).
+    let read_path = match crate::api::frb::covers_dir() {
+        Some(dir) => crate::utils::cover_url::rebase_local_cover_path(dir, cover_path, id),
+        None => std::path::PathBuf::from(cover_path),
+    };
+
+    let raw = tokio::fs::read(&read_path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 

@@ -12,6 +12,7 @@
 //! api/e2ee.rs, api/peer.rs, api/frb.rs) is unchanged.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 /// Error raised when a cover URL rewrite intended for a relay-bound
 /// payload cannot produce a remotely reachable URL: the source is a
@@ -138,6 +139,34 @@ pub fn resolve_single(
                 }),
             },
         },
+    }
+}
+
+/// Re-bases a stored local cover path onto the current `covers_dir`, keyed by
+/// the book's `book_id`.
+///
+/// The serve-side endpoint (`api/books::get_book_cover`) reads a peer's own
+/// covers from disk by the absolute path persisted in `books.cover_url`. On
+/// iOS the app's data-container UUID can change across an update, so that
+/// absolute path points at a dead container even though the file survives
+/// under the new one. This mirrors the Flutter-side `LocalCoverResolver`.
+///
+/// A device's own custom covers are always named `<book_id>.jpg`, so the
+/// re-base uses the current `book_id` — never the stored basename. Guarding on
+/// `basename == "<book_id>.jpg"` rebases only this device's own canonical
+/// cover; a path carried over from another device (multi-device sync, ADR-011,
+/// stores raw paths with the SOURCE id under a fresh local id) has a
+/// mismatched basename and is returned untouched, so it is never mapped onto
+/// an unrelated local cover. Re-basing onto a single component is also
+/// traversal-safe by construction.
+///
+/// On macOS/Android the data directory is keyed by a fixed bundle id, so the
+/// re-based path is identical to the stored one: no behavior change there.
+pub fn rebase_local_cover_path(covers_dir: &Path, stored: &str, book_id: i32) -> PathBuf {
+    let canonical = format!("{book_id}.jpg");
+    match Path::new(stored).file_name() {
+        Some(name) if name == canonical.as_str() => covers_dir.join(&canonical),
+        _ => PathBuf::from(stored),
     }
 }
 
@@ -280,6 +309,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.as_deref(), Some("/api/books/7/cover?v=20260420103000"));
+    }
+
+    // rebase_local_cover_path ---------------------------------------------
+
+    #[test]
+    fn rebase_rewrites_stale_own_path_when_basename_matches_id() {
+        let covers = Path::new(
+            "/var/mobile/Containers/Data/Application/NEW-UUID/Library/Application Support/covers",
+        );
+        let stored = "/var/mobile/Containers/Data/Application/OLD-UUID/Library/Application Support/covers/42.jpg";
+        assert_eq!(
+            rebase_local_cover_path(covers, stored, 42),
+            covers.join("42.jpg")
+        );
+    }
+
+    #[test]
+    fn rebase_does_not_remap_a_foreign_synced_path() {
+        // Book row 87 carries device A's path (basename 42). Must NOT map onto
+        // this device's 42.jpg — that would show an unrelated book's cover.
+        let covers = Path::new("/now/covers");
+        let stored = "/var/mobile/.../Application Support/covers/42.jpg";
+        assert_eq!(
+            rebase_local_cover_path(covers, stored, 87),
+            Path::new(stored)
+        );
+    }
+
+    #[test]
+    fn rebase_rewrites_a_bare_basename_matching_id() {
+        let covers = Path::new("/now/covers");
+        assert_eq!(
+            rebase_local_cover_path(covers, "42.jpg", 42),
+            covers.join("42.jpg")
+        );
+    }
+
+    #[test]
+    fn rebase_is_a_noop_when_already_in_covers_dir() {
+        let covers = Path::new("/Users/x/Application Support/covers");
+        let stored = "/Users/x/Application Support/covers/7.jpg";
+        assert_eq!(
+            rebase_local_cover_path(covers, stored, 7),
+            Path::new(stored)
+        );
     }
 
     /// Security rule S5: a URL that passes `is_servable_remotely` is

@@ -18,6 +18,11 @@ static DB: OnceLock<DatabaseConnection> = OnceLock::new();
 /// display backend logs without relying on Xcode Console (stderr is invisible
 /// to the iOS FFI host process).
 static LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+/// The application's covers directory (`<data dir>/covers`). Set once in
+/// `init_backend` from the FFI-provided db path; read by `get_book_cover` to
+/// re-base persisted cover paths after an iOS data-container UUID change.
+/// `None` in server-binary mode where no FFI init runs.
+static COVERS_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
 /// Global AppState - set once in `initBackend`, read by FFI handlers that need
 /// services not available as individual statics (e.g. catalog notifications).
 static GLOBAL_APP_STATE: OnceLock<crate::infrastructure::AppState> = OnceLock::new();
@@ -75,6 +80,12 @@ fn db() -> Option<&'static DatabaseConnection> {
 /// Get the global AppState (must be initialized first via `initBackend`).
 fn global_app_state() -> Option<&'static crate::infrastructure::AppState> {
     GLOBAL_APP_STATE.get()
+}
+
+/// The covers directory registered in `init_backend`, or `None` in
+/// server-binary mode. Used by `get_book_cover` to re-base stored cover paths.
+pub(crate) fn covers_dir() -> Option<&'static std::path::PathBuf> {
+    COVERS_DIR.get()
 }
 
 /// Load the Google Books API key from the installation profile.
@@ -188,6 +199,15 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("bibliogenius-rust.log");
     let _ = LOG_PATH.set(log_path.clone());
+
+    // Register the covers directory (sibling of the DB file) so the
+    // peer-facing cover endpoint can re-base persisted absolute paths after an
+    // iOS data-container UUID change. Mirrors the Flutter `LocalCoverResolver`.
+    let covers_dir = std::path::Path::new(&db_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("covers");
+    let _ = COVERS_DIR.set(covers_dir);
 
     static TRACING_INIT: std::sync::Once = std::sync::Once::new();
     TRACING_INIT.call_once(|| {
