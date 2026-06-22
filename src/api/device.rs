@@ -258,8 +258,16 @@ pub async fn trigger_sync(
         vec![]
     };
 
-    // 6. Build sync request message
-    let transport = crate::services::e2ee_transport::DirectTransport::new(crypto_service);
+    // 6. Build sync request message.
+    // Device sync is interactive and can transfer a full history on a
+    // never-synced device; the receiver's store + enrich + seal round-trip
+    // easily exceeds the 3s peer-sync default. This path has no relay fallback
+    // (a direct failure surfaces as a hard "Sync failed"), so give it a
+    // generous timeout rather than aborting a sync that is still progressing.
+    let transport = crate::services::e2ee_transport::DirectTransport::new_with_timeout(
+        crypto_service,
+        std::time::Duration::from_secs(30),
+    );
     let message = crate::services::e2ee_transport::DirectTransport::build_message(
         "device_sync_request",
         json!({

@@ -38,6 +38,32 @@ impl std::fmt::Display for E2eeTransportError {
     }
 }
 
+/// reqwest's `Display` only prints "error sending request for url (X)" and
+/// hides the actual cause. Walk the source chain and tag the kind so logs
+/// distinguish a timeout from a connection reset/refused — the difference
+/// between "receiver too slow" and "receiver unreachable".
+fn describe_reqwest_error(e: &reqwest::Error) -> String {
+    use std::fmt::Write as _;
+
+    let kind = if e.is_timeout() {
+        "timeout"
+    } else if e.is_connect() {
+        "connect"
+    } else if e.is_request() {
+        "request"
+    } else {
+        "other"
+    };
+
+    let mut detail = e.to_string();
+    let mut src = std::error::Error::source(e);
+    while let Some(s) = src {
+        let _ = write!(detail, ": {s}");
+        src = s.source();
+    }
+    format!("[{kind}] {detail}")
+}
+
 /// Direct transport for sending encrypted messages to peers.
 pub struct DirectTransport {
     crypto_service: Arc<CryptoService<SqliteNonceStore>>,
@@ -45,9 +71,26 @@ pub struct DirectTransport {
 }
 
 impl DirectTransport {
+    /// Default per-request timeout. Kept short so the peer-sync path fails fast
+    /// and falls back to relay. Interactive flows without a relay fallback
+    /// (device sync) override this via [`Self::new_with_timeout`].
+    const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
     pub fn new(crypto_service: Arc<CryptoService<SqliteNonceStore>>) -> Self {
+        Self::new_with_timeout(crypto_service, Self::DEFAULT_TIMEOUT)
+    }
+
+    /// Build a transport with a caller-chosen total request timeout (covers
+    /// connect + send + awaiting the peer's response). Device sync needs a
+    /// generous bound: on a never-synced device the receiver's round-trip
+    /// (store remote ops, collect + enrich local ops, seal) easily exceeds the
+    /// 3s peer-sync default, and that path has no relay fallback.
+    pub fn new_with_timeout(
+        crypto_service: Arc<CryptoService<SqliteNonceStore>>,
+        timeout: std::time::Duration,
+    ) -> Self {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3))
+            .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
@@ -84,7 +127,7 @@ impl DirectTransport {
             .json(&envelope)
             .send()
             .await
-            .map_err(|e| E2eeTransportError::Network(e.to_string()))?;
+            .map_err(|e| E2eeTransportError::Network(describe_reqwest_error(&e)))?;
 
         let status = response.status().as_u16();
 
