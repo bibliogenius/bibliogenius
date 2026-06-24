@@ -321,5 +321,4 @@ async fn prune_old_entries(db: &DatabaseConnection) -> Result<(), DbErr> {
     Ok(())
 }
 
-pub mod enrichment;
 pub mod processor;

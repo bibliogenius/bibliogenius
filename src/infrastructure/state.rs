@@ -16,8 +16,6 @@ use crate::infrastructure::{
 };
 use crate::services::IdentityService;
 use crate::services::crypto_service::CryptoService;
-use crate::services::device_pairing_service::DevicePairingService;
-use crate::services::device_sync_service::DeviceSyncService;
 use crate::services::hub_directory_service::HubDirectoryService;
 use crate::services::metadata_fill_service::MetadataFillManager;
 
@@ -79,10 +77,6 @@ pub struct AppState {
     pub identity_service: Arc<IdentityService>,
     /// Crypto service for E2EE seal/open (lazily initialized after identity is ready)
     crypto_service: Arc<OnceCell<Arc<CryptoService<SqliteNonceStore>>>>,
-    /// Device pairing service for multi-device sync
-    pub device_pairing: Arc<DevicePairingService>,
-    /// Device sync service for operation log exchange
-    pub device_sync: Arc<DeviceSyncService>,
     /// Pending relay request-response correlation map (ADR-012).
     pending_relay_requests: PendingRelayRequests,
     /// Hub directory service — manages public directory and follow relationships (ADR-015).
@@ -122,22 +116,6 @@ impl AppState {
         let loan_settings_repo = Arc::new(SeaOrmLoanSettingsRepository::new(db.clone()));
         let metadata_fill_repo = Arc::new(SeaOrmMetadataFillRepository::new(db.clone()));
 
-        // Reuse the FFI-initialized pairing service so code generation
-        // and HTTP acceptance share the same in-memory offer store.
-        let device_pairing = crate::api::frb::shared_device_pairing_svc()
-            .cloned()
-            .unwrap_or_else(|| {
-                Arc::new(DevicePairingService::new(
-                    identity_service.clone(),
-                    linked_device_repo.clone(),
-                ))
-            });
-
-        let device_sync = Arc::new(DeviceSyncService::new(
-            db.clone(),
-            linked_device_repo.clone(),
-        ));
-
         Self {
             db,
             server_port: Arc::new(std::sync::atomic::AtomicU16::new(8000)),
@@ -153,8 +131,6 @@ impl AppState {
             metadata_fill: Arc::new(MetadataFillManager::new()),
             identity_service,
             crypto_service: Arc::new(OnceCell::new()),
-            device_pairing,
-            device_sync,
             pending_relay_requests: Arc::new(dashmap::DashMap::new()),
             hub_directory: Arc::new(HubDirectoryService::new()),
             peer_direct_failures: Arc::new(dashmap::DashMap::new()),

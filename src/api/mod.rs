@@ -9,7 +9,6 @@ pub mod collections;
 pub mod contact;
 pub mod copy;
 pub mod data;
-pub mod device;
 pub mod discovery;
 pub mod e2ee;
 pub mod export;
@@ -39,7 +38,7 @@ pub mod mcp;
 
 use axum::{
     Router,
-    routing::{delete, get, post, put},
+    routing::{get, post, put},
 };
 use sea_orm::DatabaseConnection;
 
@@ -86,20 +85,6 @@ fn build_routes() -> Router<AppState> {
         // Pairing (legacy)
         .route("/auth/pairing/code", post(auth::pairing_generate_code))
         .route("/auth/pairing/verify", post(auth::pairing_verify_code))
-        // Device pairing and management (ADR-011)
-        .route("/devices/pair/offer", post(device::generate_offer))
-        .route("/devices/pair/accept", post(device::accept_offer))
-        .route("/devices", get(device::list_devices))
-        .route("/devices/register", post(device::register_device))
-        .route("/devices/:id", delete(device::remove_device))
-        // Device sync
-        .route(
-            "/devices/sync/pending-review",
-            get(device::sync_pending_review),
-        )
-        .route("/devices/sync/approve", post(device::sync_approve))
-        .route("/devices/sync/reject", post(device::sync_reject))
-        .route("/devices/sync/:id", post(device::trigger_sync))
         // Library config
         .route("/library/config", get(library::get_config))
         .route("/library/config", post(library::update_config))

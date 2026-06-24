@@ -10,8 +10,6 @@ pub mod collection_service;
 pub mod contact_service;
 pub mod crypto_service;
 pub mod delta_service;
-pub mod device_pairing_service;
-pub mod device_sync_service;
 pub mod e2ee_transport;
 pub mod gamification_service;
 pub mod hub_directory_service;

@@ -1077,7 +1077,6 @@ pub(crate) async fn try_send_e2ee_with_timeout(
                     "loan_request",
                     "book_sync_request",
                     "search_request",
-                    "device_sync_request",
                     "library_manifest_request",
                     "library_page_request",
                     "library_search_request",

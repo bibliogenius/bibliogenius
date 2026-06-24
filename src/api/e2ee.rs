@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::crypto::envelope::{ClearMessage, EncryptedEnvelope};
 use crate::infrastructure::AppState;
-use crate::models::{linked_device, peer};
+use crate::models::peer;
 use crate::services::crypto_service::PeerInfo;
 
 /// Receive and process an encrypted peer message.
@@ -57,17 +57,8 @@ pub async fn receive_encrypted_message(
         }
     };
 
-    // 2b. Also load linked devices (device sync uses a separate table)
-    let linked_devices = match linked_device::Entity::find().all(db).await {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!("E2EE: Failed to load linked devices: {e}");
-            vec![]
-        }
-    };
-
-    // 3. Build PeerInfo vec from peers with valid keys + linked devices
-    let (known_peers, peer_models) = build_known_peers_with_devices(&peers, &linked_devices);
+    // 3. Build PeerInfo vec from peers with valid keys
+    let (known_peers, peer_models) = build_known_peers(&peers);
 
     if known_peers.is_empty() {
         return (
@@ -143,76 +134,6 @@ pub fn build_known_peers(peers: &[peer::Model]) -> (Vec<PeerInfo>, Vec<peer::Mod
     (known_peers, peer_models)
 }
 
-/// Build PeerInfo vec from both peers and linked devices.
-/// Linked devices use raw binary keys instead of hex strings.
-/// Returns synthetic peer::Model entries for linked devices so the dispatch
-/// chain can log the sender name regardless of the source table.
-pub fn build_known_peers_with_devices(
-    peers: &[peer::Model],
-    devices: &[linked_device::Model],
-) -> (Vec<PeerInfo>, Vec<peer::Model>) {
-    // Start with regular peers
-    let (mut known_peers, mut peer_models) = build_known_peers(peers);
-
-    // Add linked devices (binary keys, not hex)
-    for d in devices {
-        let ed_bytes = &d.ed25519_public_key;
-        let x_bytes = &d.x25519_public_key;
-
-        if ed_bytes.len() != 32 || x_bytes.len() != 32 {
-            continue;
-        }
-
-        let ed_arr: [u8; 32] = match ed_bytes.as_slice().try_into() {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-        let x_arr: [u8; 32] = match x_bytes.as_slice().try_into() {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-
-        let verifying_key = match ed25519_dalek::VerifyingKey::from_bytes(&ed_arr) {
-            Ok(k) => k,
-            Err(_) => continue,
-        };
-        let x25519_public = x25519_dalek::PublicKey::from(x_arr);
-
-        known_peers.push(PeerInfo {
-            verifying_key,
-            x25519_public,
-        });
-        // Synthesize a peer::Model so the dispatch chain can reference the sender
-        peer_models.push(peer::Model {
-            id: d.id,
-            name: d.name.clone(),
-            display_name: None,
-            url: String::new(),
-            library_uuid: None,
-            public_key: Some(hex::encode(ed_bytes)),
-            x25519_public_key: Some(hex::encode(x_bytes)),
-            key_exchange_done: true,
-            mailbox_id: d.mailbox_id.clone(),
-            relay_url: d.relay_url.clone(),
-            relay_write_token: d.relay_write_token.clone(),
-            relay_write_token_invalid_at: None,
-            latitude: None,
-            longitude: None,
-            auto_approve: false,
-            connection_status: "accepted".to_string(),
-            last_seen: d.last_synced.clone(),
-            avatar_config: None,
-            catalog_hash: None,
-            last_catalog_sync: None,
-            last_delta_cursor: None,
-            created_at: d.created_at.clone(),
-            updated_at: d.created_at.clone(),
-        });
-    }
-
-    (known_peers, peer_models)
-}
-
 /// Dispatch a decrypted ClearMessage to the appropriate handler.
 /// Shared by both the HTTP endpoint and the relay poller.
 pub async fn dispatch_clear_message(
@@ -270,18 +191,6 @@ pub async fn dispatch_clear_message(
         }
 
         "status_update" => handle_status_update(db, clear_message, sender_peer).await,
-
-        "device_sync_request" => {
-            let response_payload = handle_device_sync_request(db, clear_message, sender_peer).await;
-            seal_response(
-                crypto_service,
-                &known_peers[peer_index],
-                "device_sync_response",
-                response_payload,
-            )
-        }
-
-        "device_sync_push" => handle_device_sync_push(db, clear_message, sender_peer).await,
 
         "peer_disconnect" => handle_peer_disconnect(db, sender_peer, our_library_uuid).await,
 
@@ -1660,166 +1569,6 @@ pub async fn handle_library_search_via_relay(
         "books": browse_books,
         "total_matches": total_matches,
     })
-}
-
-// ── Device sync handlers ──────────────────────────────────────────────
-
-/// Check if sync safety mode is enabled (module "sync_safety" in enabled_modules).
-async fn is_sync_safety_enabled(db: &DatabaseConnection) -> bool {
-    use crate::models::installation_profile::ProfileConfig;
-
-    match ProfileConfig::load(db).await {
-        Ok(config) => config.is_module_enabled("sync_safety"),
-        Err(_) => true, // Default to safe mode if profile can't be loaded
-    }
-}
-
-/// Handle a device sync request (LAN, request-response).
-///
-/// Receives remote ops from the sender, stores them with appropriate status,
-/// then returns our local ops since the sender's last sync point.
-async fn handle_device_sync_request(
-    db: &DatabaseConnection,
-    msg: &ClearMessage,
-    sender_peer: &crate::models::peer::Model,
-) -> serde_json::Value {
-    use crate::services::device_sync_service::{DeviceSyncService, RemoteOp};
-
-    let since = msg.payload.get("since").and_then(|v| v.as_str());
-
-    // Use sender_peer.id which is the LOCAL linked_device ID.
-    // (The synthetic peer::Model built from linked_device data carries the correct ID.)
-    // The device_id in the request payload is the SENDER's local ID for us, which
-    // does not match our local ID for the sender -- do not use it.
-    let device_id = sender_peer.id;
-
-    let remote_ops: Vec<RemoteOp> = msg
-        .payload
-        .get("ops")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-
-    let safety_mode = is_sync_safety_enabled(db).await;
-
-    // 1. Receive and store remote ops
-    let repo: std::sync::Arc<dyn crate::domain::LinkedDeviceRepository> = std::sync::Arc::new(
-        crate::infrastructure::SeaOrmLinkedDeviceRepository::new(db.clone()),
-    );
-    let svc = DeviceSyncService::new(db.clone(), repo.clone());
-
-    let received_count = if !remote_ops.is_empty() {
-        match svc
-            .receive_remote_ops(device_id, remote_ops, safety_mode)
-            .await
-        {
-            Ok(result) => result.inserted_count,
-            Err(e) => {
-                tracing::error!("E2EE: Failed to receive remote ops: {e}");
-                0
-            }
-        }
-    } else {
-        0
-    };
-
-    // 2. Fetch our local ops since the given timestamp
-    let local_ops = svc.get_local_ops_since(since).await.unwrap_or_default();
-
-    let mut ops_payload: Vec<serde_json::Value> = Vec::with_capacity(local_ops.len());
-    for op in &local_ops {
-        ops_payload.push(crate::sync::enrichment::op_to_sync_json(db, op).await);
-    }
-
-    // 3. Update last_synced on the device
-    if device_id > 0 {
-        let _ = svc
-            .update_device_last_synced(device_id, &chrono::Utc::now().to_rfc3339())
-            .await;
-    }
-
-    tracing::info!(
-        "E2EE: device_sync_request - received {} ops, sending {} ops back",
-        received_count,
-        ops_payload.len()
-    );
-
-    json!({
-        "ops": ops_payload,
-        "received_count": received_count,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-    })
-}
-
-/// Handle a device sync push (WAN/relay, fire-and-forget).
-///
-/// Receives remote ops and stores them. No response ops (relay is one-way).
-async fn handle_device_sync_push(
-    db: &DatabaseConnection,
-    msg: &ClearMessage,
-    sender_peer: &crate::models::peer::Model,
-) -> axum::response::Response {
-    use crate::services::device_sync_service::{DeviceSyncService, RemoteOp};
-
-    // Use sender_peer.id (LOCAL linked_device ID from synthetic peer model)
-    let device_id = sender_peer.id;
-
-    let remote_ops: Vec<RemoteOp> = msg
-        .payload
-        .get("ops")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-
-    if remote_ops.is_empty() {
-        return (
-            StatusCode::OK,
-            Json(json!({ "message": "No ops to process" })),
-        )
-            .into_response();
-    }
-
-    let safety_mode = is_sync_safety_enabled(db).await;
-
-    let repo: std::sync::Arc<dyn crate::domain::LinkedDeviceRepository> = std::sync::Arc::new(
-        crate::infrastructure::SeaOrmLinkedDeviceRepository::new(db.clone()),
-    );
-    let svc = DeviceSyncService::new(db.clone(), repo);
-
-    match svc
-        .receive_remote_ops(device_id, remote_ops, safety_mode)
-        .await
-    {
-        Ok(result) => {
-            // Update last_synced
-            if device_id > 0 {
-                let _ = svc
-                    .update_device_last_synced(device_id, &chrono::Utc::now().to_rfc3339())
-                    .await;
-            }
-
-            tracing::info!(
-                "E2EE: device_sync_push - stored {} ops from device {}",
-                result.inserted_count,
-                device_id
-            );
-
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "message": "Sync push processed",
-                    "received_count": result.inserted_count,
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("E2EE: device_sync_push failed: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": format!("Failed to process sync: {e}") })),
-            )
-                .into_response()
-        }
-    }
 }
 
 // ── Response sealing helper ────────────────────────────────────────────
