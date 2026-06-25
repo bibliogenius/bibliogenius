@@ -463,6 +463,49 @@ async fn replace_cross_device_uuid_mismatch_still_clears() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn replace_blank_local_uuid_is_not_same_device() {
+    // ADR-042 §13.3: an absent / blank local library_uuid must NEVER be read as
+    // a same-device match. The wizard now passes the device's peeked uuid
+    // read-only (auth.peekLibraryUuid), so a transiently-dark store surfaces a
+    // blank value here instead of a freshly minted junk uuid. A blank value is
+    // normalized to "absent": it must behave exactly like `None`, i.e. NOT
+    // same-device (clean-install clear path), never a false same-device that
+    // would silently preserve a foreign identity.
+    let tmp = TempDir::new().unwrap();
+    let archive = make_test_archive(&tmp, "blank", TEST_SECRET, TEST_LIBRARY_UUID, None, &[]).await;
+    let live_db_path = tmp.path().join("live.sqlite");
+    let live = make_live_db(&live_db_path).await;
+    live.close().await.unwrap();
+    let cover_dir = tmp.path().join("live-covers");
+    std::fs::create_dir_all(&cover_dir).unwrap();
+
+    let summary = restore_backup(
+        &archive,
+        TEST_SECRET,
+        RestoreMode::Replace,
+        false,
+        // Whitespace-only: normalized to "absent", must behave like `None`.
+        Some("   ".to_string()),
+        &live_db_path,
+        &cover_dir,
+    )
+    .await
+    .expect("restore");
+
+    assert!(
+        !summary.same_device,
+        "blank local uuid must not be flagged as same-device"
+    );
+    let live_after = open_existing(&live_db_path).await;
+    let n = count_crypto_keys(&live_after).await;
+    assert_eq!(
+        n, 0,
+        "blank local uuid must clear crypto_keys like an absent uuid"
+    );
+    live_after.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn replace_returns_bad_signature_for_wrong_secret() {
     let tmp = TempDir::new().unwrap();
     let archive = make_test_archive(&tmp, "wrong", TEST_SECRET, TEST_LIBRARY_UUID, None, &[]).await;

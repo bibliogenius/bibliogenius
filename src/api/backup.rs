@@ -1095,9 +1095,16 @@ async fn apply_replace(
     //     across catalog rollback (ADR-037 §5).
     //   - Replace + cross-device + no clone: wipe the row so the next launch
     //     generates a fresh NodeIdentity (clean-install path).
+    // `local_library_uuid` is the device's CURRENT persisted uuid, read by the
+    // caller WITHOUT minting one on a miss (see `auth.peekLibraryUuid` in
+    // Flutter). An absent or blank value therefore means the device's identity
+    // is genuinely unknown here, NOT that it differs from the archive: we must
+    // never let an unknown local uuid masquerade as a same-device match, nor
+    // let a caller that minted a junk uuid mid-restore silently flip the branch
+    // (ADR-042 §13.3). Blank is normalized to "absent".
     let same_device = match local_library_uuid {
-        Some(local) => local == manifest.library_uuid.as_str(),
-        None => false,
+        Some(local) if !local.trim().is_empty() => local == manifest.library_uuid.as_str(),
+        _ => false,
     };
     let identity_restored = match (restore_identity_opt, identity_packed) {
         (true, Some(packed)) => {
