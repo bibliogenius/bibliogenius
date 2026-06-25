@@ -8,7 +8,7 @@ use crate::utils::default_library_name::compute_default_library_name_seed;
 /// can decide whether to migrate the archived DB forward or refuse a
 /// future-version archive. **Bump this constant whenever a new migration
 /// is appended to `run_migrations`.**
-pub const SCHEMA_VERSION: u32 = 77;
+pub const SCHEMA_VERSION: u32 = 78;
 
 pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     let db = Database::connect(database_url).await?;
@@ -1909,12 +1909,106 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             .await;
     }
 
+    // Migration 078: Stable per-row identifiers (UUID v7) for the replicated
+    // entities (ST-03). Local INTEGER PKs are device-local and cannot correlate
+    // the same row across devices — the root cause of the op-replay failure
+    // (ADR-011) and a hard prerequisite of the hub E2EE-sync epic (decision D3).
+    //
+    // Purely additive: add a nullable `uuid TEXT`, backfill existing rows, and
+    // enforce uniqueness via an index. Integer PKs and FKs are intentionally
+    // left unchanged here — the switch to uuid-as-PK and the FK removal for
+    // cr-sqlite happen in ST-05, not in this migration.
+    for table in ["books", "copies", "authors", "contacts", "tags", "loans"] {
+        // 1. Add the column (idempotent: error ignored if it already exists).
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                format!("ALTER TABLE {table} ADD COLUMN uuid TEXT"),
+            ))
+            .await;
+        // 2. Backfill rows that predate the column.
+        backfill_uuids(db, table).await?;
+        // 3. Generate a uuid on every future insert that does not already carry
+        //    one. The `before_save` ActiveModel hook only fires on `am.insert()`
+        //    (and is required there so the RETURNING'd model carries the uuid),
+        //    but the codebase also inserts via `Entity::insert(am).exec()` and
+        //    raw SQL, which bypass it. This trigger is the catch-all that keeps
+        //    every row's uuid non-NULL regardless of the insert path. Generates
+        //    a UUID v7 in SQL (timestamp-ordered, same shape as `new_uuid_v7`).
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                format!(
+                    "CREATE TRIGGER IF NOT EXISTS trg_{table}_uuid \
+                     AFTER INSERT ON {table} FOR EACH ROW WHEN NEW.uuid IS NULL \
+                     BEGIN UPDATE {table} SET uuid = {expr} WHERE id = NEW.id; END",
+                    expr = uuid_v7_sql_expr()
+                ),
+            ))
+            .await;
+        // 4. Enforce global uniqueness. Built after the backfill so the index
+        //    never has to reconcile the transient all-NULL state.
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                format!("CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uuid ON {table}(uuid)"),
+            ))
+            .await;
+    }
+
     // Extension modules — migrations 045+
     crate::modules::memory_game::migrate(db).await?;
     crate::modules::sliding_puzzle::migrate(db).await?;
     crate::modules::hangman::migrate(db).await?;
     crate::modules::book_notes::migrate(db).await?;
 
+    Ok(())
+}
+
+/// A SQL expression that evaluates to a fresh UUID v7 string (ST-03), used by
+/// the per-table AFTER INSERT triggers from migration 078 so that *any* insert
+/// path (raw SQL, `Entity::insert(..).exec()`, etc.) gets a stable id without
+/// going through the Rust `before_save` hook.
+///
+/// Layout matches RFC 9562 v7: 48-bit millisecond timestamp, version nibble 7,
+/// variant nibble (8/9/a/b), random remainder. `julianday('now')` is constant
+/// within a single statement (so both timestamp halves agree), while
+/// `randomblob`/`random` re-evaluate per call (so the random bits differ).
+fn uuid_v7_sql_expr() -> &'static str {
+    "lower(\
+        substr(printf('%012x', cast((julianday('now') - 2440587.5) * 86400000.0 as integer)), 1, 8) \
+        || '-' || \
+        substr(printf('%012x', cast((julianday('now') - 2440587.5) * 86400000.0 as integer)), 9, 4) \
+        || '-7' || substr(hex(randomblob(2)), 2, 3) \
+        || '-' || substr('89ab', (abs(random()) % 4) + 1, 1) || substr(hex(randomblob(2)), 2, 3) \
+        || '-' || hex(randomblob(6)) \
+    )"
+}
+
+/// Backfill stable UUIDs (ST-03, migration 078) on every row of `table` whose
+/// `uuid` column is still NULL — i.e. rows that existed before the column was
+/// added. Runs synchronously inside `run_migrations`, so by the time the
+/// connection is handed out every row has a uuid and the SeaORM models can map
+/// the column to a non-optional `String`.
+///
+/// `table` comes only from the migration's own fixed list (never user input),
+/// so interpolating it into the SQL is safe.
+///
+/// Done as a single set-based `UPDATE`: `uuid_v7_sql_expr()` re-evaluates its
+/// `randomblob`/`random` parts per row (so every backfilled row gets a distinct
+/// uuid), while `julianday('now')` is constant within the statement (so they
+/// share a timestamp prefix). Runs before the UNIQUE index is built, and inside
+/// `run_migrations`, so by the time the connection is handed out no row's uuid
+/// is NULL and the SeaORM models can map the column to a non-optional `String`.
+async fn backfill_uuids(db: &DatabaseConnection, table: &str) -> Result<(), DbErr> {
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        format!(
+            "UPDATE {table} SET uuid = {expr} WHERE uuid IS NULL",
+            expr = uuid_v7_sql_expr()
+        ),
+    ))
+    .await?;
     Ok(())
 }
 
@@ -2029,6 +2123,165 @@ pub async fn backfill_borrow_metadata(db: &DatabaseConnection) -> Result<Backfil
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Migration 078: stable UUIDs (ST-03) ---
+
+    #[tokio::test]
+    async fn migration_078_adds_uuid_column_and_unique_index() {
+        let db = init_db("sqlite::memory:").await.expect("init db");
+        for table in ["books", "copies", "authors", "contacts", "tags", "loans"] {
+            let cols = db
+                .query_all(Statement::from_string(
+                    db.get_database_backend(),
+                    format!("PRAGMA table_info({table})"),
+                ))
+                .await
+                .expect("table_info");
+            let has_uuid = cols.iter().any(|r| {
+                r.try_get::<String>("", "name")
+                    .map(|n| n == "uuid")
+                    .unwrap_or(false)
+            });
+            assert!(has_uuid, "table {table} must have a uuid column");
+
+            let idx = db
+                .query_all(Statement::from_string(
+                    db.get_database_backend(),
+                    format!("PRAGMA index_list({table})"),
+                ))
+                .await
+                .expect("index_list");
+            let has_idx = idx.iter().any(|r| {
+                r.try_get::<String>("", "name")
+                    .map(|n| n == format!("idx_{table}_uuid"))
+                    .unwrap_or(false)
+            });
+            assert!(has_idx, "table {table} must have idx_{table}_uuid");
+        }
+    }
+
+    #[tokio::test]
+    async fn backfill_fills_pre_existing_null_uuid_rows() {
+        let db = init_db("sqlite::memory:").await.expect("init db");
+        // Insert several rows, then force their uuids back to NULL to mimic rows
+        // that predate migration 078. (The AFTER INSERT trigger fills uuid on
+        // insert, but it does not fire on this UPDATE, so the NULLs stick and
+        // the set-based backfill is what must repair them.)
+        for stmt in [
+            "INSERT INTO authors (name, created_at, updated_at) VALUES \
+             ('Old A', '2020-01-01', '2020-01-01'), \
+             ('Old B', '2020-01-01', '2020-01-01'), \
+             ('Old C', '2020-01-01', '2020-01-01')",
+            "UPDATE authors SET uuid = NULL",
+        ] {
+            db.execute(Statement::from_string(
+                db.get_database_backend(),
+                stmt.to_owned(),
+            ))
+            .await
+            .expect("seed pre-078 rows");
+        }
+
+        backfill_uuids(&db, "authors").await.expect("backfill");
+
+        let rows = db
+            .query_all(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT uuid FROM authors ORDER BY id".to_owned(),
+            ))
+            .await
+            .expect("select uuids");
+        let uuids: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                r.try_get::<String>("", "uuid")
+                    .expect("uuid must be non-null")
+            })
+            .collect();
+        assert_eq!(uuids.len(), 3, "all seeded rows must be present");
+
+        // Every backfilled row is a valid v7 uuid...
+        for uuid in &uuids {
+            assert_eq!(
+                uuid::Uuid::parse_str(uuid)
+                    .expect("valid uuid")
+                    .get_version_num(),
+                7,
+                "backfilled uuid must be v7"
+            );
+        }
+        // ...and the single set-based UPDATE assigns a DISTINCT uuid per row
+        // (randomblob/random re-evaluate per row). This is the property the
+        // loop-to-set-UPDATE refactor depends on.
+        let unique: std::collections::HashSet<&String> = uuids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            3,
+            "each backfilled row must get a distinct uuid"
+        );
+    }
+
+    #[tokio::test]
+    async fn entity_insert_path_gets_uuid_via_trigger() {
+        // `Entity::insert(..).exec()` bypasses the `before_save` hook; the
+        // AFTER INSERT trigger must still populate uuid so model reads (which
+        // map uuid to a non-optional String) never hit NULL. This reproduces
+        // the path that initially failed across sync/processor + service tests.
+        use crate::models::author;
+        use sea_orm::{ActiveValue::NotSet, EntityTrait, Set};
+
+        let db = init_db("sqlite::memory:").await.expect("init db");
+        let res = author::Entity::insert(author::ActiveModel {
+            id: NotSet,
+            uuid: NotSet,
+            name: Set("Trigger Test".to_owned()),
+            created_at: Set("2020".to_owned()),
+            updated_at: Set("2020".to_owned()),
+        })
+        .exec(&db)
+        .await
+        .expect("insert via Entity::insert");
+
+        let row = author::Entity::find_by_id(res.last_insert_id)
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("row exists");
+        assert!(
+            !row.uuid.is_empty(),
+            "trigger must set uuid on the Entity::insert path"
+        );
+        assert_eq!(
+            uuid::Uuid::parse_str(&row.uuid)
+                .expect("valid uuid")
+                .get_version_num(),
+            7,
+            "trigger-generated uuid must be v7"
+        );
+    }
+
+    #[tokio::test]
+    async fn uuid_unique_index_rejects_duplicates() {
+        let db = init_db("sqlite::memory:").await.expect("init db");
+        let backend = db.get_database_backend();
+        db.execute(Statement::from_string(
+            backend,
+            "INSERT INTO authors (name, uuid, created_at, updated_at) \
+             VALUES ('A', 'dup-uuid', '2020', '2020')"
+                .to_owned(),
+        ))
+        .await
+        .expect("first insert");
+        let dup = db
+            .execute(Statement::from_string(
+                backend,
+                "INSERT INTO authors (name, uuid, created_at, updated_at) \
+                 VALUES ('B', 'dup-uuid', '2020', '2020')"
+                    .to_owned(),
+            ))
+            .await;
+        assert!(dup.is_err(), "duplicate uuid must violate the unique index");
+    }
 
     #[test]
     fn parse_peer_format() {

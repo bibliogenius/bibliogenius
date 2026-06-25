@@ -140,6 +140,9 @@ pub struct FrbBook {
     /// NULL when the most recent attempt succeeded or none ever ran. Read by
     /// the owner's UI to surface a warning badge while a retry pends.
     pub hub_cover_upload_failed_at: Option<String>,
+    /// Stable cross-device identifier (ST-03). Backend-generated; surfaced to
+    /// Flutter for the upcoming account sync. None for transient/peer rows.
+    pub uuid: Option<String>,
 }
 
 /// Convert domain Book to FFI-safe FrbBook
@@ -172,6 +175,7 @@ impl From<crate::models::Book> for FrbBook {
             page_count: book.page_count,
             added_at: book.added_at,
             hub_cover_upload_failed_at: book.hub_cover_upload_failed_at,
+            uuid: book.uuid,
         }
     }
 }
@@ -658,6 +662,9 @@ impl From<FrbBook> for crate::models::Book {
             marc_record: None,
             cataloguing_notes: None,
             source_data: None,
+            // uuid is owned by the backend (ST-03); Flutter never sends it.
+            // None => NotSet on update (column preserved) / minted on insert.
+            uuid: None,
             finished_reading_at: frb_book.finished_reading_at.map(Some),
             started_reading_at: frb_book.started_reading_at.map(Some),
             source: None,
@@ -1223,6 +1230,9 @@ pub struct FrbTag {
     pub name: String,
     pub parent_id: Option<i32>,
     pub count: i64,
+    /// Stable cross-device identifier (ST-03). None for synthetic "legacy"
+    /// subject-derived tags (negative ids) that have no `tags` row.
+    pub uuid: Option<String>,
 }
 
 /// Get all tags with hierarchy info
@@ -1268,6 +1278,7 @@ pub async fn get_all_tags() -> Result<Vec<FrbTag>, String> {
         processed_names.insert(t.name.clone());
         result.push(FrbTag {
             id: t.id,
+            uuid: Some(t.uuid),
             name: t.name,
             parent_id: t.parent_id,
             count,
@@ -1281,6 +1292,7 @@ pub async fn get_all_tags() -> Result<Vec<FrbTag>, String> {
         if !processed_names.contains(&name) {
             result.push(FrbTag {
                 id: next_legacy_id,
+                uuid: None, // synthetic legacy tag: no DB row, no stable id
                 name,
                 parent_id: None,
                 count,
@@ -1314,6 +1326,7 @@ pub async fn create_tag(name: String, parent_id: Option<i32>) -> Result<FrbTag, 
             let _ = crate::sync::log_operation(db, "tag", t.id, "INSERT", None).await;
             Ok(FrbTag {
                 id: t.id,
+                uuid: Some(t.uuid),
                 name: t.name,
                 parent_id: t.parent_id,
                 count: 0,
@@ -1353,6 +1366,7 @@ pub async fn update_tag(id: i32, name: String, parent_id: Option<i32>) -> Result
             let _ = crate::sync::log_operation(db, "tag", t.id, "UPDATE", None).await;
             Ok(FrbTag {
                 id: t.id,
+                uuid: Some(t.uuid),
                 name: t.name,
                 parent_id: t.parent_id,
                 count: 0,
@@ -1443,12 +1457,16 @@ pub struct FrbContact {
     pub user_id: Option<i32>,
     pub library_owner_id: Option<i32>,
     pub is_active: bool,
+    /// Stable cross-device identifier (ST-03). Backend-generated; surfaced to
+    /// Flutter for the upcoming account sync.
+    pub uuid: Option<String>,
 }
 
 impl From<crate::services::contact_service::ContactDto> for FrbContact {
     fn from(c: crate::services::contact_service::ContactDto) -> Self {
         FrbContact {
             id: c.id,
+            uuid: c.uuid,
             contact_type: c.contact_type,
             name: c.name,
             first_name: c.first_name,
@@ -1542,6 +1560,7 @@ pub async fn create_contact(contact: FrbContact) -> Result<FrbContact, String> {
     // Convert FrbContact to ContactDto for the service layer
     let dto = crate::services::contact_service::ContactDto {
         id: None,
+        uuid: None, // backend mints on insert
         contact_type: contact.contact_type,
         name: contact.name,
         first_name: contact.first_name,
@@ -1573,6 +1592,7 @@ pub async fn update_contact(contact: FrbContact) -> Result<FrbContact, String> {
     // Convert FrbContact to ContactDto for the service layer
     let dto = crate::services::contact_service::ContactDto {
         id: contact.id,
+        uuid: None, // update path: column untouched (NotSet) for existing rows
         contact_type: contact.contact_type,
         name: contact.name,
         first_name: contact.first_name,
@@ -1625,12 +1645,15 @@ pub struct FrbLoan {
     pub book_id: Option<i32>,
     pub cover_url: Option<String>,
     pub isbn: Option<String>,
+    /// Stable cross-device identifier of the loan (ST-03).
+    pub uuid: Option<String>,
 }
 
 impl From<crate::services::loan_service::LoanWithDetails> for FrbLoan {
     fn from(l: crate::services::loan_service::LoanWithDetails) -> Self {
         FrbLoan {
             id: l.id,
+            uuid: Some(l.uuid),
             copy_id: l.copy_id,
             contact_id: l.contact_id,
             library_id: l.library_id,

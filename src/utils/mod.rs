@@ -1,5 +1,6 @@
 pub mod cover_image;
 pub mod cover_url;
+pub mod dedup_key;
 pub mod default_library_name;
 pub mod etag;
 pub mod hub_url;
@@ -9,3 +10,4 @@ pub mod leaderboard_relay;
 pub mod library_helpers;
 pub mod net;
 pub mod peer_discovery;
+pub mod uuid_gen;

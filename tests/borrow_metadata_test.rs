@@ -66,12 +66,14 @@ async fn insert_legacy_borrowed(
     let now = chrono::Utc::now().to_rfc3339();
     db.execute(Statement::from_sql_and_values(
         db.get_database_backend(),
-        "INSERT INTO copies (book_id, library_id, status, is_temporary, notes, created_at, updated_at) \
-         VALUES (?, ?, 'borrowed', 1, ?, ?, ?)",
+        "INSERT INTO copies (book_id, library_id, status, is_temporary, notes, uuid, created_at, updated_at) \
+         VALUES (?, ?, 'borrowed', 1, ?, ?, ?, ?)",
         [
             book_id.into(),
             library_id.into(),
             notes.to_string().into(),
+            // Raw insert bypasses before_save; set a uuid so model reads (ST-03) don't hit NULL.
+            rust_lib_app::utils::uuid_gen::new_uuid_v7().into(),
             now.clone().into(),
             now.into(),
         ],

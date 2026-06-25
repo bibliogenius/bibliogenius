@@ -1,5 +1,5 @@
 use sea_orm::entity::prelude::*;
-use sea_orm::{ModelTrait, NotSet, Set};
+use sea_orm::{ConnectionTrait, ModelTrait, NotSet, Set};
 use serde::{Deserialize, Serialize};
 
 use crate::utils::cover_url::{self, ResolveScope};
@@ -63,6 +63,10 @@ pub struct Model {
     /// owner's UI reads this to surface a warning badge while a retry is
     /// pending. Cleared on successful upload and on hub purge.
     pub hub_cover_upload_failed_at: Option<String>,
+    /// Stable cross-device identifier (ST-03). Generated on insert by
+    /// `before_save`; backfilled on existing rows by migration 078.
+    #[serde(default)]
+    pub uuid: String,
 }
 
 // ... (Relation enum and Related impls omit for brevity) ...
@@ -92,7 +96,18 @@ impl Related<super::tag::Entity> for Entity {
     }
 }
 
-impl ActiveModelBehavior for ActiveModel {}
+#[async_trait::async_trait]
+impl ActiveModelBehavior for ActiveModel {
+    async fn before_save<C>(mut self, _db: &C, insert: bool) -> Result<Self, DbErr>
+    where
+        C: ConnectionTrait,
+    {
+        if insert && self.uuid.is_not_set() {
+            self.uuid = Set(crate::utils::uuid_gen::new_uuid_v7());
+        }
+        Ok(self)
+    }
+}
 
 // DTO for API responses
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -167,6 +182,11 @@ pub struct Book {
     /// visitors never see another library's internal sync state.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub hub_cover_upload_failed_at: Option<String>,
+    /// Stable cross-device identifier (ST-03). Present on the owner's own
+    /// FFI/API responses; redacted from peer-facing payloads (see
+    /// `redact_for_peer`) so another library's internal merge id never leaks.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub uuid: Option<String>,
 }
 
 impl From<Model> for Book {
@@ -226,6 +246,7 @@ impl From<Model> for Book {
             added_at: Some(model.created_at),
             updated_at: Some(model.updated_at),
             hub_cover_upload_failed_at: model.hub_cover_upload_failed_at,
+            uuid: Some(model.uuid),
         }
     }
 }
@@ -385,6 +406,8 @@ impl Book {
         self.private = None;
         // Internal sync state: peers have no business knowing our retry backlog.
         self.hub_cover_upload_failed_at = None;
+        // Stable merge id is account-internal (ST-03); never expose it to peers.
+        self.uuid = None;
     }
 
     /// Appends the canonical `?v={tag}` cache-buster to an already-built
@@ -572,6 +595,9 @@ impl From<Book> for ActiveModel {
             // Owned solely by the hub-sync loop; leave NotSet on DTO round
             // trips so regular CRUD never clobbers a pending-failure flag.
             hub_cover_upload_failed_at: NotSet,
+            // Preserve a round-tripped uuid; leave NotSet for new rows so
+            // `before_save` mints one. Absent on update => column untouched.
+            uuid: book.uuid.map_or(NotSet, Set),
         }
     }
 }

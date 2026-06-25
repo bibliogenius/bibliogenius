@@ -37,12 +37,16 @@ pub struct ContactDto {
     pub user_id: Option<i32>,
     pub library_owner_id: Option<i32>,
     pub is_active: bool,
+    /// Stable cross-device identifier (ST-03). None on inbound create/update
+    /// DTOs (backend-owned); Some when read back from a persisted row.
+    pub uuid: Option<String>,
 }
 
 impl From<contact_model::Model> for ContactDto {
     fn from(model: contact_model::Model) -> Self {
         Self {
             id: Some(model.id),
+            uuid: Some(model.uuid),
             contact_type: model.r#type,
             name: model.name,
             first_name: model.first_name,

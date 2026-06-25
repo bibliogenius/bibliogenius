@@ -318,6 +318,7 @@ async fn search_books_at(
 
             let book = crate::models::book::Model {
                 id: 0,
+                uuid: String::new(), // transient search result, never persisted
                 title: info.title,
                 isbn,
                 publisher: info.publisher,

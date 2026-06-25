@@ -6672,6 +6672,7 @@ impl SseDecode for crate::api::frb::FrbBook {
         let mut var_pageCount = <Option<i32>>::sse_decode(deserializer);
         let mut var_addedAt = <Option<String>>::sse_decode(deserializer);
         let mut var_hubCoverUploadFailedAt = <Option<String>>::sse_decode(deserializer);
+        let mut var_uuid = <Option<String>>::sse_decode(deserializer);
         return crate::api::frb::FrbBook {
             id: var_id,
             title: var_title,
@@ -6697,6 +6698,7 @@ impl SseDecode for crate::api::frb::FrbBook {
             page_count: var_pageCount,
             added_at: var_addedAt,
             hub_cover_upload_failed_at: var_hubCoverUploadFailedAt,
+            uuid: var_uuid,
         };
     }
 }
@@ -6877,6 +6879,7 @@ impl SseDecode for crate::api::frb::FrbContact {
         let mut var_userId = <Option<i32>>::sse_decode(deserializer);
         let mut var_libraryOwnerId = <Option<i32>>::sse_decode(deserializer);
         let mut var_isActive = <bool>::sse_decode(deserializer);
+        let mut var_uuid = <Option<String>>::sse_decode(deserializer);
         return crate::api::frb::FrbContact {
             id: var_id,
             contact_type: var_contactType,
@@ -6895,6 +6898,7 @@ impl SseDecode for crate::api::frb::FrbContact {
             user_id: var_userId,
             library_owner_id: var_libraryOwnerId,
             is_active: var_isActive,
+            uuid: var_uuid,
         };
     }
 }
@@ -7332,6 +7336,7 @@ impl SseDecode for crate::api::frb::FrbLoan {
         let mut var_bookId = <Option<i32>>::sse_decode(deserializer);
         let mut var_coverUrl = <Option<String>>::sse_decode(deserializer);
         let mut var_isbn = <Option<String>>::sse_decode(deserializer);
+        let mut var_uuid = <Option<String>>::sse_decode(deserializer);
         return crate::api::frb::FrbLoan {
             id: var_id,
             copy_id: var_copyId,
@@ -7347,6 +7352,7 @@ impl SseDecode for crate::api::frb::FrbLoan {
             book_id: var_bookId,
             cover_url: var_coverUrl,
             isbn: var_isbn,
+            uuid: var_uuid,
         };
     }
 }
@@ -7721,11 +7727,13 @@ impl SseDecode for crate::api::frb::FrbTag {
         let mut var_name = <String>::sse_decode(deserializer);
         let mut var_parentId = <Option<i32>>::sse_decode(deserializer);
         let mut var_count = <i64>::sse_decode(deserializer);
+        let mut var_uuid = <Option<String>>::sse_decode(deserializer);
         return crate::api::frb::FrbTag {
             id: var_id,
             name: var_name,
             parent_id: var_parentId,
             count: var_count,
+            uuid: var_uuid,
         };
     }
 }
@@ -9005,6 +9013,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbBook {
             self.page_count.into_into_dart().into_dart(),
             self.added_at.into_into_dart().into_dart(),
             self.hub_cover_upload_failed_at.into_into_dart().into_dart(),
+            self.uuid.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -9231,6 +9240,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbContact {
             self.user_id.into_into_dart().into_dart(),
             self.library_owner_id.into_into_dart().into_dart(),
             self.is_active.into_into_dart().into_dart(),
+            self.uuid.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -9762,6 +9772,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbLoan {
             self.book_id.into_into_dart().into_dart(),
             self.cover_url.into_into_dart().into_dart(),
             self.isbn.into_into_dart().into_dart(),
+            self.uuid.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -10231,6 +10242,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbTag {
             self.name.into_into_dart().into_dart(),
             self.parent_id.into_into_dart().into_dart(),
             self.count.into_into_dart().into_dart(),
+            self.uuid.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -10435,6 +10447,7 @@ impl SseEncode for crate::api::frb::FrbBook {
         <Option<i32>>::sse_encode(self.page_count, serializer);
         <Option<String>>::sse_encode(self.added_at, serializer);
         <Option<String>>::sse_encode(self.hub_cover_upload_failed_at, serializer);
+        <Option<String>>::sse_encode(self.uuid, serializer);
     }
 }
 
@@ -10552,6 +10565,7 @@ impl SseEncode for crate::api::frb::FrbContact {
         <Option<i32>>::sse_encode(self.user_id, serializer);
         <Option<i32>>::sse_encode(self.library_owner_id, serializer);
         <bool>::sse_encode(self.is_active, serializer);
+        <Option<String>>::sse_encode(self.uuid, serializer);
     }
 }
 
@@ -10819,6 +10833,7 @@ impl SseEncode for crate::api::frb::FrbLoan {
         <Option<i32>>::sse_encode(self.book_id, serializer);
         <Option<String>>::sse_encode(self.cover_url, serializer);
         <Option<String>>::sse_encode(self.isbn, serializer);
+        <Option<String>>::sse_encode(self.uuid, serializer);
     }
 }
 
@@ -11049,6 +11064,7 @@ impl SseEncode for crate::api::frb::FrbTag {
         <String>::sse_encode(self.name, serializer);
         <Option<i32>>::sse_encode(self.parent_id, serializer);
         <i64>::sse_encode(self.count, serializer);
+        <Option<String>>::sse_encode(self.uuid, serializer);
     }
 }
 

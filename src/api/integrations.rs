@@ -270,7 +270,8 @@ pub async fn search_external(
                             .map(|id| format!("https://covers.openlibrary.org/b/id/{}-M.jpg", id));
 
                         let book = book::Model {
-                            id: 0, // Placeholder ID
+                            id: 0,               // Placeholder ID
+                            uuid: String::new(), // transient search result, never persisted
                             title: doc.title,
                             isbn,
                             publisher: doc.publisher.map(|v| v.join(", ")),
@@ -649,6 +650,7 @@ pub async fn search_unified(
 
             let book = book::Book {
                 id: None,
+                uuid: None,
                 title: item.label.clone(),
                 isbn: item.isbn.clone(), // Now populated by enrichment
                 publisher: item.publisher.clone(), // Resolved from Wikidata URI
@@ -700,6 +702,7 @@ pub async fn search_unified(
             for bnf_book in bnf_results {
                 let book = book::Book {
                     id: None,
+                    uuid: None,
                     title: bnf_book.title.clone(),
                     isbn: bnf_book.isbn.clone(),
                     publisher: bnf_book.publisher.clone(),
@@ -792,6 +795,7 @@ pub async fn search_unified(
                 }
                 let book = book::Book {
                     id: None,
+                    uuid: None,
                     title: bnf_book.title.clone(),
                     isbn: bnf_book.isbn.clone(),
                     publisher: bnf_book.publisher.clone(),

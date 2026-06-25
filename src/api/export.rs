@@ -351,6 +351,8 @@ pub async fn import_data(
         for b in books {
             let active = book::ActiveModel {
                 id: b.id.map_or(sea_orm::ActiveValue::NotSet, Set),
+                // Import DTOs carry no uuid; mint a fresh one via before_save.
+                uuid: sea_orm::ActiveValue::NotSet,
                 title: Set(b.title),
                 isbn: Set(b.isbn),
                 summary: Set(b.summary),
@@ -401,6 +403,7 @@ pub async fn import_data(
         for t in tags {
             let active = tag::ActiveModel {
                 id: t.id.map_or(sea_orm::ActiveValue::NotSet, Set),
+                uuid: sea_orm::ActiveValue::NotSet,
                 name: Set(t.name),
                 parent_id: Set(t.parent_id),
                 path: Set(t.path),
@@ -428,6 +431,7 @@ pub async fn import_data(
         for c in contacts {
             let active = contact::ActiveModel {
                 id: c.id.map_or(sea_orm::ActiveValue::NotSet, Set),
+                uuid: sea_orm::ActiveValue::NotSet,
                 r#type: Set(c.r#type),
                 name: Set(c.name),
                 first_name: Set(c.first_name),
@@ -674,6 +678,8 @@ pub async fn run_import_upsert(db: &DatabaseConnection, backup: ImportBackupData
         for b in books {
             let active = book::ActiveModel {
                 id: b.id.map_or(sea_orm::ActiveValue::NotSet, Set),
+                // NotSet: new rows get a fresh uuid; existing rows keep theirs.
+                uuid: sea_orm::ActiveValue::NotSet,
                 title: Set(b.title),
                 isbn: Set(b.isbn),
                 summary: Set(b.summary),
@@ -762,6 +768,7 @@ pub async fn run_import_upsert(db: &DatabaseConnection, backup: ImportBackupData
         for t in tags {
             let active = tag::ActiveModel {
                 id: t.id.map_or(sea_orm::ActiveValue::NotSet, Set),
+                uuid: sea_orm::ActiveValue::NotSet,
                 name: Set(t.name),
                 parent_id: Set(t.parent_id),
                 path: Set(t.path),
@@ -806,6 +813,7 @@ pub async fn run_import_upsert(db: &DatabaseConnection, backup: ImportBackupData
         for c in contacts {
             let active = contact::ActiveModel {
                 id: c.id.map_or(sea_orm::ActiveValue::NotSet, Set),
+                uuid: sea_orm::ActiveValue::NotSet,
                 r#type: Set(c.r#type),
                 name: Set(c.name),
                 first_name: Set(c.first_name),

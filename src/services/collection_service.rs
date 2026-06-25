@@ -268,6 +268,7 @@ mod tests {
         let now = chrono::Utc::now().to_rfc3339();
         crate::models::tag::ActiveModel {
             id: Set(id),
+            uuid: sea_orm::ActiveValue::NotSet,
             name: Set(name.to_owned()),
             parent_id: Set(None),
             path: Set(name.to_owned()),

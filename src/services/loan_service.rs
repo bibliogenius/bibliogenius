@@ -29,6 +29,8 @@ impl From<sea_orm::DbErr> for ServiceError {
 #[derive(Debug, Clone)]
 pub struct LoanWithDetails {
     pub id: i32,
+    /// Stable cross-device identifier of the loan row (ST-03).
+    pub uuid: String,
     pub copy_id: i32,
     pub contact_id: i32,
     pub library_id: i32,
@@ -116,6 +118,7 @@ pub async fn list_loans(
 
             LoanWithDetails {
                 id: loan.id,
+                uuid: loan.uuid,
                 copy_id: loan.copy_id,
                 contact_id: loan.contact_id,
                 library_id: loan.library_id,

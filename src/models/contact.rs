@@ -1,4 +1,5 @@
 use sea_orm::entity::prelude::*;
+use sea_orm::{ConnectionTrait, Set};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
@@ -24,6 +25,10 @@ pub struct Model {
     pub is_active: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// Stable cross-device identifier (ST-03). Generated on insert by
+    /// `before_save`; backfilled on existing rows by migration 078.
+    #[serde(default)]
+    pub uuid: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -54,7 +59,18 @@ impl Related<super::library::Entity> for Entity {
     }
 }
 
-impl ActiveModelBehavior for ActiveModel {}
+#[async_trait::async_trait]
+impl ActiveModelBehavior for ActiveModel {
+    async fn before_save<C>(mut self, _db: &C, insert: bool) -> Result<Self, DbErr>
+    where
+        C: ConnectionTrait,
+    {
+        if insert && self.uuid.is_not_set() {
+            self.uuid = Set(crate::utils::uuid_gen::new_uuid_v7());
+        }
+        Ok(self)
+    }
+}
 
 // DTO for API responses
 #[derive(Debug, Serialize, Deserialize)]
