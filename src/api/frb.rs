@@ -4863,18 +4863,9 @@ async fn upsert_directory_catalog_cache(
     entries: &[CatalogEntry],
 ) -> Vec<FrbCatalogEntry> {
     use crate::models::peer_book;
-    use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, Statement};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
     let now = chrono::Utc::now().to_rfc3339();
-
-    // Temporarily disable FK checks: directory entries use peer_id = 0 (sentinel,
-    // no matching peer row). sqlx enables PRAGMA foreign_keys by default.
-    let _ = db
-        .execute(Statement::from_string(
-            db.get_database_backend(),
-            "PRAGMA foreign_keys = OFF".to_owned(),
-        ))
-        .await;
 
     // Load existing cached entries for this directory library
     let existing = peer_book::Entity::find()
@@ -4891,6 +4882,18 @@ async fn upsert_directory_catalog_cache(
 
     let mut fresh_isbns = std::collections::HashSet::new();
     let mut result = Vec::with_capacity(entries.len());
+    // New sentinel rows (peer_id = 0) are inserted in a single FK-isolated
+    // batch after the loop, not inline, so the foreign_keys=OFF window stays on
+    // a dedicated connection (see the batch block below). Tuple holds the
+    // per-entry values: (title, isbn, author, cover_url, added_at).
+    #[allow(clippy::type_complexity)]
+    let mut to_insert: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = Vec::new();
 
     for entry in entries {
         fresh_isbns.insert(entry.isbn.clone());
@@ -4914,29 +4917,20 @@ async fn upsert_directory_catalog_cache(
                 added_at: entry.added_at.clone(),
             });
         } else {
-            // INSERT: new entry (notified_at = NULL - not yet notified).
-            // first_seen_at records when this viewer first saw the entry.
-            // added_at is the owner's broadcast timestamp (the one the "NEW"
-            // badge actually reads).
-            let cache = peer_book::ActiveModel {
-                peer_id: Set(0), // sentinel for directory entries
-                remote_book_id: Set(0),
-                title: Set(entry.title.clone()),
-                isbn: Set(Some(entry.isbn.clone())),
-                author: Set(entry.author.clone()),
-                cover_url: Set(entry.cover_url.clone()),
-                summary: Set(None),
-                synced_at: Set(now.clone()),
-                node_id: Set(Some(node_id.to_string())),
-                first_seen_at: Set(Some(now.clone())),
-                added_at: Set(entry.added_at.clone()),
-                notified_at: Set(None),
-                ..Default::default()
-            };
-            match peer_book::Entity::insert(cache).exec(db).await {
-                Ok(_) => {}
-                Err(e) => tracing::warn!("catalog cache insert failed for {}: {}", entry.isbn, e),
-            }
+            // INSERT: collect for a single FK-isolated batch after the loop
+            // (see the dedicated-connection block below). The sentinel row
+            // carries peer_id = 0 (no matching peers row), summary = NULL,
+            // synced_at = first_seen_at = now, notified_at = NULL (not yet
+            // notified); owned/available_copies fall back to the column
+            // defaults. added_at is the owner's broadcast timestamp (the "NEW"
+            // badge source).
+            to_insert.push((
+                entry.title.clone(),
+                entry.isbn.clone(),
+                entry.author.clone(),
+                entry.cover_url.clone(),
+                entry.added_at.clone(),
+            ));
 
             result.push(FrbCatalogEntry {
                 isbn: entry.isbn.clone(),
@@ -4945,6 +4939,52 @@ async fn upsert_directory_catalog_cache(
                 cover_url: entry.cover_url.clone(),
                 added_at: entry.added_at.clone(),
             });
+        }
+    }
+
+    // Insert the freshly-seen sentinel rows on a dedicated connection so the
+    // foreign_keys=OFF window is isolated. Directory entries reference no real
+    // peer, so the insert needs FK enforcement off; disabling it on a pooled
+    // connection could leak (a later delete reusing that connection would skip
+    // its ON DELETE CASCADE and orphan rows, the TICKET-fk-cascade-orphans root
+    // cause). A checked-out connection is invisible to concurrent operations
+    // and is restored to ON before it returns to the pool.
+    if !to_insert.is_empty() {
+        match db.get_sqlite_connection_pool().acquire().await {
+            Ok(mut conn) => {
+                let _ = sqlx::query("PRAGMA foreign_keys = OFF")
+                    .execute(&mut *conn)
+                    .await;
+                for (title, isbn, author, cover_url, added_at) in &to_insert {
+                    if let Err(e) = sqlx::query(
+                        "INSERT INTO peer_books \
+                         (peer_id, remote_book_id, title, isbn, author, cover_url, \
+                          summary, synced_at, node_id, first_seen_at, added_at, notified_at) \
+                         VALUES (0, 0, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL)",
+                    )
+                    .bind(title.as_str())
+                    .bind(isbn.as_str())
+                    .bind(author.as_deref())
+                    .bind(cover_url.as_deref())
+                    .bind(now.as_str())
+                    .bind(node_id)
+                    .bind(now.as_str())
+                    .bind(added_at.as_deref())
+                    .execute(&mut *conn)
+                    .await
+                    {
+                        tracing::warn!("catalog cache insert failed for {isbn}: {e}");
+                    }
+                }
+                // Restore enforcement before this connection rejoins the pool,
+                // so no pooled connection ever lingers with FK disabled.
+                let _ = sqlx::query("PRAGMA foreign_keys = ON")
+                    .execute(&mut *conn)
+                    .await;
+            }
+            Err(e) => {
+                tracing::warn!("catalog cache: failed to acquire dedicated connection: {e}");
+            }
         }
     }
 
@@ -5011,14 +5051,6 @@ async fn upsert_directory_catalog_cache(
             let _ = active.update(db).await;
         }
     }
-
-    // Re-enable FK checks
-    let _ = db
-        .execute(Statement::from_string(
-            db.get_database_backend(),
-            "PRAGMA foreign_keys = ON".to_owned(),
-        ))
-        .await;
 
     result
 }

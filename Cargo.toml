@@ -43,6 +43,11 @@ sea-orm = { version = "0.12", features = [
     "sqlx-sqlite",
     "runtime-tokio-rustls",
     "macros",
+    # Exposes `DatabaseConnection::get_sqlite_connection_pool()` so the
+    # directory-cache insert can pin a single connection while it disables
+    # foreign_keys, instead of toggling the pragma on the shared pool (which
+    # could leak an FK-off connection, see TICKET-fk-cascade-orphans).
+    "sea-orm-internal",
 ] }
 
 # HTTP client (native-tls-vendored: SecureTransport on Apple, SChannel on Windows,

@@ -8,7 +8,7 @@ use crate::utils::default_library_name::compute_default_library_name_seed;
 /// can decide whether to migrate the archived DB forward or refuse a
 /// future-version archive. **Bump this constant whenever a new migration
 /// is appended to `run_migrations`.**
-pub const SCHEMA_VERSION: u32 = 78;
+pub const SCHEMA_VERSION: u32 = 79;
 
 pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     let db = Database::connect(database_url).await?;
@@ -1962,7 +1962,248 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     crate::modules::hangman::migrate(db).await?;
     crate::modules::book_notes::migrate(db).await?;
 
+    // Migration 079: one-shot sweep of rows orphaned by deletions that ran
+    // while a pooled connection had `foreign_keys` disabled, so the
+    // `ON DELETE CASCADE` to `peers` never fired (TICKET-fk-cascade-orphans).
+    // The leak is fixed at the source (the directory-cache insert now isolates
+    // its FK-off window to a dedicated connection), but pre-existing orphans
+    // must be swept once. Runs after the extension-module tables exist.
+    // Idempotent via `_migration_log`; the cleanup itself only removes rows
+    // whose `peers` parent is gone, so valid rows are untouched.
+    let fk_cleanup_done = db
+        .query_one(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT name FROM _migration_log WHERE name = '079_fk_cascade_orphan_cleanup'"
+                .to_owned(),
+        ))
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if !fk_cleanup_done {
+        cleanup_fk_cascade_orphans(db).await;
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                "INSERT INTO _migration_log (name, applied_at) \
+                 VALUES ('079_fk_cascade_orphan_cleanup', datetime('now'))"
+                    .to_owned(),
+            ))
+            .await;
+    }
+
     Ok(())
+}
+
+/// Remove rows orphaned by deletions that ran with SQLite `foreign_keys`
+/// disabled, so an `ON DELETE CASCADE` to the `peers` table never fired
+/// (TICKET-fk-cascade-orphans). Covers the peer-cascade family: every table
+/// whose row is meant to disappear when its `peers` parent is deleted. Each
+/// statement removes only rows whose parent is genuinely absent, so valid rows
+/// are preserved. The `peer_books` directory cache intentionally uses the
+/// `peer_id = 0` sentinel (no matching `peers` row); it is excluded so the
+/// cache survives. `copies.lender_peer_id` is `ON DELETE SET NULL`, so its
+/// dangling references are nulled rather than the rows deleted.
+///
+/// Idempotent and safe to run repeatedly. Exposed at crate level so tests can
+/// seed orphans and assert the sweep behavior directly.
+pub(crate) async fn cleanup_fk_cascade_orphans(db: &DatabaseConnection) {
+    const STATEMENTS: [&str; 8] = [
+        "DELETE FROM peer_memory_scores WHERE peer_id NOT IN (SELECT id FROM peers)",
+        "DELETE FROM peer_puzzle_scores WHERE peer_id NOT IN (SELECT id FROM peers)",
+        "DELETE FROM peer_hangman_scores WHERE peer_id NOT IN (SELECT id FROM peers)",
+        "DELETE FROM peer_gamification_stats WHERE peer_id NOT IN (SELECT id FROM peers)",
+        "DELETE FROM peer_books WHERE peer_id <> 0 AND peer_id NOT IN (SELECT id FROM peers)",
+        "DELETE FROM p2p_requests WHERE from_peer_id NOT IN (SELECT id FROM peers)",
+        "DELETE FROM p2p_outgoing_requests WHERE to_peer_id NOT IN (SELECT id FROM peers)",
+        "UPDATE copies SET lender_peer_id = NULL \
+         WHERE lender_peer_id IS NOT NULL AND lender_peer_id NOT IN (SELECT id FROM peers)",
+    ];
+    for stmt in STATEMENTS {
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                stmt.to_owned(),
+            ))
+            .await;
+    }
+}
+
+#[cfg(test)]
+mod fk_cascade_tests {
+    use super::{cleanup_fk_cascade_orphans, init_db};
+    use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+
+    async fn exec(db: &DatabaseConnection, sql: &str) {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            sql.to_owned(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    async fn count(db: &DatabaseConnection, sql: &str) -> i64 {
+        let row = db
+            .query_one(Statement::from_string(
+                db.get_database_backend(),
+                sql.to_owned(),
+            ))
+            .await
+            .unwrap()
+            .expect("count query returns a row");
+        row.try_get::<i64>("", "c").unwrap()
+    }
+
+    /// Acceptance criterion: every connection opened by the core enforces
+    /// foreign keys, so `ON DELETE CASCADE` actually fires.
+    #[tokio::test]
+    async fn init_db_connection_enforces_foreign_keys() {
+        let db = init_db("sqlite::memory:").await.unwrap();
+        let row = db
+            .query_one(Statement::from_string(
+                db.get_database_backend(),
+                "PRAGMA foreign_keys".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .expect("PRAGMA foreign_keys returns a row");
+        let enabled: i32 = row.try_get("", "foreign_keys").unwrap();
+        assert_eq!(enabled, 1, "core connections must enforce foreign keys");
+    }
+
+    /// The cleanup sweep deletes rows whose `peers` parent is gone and leaves
+    /// valid rows alone; `foreign_key_check` is empty afterward (real-base
+    /// scenario: no directory sentinels present).
+    #[tokio::test]
+    async fn cleanup_removes_orphans_and_spares_valid_rows() {
+        let db = init_db("sqlite::memory:").await.unwrap();
+        // Seed with FK off so rows referencing a deleted peer can be inserted.
+        exec(&db, "PRAGMA foreign_keys = OFF").await;
+        exec(
+            &db,
+            "INSERT INTO peers (id, name, url) VALUES (1, 'Real', 'http://peer-1')",
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO peer_memory_scores (peer_id, library_name, best_score, difficulty, played_at, synced_at) \
+             VALUES (1, 'Real', 10.0, 'easy', '2026-01-01', '2026-01-01')",
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO peer_memory_scores (peer_id, library_name, best_score, difficulty, played_at, synced_at) \
+             VALUES (999, 'Ghost', 99.0, 'hard', '2026-01-01', '2026-01-01')",
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO peer_books (peer_id, remote_book_id, title, synced_at) \
+             VALUES (1, 5, 'Real book', '2026-01-01')",
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO peer_books (peer_id, remote_book_id, title, synced_at) \
+             VALUES (999, 6, 'Ghost book', '2026-01-01')",
+        )
+        .await;
+        exec(&db, "PRAGMA foreign_keys = ON").await;
+
+        cleanup_fk_cascade_orphans(&db).await;
+
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) AS c FROM peer_memory_scores WHERE peer_id = 1"
+            )
+            .await,
+            1,
+            "valid score must be kept",
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) AS c FROM peer_memory_scores WHERE peer_id = 999"
+            )
+            .await,
+            0,
+            "orphan score must be removed",
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) AS c FROM peer_books WHERE peer_id = 1"
+            )
+            .await,
+            1,
+            "valid peer book must be kept",
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) AS c FROM peer_books WHERE peer_id = 999"
+            )
+            .await,
+            0,
+            "orphan peer book must be removed",
+        );
+
+        let violations = db
+            .query_all(Statement::from_string(
+                db.get_database_backend(),
+                "PRAGMA foreign_key_check".to_owned(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            violations.is_empty(),
+            "no FK violations should remain after cleanup",
+        );
+    }
+
+    /// The directory cache deliberately stores `peer_id = 0` sentinel rows (no
+    /// matching `peers` row). The sweep must never touch them.
+    #[tokio::test]
+    async fn cleanup_preserves_directory_sentinel() {
+        let db = init_db("sqlite::memory:").await.unwrap();
+        exec(&db, "PRAGMA foreign_keys = OFF").await;
+        exec(
+            &db,
+            "INSERT INTO peer_books (peer_id, remote_book_id, title, synced_at, node_id) \
+             VALUES (0, 0, 'Directory entry', '2026-01-01', 'node-uuid')",
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO peer_books (peer_id, remote_book_id, title, synced_at) \
+             VALUES (999, 6, 'Ghost book', '2026-01-01')",
+        )
+        .await;
+        exec(&db, "PRAGMA foreign_keys = ON").await;
+
+        cleanup_fk_cascade_orphans(&db).await;
+
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) AS c FROM peer_books WHERE peer_id = 0"
+            )
+            .await,
+            1,
+            "directory sentinel must survive the sweep",
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) AS c FROM peer_books WHERE peer_id = 999"
+            )
+            .await,
+            0,
+            "orphan peer book must be removed",
+        );
+    }
 }
 
 /// A SQL expression that evaluates to a fresh UUID v7 string (ST-03), used by
