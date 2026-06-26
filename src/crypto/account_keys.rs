@@ -42,10 +42,12 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use sha2::Sha256;
+use x25519_dalek::StaticSecret;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::encryption::generate_nonce;
 use super::errors::CryptoError;
+use super::sealed_blob;
 
 /// AEAD algorithm identifier recorded on the account (ADR-042 §14/M5). Clients pin
 /// this value and refuse a downgrade; v1 ships plain AES-256-GCM.
@@ -231,6 +233,18 @@ impl AccountKeyBundle {
         unpad_bucket(&padded)
     }
 
+    /// Seal this trousseau to a new device's X25519 identity for Path B enrollment
+    /// (ADR-042 §14 F6/B). Only the holder of the matching X25519 secret can open it,
+    /// and the 96-byte plaintext layout never leaves the module unsealed. The returned
+    /// base64 blob may be relayed through the hub since it is encrypted to the device.
+    pub fn seal_to_device(
+        &self,
+        recipient_x25519_public: &[u8; 32],
+    ) -> Result<String, CryptoError> {
+        let plaintext = self.serialize();
+        sealed_blob::seal(recipient_x25519_public, &plaintext)
+    }
+
     /// Serialize the bundle to its fixed 96-byte plaintext layout (adk || aik || seed).
     /// The returned buffer is zeroized on drop.
     fn serialize(&self) -> Zeroizing<Vec<u8>> {
@@ -328,6 +342,17 @@ pub fn unwrap_bundle(
     kind: WrapKind,
 ) -> Result<AccountKeyBundle, CryptoError> {
     let plaintext = Zeroizing::new(aead_decrypt(wrapping_key, kind.aad(), wrapped)?);
+    AccountKeyBundle::deserialize(&plaintext)
+}
+
+/// Open a trousseau sealed by [`AccountKeyBundle::seal_to_device`] using this device's
+/// X25519 static secret (Path B enrollment). A blob sealed to a different device, or a
+/// tampered blob, fails the AEAD and returns an error.
+pub fn open_device_sealed_bundle(
+    my_x25519_secret: &StaticSecret,
+    sealed_b64: &str,
+) -> Result<AccountKeyBundle, CryptoError> {
+    let plaintext = Zeroizing::new(sealed_blob::open(my_x25519_secret, sealed_b64)?);
     AccountKeyBundle::deserialize(&plaintext)
 }
 
@@ -665,6 +690,43 @@ mod tests {
         let padded_big = pad_bucket(&big);
         assert_eq!(padded_big.len() % PAD_STEP_ABOVE, 0);
         assert_eq!(unpad_bucket(&padded_big).unwrap(), big);
+    }
+
+    #[test]
+    fn device_seal_open_roundtrip() {
+        use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+        let bundle = AccountKeyBundle::generate();
+        let recipient = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = X25519PublicKey::from(&recipient);
+
+        let sealed = bundle.seal_to_device(recipient_pub.as_bytes()).unwrap();
+        let restored = open_device_sealed_bundle(&recipient, &sealed).unwrap();
+
+        // The restored trousseau is functionally identical to the original one.
+        let oid = bundle.opaque_id("book", "uuid-1");
+        let blob = restored
+            .seal_entity(ACCOUNT_ID, &oid, DEVICE_ID, b"payload")
+            .unwrap();
+        assert_eq!(
+            bundle
+                .open_entity(ACCOUNT_ID, &oid, DEVICE_ID, &blob)
+                .unwrap(),
+            b"payload"
+        );
+        assert_eq!(restored.account_auth_pk(), bundle.account_auth_pk());
+    }
+
+    #[test]
+    fn device_sealed_bundle_rejects_wrong_recipient() {
+        use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+        let bundle = AccountKeyBundle::generate();
+        let recipient = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = X25519PublicKey::from(&recipient);
+        let eve = StaticSecret::random_from_rng(OsRng);
+
+        let sealed = bundle.seal_to_device(recipient_pub.as_bytes()).unwrap();
+        // A device that is not the sealed recipient cannot open the trousseau.
+        assert!(open_device_sealed_bundle(&eve, &sealed).is_err());
     }
 
     #[test]

@@ -20,8 +20,11 @@
 //! keybundle gate rejects it (HTTP 401) and, even if it did not, the AEAD unwrap fails —
 //! both map to [`EnrollmentError::WrongPassphrase`].
 //!
-//! Path B (sealed X25519 transfer from an already-authorized device) and the subsequent
-//! device-registry adopt wiring land in later slices (ADR-042 §14 F6/B).
+//! Path B ([`enroll_from_sealed_bundle`]) is the default-UX alternative (ADR-042 §14
+//! F6/B): an already-authorized device seals the trousseau to this device's X25519
+//! identity (the new device's public key travels over an authenticated channel — QR/SAS
+//! — never relayed raw, §14/H2), so no passphrase or KDF work is needed here. Wiring the
+//! new device into the signed device registry (adopt + re-publish) lands in a later slice.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -30,8 +33,9 @@ use zeroize::Zeroizing;
 
 use crate::crypto::account_keys::{
     ACCOUNT_SCHEMA_VERSION, AEAD_ALG_V1, AccountKeyBundle, Argon2Params, WrapKind,
-    derive_auth_verifier, derive_kwk, derive_master_key, unwrap_bundle,
+    derive_auth_verifier, derive_kwk, derive_master_key, open_device_sealed_bundle, unwrap_bundle,
 };
+use crate::crypto::identity::NodeIdentity;
 use crate::services::account_sync_client::{
     AccountDescriptor, AccountSyncClient, AccountSyncError, KdfParams, auth_verifier_hash_hex,
     decode_blob_standard,
@@ -59,6 +63,10 @@ pub enum EnrollmentError {
     AccountNotFound,
     /// The passphrase did not unlock the trousseau (gate rejection or AEAD failure).
     WrongPassphrase,
+    /// The sealed trousseau could not be opened with this device's identity (Path B).
+    SealedBundleInvalid,
+    /// The hub rejected authentication with the unlocked trousseau (wrong account).
+    AuthFailed,
     /// The hub published a KDF/AEAD/schema profile this client refuses (no downgrade).
     UnsupportedProfile(String),
     /// The hub omitted the requested wrapped key copy.
@@ -78,6 +86,10 @@ impl std::fmt::Display for EnrollmentError {
         match self {
             Self::AccountNotFound => write!(f, "No account exists for this email"),
             Self::WrongPassphrase => write!(f, "Incorrect passphrase"),
+            Self::SealedBundleInvalid => {
+                write!(f, "Sealed trousseau could not be opened on this device")
+            }
+            Self::AuthFailed => write!(f, "Hub rejected authentication with this trousseau"),
             Self::UnsupportedProfile(e) => write!(f, "Unsupported account profile: {e}"),
             Self::MissingWrappedKey => write!(f, "Hub returned no passphrase-wrapped key"),
             Self::DescriptorMismatch => {
@@ -161,6 +173,34 @@ pub async fn enroll_with_passphrase(
     })
 }
 
+/// Path B enrollment: join an existing account on this device using a trousseau that an
+/// already-authorized device sealed to this device's X25519 identity (ADR-042 §14 F6/B).
+///
+/// No passphrase or KDF work is involved: the sealed blob carries the trousseau directly.
+/// On success the trousseau is unlocked in RAM and `client` is left authenticated. The
+/// new device's public key must have reached the sealing device over an authenticated
+/// channel (QR/SAS); this function only consumes the resulting sealed blob.
+pub async fn enroll_from_sealed_bundle(
+    client: &mut AccountSyncClient,
+    email: &str,
+    my_identity: &NodeIdentity,
+    sealed_bundle_b64: &str,
+) -> Result<EnrolledAccount, EnrollmentError> {
+    // 1. Open the sealed trousseau with this device's X25519 secret (a blob sealed to a
+    //    different device, or a tampered one, fails the AEAD here).
+    let bundle = open_device_sealed_bundle(my_identity.x25519_static_secret(), sealed_bundle_b64)
+        .map_err(|_| EnrollmentError::SealedBundleInvalid)?;
+
+    // 2. Authenticate: login proves to the hub that this trousseau owns the account's
+    //    auth key, and yields the opaque account id needed to key blobs during sync.
+    let outcome = client.login(email, &bundle).await.map_err(map_login_err)?;
+
+    Ok(EnrolledAccount {
+        account_id: outcome.account_id,
+        bundle,
+    })
+}
+
 /// Refuse any account profile this client cannot derive identically (ADR-042 §3/§14 M5).
 fn validate_profile(descriptor: &AccountDescriptor) -> Result<Argon2Params, EnrollmentError> {
     let KdfParams {
@@ -225,7 +265,8 @@ fn map_keybundle_err(e: AccountSyncError) -> EnrollmentError {
 
 fn map_login_err(e: AccountSyncError) -> EnrollmentError {
     match e {
-        AccountSyncError::Hub(401, _) => EnrollmentError::DescriptorMismatch,
+        AccountSyncError::Hub(401, _) => EnrollmentError::AuthFailed,
+        AccountSyncError::Hub(404, _) => EnrollmentError::AccountNotFound,
         other => EnrollmentError::Hub(other.to_string()),
     }
 }
@@ -475,5 +516,86 @@ mod tests {
             .err()
             .unwrap();
         assert!(matches!(err, EnrollmentError::UnsupportedProfile(_)));
+    }
+
+    // --- Path B (sealed X25519 transfer) ---
+
+    #[tokio::test]
+    async fn path_b_sealed_enrollment_unlocks_and_authenticates() {
+        let server = MockServer::start().await;
+        let bundle = AccountKeyBundle::generate();
+        let pk_b64url = URL_SAFE_NO_PAD.encode(bundle.account_auth_pk());
+        let account_pk = bundle.account_auth_pk();
+        // The new device's identity; an authorized device seals the trousseau to it.
+        let new_device = NodeIdentity::generate();
+        let sealed = bundle
+            .seal_to_device(new_device.x25519_public_key().as_bytes())
+            .unwrap();
+
+        mount_challenge(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/account/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "sess-b",
+                "account_id": "acct-b",
+                "descriptor": descriptor_json(&generate_salt(), &pk_b64url),
+            })))
+            .mount(&server)
+            .await;
+
+        let mut client = AccountSyncClient::with_base_url(server.uri());
+        let enrolled = enroll_from_sealed_bundle(&mut client, EMAIL, &new_device, &sealed)
+            .await
+            .unwrap();
+
+        assert_eq!(enrolled.account_id, "acct-b");
+        assert!(client.is_authenticated());
+        assert_eq!(enrolled.bundle.account_auth_pk(), account_pk);
+    }
+
+    #[tokio::test]
+    async fn path_b_rejects_bundle_sealed_to_another_device() {
+        let bundle = AccountKeyBundle::generate();
+        let intended = NodeIdentity::generate();
+        let other_device = NodeIdentity::generate();
+        let sealed = bundle
+            .seal_to_device(intended.x25519_public_key().as_bytes())
+            .unwrap();
+
+        // The hub is never contacted: opening fails before any login attempt.
+        let mut client = AccountSyncClient::with_base_url("http://127.0.0.1:1");
+        let err = enroll_from_sealed_bundle(&mut client, EMAIL, &other_device, &sealed)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, EnrollmentError::SealedBundleInvalid));
+        assert!(!client.is_authenticated());
+    }
+
+    #[tokio::test]
+    async fn path_b_login_rejection_maps_to_auth_failed() {
+        let server = MockServer::start().await;
+        let bundle = AccountKeyBundle::generate();
+        let new_device = NodeIdentity::generate();
+        let sealed = bundle
+            .seal_to_device(new_device.x25519_public_key().as_bytes())
+            .unwrap();
+
+        mount_challenge(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/account/login"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"error": "Authentication failed"})),
+            )
+            .mount(&server)
+            .await;
+
+        let mut client = AccountSyncClient::with_base_url(server.uri());
+        let err = enroll_from_sealed_bundle(&mut client, EMAIL, &new_device, &sealed)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, EnrollmentError::AuthFailed));
     }
 }
