@@ -67,6 +67,10 @@ const HKDF_INFO_ENTITY_CONTENT: &[u8] = b"bg-acct-v1|entity-content";
 const BLOB_AAD_PREFIX: &[u8] = b"bg-acct-v1|blob";
 const BUNDLE_AAD_PASSPHRASE: &[u8] = b"bg-acct-v1|bundle-passphrase";
 const BUNDLE_AAD_RECOVERY: &[u8] = b"bg-acct-v1|bundle-recovery";
+/// AAD for the device-local at-rest wrap of the trousseau (ADR-042 §14 client
+/// persistence addendum). Distinct from the passphrase/recovery wrap and the device
+/// seal, so an at-rest blob can never be mistaken for any other wrapped copy.
+const BUNDLE_AAD_AT_REST: &[u8] = b"bg-acct-v1|bundle-at-rest";
 
 /// Separator between entity type and uuid in the opaque-id HMAC input (ADR-042 §6).
 const OPAQUE_ID_SEP: u8 = 0x1F;
@@ -243,6 +247,27 @@ impl AccountKeyBundle {
     ) -> Result<String, CryptoError> {
         let plaintext = self.serialize();
         sealed_blob::seal(recipient_x25519_public, &plaintext)
+    }
+
+    /// Seal the trousseau at rest under a device-local symmetric key, producing
+    /// `nonce || ciphertext` (ADR-042 §14 client-persistence addendum). The key is the
+    /// same `Argon2(library_uuid)`-derived root that protects `crypto_keys`, so the at-rest
+    /// blob is bound to this device and unreadable without it. The 96-byte plaintext never
+    /// leaves this module, mirroring [`Self::seal_to_device`] and [`wrap_bundle`].
+    pub fn seal_at_rest(&self, device_local_key: &[u8; 32]) -> Result<Vec<u8>, CryptoError> {
+        let plaintext = self.serialize();
+        aead_encrypt(device_local_key, BUNDLE_AAD_AT_REST, &plaintext)
+    }
+
+    /// Reload a trousseau sealed by [`Self::seal_at_rest`]. A wrong device-local key
+    /// (e.g. a `library_uuid` storage swing) or any tampering fails the AEAD and returns
+    /// [`CryptoError::DecryptionFailed`] — never a silently wrong bundle.
+    pub fn open_at_rest(
+        device_local_key: &[u8; 32],
+        sealed: &[u8],
+    ) -> Result<AccountKeyBundle, CryptoError> {
+        let plaintext = Zeroizing::new(aead_decrypt(device_local_key, BUNDLE_AAD_AT_REST, sealed)?);
+        AccountKeyBundle::deserialize(&plaintext)
     }
 
     /// Serialize the bundle to its fixed 96-byte plaintext layout (adk || aik || seed).
@@ -727,6 +752,43 @@ mod tests {
         let sealed = bundle.seal_to_device(recipient_pub.as_bytes()).unwrap();
         // A device that is not the sealed recipient cannot open the trousseau.
         assert!(open_device_sealed_bundle(&eve, &sealed).is_err());
+    }
+
+    #[test]
+    fn at_rest_seal_open_roundtrip() {
+        let bundle = AccountKeyBundle::generate();
+        let key = [0x42u8; 32]; // stands in for the Argon2(library_uuid) device-local key.
+
+        let sealed = bundle.seal_at_rest(&key).unwrap();
+        // The sealed blob must not contain the raw key material in the clear.
+        let plaintext = bundle.serialize();
+        assert!(
+            sealed.windows(plaintext.len()).all(|w| w != &plaintext[..]),
+            "trousseau plaintext leaked into the at-rest blob"
+        );
+
+        let restored = AccountKeyBundle::open_at_rest(&key, &sealed).unwrap();
+        // The reloaded trousseau is functionally identical to the original one.
+        let oid = bundle.opaque_id("book", "uuid-1");
+        let blob = restored
+            .seal_entity(ACCOUNT_ID, &oid, DEVICE_ID, b"payload")
+            .unwrap();
+        assert_eq!(
+            bundle
+                .open_entity(ACCOUNT_ID, &oid, DEVICE_ID, &blob)
+                .unwrap(),
+            b"payload"
+        );
+        assert_eq!(restored.account_auth_pk(), bundle.account_auth_pk());
+    }
+
+    #[test]
+    fn at_rest_rejects_wrong_device_local_key() {
+        let bundle = AccountKeyBundle::generate();
+        let sealed = bundle.seal_at_rest(&[1u8; 32]).unwrap();
+        // A different device-local key (e.g. a library_uuid storage swing) must fail
+        // the AEAD rather than yield a wrong bundle.
+        assert!(AccountKeyBundle::open_at_rest(&[2u8; 32], &sealed).is_err());
     }
 
     #[test]

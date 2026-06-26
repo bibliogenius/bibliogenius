@@ -628,6 +628,329 @@ pub async fn parse_invite_link_ffi(link: String) -> Result<String, String> {
     parse_qr_payload_ffi(json_str).await
 }
 
+// ============ Account E2EE Sync — session + enrollment (ST-05 Phase F / F1) ============
+//
+// Exposes the already-built account-sync services (enrollment, signed device registry,
+// at-rest persistence) to Flutter. Scope of F1: JOIN an existing account (passphrase or
+// sealed QR pairing), manage authorized devices, and hold the unlocked trousseau in RAM
+// across calls. Out of F1 scope (separate slices): account SIGNUP (needs the descriptor
+// signer + recovery kit + passphrase policy) and the data sync cycle `sync_once` (needs
+// the Phase E merge engine). `account_refresh_devices_ffi` already drives the real
+// registry adoption that `sync_once` will sit behind.
+
+/// The unlocked account session, held in RAM for the running process. Dropping it zeroizes
+/// the trousseau (A1). Rehydrated from the encrypted `account_session` row on first use
+/// after launch via [`ensure_account_session`].
+struct AccountSession {
+    bundle: crate::crypto::account_keys::AccountKeyBundle,
+    client: crate::services::account_sync_client::AccountSyncClient,
+    account_id: String,
+    device_id: String,
+    email: String,
+}
+
+static ACCOUNT_SESSION: tokio::sync::Mutex<Option<AccountSession>> =
+    tokio::sync::Mutex::const_new(None);
+
+/// The random `device_id` lane key a NEW device generates when it shows its pairing QR,
+/// kept until the sealed trousseau comes back so it enrolls under the SAME id the
+/// authorizing device wrote into the registry. RAM-only: pairing is one in-person flow.
+static PENDING_PAIRING_DEVICE_ID: tokio::sync::Mutex<Option<String>> =
+    tokio::sync::Mutex::const_new(None);
+
+/// The library UUID this device's identity was initialized with (the at-rest KDF input).
+fn account_library_uuid() -> Result<String, String> {
+    IDENTITY_SERVICE
+        .get()
+        .ok_or("Identity not initialized")?
+        .library_uuid()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Library UUID not available".to_string())
+}
+
+/// This device's `DeviceEntry` for the signed registry: its random lane key plus its
+/// reused ADR-039 `NodeIdentity` public keys.
+fn account_device_entry(
+    device_id: &str,
+    name: &str,
+) -> Result<crate::crypto::device_registry::DeviceEntry, String> {
+    let svc = IDENTITY_SERVICE.get().ok_or("Identity not initialized")?;
+    let identity = svc.identity()?;
+    Ok(crate::crypto::device_registry::DeviceEntry {
+        device_id: device_id.to_string(),
+        ed25519_pk: identity.verifying_key().to_bytes(),
+        x25519_pk: identity.x25519_public_key().to_bytes(),
+        name: name.to_string(),
+    })
+}
+
+/// JSON status object for the UI: signed-in flag plus the plaintext metadata.
+fn account_status_json(signed_in: bool, email: &str, account_id: &str, device_id: &str) -> String {
+    serde_json::json!({
+        "signed_in": signed_in,
+        "email": email,
+        "account_id": account_id,
+        "device_id": device_id,
+    })
+    .to_string()
+}
+
+/// Rehydrate the in-RAM session from disk if empty: decrypt the trousseau under the
+/// device-local key and re-authenticate with the hub. Errors if no session is persisted.
+async fn ensure_account_session<'a>(
+    guard: &'a mut tokio::sync::MutexGuard<'_, Option<AccountSession>>,
+) -> Result<&'a mut AccountSession, String> {
+    if guard.is_none() {
+        let db = db().ok_or("Database not initialized")?;
+        let lib = account_library_uuid()?;
+        let persisted = crate::services::account_session_service::load(db, &lib)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("No account session on this device")?;
+        let mut client = crate::services::account_sync_client::AccountSyncClient::new()
+            .map_err(|e| e.to_string())?;
+        // Re-authenticate from the trousseau (the stored token is not persisted).
+        client
+            .login(&persisted.email, &persisted.bundle)
+            .await
+            .map_err(|e| e.to_string())?;
+        **guard = Some(AccountSession {
+            bundle: persisted.bundle,
+            client,
+            account_id: persisted.account_id,
+            device_id: persisted.device_id,
+            email: persisted.email,
+        });
+    }
+    Ok(guard.as_mut().expect("session populated above"))
+}
+
+/// Account session status for the UI. Cheap: reads the plaintext metadata columns and
+/// never decrypts the trousseau or hits the network.
+pub async fn account_status_ffi() -> Result<String, String> {
+    let db = db().ok_or("Database not initialized")?;
+    match crate::services::account_session_service::load_metadata(db)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        Some(m) => Ok(account_status_json(
+            true,
+            &m.email,
+            &m.account_id,
+            &m.device_id,
+        )),
+        None => Ok(account_status_json(false, "", "", "")),
+    }
+}
+
+/// Join an EXISTING account on this device with its passphrase (Path A). Unlocks the
+/// trousseau, enrolls this device into the signed registry, and persists the session.
+pub async fn account_enroll_passphrase_ffi(
+    email: String,
+    passphrase: String,
+    device_name: String,
+) -> Result<String, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let lib = account_library_uuid()?;
+
+    let mut client = crate::services::account_sync_client::AccountSyncClient::new()
+        .map_err(|e| e.to_string())?;
+    let pass = secrecy::SecretString::new(passphrase);
+    let enrolled =
+        crate::services::account_enrollment::enroll_with_passphrase(&mut client, &email, &pass)
+            .await
+            .map_err(|e| e.to_string())?;
+
+    // Add this device to the account's signed registry so peers accept its lanes (H3).
+    let device_id = crate::services::account_session_service::generate_device_id();
+    let entry = account_device_entry(&device_id, &device_name)?;
+    let state = crate::services::account_sync_engine::DbSyncStateStore::new(db.clone());
+    crate::services::account_sync_engine::enroll_device(
+        &client,
+        &state,
+        &enrolled.bundle,
+        &enrolled.account_id,
+        entry,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    crate::services::account_session_service::persist(
+        db,
+        &lib,
+        &enrolled.account_id,
+        &email,
+        &device_id,
+        &enrolled.bundle,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let status = account_status_json(true, &email, &enrolled.account_id, &device_id);
+    *ACCOUNT_SESSION.lock().await = Some(AccountSession {
+        bundle: enrolled.bundle,
+        client,
+        account_id: enrolled.account_id,
+        device_id,
+        email,
+    });
+    Ok(status)
+}
+
+/// NEW device, step 1: generate this device's lane key and return the `bg-pair` QR payload
+/// (its lane key + ADR-039 public keys) for an authorized device to scan. The payload
+/// carries NO secret; the X25519 public key in it is what the authorized device will seal
+/// the trousseau to (ADR-045 authenticated channel).
+pub async fn account_get_device_pairing_qr_ffi(device_name: String) -> Result<String, String> {
+    let svc = IDENTITY_SERVICE.get().ok_or("Identity not initialized")?;
+    let identity = svc.identity()?;
+    let device_id = crate::services::account_session_service::generate_device_id();
+    let payload = crate::services::account_pairing::build_pairing_qr(
+        &device_id,
+        &identity.verifying_key().to_bytes(),
+        &identity.x25519_public_key().to_bytes(),
+        &device_name,
+    );
+    *PENDING_PAIRING_DEVICE_ID.lock().await = Some(device_id);
+    Ok(payload)
+}
+
+/// AUTHORIZED device: scan a NEW device's `bg-pair` QR, seal the trousseau to it, and add it
+/// to the signed registry. Returns the `bg-sealed` payload (sealed blob + account email) to
+/// show back as a QR.
+///
+/// SECURITY (ADR-045 / ADR-042 §14 H2): the X25519 key the trousseau is sealed to comes
+/// ONLY from the scanned payload (`req.x25519_pk`) — never a hub field. Do not refactor this
+/// to source the key from anywhere else.
+pub async fn account_authorize_device_ffi(pairing_qr_payload: String) -> Result<String, String> {
+    let req = crate::services::account_pairing::parse_pairing_qr(&pairing_qr_payload)
+        .map_err(|e| e.to_string())?;
+    let db = db().ok_or("Database not initialized")?;
+
+    let mut guard = ACCOUNT_SESSION.lock().await;
+    let session = ensure_account_session(&mut guard).await?;
+
+    // Seal to the scanned key, and only the scanned key.
+    let sealed = session
+        .bundle
+        .seal_to_device(&req.x25519_pk)
+        .map_err(|e| e.to_string())?;
+
+    let state = crate::services::account_sync_engine::DbSyncStateStore::new(db.clone());
+    crate::services::account_sync_engine::enroll_device(
+        &session.client,
+        &state,
+        &session.bundle,
+        &session.account_id,
+        req.to_device_entry(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(crate::services::account_pairing::build_sealed_qr(
+        &sealed,
+        &session.email,
+    ))
+}
+
+/// NEW device, step 2: scan the `bg-sealed` QR returned by the authorized device, open the
+/// trousseau with this device's X25519 identity, authenticate, and persist the session. The
+/// authorizing device already registered this device, so no registry write happens here.
+pub async fn account_enroll_from_sealed_ffi(sealed_qr_payload: String) -> Result<String, String> {
+    let (sealed, email) = crate::services::account_pairing::parse_sealed_qr(&sealed_qr_payload)
+        .map_err(|e| e.to_string())?;
+    let db = db().ok_or("Database not initialized")?;
+    let lib = account_library_uuid()?;
+    let device_id = PENDING_PAIRING_DEVICE_ID
+        .lock()
+        .await
+        .clone()
+        .ok_or("No pending pairing on this device; show the pairing QR first")?;
+
+    let svc = IDENTITY_SERVICE.get().ok_or("Identity not initialized")?;
+    let identity = svc.identity()?;
+    let mut client = crate::services::account_sync_client::AccountSyncClient::new()
+        .map_err(|e| e.to_string())?;
+    let enrolled = crate::services::account_enrollment::enroll_from_sealed_bundle(
+        &mut client,
+        &email,
+        identity,
+        &sealed,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    crate::services::account_session_service::persist(
+        db,
+        &lib,
+        &enrolled.account_id,
+        &email,
+        &device_id,
+        &enrolled.bundle,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    *PENDING_PAIRING_DEVICE_ID.lock().await = None;
+    let status = account_status_json(true, &email, &enrolled.account_id, &device_id);
+    *ACCOUNT_SESSION.lock().await = Some(AccountSession {
+        bundle: enrolled.bundle,
+        client,
+        account_id: enrolled.account_id,
+        device_id,
+        email,
+    });
+    Ok(status)
+}
+
+/// Fetch and adopt the account's signed device registry, returning the authorized devices
+/// as JSON (`{device_id, name, is_self}`). This is the H3 step `sync_once` runs first; it
+/// is exposed on its own so the UI can list/refresh devices before data sync ships.
+pub async fn account_refresh_devices_ffi() -> Result<String, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let mut guard = ACCOUNT_SESSION.lock().await;
+    let session = ensure_account_session(&mut guard).await?;
+
+    let state = crate::services::account_sync_engine::DbSyncStateStore::new(db.clone());
+    let registry = crate::services::account_sync_engine::refresh_authorized_devices(
+        &session.client,
+        &state,
+        &session.account_id,
+        &session.bundle.verifying_key(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let devices: Vec<serde_json::Value> = registry
+        .map(|reg| {
+            reg.devices
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "device_id": d.device_id,
+                        "name": d.name,
+                        "is_self": d.device_id == session.device_id,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(serde_json::json!({ "devices": devices }).to_string())
+}
+
+/// Sign out of the account on this device: drop the in-RAM session and delete the encrypted
+/// `account_session` row. Does not revoke the device server-side (that is a registry edit
+/// from another device). Idempotent.
+pub async fn account_logout_ffi() -> Result<String, String> {
+    let db = db().ok_or("Database not initialized")?;
+    crate::services::account_session_service::clear(db)
+        .await
+        .map_err(|e| e.to_string())?;
+    *ACCOUNT_SESSION.lock().await = None;
+    *PENDING_PAIRING_DEVICE_ID.lock().await = None;
+    Ok("Signed out".to_string())
+}
+
 // ============ Initializers & Converters ============
 
 impl From<FrbBook> for crate::models::Book {

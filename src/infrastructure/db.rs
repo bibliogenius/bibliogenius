@@ -2022,6 +2022,29 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 081: client at-rest account session (ST-05 Phase F, ADR-042 §14
+    // client-persistence addendum). Singleton row (`id = 0`, one account per device in
+    // v1) holding the unlocked trousseau SEALED at rest under the Argon2(library_uuid)
+    // device-local key (same root that protects `crypto_keys`), plus the opaque hub
+    // `account_id`, the login `email`, and this device's random base64url `device_id`
+    // lane key. `encrypted_bundle` is `nonce || ciphertext` from `seal_at_rest`; the
+    // trousseau plaintext is never stored. Cleared on logout. Purely additive.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"CREATE TABLE IF NOT EXISTS account_session (
+            id INTEGER PRIMARY KEY CHECK (id = 0),
+            account_id TEXT NOT NULL,
+            email TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            encrypted_bundle BLOB NOT NULL,
+            salt BLOB NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )"#
+            .to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
 
