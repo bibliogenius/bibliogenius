@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::crypto::account_keys::AccountKeyBundle;
+use crate::crypto::device_registry::DeviceRegistry;
 use crate::services::account_sync_client::{
     AccountSyncClient, LanePush, PullResponse, PushResponse, decode_blob_standard, encode_b64url,
     encode_blob_standard,
@@ -99,6 +100,10 @@ pub struct SyncContext {
     pub account_id: String,
     /// This device's lane key (base64url), also used to exclude our own lanes on pull.
     pub device_id: String,
+    /// Verified signed device registry for H3 enforcement: pulled lanes whose
+    /// `device_id` is absent are ignored (ADR-043 H3). `None` accepts all lanes
+    /// (e.g. before the registry has been fetched); clients SHOULD set it once known.
+    pub authorized_devices: Option<DeviceRegistry>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -245,6 +250,16 @@ pub async fn sync_once(
         }
 
         for lane in &resp.lanes {
+            // H3: ignore lanes from devices absent from the signed registry. A
+            // malicious hub cannot forge the registry (signed by account_auth_sk),
+            // so it cannot smuggle a lane from an unauthorized/revoked device.
+            if ctx
+                .authorized_devices
+                .as_ref()
+                .is_some_and(|reg| !reg.is_authorized(&lane.device_id))
+            {
+                continue;
+            }
             // A blob-less tombstone (blob GC'd by the hub) cannot be applied: the
             // opaque_id is non-invertible, so we have no entity ref. Skip it.
             let Some(blob_b64) = lane.blob.as_deref() else {
@@ -675,6 +690,27 @@ mod tests {
         SyncContext {
             account_id: "acct-1".to_string(),
             device_id: device.to_string(),
+            authorized_devices: None,
+        }
+    }
+
+    /// Build a registry authorizing exactly `device_ids` (the in-memory H3 check uses
+    /// `is_authorized` directly; sign/verify is covered in the device_registry tests).
+    fn registry_for(device_ids: &[&str]) -> DeviceRegistry {
+        use crate::crypto::device_registry::DeviceEntry;
+        let devices = device_ids
+            .iter()
+            .map(|id| DeviceEntry {
+                device_id: id.to_string(),
+                ed25519_pk: [0u8; 32],
+                x25519_pk: [0u8; 32],
+                name: id.to_string(),
+            })
+            .collect();
+        DeviceRegistry {
+            account_id: "acct-1".to_string(),
+            registry_seq: 1,
+            devices,
         }
     }
 
@@ -787,6 +823,46 @@ mod tests {
             .unwrap();
         assert_eq!(s2.applied, 0);
         assert_eq!(s2.pushed, 0);
+    }
+
+    #[tokio::test]
+    async fn h3_drops_lanes_from_unauthorized_devices() {
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+
+        // devA is authorized; devX is not in the signed registry.
+        let eng_a = FakeEngine::new("devA");
+        let eng_x = FakeEngine::new("devX");
+        let state_a = MemState::default();
+        let state_x = MemState::default();
+        eng_a.edit("book-a", "from A", false);
+        eng_x.edit("book-x", "from X (rogue)", false);
+        sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
+            .await
+            .unwrap();
+        sync_once(&*hub, &eng_x, &bundle, &state_x, &ctx("devX"))
+            .await
+            .unwrap();
+
+        // devB pulls with a registry authorizing only devB + devA (devX excluded, H3).
+        let eng_b = FakeEngine::new("devB");
+        let state_b = MemState::default();
+        let mut ctx_b = ctx("devB");
+        ctx_b.authorized_devices = Some(registry_for(&["devA", "devB"]));
+
+        sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx_b)
+            .await
+            .unwrap();
+
+        let snap = eng_b.snapshot();
+        assert!(
+            snap.iter().any(|(u, _, _)| u == "book-a"),
+            "authorized lane applied"
+        );
+        assert!(
+            !snap.iter().any(|(u, _, _)| u == "book-x"),
+            "lane from an unauthorized device must be dropped (H3)"
+        );
     }
 
     #[tokio::test]
