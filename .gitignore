@@ -29,3 +29,10 @@
 # Other
 backend.log
 server.log
+
+# Vendored cr-sqlite native artifacts (ST-05 C2): not committed (platform-specific
+# build blobs). Obtain per vendor/crsqlite/README.md; CHECKSUMS.txt is committed.
+vendor/crsqlite/*.dylib
+vendor/crsqlite/*.so
+vendor/crsqlite/*.dll
+vendor/crsqlite/*.a

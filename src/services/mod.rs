@@ -5,6 +5,8 @@
 
 pub mod account_sync_client;
 pub mod account_sync_engine;
+#[cfg(feature = "crsqlite")]
+pub mod crsqlite_engine;
 pub mod book_service;
 pub mod catalog_events;
 pub mod catalog_notification;

@@ -827,4 +827,40 @@ mod tests {
         // Distinct accounts are isolated.
         assert_eq!(store.pull_cursor("acct-2").await.unwrap(), 0);
     }
+
+    // C2 spike: the SAME sync_once pipeline, driven by the REAL cr-sqlite engine
+    // (two in-memory cr-sqlite DBs) instead of the in-memory fake. Validates that the
+    // real CRDT engine converges through our encrypt/transport/cursor loop.
+    // Runs only with `--features crsqlite` (needs the vendored extension).
+    #[cfg(feature = "crsqlite")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_crsqlite_two_devices_converge() {
+        use crate::services::crsqlite_engine::CrSqliteMergeEngine;
+
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        let eng_a = CrSqliteMergeEngine::open_in_memory("books").unwrap();
+        let eng_b = CrSqliteMergeEngine::open_in_memory("books").unwrap();
+        let state_a = MemState::default();
+        let state_b = MemState::default();
+
+        // Offline divergence on two real cr-sqlite databases.
+        eng_a.upsert("book-1", "title from A").unwrap();
+        eng_b.upsert("book-1", "title from B").unwrap();
+        eng_b.upsert("book-2", "only on B").unwrap();
+
+        for _ in 0..2 {
+            sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA")).await.unwrap();
+            sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB")).await.unwrap();
+            sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA")).await.unwrap();
+        }
+
+        let snap_a = eng_a.snapshot().unwrap();
+        let snap_b = eng_b.snapshot().unwrap();
+        // cr-sqlite decides the LWW winner for book-1 by its own HLC; we only assert
+        // the two real engines converge and both rows propagated.
+        assert_eq!(snap_a, snap_b, "real cr-sqlite engines must converge");
+        assert!(snap_a.iter().any(|(u, _)| u == "book-1"));
+        assert!(snap_a.iter().any(|(u, _)| u == "book-2"));
+    }
 }
