@@ -36,7 +36,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
@@ -74,6 +74,9 @@ const BUNDLE_AAD_AT_REST: &[u8] = b"bg-acct-v1|bundle-at-rest";
 
 /// Separator between entity type and uuid in the opaque-id HMAC input (ADR-042 §6).
 const OPAQUE_ID_SEP: u8 = 0x1F;
+
+/// Domain prefix for the canonical account descriptor that is signed at signup (ADR-042 §3).
+const DESCRIPTOR_DOMAIN: &[u8] = b"bg-acct-v1|descriptor";
 
 // Argon2id ACCOUNT profile (ADR-042 §3, §14/H4). DISTINCT from the device-local
 // profile in `encryption::derive_key_from_password` (which uses p=4): the account
@@ -270,6 +273,14 @@ impl AccountKeyBundle {
         AccountKeyBundle::deserialize(&plaintext)
     }
 
+    /// Sign the canonical public account descriptor with the account auth key, producing the
+    /// 64-byte `descriptor_sig` published at signup (ADR-042 §3). A joining device verifies it
+    /// with [`verify_account_descriptor`] to confirm the public KDF/auth material it trusted
+    /// was authored by the account key, not substituted by a malicious hub.
+    pub fn sign_descriptor(&self, canonical: &[u8]) -> [u8; 64] {
+        self.signing_key().sign(canonical).to_bytes()
+    }
+
     /// Serialize the bundle to its fixed 96-byte plaintext layout (adk || aik || seed).
     /// The returned buffer is zeroized on drop.
     fn serialize(&self) -> Zeroizing<Vec<u8>> {
@@ -379,6 +390,49 @@ pub fn open_device_sealed_bundle(
 ) -> Result<AccountKeyBundle, CryptoError> {
     let plaintext = Zeroizing::new(sealed_blob::open(my_x25519_secret, sealed_b64)?);
     AccountKeyBundle::deserialize(&plaintext)
+}
+
+/// Domain-separated, length-framed canonical serialization of the PUBLIC account descriptor:
+/// the exact bytes signed by `account_auth_sk` at signup and verified by a joining device
+/// (ADR-042 §3). Fixed-size fields (salt, pk) are appended raw; the variable strings are
+/// length-prefixed so the encoding is unambiguous regardless of their lengths. Both the
+/// signer (signup) and verifier (enrollment, web client) MUST build these bytes identically.
+#[allow(clippy::too_many_arguments)]
+pub fn account_descriptor_canonical(
+    account_salt: &[u8; 32],
+    account_auth_pk: &[u8; 32],
+    kdf_algo: &str,
+    kdf_version: u32,
+    m_cost: u32,
+    t_cost: u32,
+    p_cost: u32,
+    schema_version: u32,
+    auth_method: &str,
+    aead_alg: &str,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(DESCRIPTOR_DOMAIN);
+    out.extend_from_slice(account_salt);
+    out.extend_from_slice(account_auth_pk);
+    for n in [kdf_version, m_cost, t_cost, p_cost, schema_version] {
+        out.extend_from_slice(&n.to_le_bytes());
+    }
+    for s in [kdf_algo, auth_method, aead_alg] {
+        out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+    }
+    out
+}
+
+/// Verify a `descriptor_sig` over [`account_descriptor_canonical`] bytes against the account
+/// auth public key. Returns `false` on any signature mismatch.
+pub fn verify_account_descriptor(
+    account_auth_pk: &VerifyingKey,
+    canonical: &[u8],
+    sig: &[u8; 64],
+) -> bool {
+    let signature = ed25519_dalek::Signature::from_bytes(sig);
+    account_auth_pk.verify(canonical, &signature).is_ok()
 }
 
 // --- internal helpers ---
@@ -789,6 +843,56 @@ mod tests {
         // A different device-local key (e.g. a library_uuid storage swing) must fail
         // the AEAD rather than yield a wrong bundle.
         assert!(AccountKeyBundle::open_at_rest(&[2u8; 32], &sealed).is_err());
+    }
+
+    #[test]
+    fn descriptor_sign_verify_roundtrip_and_tamper() {
+        let bundle = AccountKeyBundle::generate();
+        let salt = [3u8; 32];
+        let pk = bundle.account_auth_pk();
+        let canonical = account_descriptor_canonical(
+            &salt,
+            &pk,
+            "argon2id",
+            19,
+            65536,
+            3,
+            1,
+            1,
+            "passphrase",
+            "AES-256-GCM",
+        );
+        let sig = bundle.sign_descriptor(&canonical);
+        assert!(verify_account_descriptor(
+            &bundle.verifying_key(),
+            &canonical,
+            &sig
+        ));
+        // A different account key (a malicious hub forging the descriptor) does not verify.
+        let other = AccountKeyBundle::generate();
+        assert!(!verify_account_descriptor(
+            &other.verifying_key(),
+            &canonical,
+            &sig
+        ));
+        // Tampering a single descriptor field (here the Argon2 memory cost) breaks the sig.
+        let tampered = account_descriptor_canonical(
+            &salt,
+            &pk,
+            "argon2id",
+            19,
+            19456,
+            3,
+            1,
+            1,
+            "passphrase",
+            "AES-256-GCM",
+        );
+        assert!(!verify_account_descriptor(
+            &bundle.verifying_key(),
+            &tampered,
+            &sig
+        ));
     }
 
     #[test]

@@ -123,6 +123,9 @@ zstd = "0.13"
 rmp-serde = "1"
 hex = "0.4"
 base64 = "0.22"
+# Account signup (ST-05 Phase F): passphrase strength gate (F7) + recovery-kit mnemonic (ADR-042 §8/§14 L2)
+zxcvbn = "3"
+bip39 = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # Local backup archive (.bgbackup). Default features pull deflate via

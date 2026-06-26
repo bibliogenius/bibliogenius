@@ -33,7 +33,8 @@ use zeroize::Zeroizing;
 
 use crate::crypto::account_keys::{
     ACCOUNT_SCHEMA_VERSION, AEAD_ALG_V1, AccountKeyBundle, Argon2Params, WrapKind,
-    derive_auth_verifier, derive_kwk, derive_master_key, open_device_sealed_bundle, unwrap_bundle,
+    account_descriptor_canonical, derive_auth_verifier, derive_kwk, derive_master_key,
+    open_device_sealed_bundle, unwrap_bundle, verify_account_descriptor,
 };
 use crate::crypto::identity::NodeIdentity;
 use crate::services::account_sync_client::{
@@ -73,6 +74,9 @@ pub enum EnrollmentError {
     MissingWrappedKey,
     /// The unlocked trousseau does not match the public account descriptor.
     DescriptorMismatch,
+    /// The public descriptor's signature does not verify: the hub tampered with the salt /
+    /// KDF params / auth material it served (or supplied a bad signature).
+    DescriptorSigInvalid,
     /// Malformed base64 in a hub-supplied field (salt, key, blob).
     Encoding(String),
     /// Crypto failure deriving keys or unwrapping the trousseau.
@@ -94,6 +98,9 @@ impl std::fmt::Display for EnrollmentError {
             Self::MissingWrappedKey => write!(f, "Hub returned no passphrase-wrapped key"),
             Self::DescriptorMismatch => {
                 write!(f, "Account key does not match the published descriptor")
+            }
+            Self::DescriptorSigInvalid => {
+                write!(f, "Account descriptor signature did not verify")
             }
             Self::Encoding(e) => write!(f, "Encoding error: {e}"),
             Self::Crypto(e) => write!(f, "Crypto error: {e}"),
@@ -119,6 +126,12 @@ pub async fn enroll_with_passphrase(
     // 2. Pin the published profile: refuse a hub that serves a weaker/different KDF,
     //    AEAD, or schema than this client implements (ADR-042 §14/M5, no downgrade).
     let params = validate_profile(&descriptor)?;
+
+    // 2b. Verify the descriptor signature: the salt + KDF/auth material must have been
+    //     signed by the account auth key, so a malicious hub cannot silently swap the salt
+    //     or auth pk it serves (ADR-042 §3). Defense in depth above validate_profile (which
+    //     pins the params) and the post-unwrap descriptor match (which binds the auth key).
+    verify_descriptor_signature(&descriptor)?;
 
     // 3. Derive the Master Key from the passphrase and the published salt/params.
     //    Argon2id (64 MiB, t=3) dominates the cost (~hundreds of ms); run it on the
@@ -247,6 +260,43 @@ fn decode_b64url_32(value: &str) -> Result<[u8; 32], EnrollmentError> {
         .map_err(|_| EnrollmentError::Encoding("expected 32 bytes".to_string()))
 }
 
+/// Decode a base64url(no-pad) 64-byte Ed25519 signature field (`descriptor_sig`).
+fn decode_b64url_64(value: &str) -> Result<[u8; 64], EnrollmentError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|e| EnrollmentError::Encoding(e.to_string()))?;
+    bytes
+        .try_into()
+        .map_err(|_| EnrollmentError::Encoding("expected 64 bytes".to_string()))
+}
+
+/// Verify the account descriptor signature (ADR-042 §3): rebuild the canonical descriptor
+/// from the served fields and check it was signed by the descriptor's own account auth key.
+/// A bad signature or a non-point public key is a [`EnrollmentError::DescriptorSigInvalid`].
+fn verify_descriptor_signature(descriptor: &AccountDescriptor) -> Result<(), EnrollmentError> {
+    let salt = decode_b64url_32(&descriptor.account_salt)?;
+    let pk_bytes = decode_b64url_32(&descriptor.account_auth_pk)?;
+    let sig = decode_b64url_64(&descriptor.descriptor_sig)?;
+    let canonical = account_descriptor_canonical(
+        &salt,
+        &pk_bytes,
+        &descriptor.kdf_params.algo,
+        descriptor.kdf_params.version,
+        descriptor.kdf_params.m,
+        descriptor.kdf_params.t,
+        descriptor.kdf_params.p,
+        descriptor.schema_version,
+        &descriptor.auth_method,
+        &descriptor.aead_alg,
+    );
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes)
+        .map_err(|_| EnrollmentError::DescriptorSigInvalid)?;
+    if !verify_account_descriptor(&vk, &canonical, &sig) {
+        return Err(EnrollmentError::DescriptorSigInvalid);
+    }
+    Ok(())
+}
+
 fn map_bootstrap_err(e: AccountSyncError) -> EnrollmentError {
     match e {
         AccountSyncError::Hub(404, _) => EnrollmentError::AccountNotFound,
@@ -274,7 +324,9 @@ fn map_login_err(e: AccountSyncError) -> EnrollmentError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::account_keys::{derive_kwk, derive_master_key, wrap_bundle};
+    use crate::crypto::account_keys::{
+        account_descriptor_canonical, derive_kwk, derive_master_key, wrap_bundle,
+    };
     use crate::crypto::encryption::generate_salt;
     use crate::services::account_sync_client::encode_blob_standard;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -302,15 +354,32 @@ mod tests {
         encode_blob_standard(&wrapped)
     }
 
-    fn descriptor_json(salt: &[u8; 32], account_auth_pk_b64url: &str) -> serde_json::Value {
+    /// Build a descriptor JSON signed by `signer` (so its `descriptor_sig` verifies against
+    /// the `account_auth_pk` it advertises). To simulate a key mismatch, pass a `signer`
+    /// different from the trousseau that wrapped the keybundle.
+    fn descriptor_json(salt: &[u8; 32], signer: &AccountKeyBundle) -> serde_json::Value {
+        let pk = signer.account_auth_pk();
+        let canonical = account_descriptor_canonical(
+            salt,
+            &pk,
+            "argon2id",
+            19,
+            256,
+            1,
+            1,
+            1,
+            "passphrase",
+            "AES-256-GCM",
+        );
+        let sig = signer.sign_descriptor(&canonical);
         serde_json::json!({
             "account_salt": URL_SAFE_NO_PAD.encode(salt),
             "kdf_params": {"algo": "argon2id", "version": 19, "m": 256, "t": 1, "p": 1},
             "schema_version": 1,
             "auth_method": "passphrase",
             "aead_alg": "AES-256-GCM",
-            "account_auth_pk": account_auth_pk_b64url,
-            "descriptor_sig": "c2ln",
+            "account_auth_pk": URL_SAFE_NO_PAD.encode(pk),
+            "descriptor_sig": URL_SAFE_NO_PAD.encode(sig),
         })
     }
 
@@ -331,15 +400,12 @@ mod tests {
     async fn path_a_enrollment_unlocks_bundle_and_authenticates() {
         let server = MockServer::start().await;
         let bundle = AccountKeyBundle::generate();
-        let pk_b64url = URL_SAFE_NO_PAD.encode(bundle.account_auth_pk());
         let salt = generate_salt();
         let wrapped_blob = wrap_for(&bundle, &salt, PASSPHRASE);
 
         Mock::given(method("GET"))
             .and(path("/api/account/bootstrap"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(descriptor_json(&salt, &pk_b64url)),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(descriptor_json(&salt, &bundle)))
             .mount(&server)
             .await;
         mount_challenge(&server).await;
@@ -355,7 +421,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "token": "sess-xyz",
                 "account_id": "acct-42",
-                "descriptor": descriptor_json(&salt, &pk_b64url),
+                "descriptor": descriptor_json(&salt, &bundle),
             })))
             .mount(&server)
             .await;
@@ -396,14 +462,11 @@ mod tests {
     async fn wrong_passphrase_gate_rejection_maps_to_wrong_passphrase() {
         let server = MockServer::start().await;
         let bundle = AccountKeyBundle::generate();
-        let pk_b64url = URL_SAFE_NO_PAD.encode(bundle.account_auth_pk());
         let salt = generate_salt();
 
         Mock::given(method("GET"))
             .and(path("/api/account/bootstrap"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(descriptor_json(&salt, &pk_b64url)),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(descriptor_json(&salt, &bundle)))
             .mount(&server)
             .await;
         mount_challenge(&server).await;
@@ -430,7 +493,6 @@ mod tests {
     async fn tampered_wrapped_blob_fails_aead_as_wrong_passphrase() {
         let server = MockServer::start().await;
         let bundle = AccountKeyBundle::generate();
-        let pk_b64url = URL_SAFE_NO_PAD.encode(bundle.account_auth_pk());
         let salt = generate_salt();
         // Correct verifier hash (gate passes) but a wrapped blob that fails to unwrap.
         let mut wrapped = decode_blob_standard(&wrap_for(&bundle, &salt, PASSPHRASE)).unwrap();
@@ -440,9 +502,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/api/account/bootstrap"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(descriptor_json(&salt, &pk_b64url)),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(descriptor_json(&salt, &bundle)))
             .mount(&server)
             .await;
         mount_challenge(&server).await;
@@ -468,14 +528,13 @@ mod tests {
         let bundle = AccountKeyBundle::generate();
         let salt = generate_salt();
         let wrapped_blob = wrap_for(&bundle, &salt, PASSPHRASE);
-        // The descriptor advertises a DIFFERENT account auth key than the trousseau holds.
-        let other_pk = URL_SAFE_NO_PAD.encode(AccountKeyBundle::generate().account_auth_pk());
+        // The descriptor advertises (and is signed by) a DIFFERENT account key than the
+        // trousseau holds, so its signature verifies but the post-unwrap key match fails.
+        let other = AccountKeyBundle::generate();
 
         Mock::given(method("GET"))
             .and(path("/api/account/bootstrap"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(descriptor_json(&salt, &other_pk)),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(descriptor_json(&salt, &other)))
             .mount(&server)
             .await;
         mount_challenge(&server).await;
@@ -499,9 +558,8 @@ mod tests {
     async fn downgraded_kdf_profile_is_refused() {
         let server = MockServer::start().await;
         let bundle = AccountKeyBundle::generate();
-        let pk_b64url = URL_SAFE_NO_PAD.encode(bundle.account_auth_pk());
         let salt = generate_salt();
-        let mut descriptor = descriptor_json(&salt, &pk_b64url);
+        let mut descriptor = descriptor_json(&salt, &bundle);
         descriptor["kdf_params"]["algo"] = serde_json::json!("pbkdf2");
 
         Mock::given(method("GET"))
@@ -518,13 +576,36 @@ mod tests {
         assert!(matches!(err, EnrollmentError::UnsupportedProfile(_)));
     }
 
+    #[tokio::test]
+    async fn tampered_descriptor_fails_signature_verification() {
+        let server = MockServer::start().await;
+        let bundle = AccountKeyBundle::generate();
+        let salt = generate_salt();
+        // The hub serves a descriptor whose salt differs from what was signed: the
+        // descriptor signature must fail before any key derivation happens.
+        let mut descriptor = descriptor_json(&salt, &bundle);
+        descriptor["account_salt"] = serde_json::json!(URL_SAFE_NO_PAD.encode(generate_salt()));
+
+        Mock::given(method("GET"))
+            .and(path("/api/account/bootstrap"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(descriptor))
+            .mount(&server)
+            .await;
+
+        let mut client = AccountSyncClient::with_base_url(server.uri());
+        let err = enroll_with_passphrase(&mut client, EMAIL, &SecretString::new(PASSPHRASE.into()))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, EnrollmentError::DescriptorSigInvalid));
+    }
+
     // --- Path B (sealed X25519 transfer) ---
 
     #[tokio::test]
     async fn path_b_sealed_enrollment_unlocks_and_authenticates() {
         let server = MockServer::start().await;
         let bundle = AccountKeyBundle::generate();
-        let pk_b64url = URL_SAFE_NO_PAD.encode(bundle.account_auth_pk());
         let account_pk = bundle.account_auth_pk();
         // The new device's identity; an authorized device seals the trousseau to it.
         let new_device = NodeIdentity::generate();
@@ -538,7 +619,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "token": "sess-b",
                 "account_id": "acct-b",
-                "descriptor": descriptor_json(&generate_salt(), &pk_b64url),
+                "descriptor": descriptor_json(&generate_salt(), &bundle),
             })))
             .mount(&server)
             .await;

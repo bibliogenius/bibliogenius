@@ -951,6 +951,91 @@ pub async fn account_logout_ffi() -> Result<String, String> {
     Ok("Signed out".to_string())
 }
 
+/// Score a candidate passphrase locally for the signup strength meter. No network, no DB,
+/// no logging (SECURITY_GUIDELINES F7: the check is 100% local). Returns JSON
+/// `{score 0-4, length, acceptable, warning, suggestions}`; the UI gates the signup button
+/// on `acceptable` (zxcvbn 4/4 AND length >= 12).
+pub async fn account_check_passphrase_ffi(passphrase: String) -> Result<String, String> {
+    let s = crate::services::account_signup_service::check_passphrase(&passphrase);
+    Ok(serde_json::json!({
+        "score": s.score,
+        "length": s.length,
+        "acceptable": s.acceptable,
+        "warning": s.warning,
+        "suggestions": s.suggestions,
+    })
+    .to_string())
+}
+
+/// Create a NEW account on this (first) device with a passphrase (Path A). Enforces the
+/// strength floor, generates and double-wraps the trousseau, publishes the first signed
+/// registry, persists the session, and returns the one-time BIP39 recovery phrase inside the
+/// status JSON (`recovery_phrase`) for the UI to display ONCE. The phrase is never persisted
+/// or logged; losing both passphrase and kit means permanent account loss (ADR-042 §8).
+pub async fn account_signup_ffi(
+    email: String,
+    passphrase: String,
+    device_name: String,
+) -> Result<String, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let lib = account_library_uuid()?;
+    let device_id = crate::services::account_session_service::generate_device_id();
+    let entry = account_device_entry(&device_id, &device_name)?;
+
+    let mut client = crate::services::account_sync_client::AccountSyncClient::new()
+        .map_err(|e| e.to_string())?;
+    let pass = secrecy::SecretString::new(passphrase);
+    let outcome =
+        match crate::services::account_signup_service::signup(&mut client, &email, &pass, entry)
+            .await
+        {
+            Ok(o) => o,
+            // Stable, routable prefixes so the Flutter layer can recover instead of dead-ending:
+            // a duplicate email should offer "sign in" (the user can join with their passphrase).
+            Err(crate::services::account_signup_service::SignupError::AccountExists) => {
+                return Err(format!(
+                    "{}: an account already exists for this email",
+                    crate::services::account_signup_service::E_ACCOUNT_EXISTS
+                ));
+            }
+            Err(crate::services::account_signup_service::SignupError::WeakPassphrase(_)) => {
+                return Err(format!(
+                    "{}: passphrase does not meet the strength floor",
+                    crate::services::account_signup_service::E_WEAK_PASSPHRASE
+                ));
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+
+    crate::services::account_session_service::persist(
+        db,
+        &lib,
+        &outcome.account_id,
+        &email,
+        &device_id,
+        &outcome.bundle,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let status = serde_json::json!({
+        "signed_in": true,
+        "email": email,
+        "account_id": outcome.account_id,
+        "device_id": device_id,
+        "recovery_phrase": outcome.recovery_phrase,
+    })
+    .to_string();
+    *ACCOUNT_SESSION.lock().await = Some(AccountSession {
+        bundle: outcome.bundle,
+        client,
+        account_id: outcome.account_id,
+        device_id,
+        email,
+    });
+    Ok(status)
+}
+
 // ============ Initializers & Converters ============
 
 impl From<FrbBook> for crate::models::Book {
