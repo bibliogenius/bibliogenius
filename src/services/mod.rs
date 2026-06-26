@@ -3,6 +3,7 @@
 //! This module contains pure business logic extracted from HTTP handlers.
 //! Services can be called directly via FFI or through Axum handlers.
 
+pub mod account_enrollment;
 pub mod account_sync_client;
 pub mod account_sync_engine;
 pub mod book_service;

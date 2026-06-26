@@ -1,0 +1,479 @@
+//! Account enrollment — joining an existing account on a new device (ST-05 Phase D2).
+//!
+//! This is the client orchestration that turns a passphrase into an unlocked account
+//! trousseau on a fresh device, composed purely from Phase A crypto
+//! ([`crate::crypto::account_keys`]) and the Phase B hub client
+//! ([`AccountSyncClient`]). It owns no persistence and no FFI — the Phase F account
+//! service will call it and store the result.
+//!
+//! Path A (passphrase) — the floor required for the web client (ADR-042 §14 F6/A):
+//! ```text
+//! bootstrap(email)            -> public descriptor (salt, Argon2id params, account_auth_pk)
+//! derive_master_key(passphrase, salt, params)
+//! derive_auth_verifier(MK)    -> hash -> download_keybundle gate (HMAC challenge-response)
+//! derive_kwk(MK)              -> unwrap_bundle(wrapped, KWK)   [AEAD: wrong passphrase fails]
+//! login(bundle)              -> opaque account_id + session ready for sync
+//! ```
+//!
+//! No secret ever leaves the device: the hub only sees the AuthVerifier *hash*, public
+//! key material, and ciphertext. A wrong passphrase derives a wrong Master Key, so the
+//! keybundle gate rejects it (HTTP 401) and, even if it did not, the AEAD unwrap fails —
+//! both map to [`EnrollmentError::WrongPassphrase`].
+//!
+//! Path B (sealed X25519 transfer from an already-authorized device) and the subsequent
+//! device-registry adopt wiring land in later slices (ADR-042 §14 F6/B).
+
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use secrecy::{ExposeSecret, SecretString};
+use zeroize::Zeroizing;
+
+use crate::crypto::account_keys::{
+    ACCOUNT_SCHEMA_VERSION, AEAD_ALG_V1, AccountKeyBundle, Argon2Params, WrapKind,
+    derive_auth_verifier, derive_kwk, derive_master_key, unwrap_bundle,
+};
+use crate::services::account_sync_client::{
+    AccountDescriptor, AccountSyncClient, AccountSyncError, KdfParams, auth_verifier_hash_hex,
+    decode_blob_standard,
+};
+
+/// Argon2 version 0x13 (the only version this client derives, V0x13). The hub publishes
+/// it as the integer `19` in [`KdfParams::version`]; any other value is a refused downgrade.
+const ARGON2_VERSION_0X13: u32 = 0x13;
+
+/// The KDF algorithm this client supports for the account Master Key.
+const KDF_ALGO_ARGON2ID: &str = "argon2id";
+
+/// Outcome of a successful Path A enrollment: the unlocked trousseau plus the opaque
+/// account id needed to key blobs. On return, `client` holds an authenticated session.
+pub struct EnrolledAccount {
+    /// Opaque hub account id (bound into the per-blob AEAD AAD during sync).
+    pub account_id: String,
+    /// The unlocked account trousseau, decrypted only in RAM (never logged, zeroized on drop).
+    pub bundle: AccountKeyBundle,
+}
+
+#[derive(Debug)]
+pub enum EnrollmentError {
+    /// No account exists for this email on the hub.
+    AccountNotFound,
+    /// The passphrase did not unlock the trousseau (gate rejection or AEAD failure).
+    WrongPassphrase,
+    /// The hub published a KDF/AEAD/schema profile this client refuses (no downgrade).
+    UnsupportedProfile(String),
+    /// The hub omitted the requested wrapped key copy.
+    MissingWrappedKey,
+    /// The unlocked trousseau does not match the public account descriptor.
+    DescriptorMismatch,
+    /// Malformed base64 in a hub-supplied field (salt, key, blob).
+    Encoding(String),
+    /// Crypto failure deriving keys or unwrapping the trousseau.
+    Crypto(String),
+    /// Network or non-auth hub error.
+    Hub(String),
+}
+
+impl std::fmt::Display for EnrollmentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AccountNotFound => write!(f, "No account exists for this email"),
+            Self::WrongPassphrase => write!(f, "Incorrect passphrase"),
+            Self::UnsupportedProfile(e) => write!(f, "Unsupported account profile: {e}"),
+            Self::MissingWrappedKey => write!(f, "Hub returned no passphrase-wrapped key"),
+            Self::DescriptorMismatch => {
+                write!(f, "Account key does not match the published descriptor")
+            }
+            Self::Encoding(e) => write!(f, "Encoding error: {e}"),
+            Self::Crypto(e) => write!(f, "Crypto error: {e}"),
+            Self::Hub(e) => write!(f, "Hub error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for EnrollmentError {}
+
+/// Path A enrollment: join an existing account on this device using its passphrase.
+///
+/// On success the trousseau is unlocked in RAM and `client` is left authenticated. The
+/// passphrase is only ever fed to Argon2id and is never sent to the hub.
+pub async fn enroll_with_passphrase(
+    client: &mut AccountSyncClient,
+    email: &str,
+    passphrase: &SecretString,
+) -> Result<EnrolledAccount, EnrollmentError> {
+    // 1. Fetch the account's public KDF descriptor (404 => no such account).
+    let descriptor = client.bootstrap(email).await.map_err(map_bootstrap_err)?;
+
+    // 2. Pin the published profile: refuse a hub that serves a weaker/different KDF,
+    //    AEAD, or schema than this client implements (ADR-042 §14/M5, no downgrade).
+    let params = validate_profile(&descriptor)?;
+
+    // 3. Derive the Master Key from the passphrase and the published salt/params.
+    //    Argon2id (64 MiB, t=3) dominates the cost (~hundreds of ms); run it on the
+    //    blocking pool so it never stalls the single-threaded FFI runtime, matching the
+    //    pattern already used for password-derived backup keys (see `api/backup.rs`).
+    let salt = decode_b64url_32(&descriptor.account_salt)?;
+    let passphrase_bytes: Zeroizing<Vec<u8>> =
+        Zeroizing::new(passphrase.expose_secret().as_bytes().to_vec());
+    let mk = tokio::task::spawn_blocking(move || {
+        derive_master_key(passphrase_bytes.as_slice(), &salt, params)
+    })
+    .await
+    .map_err(|e| EnrollmentError::Crypto(format!("key derivation task failed: {e}")))?
+    .map_err(|e| EnrollmentError::Crypto(e.to_string()))?;
+
+    // 4. Gate-download the wrapped trousseau with the AuthVerifier HMAC (401 => wrong
+    //    passphrase, since a wrong MK yields a wrong verifier hash).
+    let auth_verifier =
+        derive_auth_verifier(&mk).map_err(|e| EnrollmentError::Crypto(e.to_string()))?;
+    let verifier_hash = auth_verifier_hash_hex(&auth_verifier);
+    let wrapped_keys = client
+        .download_keybundle(email, &verifier_hash, &[WrapKind::Passphrase.wire_kind()])
+        .await
+        .map_err(map_keybundle_err)?;
+    let wrapped = wrapped_keys
+        .iter()
+        .find(|k| k.kind == WrapKind::Passphrase.wire_kind())
+        .ok_or(EnrollmentError::MissingWrappedKey)?;
+    let wrapped_bytes = decode_blob_standard(&wrapped.blob)
+        .map_err(|e| EnrollmentError::Encoding(e.to_string()))?;
+
+    // 5. Unwrap the trousseau locally. A right MK but wrong wrapped bytes (or a hub that
+    //    served a tampered salt/params making the KWK wrong) fails the AEAD here.
+    let kwk = derive_kwk(&mk).map_err(|e| EnrollmentError::Crypto(e.to_string()))?;
+    let bundle = unwrap_bundle(&wrapped_bytes, &kwk, WrapKind::Passphrase)
+        .map_err(|_| EnrollmentError::WrongPassphrase)?;
+
+    // 6. Integrity: the unlocked auth key must match the descriptor we trusted for the
+    //    KDF params, catching a hub that mismatched the public material.
+    let descriptor_pk = decode_b64url_32(&descriptor.account_auth_pk)?;
+    if bundle.account_auth_pk() != descriptor_pk {
+        return Err(EnrollmentError::DescriptorMismatch);
+    }
+
+    // 7. Authenticate so the session is ready for sync and learn the opaque account id.
+    //    Login also proves to the hub that this trousseau owns the account's auth key.
+    let outcome = client.login(email, &bundle).await.map_err(map_login_err)?;
+
+    Ok(EnrolledAccount {
+        account_id: outcome.account_id,
+        bundle,
+    })
+}
+
+/// Refuse any account profile this client cannot derive identically (ADR-042 §3/§14 M5).
+fn validate_profile(descriptor: &AccountDescriptor) -> Result<Argon2Params, EnrollmentError> {
+    let KdfParams {
+        algo,
+        version,
+        m,
+        t,
+        p,
+    } = &descriptor.kdf_params;
+    if algo != KDF_ALGO_ARGON2ID {
+        return Err(EnrollmentError::UnsupportedProfile(format!("KDF {algo}")));
+    }
+    if *version != ARGON2_VERSION_0X13 {
+        return Err(EnrollmentError::UnsupportedProfile(format!(
+            "Argon2 version {version}"
+        )));
+    }
+    if descriptor.aead_alg != AEAD_ALG_V1 {
+        return Err(EnrollmentError::UnsupportedProfile(format!(
+            "AEAD {}",
+            descriptor.aead_alg
+        )));
+    }
+    if descriptor.schema_version != ACCOUNT_SCHEMA_VERSION {
+        return Err(EnrollmentError::UnsupportedProfile(format!(
+            "schema v{}",
+            descriptor.schema_version
+        )));
+    }
+    Ok(Argon2Params {
+        m_cost: *m,
+        t_cost: *t,
+        p_cost: *p,
+    })
+}
+
+/// Decode a base64url(no-pad) field the hub guarantees is 32 bytes (salt, public key).
+fn decode_b64url_32(value: &str) -> Result<[u8; 32], EnrollmentError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|e| EnrollmentError::Encoding(e.to_string()))?;
+    bytes
+        .try_into()
+        .map_err(|_| EnrollmentError::Encoding("expected 32 bytes".to_string()))
+}
+
+fn map_bootstrap_err(e: AccountSyncError) -> EnrollmentError {
+    match e {
+        AccountSyncError::Hub(404, _) => EnrollmentError::AccountNotFound,
+        other => EnrollmentError::Hub(other.to_string()),
+    }
+}
+
+fn map_keybundle_err(e: AccountSyncError) -> EnrollmentError {
+    match e {
+        // The gate returns 401 both for a bad MAC (wrong passphrase) and an unknown
+        // account; bootstrap already proved the account exists, so 401 means passphrase.
+        AccountSyncError::Hub(401, _) => EnrollmentError::WrongPassphrase,
+        other => EnrollmentError::Hub(other.to_string()),
+    }
+}
+
+fn map_login_err(e: AccountSyncError) -> EnrollmentError {
+    match e {
+        AccountSyncError::Hub(401, _) => EnrollmentError::DescriptorMismatch,
+        other => EnrollmentError::Hub(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::account_keys::{derive_kwk, derive_master_key, wrap_bundle};
+    use crate::crypto::encryption::generate_salt;
+    use crate::services::account_sync_client::encode_blob_standard;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Cheap Argon2 params so enrollment tests stay fast; the mock hub serves these same
+    // values, so the client derives exactly the Master Key that wrapped the bundle.
+    fn fast_params() -> Argon2Params {
+        Argon2Params {
+            m_cost: 256,
+            t_cost: 1,
+            p_cost: 1,
+        }
+    }
+
+    const PASSPHRASE: &str = "correct horse battery staple";
+    const EMAIL: &str = "reader@example.org";
+
+    /// Build the wrapped passphrase copy a freshly signed-up account would store.
+    fn wrap_for(bundle: &AccountKeyBundle, salt: &[u8; 32], passphrase: &str) -> String {
+        let mk = derive_master_key(passphrase.as_bytes(), salt, fast_params()).unwrap();
+        let kwk = derive_kwk(&mk).unwrap();
+        let wrapped = wrap_bundle(bundle, &kwk, WrapKind::Passphrase).unwrap();
+        encode_blob_standard(&wrapped)
+    }
+
+    fn descriptor_json(salt: &[u8; 32], account_auth_pk_b64url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "account_salt": URL_SAFE_NO_PAD.encode(salt),
+            "kdf_params": {"algo": "argon2id", "version": 19, "m": 256, "t": 1, "p": 1},
+            "schema_version": 1,
+            "auth_method": "passphrase",
+            "aead_alg": "AES-256-GCM",
+            "account_auth_pk": account_auth_pk_b64url,
+            "descriptor_sig": "c2ln",
+        })
+    }
+
+    async fn mount_challenge(server: &MockServer) {
+        // Both login and keybundle fetch a challenge from the same endpoint; a fixed
+        // nonce works because the mock login/keybundle handlers do not verify it.
+        Mock::given(method("POST"))
+            .and(path("/api/account/challenge"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "challenge": URL_SAFE_NO_PAD.encode([7u8; 32]),
+                "expires_at": "2026-01-01T00:00:00Z",
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn path_a_enrollment_unlocks_bundle_and_authenticates() {
+        let server = MockServer::start().await;
+        let bundle = AccountKeyBundle::generate();
+        let pk_b64url = URL_SAFE_NO_PAD.encode(bundle.account_auth_pk());
+        let salt = generate_salt();
+        let wrapped_blob = wrap_for(&bundle, &salt, PASSPHRASE);
+
+        Mock::given(method("GET"))
+            .and(path("/api/account/bootstrap"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(descriptor_json(&salt, &pk_b64url)),
+            )
+            .mount(&server)
+            .await;
+        mount_challenge(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/account/keybundle"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "wrapped_keys": [{ "kind": "passphrase", "blob": wrapped_blob }],
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/account/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "sess-xyz",
+                "account_id": "acct-42",
+                "descriptor": descriptor_json(&salt, &pk_b64url),
+            })))
+            .mount(&server)
+            .await;
+
+        let mut client = AccountSyncClient::with_base_url(server.uri());
+        let enrolled =
+            enroll_with_passphrase(&mut client, EMAIL, &SecretString::new(PASSPHRASE.into()))
+                .await
+                .unwrap();
+
+        assert_eq!(enrolled.account_id, "acct-42");
+        assert!(client.is_authenticated());
+        // The unlocked trousseau is the real one: it carries the account auth key.
+        assert_eq!(enrolled.bundle.account_auth_pk(), bundle.account_auth_pk());
+    }
+
+    #[tokio::test]
+    async fn unknown_account_maps_to_account_not_found() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/account/bootstrap"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({"error": "Account not found"})),
+            )
+            .mount(&server)
+            .await;
+
+        let mut client = AccountSyncClient::with_base_url(server.uri());
+        let err = enroll_with_passphrase(&mut client, EMAIL, &SecretString::new(PASSPHRASE.into()))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, EnrollmentError::AccountNotFound));
+    }
+
+    #[tokio::test]
+    async fn wrong_passphrase_gate_rejection_maps_to_wrong_passphrase() {
+        let server = MockServer::start().await;
+        let bundle = AccountKeyBundle::generate();
+        let pk_b64url = URL_SAFE_NO_PAD.encode(bundle.account_auth_pk());
+        let salt = generate_salt();
+
+        Mock::given(method("GET"))
+            .and(path("/api/account/bootstrap"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(descriptor_json(&salt, &pk_b64url)),
+            )
+            .mount(&server)
+            .await;
+        mount_challenge(&server).await;
+        // A wrong passphrase yields a wrong verifier hash, so the gate returns 401.
+        Mock::given(method("POST"))
+            .and(path("/api/account/keybundle"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"error": "Authentication failed"})),
+            )
+            .mount(&server)
+            .await;
+
+        let mut client = AccountSyncClient::with_base_url(server.uri());
+        let err =
+            enroll_with_passphrase(&mut client, EMAIL, &SecretString::new("wrong pass".into()))
+                .await
+                .err()
+                .unwrap();
+        assert!(matches!(err, EnrollmentError::WrongPassphrase));
+    }
+
+    #[tokio::test]
+    async fn tampered_wrapped_blob_fails_aead_as_wrong_passphrase() {
+        let server = MockServer::start().await;
+        let bundle = AccountKeyBundle::generate();
+        let pk_b64url = URL_SAFE_NO_PAD.encode(bundle.account_auth_pk());
+        let salt = generate_salt();
+        // Correct verifier hash (gate passes) but a wrapped blob that fails to unwrap.
+        let mut wrapped = decode_blob_standard(&wrap_for(&bundle, &salt, PASSPHRASE)).unwrap();
+        let last = wrapped.len() - 1;
+        wrapped[last] ^= 0xFF;
+        let tampered_blob = encode_blob_standard(&wrapped);
+
+        Mock::given(method("GET"))
+            .and(path("/api/account/bootstrap"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(descriptor_json(&salt, &pk_b64url)),
+            )
+            .mount(&server)
+            .await;
+        mount_challenge(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/account/keybundle"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "wrapped_keys": [{ "kind": "passphrase", "blob": tampered_blob }],
+            })))
+            .mount(&server)
+            .await;
+
+        let mut client = AccountSyncClient::with_base_url(server.uri());
+        let err = enroll_with_passphrase(&mut client, EMAIL, &SecretString::new(PASSPHRASE.into()))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, EnrollmentError::WrongPassphrase));
+    }
+
+    #[tokio::test]
+    async fn mismatched_descriptor_key_is_rejected() {
+        let server = MockServer::start().await;
+        let bundle = AccountKeyBundle::generate();
+        let salt = generate_salt();
+        let wrapped_blob = wrap_for(&bundle, &salt, PASSPHRASE);
+        // The descriptor advertises a DIFFERENT account auth key than the trousseau holds.
+        let other_pk = URL_SAFE_NO_PAD.encode(AccountKeyBundle::generate().account_auth_pk());
+
+        Mock::given(method("GET"))
+            .and(path("/api/account/bootstrap"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(descriptor_json(&salt, &other_pk)),
+            )
+            .mount(&server)
+            .await;
+        mount_challenge(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/account/keybundle"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "wrapped_keys": [{ "kind": "passphrase", "blob": wrapped_blob }],
+            })))
+            .mount(&server)
+            .await;
+
+        let mut client = AccountSyncClient::with_base_url(server.uri());
+        let err = enroll_with_passphrase(&mut client, EMAIL, &SecretString::new(PASSPHRASE.into()))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, EnrollmentError::DescriptorMismatch));
+    }
+
+    #[tokio::test]
+    async fn downgraded_kdf_profile_is_refused() {
+        let server = MockServer::start().await;
+        let bundle = AccountKeyBundle::generate();
+        let pk_b64url = URL_SAFE_NO_PAD.encode(bundle.account_auth_pk());
+        let salt = generate_salt();
+        let mut descriptor = descriptor_json(&salt, &pk_b64url);
+        descriptor["kdf_params"]["algo"] = serde_json::json!("pbkdf2");
+
+        Mock::given(method("GET"))
+            .and(path("/api/account/bootstrap"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(descriptor))
+            .mount(&server)
+            .await;
+
+        let mut client = AccountSyncClient::with_base_url(server.uri());
+        let err = enroll_with_passphrase(&mut client, EMAIL, &SecretString::new(PASSPHRASE.into()))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, EnrollmentError::UnsupportedProfile(_)));
+    }
+}

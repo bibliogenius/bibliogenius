@@ -121,6 +121,15 @@ impl WrapKind {
             Self::Recovery => BUNDLE_AAD_RECOVERY,
         }
     }
+
+    /// The on-the-wire `kind` label the hub stores for this wrapped copy
+    /// (matches `WrappedAccountKey::KIND_*` on the hub).
+    pub fn wire_kind(self) -> &'static str {
+        match self {
+            Self::Passphrase => "passphrase",
+            Self::Recovery => "recovery",
+        }
+    }
 }
 
 /// The account trousseau: random keys shared by all devices of an account, decrypted
