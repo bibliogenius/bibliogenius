@@ -2004,9 +2004,21 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             account_id TEXT PRIMARY KEY,
             pull_cursor INTEGER NOT NULL DEFAULT 0,
             push_version INTEGER NOT NULL DEFAULT 0,
+            registry_seq INTEGER NOT NULL DEFAULT 0,
             last_synced_at TEXT
         )"#
             .to_owned(),
+        ))
+        .await;
+
+    // Additive: `registry_seq` is the last adopted signed-registry version, used as the
+    // anti-rollback floor for H3 device-registry adoption. A table created before this
+    // column existed gets it here; the ALTER is a no-op (ignored error) once present.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE account_sync_state ADD COLUMN registry_seq INTEGER NOT NULL DEFAULT 0"
+                .to_owned(),
         ))
         .await;
 

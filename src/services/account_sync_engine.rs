@@ -25,11 +25,13 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use ed25519_dalek::VerifyingKey;
+
 use crate::crypto::account_keys::AccountKeyBundle;
-use crate::crypto::device_registry::DeviceRegistry;
+use crate::crypto::device_registry::{DeviceEntry, DeviceRegistry};
 use crate::services::account_sync_client::{
-    AccountSyncClient, LanePush, PullResponse, PushResponse, decode_blob_standard, encode_b64url,
-    encode_blob_standard,
+    AccountSyncClient, LanePush, PullResponse, PushResponse, RegistryResponse,
+    decode_blob_standard, encode_b64url, encode_blob_standard,
 };
 
 /// Hub pull page size (the hub caps at 200).
@@ -49,6 +51,9 @@ pub enum SyncError {
     Merge(String),
     State(String),
     Encoding(String),
+    /// Device-registry verification/adoption failed (bad signature, wrong account, or a
+    /// rollback / replay attempt).
+    Registry(String),
 }
 
 impl std::fmt::Display for SyncError {
@@ -59,6 +64,7 @@ impl std::fmt::Display for SyncError {
             Self::Merge(e) => write!(f, "Merge error: {e}"),
             Self::State(e) => write!(f, "Sync state error: {e}"),
             Self::Encoding(e) => write!(f, "Encoding error: {e}"),
+            Self::Registry(e) => write!(f, "Device registry error: {e}"),
         }
     }
 }
@@ -147,6 +153,12 @@ pub trait LaneTransport: Send + Sync {
         cursor: i64,
         limit: u32,
     ) -> std::result::Result<PullResponse, SyncError>;
+    /// Fetch the opaque signed device registry (H3). `blob` is `None` if never published.
+    async fn fetch_registry(&self) -> std::result::Result<RegistryResponse, SyncError>;
+    /// Publish a new opaque signed registry blob (standard base64); returns the hub's
+    /// new server-side `registry_seq` (informational — the signed seq inside the blob is
+    /// the source of truth for anti-rollback).
+    async fn publish_registry(&self, blob_b64: &str) -> std::result::Result<i64, SyncError>;
 }
 
 #[async_trait]
@@ -171,6 +183,18 @@ impl LaneTransport for AccountSyncClient {
             .await
             .map_err(|e| SyncError::Transport(e.to_string()))
     }
+
+    async fn fetch_registry(&self) -> std::result::Result<RegistryResponse, SyncError> {
+        AccountSyncClient::get_registry(self)
+            .await
+            .map_err(|e| SyncError::Transport(e.to_string()))
+    }
+
+    async fn publish_registry(&self, blob_b64: &str) -> std::result::Result<i64, SyncError> {
+        AccountSyncClient::post_registry(self, blob_b64)
+            .await
+            .map_err(|e| SyncError::Transport(e.to_string()))
+    }
 }
 
 /// Persists the per-account sync cursors. SQLite in production; in-memory in tests.
@@ -189,6 +213,14 @@ pub trait SyncStateStore: Send + Sync {
         &self,
         account_id: &str,
         version: i64,
+    ) -> std::result::Result<(), SyncError>;
+    /// Last adopted signed-registry `registry_seq` (0 = none adopted yet). The anti-
+    /// rollback floor passed to [`DeviceRegistry::adopt`].
+    async fn registry_seq(&self, account_id: &str) -> std::result::Result<i64, SyncError>;
+    async fn set_registry_seq(
+        &self,
+        account_id: &str,
+        seq: i64,
     ) -> std::result::Result<(), SyncError>;
 }
 
@@ -354,6 +386,85 @@ pub async fn sync_once(
 }
 
 // ---------------------------------------------------------------------------
+// Device registry (H3): fetch/adopt and enroll
+// ---------------------------------------------------------------------------
+
+/// Fetch the signed registry from the hub and adopt it: verify the account signature and
+/// reject a cross-account or rolled-back registry (anti-rollback compares against the
+/// persisted signed `registry_seq`, NEVER the hub's server-side counter). Returns `None`
+/// if the hub has no registry yet. Does NOT persist — the caller decides which seq becomes
+/// the new floor (the adopted one on refresh, or the bumped one after enroll publishes).
+async fn fetch_and_adopt(
+    transport: &dyn LaneTransport,
+    state: &dyn SyncStateStore,
+    account_id: &str,
+    account_key: &VerifyingKey,
+) -> std::result::Result<Option<DeviceRegistry>, SyncError> {
+    let Some(blob_b64) = transport.fetch_registry().await?.blob else {
+        return Ok(None);
+    };
+    let blob = decode_blob_standard(&blob_b64).map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let last_seen = state.registry_seq(account_id).await?.max(0) as u64;
+    DeviceRegistry::adopt(&blob, account_key, account_id, last_seen)
+        .map(Some)
+        .map_err(|e| SyncError::Registry(e.to_string()))
+}
+
+/// Fetch the signed device registry from the hub, adopt it, and persist the adopted
+/// signed `registry_seq`. Returns the verified registry to populate
+/// [`SyncContext::authorized_devices`] before [`sync_once`] (so H3 is enforceable);
+/// `None` means the hub has no registry yet (e.g. before the first device signs up).
+pub async fn refresh_authorized_devices(
+    transport: &dyn LaneTransport,
+    state: &dyn SyncStateStore,
+    account_id: &str,
+    account_key: &VerifyingKey,
+) -> std::result::Result<Option<DeviceRegistry>, SyncError> {
+    let Some(reg) = fetch_and_adopt(transport, state, account_id, account_key).await? else {
+        return Ok(None);
+    };
+    state
+        .set_registry_seq(account_id, reg.registry_seq as i64)
+        .await?;
+    Ok(Some(reg))
+}
+
+/// Enroll `new_device` into the account's signed registry: fetch the current registry,
+/// adopt it (so we always extend the latest signed version, never a stale one), append
+/// the device, bump the signed `registry_seq`, re-sign with the account key, and publish.
+/// Persists the new seq and returns the updated registry.
+///
+/// Only an already-authorized device (it holds the trousseau / account signing key) can
+/// do this; the hub stores the blob opaquely and cannot forge or reorder it. Returns
+/// [`SyncError::Registry`] if the hub has no registry yet (the first one is created at
+/// signup, not here).
+pub async fn enroll_device(
+    transport: &dyn LaneTransport,
+    state: &dyn SyncStateStore,
+    bundle: &AccountKeyBundle,
+    account_id: &str,
+    new_device: DeviceEntry,
+) -> std::result::Result<DeviceRegistry, SyncError> {
+    let current = fetch_and_adopt(transport, state, account_id, &bundle.verifying_key())
+        .await?
+        .ok_or_else(|| SyncError::Registry("no registry to extend".to_string()))?;
+
+    let updated = current.with_device(new_device);
+    let signed = updated
+        .sign(&bundle.signing_key())
+        .map_err(|e| SyncError::Crypto(e.to_string()))?;
+    transport
+        .publish_registry(&encode_blob_standard(&signed))
+        .await?;
+    // Persist the seq we just signed so our own publish is not seen as a rollback on the
+    // next refresh (the hub's returned counter is not the signed seq, so we ignore it).
+    state
+        .set_registry_seq(account_id, updated.registry_seq as i64)
+        .await?;
+    Ok(updated)
+}
+
+// ---------------------------------------------------------------------------
 // SQLite-backed sync state (migration 080)
 // ---------------------------------------------------------------------------
 
@@ -433,6 +544,16 @@ impl SyncStateStore for DbSyncStateStore {
     ) -> std::result::Result<(), SyncError> {
         self.upsert(account_id, "push_version", version).await
     }
+    async fn registry_seq(&self, account_id: &str) -> std::result::Result<i64, SyncError> {
+        self.column(account_id, "registry_seq").await
+    }
+    async fn set_registry_seq(
+        &self,
+        account_id: &str,
+        seq: i64,
+    ) -> std::result::Result<(), SyncError> {
+        self.upsert(account_id, "registry_seq", seq).await
+    }
 }
 
 #[cfg(test)]
@@ -448,6 +569,7 @@ mod tests {
     struct MemState {
         pull: Mutex<HashMap<String, i64>>,
         push: Mutex<HashMap<String, i64>>,
+        registry: Mutex<HashMap<String, i64>>,
     }
 
     #[async_trait]
@@ -474,6 +596,20 @@ mod tests {
             self.push.lock().unwrap().insert(account_id.to_string(), v);
             Ok(())
         }
+        async fn registry_seq(&self, account_id: &str) -> std::result::Result<i64, SyncError> {
+            Ok(*self.registry.lock().unwrap().get(account_id).unwrap_or(&0))
+        }
+        async fn set_registry_seq(
+            &self,
+            account_id: &str,
+            seq: i64,
+        ) -> std::result::Result<(), SyncError> {
+            self.registry
+                .lock()
+                .unwrap()
+                .insert(account_id.to_string(), seq);
+            Ok(())
+        }
     }
 
     // --- in-memory stateful hub (mirrors the ADR-043 lane semantics) ---
@@ -492,6 +628,9 @@ mod tests {
         // key: (opaque_id, device_id)
         lanes: Mutex<HashMap<(String, String), HubLane>>,
         seq: Mutex<i64>,
+        // Opaque signed registry blob (standard base64) + the hub's own monotonic counter.
+        registry_blob: Mutex<Option<String>>,
+        registry_seq: Mutex<i64>,
     }
 
     #[async_trait]
@@ -554,6 +693,21 @@ mod tests {
                 lanes,
                 next_cursor: next,
             })
+        }
+
+        async fn fetch_registry(&self) -> std::result::Result<RegistryResponse, SyncError> {
+            Ok(RegistryResponse {
+                blob: self.registry_blob.lock().unwrap().clone(),
+                registry_seq: *self.registry_seq.lock().unwrap(),
+            })
+        }
+
+        async fn publish_registry(&self, blob_b64: &str) -> std::result::Result<i64, SyncError> {
+            // The hub stores the blob opaquely and bumps its own counter (no CAS).
+            let mut seq = self.registry_seq.lock().unwrap();
+            *seq += 1;
+            *self.registry_blob.lock().unwrap() = Some(blob_b64.to_string());
+            Ok(*seq)
         }
     }
 
@@ -877,7 +1031,8 @@ mod tests {
             db.get_database_backend(),
             "CREATE TABLE account_sync_state (account_id TEXT PRIMARY KEY, \
              pull_cursor INTEGER NOT NULL DEFAULT 0, \
-             push_version INTEGER NOT NULL DEFAULT 0, last_synced_at TEXT)"
+             push_version INTEGER NOT NULL DEFAULT 0, \
+             registry_seq INTEGER NOT NULL DEFAULT 0, last_synced_at TEXT)"
                 .to_owned(),
         ))
         .await
@@ -888,20 +1043,152 @@ mod tests {
         // Unknown account defaults to 0.
         assert_eq!(store.pull_cursor("acct-1").await.unwrap(), 0);
         assert_eq!(store.push_version("acct-1").await.unwrap(), 0);
+        assert_eq!(store.registry_seq("acct-1").await.unwrap(), 0);
 
         // Insert path, then read back.
         store.set_pull_cursor("acct-1", 7).await.unwrap();
         store.set_push_version("acct-1", 12).await.unwrap();
+        store.set_registry_seq("acct-1", 3).await.unwrap();
         assert_eq!(store.pull_cursor("acct-1").await.unwrap(), 7);
         assert_eq!(store.push_version("acct-1").await.unwrap(), 12);
+        assert_eq!(store.registry_seq("acct-1").await.unwrap(), 3);
 
-        // Upsert path: updating one column leaves the other intact (ON CONFLICT).
+        // Upsert path: updating one column leaves the others intact (ON CONFLICT).
         store.set_pull_cursor("acct-1", 9).await.unwrap();
         assert_eq!(store.pull_cursor("acct-1").await.unwrap(), 9);
         assert_eq!(store.push_version("acct-1").await.unwrap(), 12);
+        assert_eq!(store.registry_seq("acct-1").await.unwrap(), 3);
 
         // Distinct accounts are isolated.
         assert_eq!(store.pull_cursor("acct-2").await.unwrap(), 0);
+    }
+
+    // --- device registry: fetch/adopt + enroll ---
+
+    /// Sign `reg` with the account key and publish it to the in-memory hub.
+    async fn seed_registry(hub: &MemHub, reg: &DeviceRegistry, bundle: &AccountKeyBundle) {
+        let signed = reg.sign(&bundle.signing_key()).unwrap();
+        hub.publish_registry(&encode_blob_standard(&signed))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_adopts_registry_and_persists_signed_seq() {
+        let bundle = AccountKeyBundle::generate();
+        let hub = MemHub::default();
+        let state = MemState::default();
+        let mut reg = registry_for(&["devA"]);
+        reg.registry_seq = 4;
+        seed_registry(&hub, &reg, &bundle).await;
+
+        let adopted = refresh_authorized_devices(&hub, &state, "acct-1", &bundle.verifying_key())
+            .await
+            .unwrap()
+            .expect("registry present");
+
+        assert!(adopted.is_authorized("devA"));
+        // The SIGNED seq (4) is persisted, not the hub's own counter (1 after one publish).
+        assert_eq!(state.registry_seq("acct-1").await.unwrap(), 4);
+
+        // A second refresh of the same registry is idempotent (seq == last_seen is allowed).
+        assert!(
+            refresh_authorized_devices(&hub, &state, "acct-1", &bundle.verifying_key())
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_returns_none_when_hub_has_no_registry() {
+        let bundle = AccountKeyBundle::generate();
+        let hub = MemHub::default();
+        let state = MemState::default();
+        let got = refresh_authorized_devices(&hub, &state, "acct-1", &bundle.verifying_key())
+            .await
+            .unwrap();
+        assert!(got.is_none());
+        assert_eq!(state.registry_seq("acct-1").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_a_rolled_back_registry() {
+        let bundle = AccountKeyBundle::generate();
+        let hub = MemHub::default();
+        let state = MemState::default();
+        // We have already adopted seq 5; the hub serves an older validly-signed seq-2.
+        state.set_registry_seq("acct-1", 5).await.unwrap();
+        let mut stale = registry_for(&["devA"]);
+        stale.registry_seq = 2;
+        seed_registry(&hub, &stale, &bundle).await;
+
+        let err = refresh_authorized_devices(&hub, &state, "acct-1", &bundle.verifying_key())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SyncError::Registry(_)));
+        // The rollback attempt must not lower our persisted floor.
+        assert_eq!(state.registry_seq("acct-1").await.unwrap(), 5);
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_a_foreign_account_signature() {
+        let bundle = AccountKeyBundle::generate();
+        let attacker = AccountKeyBundle::generate();
+        let hub = MemHub::default();
+        let state = MemState::default();
+        seed_registry(&hub, &registry_for(&["devA"]), &bundle).await;
+
+        // Verifying against a different account key must fail (a malicious hub forgery).
+        let err = refresh_authorized_devices(&hub, &state, "acct-1", &attacker.verifying_key())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SyncError::Registry(_)));
+    }
+
+    #[tokio::test]
+    async fn enroll_appends_device_and_republishes_signed_registry() {
+        let bundle = AccountKeyBundle::generate();
+        let hub = MemHub::default();
+        let state = MemState::default();
+        seed_registry(&hub, &registry_for(&["devA"]), &bundle).await; // seq 1
+
+        let new_device = DeviceEntry {
+            device_id: "devB".to_string(),
+            ed25519_pk: [9u8; 32],
+            x25519_pk: [8u8; 32],
+            name: "new phone".to_string(),
+        };
+        let updated = enroll_device(&hub, &state, &bundle, "acct-1", new_device)
+            .await
+            .unwrap();
+        assert_eq!(updated.registry_seq, 2);
+        assert!(updated.is_authorized("devA") && updated.is_authorized("devB"));
+        assert_eq!(state.registry_seq("acct-1").await.unwrap(), 2);
+
+        // The republished blob on the hub verifies and carries both devices.
+        let resp = hub.fetch_registry().await.unwrap();
+        let blob = decode_blob_standard(&resp.blob.unwrap()).unwrap();
+        let published = DeviceRegistry::verify(&blob, &bundle.verifying_key()).unwrap();
+        assert!(published.is_authorized("devB"));
+        assert_eq!(published.registry_seq, 2);
+    }
+
+    #[tokio::test]
+    async fn enroll_without_existing_registry_errors() {
+        let bundle = AccountKeyBundle::generate();
+        let hub = MemHub::default();
+        let state = MemState::default();
+        let new_device = DeviceEntry {
+            device_id: "devB".to_string(),
+            ed25519_pk: [0u8; 32],
+            x25519_pk: [0u8; 32],
+            name: "new".to_string(),
+        };
+        let err = enroll_device(&hub, &state, &bundle, "acct-1", new_device)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SyncError::Registry(_)));
     }
 
     // C2 spike: the SAME sync_once pipeline, driven by the REAL cr-sqlite engine

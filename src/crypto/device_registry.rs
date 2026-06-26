@@ -55,6 +55,25 @@ impl DeviceRegistry {
         self.devices.iter().find(|d| d.device_id == device_id)
     }
 
+    /// Return a new registry with `entry` added (or replaced, if its `device_id` is
+    /// already present) and `registry_seq` bumped by one — the form an authorized device
+    /// signs and publishes to enroll another device. Because the seq advances, a receiver
+    /// adopts it as newer (never a rollback). The result is unsigned; call [`Self::sign`].
+    pub fn with_device(&self, entry: DeviceEntry) -> DeviceRegistry {
+        let mut devices: Vec<DeviceEntry> = self
+            .devices
+            .iter()
+            .filter(|d| d.device_id != entry.device_id)
+            .cloned()
+            .collect();
+        devices.push(entry);
+        DeviceRegistry {
+            account_id: self.account_id.clone(),
+            registry_seq: self.registry_seq + 1,
+            devices,
+        }
+    }
+
     /// Serialize and sign with the account key. Returns the opaque blob to publish.
     pub fn sign(&self, signing_key: &SigningKey) -> Result<Vec<u8>, CryptoError> {
         let payload =
@@ -195,6 +214,28 @@ mod tests {
         assert!(!reg.is_authorized("devX"));
         assert_eq!(reg.device("devA").unwrap().name, "device devA");
         assert!(reg.device("devX").is_none());
+    }
+
+    #[test]
+    fn with_device_appends_and_bumps_seq() {
+        let reg = registry(); // seq 3, devA + devB
+        let extended = reg.with_device(entry("devC"));
+        assert_eq!(extended.registry_seq, 4);
+        assert!(extended.is_authorized("devC"));
+        assert_eq!(extended.devices.len(), 3);
+        // The source registry is untouched (returns a new value).
+        assert_eq!(reg.devices.len(), 2);
+    }
+
+    #[test]
+    fn with_device_replaces_existing_id_without_duplicating() {
+        let reg = registry(); // devA has name "device devA"
+        let mut renamed = entry("devA");
+        renamed.name = "renamed".to_string();
+        let updated = reg.with_device(renamed);
+        assert_eq!(updated.devices.len(), 2, "devA must not be duplicated");
+        assert_eq!(updated.device("devA").unwrap().name, "renamed");
+        assert_eq!(updated.registry_seq, 4);
     }
 
     #[test]
