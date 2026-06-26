@@ -1,1 +1,2 @@
 4f33f05d9dc1f4bf91da89f37b86cb93f8252141cec6b046c1b88f8ab7ff7a48  crsqlite.dylib
+8342a905eba9c3a5197aa95c80def46870bce2a26d37d0f5eab01aab1aa74157  crsqlite-aarch64-apple-darwin.a
