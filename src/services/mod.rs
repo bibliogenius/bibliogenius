@@ -4,6 +4,7 @@
 //! Services can be called directly via FFI or through Axum handlers.
 
 pub mod account_sync_client;
+pub mod account_sync_engine;
 pub mod book_service;
 pub mod catalog_events;
 pub mod catalog_notification;

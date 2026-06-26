@@ -1992,6 +1992,24 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             .await;
     }
 
+    // Migration 080: per-account sync cursors for the account E2EE sync layer
+    // (ST-05). One row per account: `pull_cursor` is the hub `change_seq`
+    // high-water mark consumed so far, `push_version` is the local cr-sqlite
+    // `db_version` up to which our own changes were already pushed. Purely
+    // additive and isolated from the replicated entity tables.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"CREATE TABLE IF NOT EXISTS account_sync_state (
+            account_id TEXT PRIMARY KEY,
+            pull_cursor INTEGER NOT NULL DEFAULT 0,
+            push_version INTEGER NOT NULL DEFAULT 0,
+            last_synced_at TEXT
+        )"#
+            .to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
 
