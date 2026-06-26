@@ -850,9 +850,15 @@ mod tests {
         eng_b.upsert("book-2", "only on B").unwrap();
 
         for _ in 0..2 {
-            sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA")).await.unwrap();
-            sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB")).await.unwrap();
-            sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA")).await.unwrap();
+            sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
+                .await
+                .unwrap();
+            sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+                .await
+                .unwrap();
+            sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
+                .await
+                .unwrap();
         }
 
         let snap_a = eng_a.snapshot().unwrap();

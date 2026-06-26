@@ -43,6 +43,56 @@ pub fn book_dedup_key(
     )
 }
 
+/// Natural-identity key for a **contact** (ST-05 merge): normalized `email`, else
+/// normalized `phone` (digits only), else normalized `name`. Returns `None` when no
+/// usable signal exists, so the merge keeps the rows distinct (the safe failure mode).
+///
+/// Signals are prefixed (`email:`/`phone:`/`name:`) so a phone and a name that happen
+/// to normalize to the same string never collide.
+pub fn contact_dedup_key(email: Option<&str>, phone: Option<&str>, name: &str) -> Option<String> {
+    if let Some(e) = normalized_email(email) {
+        return Some(format!("email:{e}"));
+    }
+    if let Some(p) = normalized_phone(phone) {
+        return Some(format!("phone:{p}"));
+    }
+    let n = normalize_text(name);
+    (!n.is_empty()).then(|| format!("name:{n}"))
+}
+
+/// Natural-identity key for an **author** (ST-05 merge): normalized `name`, or `None`
+/// when the name is empty after normalization.
+pub fn author_dedup_key(name: &str) -> Option<String> {
+    normalized_name_key(name)
+}
+
+/// Natural-identity key for a **tag/shelf** (ST-05 merge): normalized `name`, or `None`
+/// when empty. `tags.name` is already locally UNIQUE; this correlates it across devices.
+pub fn tag_dedup_key(name: &str) -> Option<String> {
+    normalized_name_key(name)
+}
+
+/// Shared single-signal name key (author/tag): normalized name, `None` if empty.
+fn normalized_name_key(name: &str) -> Option<String> {
+    let n = normalize_text(name);
+    (!n.is_empty()).then_some(n)
+}
+
+/// Lowercased, trimmed email, or `None` when absent/empty. Case is folded (mail
+/// addresses are treated case-insensitively); nothing else is rewritten, so a
+/// gmail-style dotted alias is an accepted under-dedup miss, never a wrong merge.
+fn normalized_email(raw: Option<&str>) -> Option<String> {
+    let e = raw?.trim().to_lowercase();
+    (!e.is_empty()).then_some(e)
+}
+
+/// Digits-only phone, or `None` when absent/empty. Formatting and separators are
+/// dropped; international vs national forms (`+33…` vs `0…`) are an accepted miss.
+fn normalized_phone(raw: Option<&str>) -> Option<String> {
+    let p: String = raw?.chars().filter(|c| c.is_ascii_digit()).collect();
+    (!p.is_empty()).then_some(p)
+}
+
 /// Canonical ISBN-13 for `raw`, or `None` when absent, empty, or unparseable.
 fn normalized_isbn(raw: Option<&str>) -> Option<String> {
     let raw = raw?.trim();
@@ -151,5 +201,62 @@ mod tests {
         let a = book_dedup_key(None, "L'Étranger", Some("Albert  Camus"), Some(1942));
         let b = book_dedup_key(None, "l'étranger!", Some("albert camus"), Some(1942));
         assert_eq!(a, b);
+    }
+
+    // --- contact ---
+
+    #[test]
+    fn contact_same_email_matches_case_insensitively() {
+        let a = contact_dedup_key(Some("  Alice@Example.COM "), None, "Alice");
+        let b = contact_dedup_key(Some("alice@example.com"), Some("0612345678"), "A. Liddell");
+        assert_eq!(a, b, "email wins and is case/space-insensitive");
+        assert_eq!(a.as_deref(), Some("email:alice@example.com"));
+    }
+
+    #[test]
+    fn contact_phone_matches_across_formatting() {
+        let a = contact_dedup_key(None, Some("+33 6 12 34 56 78"), "Bob");
+        let b = contact_dedup_key(None, Some("+33612345678"), "Robert");
+        assert_eq!(a, b);
+        assert_eq!(a.as_deref(), Some("phone:33612345678"));
+    }
+
+    #[test]
+    fn contact_falls_back_to_name_then_none() {
+        let by_name = contact_dedup_key(None, None, "  Carol   Danvers ");
+        assert_eq!(by_name.as_deref(), Some("name:carol danvers"));
+        // No email, no phone, blank name -> no usable identity.
+        assert_eq!(contact_dedup_key(None, Some("  "), "   "), None);
+    }
+
+    #[test]
+    fn contact_phone_and_name_do_not_collide() {
+        // A name normalizing to "123" must not equal a phone "123".
+        let phone = contact_dedup_key(None, Some("123"), "ignored");
+        let name = contact_dedup_key(None, None, "123");
+        assert_ne!(phone, name);
+    }
+
+    // --- author / tag ---
+
+    #[test]
+    fn author_key_normalizes_and_rejects_empty() {
+        assert_eq!(
+            author_dedup_key("Ursula K.  Le Guin"),
+            author_dedup_key("ursula k le guin!")
+        );
+        assert_eq!(author_dedup_key("   "), None);
+    }
+
+    #[test]
+    fn tag_key_normalizes_and_rejects_empty() {
+        // Same source string, differing only by case / punctuation / whitespace.
+        // (A hyphen vs a space is a different source -> accepted miss, like diacritics.)
+        assert_eq!(
+            tag_dedup_key("Science Fiction"),
+            tag_dedup_key("  science   fiction! ")
+        );
+        assert_ne!(tag_dedup_key("sci-fi"), tag_dedup_key("fantasy"));
+        assert_eq!(tag_dedup_key(""), None);
     }
 }

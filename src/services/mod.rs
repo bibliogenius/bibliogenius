@@ -5,13 +5,13 @@
 
 pub mod account_sync_client;
 pub mod account_sync_engine;
-#[cfg(feature = "crsqlite")]
-pub mod crsqlite_engine;
 pub mod book_service;
 pub mod catalog_events;
 pub mod catalog_notification;
 pub mod collection_service;
 pub mod contact_service;
+#[cfg(feature = "crsqlite")]
+pub mod crsqlite_engine;
 pub mod crypto_service;
 pub mod delta_service;
 pub mod e2ee_transport;
