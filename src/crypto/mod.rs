@@ -7,6 +7,7 @@
 //! - Replay protection via nonce store (B4)
 //! - O(1) sender identification via sender_hint (B5)
 
+pub mod account_keys;
 pub mod encryption;
 pub mod envelope;
 pub mod errors;
