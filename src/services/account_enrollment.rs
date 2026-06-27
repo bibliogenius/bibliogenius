@@ -49,6 +49,17 @@ const ARGON2_VERSION_0X13: u32 = 0x13;
 /// The KDF algorithm this client supports for the account Master Key.
 const KDF_ALGO_ARGON2ID: &str = "argon2id";
 
+// Minimum Argon2id cost this client accepts from a downloaded account descriptor
+// (SECURITY_GUIDELINES F3). The descriptor's KDF params come from the hub, so a
+// malicious or compromised hub must not be able to downgrade them to make offline
+// passphrase brute-force cheap. The floor is the current production baseline
+// (account_keys: 64 MiB / t=3 / p=1) but is kept as a SEPARATE, stable minimum so
+// accounts created at the baseline stay enrollable if production later raises its
+// own cost. p is pinned exactly (WASM single-thread parity, ST-07).
+const MIN_ARGON2_M_COST: u32 = 65536; // 64 MiB
+const MIN_ARGON2_T_COST: u32 = 3;
+const REQUIRED_ARGON2_P_COST: u32 = 1;
+
 /// Outcome of a successful Path A enrollment: the unlocked trousseau plus the opaque
 /// account id needed to key blobs. On return, `client` holds an authenticated session.
 pub struct EnrolledAccount {
@@ -243,6 +254,13 @@ fn validate_profile(descriptor: &AccountDescriptor) -> Result<Argon2Params, Enro
             descriptor.schema_version
         )));
     }
+    // KDF cost floor: refuse a hub-supplied profile weaker than the baseline, so a
+    // downgrade cannot cheapen offline passphrase brute-force (SECURITY_GUIDELINES F3).
+    if *m < MIN_ARGON2_M_COST || *t < MIN_ARGON2_T_COST || *p != REQUIRED_ARGON2_P_COST {
+        return Err(EnrollmentError::UnsupportedProfile(format!(
+            "KDF cost below floor (m={m}, t={t}, p={p})"
+        )));
+    }
     Ok(Argon2Params {
         m_cost: *m,
         t_cost: *t,
@@ -333,13 +351,15 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    // Cheap Argon2 params so enrollment tests stay fast; the mock hub serves these same
-    // values, so the client derives exactly the Master Key that wrapped the bundle.
-    fn fast_params() -> Argon2Params {
+    // Floor-valid Argon2 params (must match the mock hub's descriptor so the client
+    // derives exactly the Master Key that wrapped the bundle). These are at the
+    // accepted cost floor now that `validate_profile` enforces it, so happy-path
+    // enrollment tests run a real 64 MiB derivation.
+    fn valid_kdf_params() -> Argon2Params {
         Argon2Params {
-            m_cost: 256,
-            t_cost: 1,
-            p_cost: 1,
+            m_cost: MIN_ARGON2_M_COST,
+            t_cost: MIN_ARGON2_T_COST,
+            p_cost: REQUIRED_ARGON2_P_COST,
         }
     }
 
@@ -348,7 +368,7 @@ mod tests {
 
     /// Build the wrapped passphrase copy a freshly signed-up account would store.
     fn wrap_for(bundle: &AccountKeyBundle, salt: &[u8; 32], passphrase: &str) -> String {
-        let mk = derive_master_key(passphrase.as_bytes(), salt, fast_params()).unwrap();
+        let mk = derive_master_key(passphrase.as_bytes(), salt, valid_kdf_params()).unwrap();
         let kwk = derive_kwk(&mk).unwrap();
         let wrapped = wrap_bundle(bundle, &kwk, WrapKind::Passphrase).unwrap();
         encode_blob_standard(&wrapped)
@@ -364,9 +384,9 @@ mod tests {
             &pk,
             "argon2id",
             19,
-            256,
-            1,
-            1,
+            MIN_ARGON2_M_COST,
+            MIN_ARGON2_T_COST,
+            REQUIRED_ARGON2_P_COST,
             1,
             "passphrase",
             "AES-256-GCM",
@@ -374,7 +394,7 @@ mod tests {
         let sig = signer.sign_descriptor(&canonical);
         serde_json::json!({
             "account_salt": URL_SAFE_NO_PAD.encode(salt),
-            "kdf_params": {"algo": "argon2id", "version": 19, "m": 256, "t": 1, "p": 1},
+            "kdf_params": {"algo": "argon2id", "version": 19, "m": MIN_ARGON2_M_COST, "t": MIN_ARGON2_T_COST, "p": REQUIRED_ARGON2_P_COST},
             "schema_version": 1,
             "auth_method": "passphrase",
             "aead_alg": "AES-256-GCM",
@@ -561,6 +581,32 @@ mod tests {
         let salt = generate_salt();
         let mut descriptor = descriptor_json(&salt, &bundle);
         descriptor["kdf_params"]["algo"] = serde_json::json!("pbkdf2");
+
+        Mock::given(method("GET"))
+            .and(path("/api/account/bootstrap"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(descriptor))
+            .mount(&server)
+            .await;
+
+        let mut client = AccountSyncClient::with_base_url(server.uri());
+        let err = enroll_with_passphrase(&mut client, EMAIL, &SecretString::new(PASSPHRASE.into()))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, EnrollmentError::UnsupportedProfile(_)));
+    }
+
+    #[tokio::test]
+    async fn weak_kdf_cost_is_refused() {
+        // A hostile hub serves a structurally valid descriptor but with a downgraded
+        // Argon2 memory cost (256 KiB instead of the 64 MiB floor) to make offline
+        // brute-force of the passphrase cheap. validate_profile must reject it before
+        // any derivation, so the now-stale descriptor_sig is never even reached.
+        let server = MockServer::start().await;
+        let bundle = AccountKeyBundle::generate();
+        let salt = generate_salt();
+        let mut descriptor = descriptor_json(&salt, &bundle);
+        descriptor["kdf_params"]["m"] = serde_json::json!(256);
 
         Mock::given(method("GET"))
             .and(path("/api/account/bootstrap"))
