@@ -72,6 +72,9 @@ pub struct CrSqliteMergeEngine {
 }
 
 /// Path to the vendored cr-sqlite dynamic library (dev/test path only; see module docs).
+// WS-2 hardening: the `.dylib` suffix is macOS-only. A Linux dev path needs `.so`
+// (gate on `cfg!(target_os = ...)`). Fine for now: WS-0 is the macOS dev/test path,
+// and production (WS-5) links statically instead of loading this file at all.
 fn vendored_extension_path() -> String {
     format!(
         "{}/vendor/crsqlite/crsqlite.dylib",
@@ -159,6 +162,8 @@ impl CrSqliteMergeEngine {
     }
 
     /// Test helper: ordered `(uuid, title)` snapshot of the live table.
+    // WS-2 hardening: `title` is read as a non-null `String`; if this helper outlives the
+    // spike to inspect post-merge states where a column can be NULL, switch to `Option`.
     pub async fn snapshot(&self) -> Result<Vec<(String, String)>, MergeEngineError> {
         let rows = self
             .db
@@ -243,6 +248,9 @@ impl MergeEngine for CrSqliteMergeEngine {
         let rows: Vec<ChangeRow> = rmp_serde::from_slice(&change.changeset).map_err(err)?;
         let pool = self.db.get_sqlite_connection_pool();
         let mut tx = pool.begin().await.map_err(err)?;
+        // WS-2 hardening: `apply` is the ingestion hot path on the real DB. The per-row
+        // `.clone()` of each bound field below sidesteps sqlx's `'q` lifetime; revisit by
+        // binding references once this engine runs over the production library.
         for r in &rows {
             let mut q = sqlx::query(
                 "INSERT INTO crsql_changes \
