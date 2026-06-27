@@ -44,7 +44,7 @@ pub struct Model {
     /// contact loan). Stored as TEXT; see `BorrowSource` for the typed
     /// representation used across the code. NULL for non-borrowed copies.
     pub borrow_source: Option<String>,
-    /// Stable cross-device identifier (ST-03). Generated on insert by
+    /// Stable cross-device identifier. Generated on insert by
     /// `before_save`; backfilled on existing rows by migration 078.
     #[serde(default)]
     pub uuid: String,

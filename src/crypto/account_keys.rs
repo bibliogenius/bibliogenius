@@ -80,7 +80,7 @@ const DESCRIPTOR_DOMAIN: &[u8] = b"bg-acct-v1|descriptor";
 
 // Argon2id ACCOUNT profile (ADR-042 §3, §14/H4). DISTINCT from the device-local
 // profile in `encryption::derive_key_from_password` (which uses p=4): the account
-// KDF uses p=1 for WASM single-thread parity with the future web client (ST-07).
+// KDF uses p=1 for WASM single-thread parity with the future web client.
 const ACCT_ARGON2_M_COST: u32 = 65536; // 64 MiB
 const ACCT_ARGON2_T_COST: u32 = 3;
 const ACCT_ARGON2_P_COST: u32 = 1;

@@ -1910,14 +1910,14 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     }
 
     // Migration 078: Stable per-row identifiers (UUID v7) for the replicated
-    // entities (ST-03). Local INTEGER PKs are device-local and cannot correlate
+    // entities. Local INTEGER PKs are device-local and cannot correlate
     // the same row across devices — the root cause of the op-replay failure
     // (ADR-011) and a hard prerequisite of the hub E2EE-sync epic (decision D3).
     //
     // Purely additive: add a nullable `uuid TEXT`, backfill existing rows, and
     // enforce uniqueness via an index. Integer PKs and FKs are intentionally
     // left unchanged here — the switch to uuid-as-PK and the FK removal for
-    // cr-sqlite happen in ST-05, not in this migration.
+    // cr-sqlite happen in the account-sync work, not in this migration.
     for table in ["books", "copies", "authors", "contacts", "tags", "loans"] {
         // 1. Add the column (idempotent: error ignored if it already exists).
         let _ = db
@@ -1964,7 +1964,7 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
 
     // Migration 079: one-shot sweep of rows orphaned by deletions that ran
     // while a pooled connection had `foreign_keys` disabled, so the
-    // `ON DELETE CASCADE` to `peers` never fired (TICKET-fk-cascade-orphans).
+    // `ON DELETE CASCADE` to `peers` never fired (the foreign-key cascade-orphan bug).
     // The leak is fixed at the source (the directory-cache insert now isolates
     // its FK-off window to a dedicated connection), but pre-existing orphans
     // must be swept once. Runs after the extension-module tables exist.
@@ -1992,8 +1992,8 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             .await;
     }
 
-    // Migration 080: per-account sync cursors for the account E2EE sync layer
-    // (ST-05). One row per account: `pull_cursor` is the hub `change_seq`
+    // Migration 080: per-account sync cursors for the account E2EE sync layer.
+    // One row per account: `pull_cursor` is the hub `change_seq`
     // high-water mark consumed so far, `push_version` is the local cr-sqlite
     // `db_version` up to which our own changes were already pushed. Purely
     // additive and isolated from the replicated entity tables.
@@ -2050,7 +2050,7 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
 
 /// Remove rows orphaned by deletions that ran with SQLite `foreign_keys`
 /// disabled, so an `ON DELETE CASCADE` to the `peers` table never fired
-/// (TICKET-fk-cascade-orphans). Covers the peer-cascade family: every table
+/// (the foreign-key cascade-orphan bug). Covers the peer-cascade family: every table
 /// whose row is meant to disappear when its `peers` parent is deleted. Each
 /// statement removes only rows whose parent is genuinely absent, so valid rows
 /// are preserved. The `peer_books` directory cache intentionally uses the
@@ -2259,7 +2259,7 @@ mod fk_cascade_tests {
     }
 }
 
-/// A SQL expression that evaluates to a fresh UUID v7 string (ST-03), used by
+/// A SQL expression that evaluates to a fresh UUID v7 string, used by
 /// the per-table AFTER INSERT triggers from migration 078 so that *any* insert
 /// path (raw SQL, `Entity::insert(..).exec()`, etc.) gets a stable id without
 /// going through the Rust `before_save` hook.
@@ -2279,7 +2279,7 @@ fn uuid_v7_sql_expr() -> &'static str {
     )"
 }
 
-/// Backfill stable UUIDs (ST-03, migration 078) on every row of `table` whose
+/// Backfill stable UUIDs (migration 078) on every row of `table` whose
 /// `uuid` column is still NULL — i.e. rows that existed before the column was
 /// added. Runs synchronously inside `run_migrations`, so by the time the
 /// connection is handed out every row has a uuid and the SeaORM models can map
@@ -2418,7 +2418,7 @@ pub async fn backfill_borrow_metadata(db: &DatabaseConnection) -> Result<Backfil
 mod tests {
     use super::*;
 
-    // --- Migration 078: stable UUIDs (ST-03) ---
+    // --- Migration 078: stable UUIDs ---
 
     #[tokio::test]
     async fn migration_078_adds_uuid_column_and_unique_index() {

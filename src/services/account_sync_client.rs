@@ -1,4 +1,4 @@
-//! Account sync hub client (ST-05 Phase B).
+//! Account sync hub client.
 //!
 //! Rust client for the ADR-043 blind lane store and its account lifecycle/auth
 //! endpoints (`AccountController` / `AccountSyncController` on the hub). The hub never
@@ -8,8 +8,8 @@
 //! This module owns the WIRE layer only — request/response DTOs, the two auth
 //! crypto challenge-responses, and the HTTP calls. The local merge/cursor state and
 //! the bundle-at-rest persistence are deliberately NOT here: the pull cursor is read
-//! and written by the Phase C sync loop, and the bundle is persisted by the Phase F
-//! account service. Keeping this module stateless (the session token aside) makes it
+//! and written by the local sync loop, and the bundle is persisted by the account FFI
+//! service. Keeping this module stateless (the session token aside) makes it
 //! fully testable against a mock hub without touching the database.
 //!
 //! Crypto interop, verified against `AccountAuthService.php`:
@@ -110,7 +110,7 @@ pub struct AccountDescriptor {
     pub descriptor_sig: String,
 }
 
-/// Fields for `POST /signup`. The caller (Phase F account service) assembles these
+/// Fields for `POST /signup`. The caller (the account FFI service) assembles these
 /// from a freshly generated bundle + the chosen passphrase / recovery kit.
 #[derive(Debug, Clone, Serialize)]
 pub struct SignupRequest {

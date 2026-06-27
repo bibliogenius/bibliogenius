@@ -1,4 +1,4 @@
-//! Account sync engine — the local sync pipeline (ST-05 Phase C1).
+//! Account sync engine — the local sync pipeline.
 //!
 //! Orchestrates one sync cycle: pull other devices' encrypted lanes, decrypt and
 //! merge them locally, then encrypt and push our own changed entities. The pipeline
@@ -6,7 +6,7 @@
 //! without a database, a network, or the cr-sqlite native extension.
 //!
 //! - [`MergeEngine`] — produces/applies opaque per-entity changesets and exposes the
-//!   local merge clock. The production impl wraps cr-sqlite (Phase C2: `crsql_as_crr`,
+//!   local merge clock. The production impl wraps cr-sqlite (`crsql_as_crr`,
 //!   `crsql_changes`, `db_version`); the tests use an in-memory LWW engine.
 //! - [`LaneTransport`] — push/pull lanes against the hub. The production impl wraps
 //!   [`AccountSyncClient`]; the tests use an in-memory stateful hub.
@@ -436,11 +436,11 @@ pub async fn refresh_authorized_devices(
 /// invariant (ADR-043 H3) in a single place, so no caller can sync against a
 /// stale registry. Note: if the hub serves no registry the refresh yields
 /// `None` and `sync_once` then accepts all lanes (H3 disabled, see
-/// [`SyncContext::authorized_devices`]); Phase E should decide whether a `None`
+/// [`SyncContext::authorized_devices`]); a future change should decide whether a `None`
 /// from an already-enrolled device must mean "deny" rather than "accept all".
-/// This is the seam the Phase F entrypoint
+/// This is the seam the account FFI entrypoint
 /// (`account_sync_now_ffi`) and the future periodic/on-resume triggers call;
-/// the production merge `engine` is supplied by the caller (Phase E / C2-prod).
+/// the production merge `engine` is supplied by the caller (future work).
 pub async fn refresh_then_sync(
     transport: &dyn LaneTransport,
     engine: &dyn MergeEngine,
@@ -1275,7 +1275,7 @@ mod tests {
         assert!(eng_a.snapshot().iter().any(|(u, _, _)| u == "book-1"));
     }
 
-    // C2 / WS-0: the SAME sync_once pipeline, driven by the REAL cr-sqlite engine over
+    // Production-stack variant: the SAME sync_once pipeline, driven by the REAL cr-sqlite engine over
     // the production sqlx + SeaORM stack (two in-memory cr-sqlite DBs) instead of the
     // in-memory fake. Validates that the real CRDT engine converges through our
     // encrypt/transport/cursor loop on the stack the app actually uses.

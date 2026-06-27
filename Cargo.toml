@@ -22,7 +22,7 @@ required-features = ["desktop"]
 default = ["desktop", "mcp"]
 desktop = []
 mcp = []
-# ST-05 Phase C2 (WS-0): the real cr-sqlite merge engine over the sqlx + SeaORM
+# The real cr-sqlite merge engine over the sqlx + SeaORM
 # stack. Off by default so the normal build/CI needs no native cr-sqlite extension.
 crsqlite = []
 
@@ -49,7 +49,7 @@ sea-orm = { version = "0.12", features = [
     # Exposes `DatabaseConnection::get_sqlite_connection_pool()` so the
     # directory-cache insert can pin a single connection while it disables
     # foreign_keys, instead of toggling the pragma on the shared pool (which
-    # could leak an FK-off connection, see TICKET-fk-cascade-orphans).
+    # could leak an FK-off connection, the foreign-key cascade-orphan bug).
     "sea-orm-internal",
 ] }
 

@@ -1,10 +1,10 @@
-//! Real cr-sqlite merge engine (ST-05 Phase C2, WS-0).
+//! Real cr-sqlite merge engine (account-sync merge over the production DB stack).
 //!
 //! Implements the [`MergeEngine`](super::account_sync_engine::MergeEngine) seam from
-//! C1 over an actual cr-sqlite (vlcn.io v0.16.3) database, so the C1 sync pipeline can
-//! be validated against the real CRDT engine, not the in-memory fake.
+//! the local sync pipeline over an actual cr-sqlite (vlcn.io v0.16.3) database, so the
+//! sync pipeline can be validated against the real CRDT engine, not the in-memory fake.
 //!
-//! WS-0 runs that engine over the **production database stack**: an sqlx `SqlitePool`
+//! This step runs that engine over the **production database stack**: an sqlx `SqlitePool`
 //! with cr-sqlite loaded as a runtime extension, wrapped into a SeaORM
 //! [`DatabaseConnection`]. This is the deliberate change from the earlier rusqlite
 //! spike — it proves cr-sqlite composes with sqlx 0.7 + SeaORM 0.12 (the stack the app
@@ -15,8 +15,8 @@
 //! - Feature-gated behind `crsqlite`; the default build/CI needs no native extension.
 //! - cr-sqlite is loaded **dynamically** at runtime (`extension_with_entrypoint`). This
 //!   is the local desktop dev/test path only (macOS/Linux).
-//! - The SHIPPED app cannot load a separate extension file on iOS; production (WS-5)
-//!   links cr-sqlite statically and registers it in-process via
+//! - The SHIPPED app cannot load a separate extension file on iOS; the production
+//!   static-link build links cr-sqlite statically and registers it in-process via
 //!   `sqlite3_auto_extension`. See ADR-044 sections 2-3. This module is the
 //!   engine-semantics + stack-integration step, not the production static wiring.
 //!
@@ -72,9 +72,10 @@ pub struct CrSqliteMergeEngine {
 }
 
 /// Path to the vendored cr-sqlite dynamic library (dev/test path only; see module docs).
-// WS-2 hardening: the `.dylib` suffix is macOS-only. A Linux dev path needs `.so`
-// (gate on `cfg!(target_os = ...)`). Fine for now: WS-0 is the macOS dev/test path,
-// and production (WS-5) links statically instead of loading this file at all.
+// Future hardening (uuid-PK migration over the real DB): the `.dylib` suffix is
+// macOS-only. A Linux dev path needs `.so` (gate on `cfg!(target_os = ...)`). Fine for
+// now: this is the macOS dev/test path, and the production static-link build links
+// statically instead of loading this file at all.
 fn vendored_extension_path() -> String {
     format!(
         "{}/vendor/crsqlite/crsqlite.dylib",
@@ -137,8 +138,8 @@ impl CrSqliteMergeEngine {
     /// Run `crsql_finalize()` before the connection is closed (cr-sqlite contract).
     ///
     /// `Drop` cannot do this here because teardown is async (sqlx). Callers hold the
-    /// engine and must call this before dropping it; production teardown (WS-5) wires it
-    /// into the app's DB shutdown.
+    /// engine and must call this before dropping it; the production static-link build wires
+    /// it into the app's DB shutdown.
     pub async fn finalize(&self) -> Result<(), MergeEngineError> {
         self.exec("SELECT crsql_finalize();").await
     }
@@ -162,7 +163,7 @@ impl CrSqliteMergeEngine {
     }
 
     /// Test helper: ordered `(uuid, title)` snapshot of the live table.
-    // WS-2 hardening: `title` is read as a non-null `String`; if this helper outlives the
+    // Future hardening (uuid-PK migration over the real DB): `title` is read as a non-null `String`; if this helper outlives the
     // spike to inspect post-merge states where a column can be NULL, switch to `Option`.
     pub async fn snapshot(&self) -> Result<Vec<(String, String)>, MergeEngineError> {
         let rows = self
@@ -248,7 +249,7 @@ impl MergeEngine for CrSqliteMergeEngine {
         let rows: Vec<ChangeRow> = rmp_serde::from_slice(&change.changeset).map_err(err)?;
         let pool = self.db.get_sqlite_connection_pool();
         let mut tx = pool.begin().await.map_err(err)?;
-        // WS-2 hardening: `apply` is the ingestion hot path on the real DB. The per-row
+        // Future hardening (uuid-PK migration over the real DB): `apply` is the ingestion hot path on the real DB. The per-row
         // `.clone()` of each bound field below sidesteps sqlx's `'q` lifetime; revisit by
         // binding references once this engine runs over the production library.
         for r in &rows {

@@ -1,9 +1,9 @@
-//! Account enrollment — joining an existing account on a new device (ST-05 Phase D2).
+//! Account enrollment — joining an existing account on a new device.
 //!
 //! This is the client orchestration that turns a passphrase into an unlocked account
-//! trousseau on a fresh device, composed purely from Phase A crypto
-//! ([`crate::crypto::account_keys`]) and the Phase B hub client
-//! ([`AccountSyncClient`]). It owns no persistence and no FFI — the Phase F account
+//! trousseau on a fresh device, composed purely from the account-key crypto
+//! ([`crate::crypto::account_keys`]) and the hub client
+//! ([`AccountSyncClient`]). It owns no persistence and no FFI — the account FFI
 //! service will call it and store the result.
 //!
 //! Path A (passphrase) — the floor required for the web client (ADR-042 §14 F6/A):
@@ -55,7 +55,7 @@ const KDF_ALGO_ARGON2ID: &str = "argon2id";
 // passphrase brute-force cheap. The floor is the current production baseline
 // (account_keys: 64 MiB / t=3 / p=1) but is kept as a SEPARATE, stable minimum so
 // accounts created at the baseline stay enrollable if production later raises its
-// own cost. p is pinned exactly (WASM single-thread parity, ST-07).
+// own cost. p is pinned exactly (WASM single-thread parity with the future web client).
 const MIN_ARGON2_M_COST: u32 = 65536; // 64 MiB
 const MIN_ARGON2_T_COST: u32 = 3;
 const REQUIRED_ARGON2_P_COST: u32 = 1;

@@ -10,7 +10,7 @@ pub struct Model {
     pub name: String,
     pub created_at: String,
     pub updated_at: String,
-    /// Stable cross-device identifier (ST-03). Generated on insert by
+    /// Stable cross-device identifier. Generated on insert by
     /// `before_save`; backfilled on existing rows by migration 078.
     #[serde(default)]
     pub uuid: String,

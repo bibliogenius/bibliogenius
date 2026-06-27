@@ -72,7 +72,7 @@ async fn insert_legacy_borrowed(
             book_id.into(),
             library_id.into(),
             notes.to_string().into(),
-            // Raw insert bypasses before_save; set a uuid so model reads (ST-03) don't hit NULL.
+            // Raw insert bypasses before_save; set a uuid so model reads don't hit NULL.
             rust_lib_app::utils::uuid_gen::new_uuid_v7().into(),
             now.clone().into(),
             now.into(),

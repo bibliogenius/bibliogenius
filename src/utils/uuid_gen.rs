@@ -1,4 +1,4 @@
-//! Centralized stable-identifier generation (ST-03).
+//! Centralized stable-identifier generation.
 //!
 //! Every replicated entity (`books`, `copies`, `authors`, `contacts`, `tags`,
 //! `loans`) carries a stable `uuid` that is valid across devices. The hub
@@ -7,7 +7,7 @@
 //!
 //! We use UUID **v7**: time-ordered, which keeps freshly created rows roughly
 //! sortable (useful for debugging and as a natural ordering hint for the
-//! cr-sqlite merge layer in ST-05) while staying globally unique.
+//! cr-sqlite merge layer) while staying globally unique.
 
 use uuid::Uuid;
 

@@ -1,4 +1,4 @@
-# Vendored cr-sqlite (ST-05 Phase C2)
+# Vendored cr-sqlite
 
 The cr-sqlite native artifacts are **not committed** (platform-specific build blobs).
 Only `CHECKSUMS.txt` is tracked. This directory holds the loadable extension used by

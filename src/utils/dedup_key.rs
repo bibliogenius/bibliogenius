@@ -1,15 +1,15 @@
-//! Natural deduplication keys for the account-sync merge (ST-03).
+//! Natural deduplication keys for the account-sync merge.
 //!
 //! When a user adds the same physical book on two devices, each device mints a
 //! *different* `uuid` (see [`crate::utils::uuid_gen`]). On the first account
-//! sync (ST-05) those two rows must be recognized as the same book, or the
+//! sync those two rows must be recognized as the same book, or the
 //! library would double-count it. A globally unique id cannot do that by
 //! itself: it makes rows *addressable*, not *correlatable*.
 //!
 //! This module produces a stable **natural-identity key** from a book's
-//! bibliographic fields. The merge in ST-05 compares these keys (scoped to the
+//! bibliographic fields. The account-sync merge compares these keys (scoped to the
 //! account's library) to fuse duplicates. The key is a *correlation hint*, not
-//! a uniqueness constraint enforced in ST-03.
+//! a uniqueness constraint enforced by the stable-identifier scheme.
 //!
 //! Rule (see also the doc note in `bibliogenius-docs`):
 //! - With a usable ISBN: `isbn:<isbn13>`. The ISBN is canonicalized to ISBN-13
@@ -22,7 +22,7 @@
 
 use crate::utils::isbn;
 
-/// Compute the natural-identity key used by the account merge (ST-05) to detect
+/// Compute the natural-identity key used by the account merge to detect
 /// that two rows (with different uuids, possibly on different devices) describe
 /// the same book.
 pub fn book_dedup_key(
@@ -43,7 +43,7 @@ pub fn book_dedup_key(
     )
 }
 
-/// Natural-identity key for a **contact** (ST-05 merge): normalized `email`, else
+/// Natural-identity key for a **contact** (account merge): normalized `email`, else
 /// normalized `phone` (digits only), else normalized `name`. Returns `None` when no
 /// usable signal exists, so the merge keeps the rows distinct (the safe failure mode).
 ///
@@ -60,13 +60,13 @@ pub fn contact_dedup_key(email: Option<&str>, phone: Option<&str>, name: &str) -
     (!n.is_empty()).then(|| format!("name:{n}"))
 }
 
-/// Natural-identity key for an **author** (ST-05 merge): normalized `name`, or `None`
+/// Natural-identity key for an **author** (account merge): normalized `name`, or `None`
 /// when the name is empty after normalization.
 pub fn author_dedup_key(name: &str) -> Option<String> {
     normalized_name_key(name)
 }
 
-/// Natural-identity key for a **tag/shelf** (ST-05 merge): normalized `name`, or `None`
+/// Natural-identity key for a **tag/shelf** (account merge): normalized `name`, or `None`
 /// when empty. `tags.name` is already locally UNIQUE; this correlates it across devices.
 pub fn tag_dedup_key(name: &str) -> Option<String> {
     normalized_name_key(name)

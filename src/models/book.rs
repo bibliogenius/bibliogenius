@@ -63,7 +63,7 @@ pub struct Model {
     /// owner's UI reads this to surface a warning badge while a retry is
     /// pending. Cleared on successful upload and on hub purge.
     pub hub_cover_upload_failed_at: Option<String>,
-    /// Stable cross-device identifier (ST-03). Generated on insert by
+    /// Stable cross-device identifier. Generated on insert by
     /// `before_save`; backfilled on existing rows by migration 078.
     #[serde(default)]
     pub uuid: String,
@@ -182,7 +182,7 @@ pub struct Book {
     /// visitors never see another library's internal sync state.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub hub_cover_upload_failed_at: Option<String>,
-    /// Stable cross-device identifier (ST-03). Present on the owner's own
+    /// Stable cross-device identifier. Present on the owner's own
     /// FFI/API responses; redacted from peer-facing payloads (see
     /// `redact_for_peer`) so another library's internal merge id never leaks.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -406,7 +406,7 @@ impl Book {
         self.private = None;
         // Internal sync state: peers have no business knowing our retry backlog.
         self.hub_cover_upload_failed_at = None;
-        // Stable merge id is account-internal (ST-03); never expose it to peers.
+        // Stable merge id is account-internal; never expose it to peers.
         self.uuid = None;
     }
 

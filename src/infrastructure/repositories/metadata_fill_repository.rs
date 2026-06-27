@@ -633,7 +633,7 @@ mod tests {
                 Value::from(year),
                 Value::from(cover.map(|s| s.to_string())),
                 Value::from(pages),
-                // Raw insert bypasses before_save; set a uuid so model reads (ST-03) don't hit NULL.
+                // Raw insert bypasses before_save; set a uuid so model reads don't hit NULL.
                 Value::from(crate::utils::uuid_gen::new_uuid_v7()),
                 Value::from(now.clone()),
                 Value::from(now),

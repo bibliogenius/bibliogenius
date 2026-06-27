@@ -59,7 +59,7 @@ impl From<Model> for super::Book {
     fn from(pb: Model) -> Self {
         super::Book {
             id: Some(pb.remote_book_id),
-            // Peer-cached rows have no local stable id (ST-03); not ours to mint.
+            // Peer-cached rows have no local stable id; not ours to mint.
             uuid: None,
             title: pb.title,
             isbn: pb.isbn,

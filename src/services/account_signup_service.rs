@@ -1,10 +1,10 @@
-//! Account creation (signup) orchestration (ST-05 Phase F).
+//! Account creation (signup) orchestration.
 //!
 //! Creates a BRAND NEW account from a passphrase: generates a random trousseau, wraps it
 //! under the passphrase Master Key AND a recovery key, signs the public descriptor, creates
 //! the first signed device registry, and registers everything with the hub. Pure
-//! orchestration over Phase A crypto ([`crate::crypto::account_keys`]) and the Phase B hub
-//! client ([`AccountSyncClient`]); it owns no local persistence (the Phase F FFI layer
+//! orchestration over the account-key crypto ([`crate::crypto::account_keys`]) and the hub
+//! client ([`AccountSyncClient`]); it owns no local persistence (the account FFI layer
 //! persists the returned session, exactly as for [`super::account_enrollment`]).
 //!
 //! Two security floors from `SECURITY_GUIDELINES.md` F7 are enforced here, never skipped:
