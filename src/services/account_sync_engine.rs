@@ -1275,9 +1275,10 @@ mod tests {
         assert!(eng_a.snapshot().iter().any(|(u, _, _)| u == "book-1"));
     }
 
-    // C2 spike: the SAME sync_once pipeline, driven by the REAL cr-sqlite engine
-    // (two in-memory cr-sqlite DBs) instead of the in-memory fake. Validates that the
-    // real CRDT engine converges through our encrypt/transport/cursor loop.
+    // C2 / WS-0: the SAME sync_once pipeline, driven by the REAL cr-sqlite engine over
+    // the production sqlx + SeaORM stack (two in-memory cr-sqlite DBs) instead of the
+    // in-memory fake. Validates that the real CRDT engine converges through our
+    // encrypt/transport/cursor loop on the stack the app actually uses.
     // Runs only with `--features crsqlite` (needs the vendored extension).
     #[cfg(feature = "crsqlite")]
     #[tokio::test(flavor = "multi_thread")]
@@ -1286,15 +1287,15 @@ mod tests {
 
         let bundle = Arc::new(AccountKeyBundle::generate());
         let hub = Arc::new(MemHub::default());
-        let eng_a = CrSqliteMergeEngine::open_in_memory("books").unwrap();
-        let eng_b = CrSqliteMergeEngine::open_in_memory("books").unwrap();
+        let eng_a = CrSqliteMergeEngine::open_in_memory("books").await.unwrap();
+        let eng_b = CrSqliteMergeEngine::open_in_memory("books").await.unwrap();
         let state_a = MemState::default();
         let state_b = MemState::default();
 
         // Offline divergence on two real cr-sqlite databases.
-        eng_a.upsert("book-1", "title from A").unwrap();
-        eng_b.upsert("book-1", "title from B").unwrap();
-        eng_b.upsert("book-2", "only on B").unwrap();
+        eng_a.upsert("book-1", "title from A").await.unwrap();
+        eng_b.upsert("book-1", "title from B").await.unwrap();
+        eng_b.upsert("book-2", "only on B").await.unwrap();
 
         for _ in 0..2 {
             sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
@@ -1308,12 +1309,16 @@ mod tests {
                 .unwrap();
         }
 
-        let snap_a = eng_a.snapshot().unwrap();
-        let snap_b = eng_b.snapshot().unwrap();
+        let snap_a = eng_a.snapshot().await.unwrap();
+        let snap_b = eng_b.snapshot().await.unwrap();
         // cr-sqlite decides the LWW winner for book-1 by its own HLC; we only assert
         // the two real engines converge and both rows propagated.
         assert_eq!(snap_a, snap_b, "real cr-sqlite engines must converge");
         assert!(snap_a.iter().any(|(u, _)| u == "book-1"));
         assert!(snap_a.iter().any(|(u, _)| u == "book-2"));
+
+        // Honour the cr-sqlite teardown contract.
+        eng_a.finalize().await.unwrap();
+        eng_b.finalize().await.unwrap();
     }
 }

@@ -22,9 +22,9 @@ required-features = ["desktop"]
 default = ["desktop", "mcp"]
 desktop = []
 mcp = []
-# ST-05 Phase C2 spike: the real cr-sqlite merge engine. Off by default so the
-# normal build/CI needs no native cr-sqlite extension.
-crsqlite = ["dep:rusqlite"]
+# ST-05 Phase C2 (WS-0): the real cr-sqlite merge engine over the sqlx + SeaORM
+# stack. Off by default so the normal build/CI needs no native cr-sqlite extension.
+crsqlite = []
 
 [dependencies]
 # Flutter Rust Bridge
@@ -132,11 +132,6 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # flate2 + a couple of others; the compile cost is acceptable and we want
 # a simple, well-tested feature set for archive interop.
 zip = "2"
-
-# cr-sqlite local merge engine (ST-05 Phase C2 spike), feature-gated via `crsqlite`.
-# rusqlite 0.30 pins libsqlite3-sys 0.27 to unify with sqlx 0.7.4's, so a single
-# bundled SQLite is compiled (no duplicate-symbol clash). Provides load_extension.
-rusqlite = { version = "0.30", features = ["bundled", "load_extension"], optional = true }
 
 [profile.release]
 strip = true
