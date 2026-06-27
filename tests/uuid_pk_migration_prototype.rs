@@ -1,8 +1,8 @@
-//! WS-1 prototype: the id -> uuid primary-key migration for ST-05 Phase E.
+//! Prototype: the id -> uuid primary-key migration for the account-sync merge engine.
 //!
 //! This is a SANDBOX, not a production migration. It does NOT touch
 //! `run_migrations` and never bumps `SCHEMA_VERSION`, so it carries zero
-//! regression risk. Its job is to de-risk WS-2 by proving, against the REAL
+//! regression risk. Its job is to de-risk the real migration by proving, against the REAL
 //! schema (built via `run_migrations`) plus a representative fixture, that the
 //! candidate migration:
 //!   - rebuilds the 6 replicated entity tables to a `uuid TEXT PRIMARY KEY`
@@ -13,11 +13,11 @@
 //!   - keeps references to LOCAL tables (library_id, user_id, lender_peer_id) integer.
 //!
 //! The rebuild is GENERIC (driven by `PRAGMA table_info`) so it survives column
-//! drift — the same property WS-2's real migration needs. The FK toggle runs on a
+//! drift — the same property the real migration needs. The FK toggle runs on a
 //! dedicated acquired connection (never the shared pool), mirroring the leak-safe
 //! precedent at `frb.rs:5410`.
 //!
-//! Scope deferred to later WS-1 slices / WS-2 (called out where relevant):
+//! Scope deferred to later prototype slices / the real migration (called out where relevant):
 //!   - validating `crsql_as_crr` on the rebuilt schema (needs a cr-sqlite-loaded
 //!     connection),
 //!   - re-creating secondary indexes and the uuid-population trigger,
@@ -123,7 +123,7 @@ fn specs() -> Vec<Spec> {
             refs: &[("copy_id", "copies"), ("contact_id", "contacts")],
         },
         // book_notes lives in an EXTENSION MODULE (src/modules/book_notes), not in
-        // db.rs -- discovered via the FK fan-out diagnostic. WS-2 must sweep module
+        // db.rs -- discovered via the FK fan-out diagnostic. The real migration must sweep module
         // tables too. Open product question: should per-book notes sync (would need a
         // uuid column + CRR)? For now it stays local, ref rewritten to books.uuid.
         Spec {
@@ -155,10 +155,96 @@ const ALL_REFS: &[(&str, &str, &str, &str)] = &[
     ("book_notes", "book_id", "books", "uuid"),
 ];
 
+/// The 6 replicated entity tables rebuilt to a uuid PRIMARY KEY (mode A).
+const REBUILT_ENTITIES: &[&str] = &["books", "authors", "tags", "contacts", "copies", "loans"];
+
 async fn setup() -> DatabaseConnection {
     let db = db::init_db("sqlite::memory:").await.expect("init db");
     db::run_migrations(&db).await.expect("run migrations");
     db
+}
+
+/// Every foreign key in the DB that points INTO a rebuilt entity table, as
+/// `(child_table, child_col, parent_table)`. The real migration must rewrite each of these.
+async fn fanout_into_rebuilt(conn: &mut sqlx::SqliteConnection) -> Vec<(String, String, String)> {
+    let tables = sqlx::query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .unwrap();
+
+    let mut fanout: Vec<(String, String, String)> = Vec::new();
+    for t in &tables {
+        let name: String = t.get("name");
+        let fks = sqlx::query(&format!("PRAGMA foreign_key_list(\"{name}\")"))
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap();
+        for fk in &fks {
+            let parent: String = fk.get("table");
+            if REBUILT_ENTITIES.contains(&parent.as_str()) {
+                let from: String = fk.get("from");
+                fanout.push((name.clone(), from, parent));
+            }
+        }
+    }
+    fanout.sort();
+    fanout
+}
+
+/// The references the migration plan (`ALL_REFS`) handles that point INTO the
+/// rebuilt set (`collection_books.collection_id -> collections` is excluded:
+/// collections is already uuid-keyed and not rebuilt).
+fn handled_refs_into_rebuilt() -> BTreeSet<(String, String, String)> {
+    ALL_REFS
+        .iter()
+        .filter(|(_, _, parent, _)| REBUILT_ENTITIES.contains(parent))
+        .map(|(child, col, parent, _)| (child.to_string(), col.to_string(), parent.to_string()))
+        .collect()
+}
+
+/// FK fan-out references not covered by the plan, formatted for assertions.
+fn uncovered_fanout(
+    fanout: &[(String, String, String)],
+    handled: &BTreeSet<(String, String, String)>,
+) -> Vec<String> {
+    fanout
+        .iter()
+        .filter(|fk| !handled.contains(*fk))
+        .map(|(c, col, p)| format!("{c}.{col} -> {p}"))
+        .collect()
+}
+
+/// Row count per table in the migration plan, captured before the rebuild.
+async fn capture_counts(db: &DatabaseConnection) -> Vec<(String, i64)> {
+    let mut v = Vec::new();
+    for spec in specs() {
+        v.push((spec.table.to_string(), count(db, spec.table).await));
+    }
+    v
+}
+
+/// Assert the rebuild neither lost nor duplicated any row.
+async fn assert_counts_preserved(db: &DatabaseConnection, before: &[(String, i64)]) {
+    for (table, n) in before {
+        assert_eq!(
+            count(db, table).await,
+            *n,
+            "row count changed for {table}: the rebuild lost or duplicated rows"
+        );
+    }
+}
+
+/// Assert every rewritten reference resolves to a parent's uuid (no orphans).
+async fn assert_no_orphans(db: &DatabaseConnection) {
+    for (child, col, parent, parent_col) in ALL_REFS {
+        let orphans = count_orphans(db, child, col, parent, parent_col).await;
+        assert_eq!(
+            orphans, 0,
+            "{child}.{col} has {orphans} value(s) not present in {parent}.{parent_col} after the rewrite"
+        );
+    }
 }
 
 async fn count(db: &DatabaseConnection, table: &str) -> i64 {
@@ -363,7 +449,7 @@ async fn run_migration(db: &DatabaseConnection) {
     let mut conn = pool.acquire().await.expect("acquire for migration");
 
     // SQLite's table-redefinition procedure: FK off for the rebuild window. On the
-    // real multi-connection pool, WS-2 MUST keep this on a dedicated acquired
+    // real multi-connection pool, the real migration MUST keep this on a dedicated acquired
     // connection (never the shared pool) and restore ON before it returns -- the
     // frb.rs:5410 leak-safe pattern. Here the in-memory pool is single-connection.
     sqlx::query("PRAGMA foreign_keys = OFF")
@@ -432,23 +518,9 @@ async fn migration_preserves_every_row() {
     let db = setup().await;
     seed(&db).await;
 
-    let before: Vec<(String, i64)> = {
-        let mut v = Vec::new();
-        for spec in specs() {
-            v.push((spec.table.to_string(), count(&db, spec.table).await));
-        }
-        v
-    };
-
+    let before = capture_counts(&db).await;
     run_migration(&db).await;
-
-    for (table, n) in before {
-        assert_eq!(
-            count(&db, &table).await,
-            n,
-            "row count changed for {table}: the rebuild lost or duplicated rows"
-        );
-    }
+    assert_counts_preserved(&db, &before).await;
 }
 
 #[tokio::test]
@@ -457,13 +529,7 @@ async fn every_reference_resolves_to_a_parent_uuid() {
     seed(&db).await;
     run_migration(&db).await;
 
-    for (child, col, parent, parent_col) in ALL_REFS {
-        let orphans = count_orphans(&db, child, col, parent, parent_col).await;
-        assert_eq!(
-            orphans, 0,
-            "{child}.{col} has {orphans} value(s) not present in {parent}.{parent_col} after the rewrite"
-        );
-    }
+    assert_no_orphans(&db).await;
 }
 
 async fn count_orphans(
@@ -559,50 +625,18 @@ async fn local_table_keeps_integer_id_and_local_refs_stay_integer() {
 /// migration plan (`ALL_REFS`). This is what discovered `book_notes` (an
 /// extension-module table) the first time; as an assertion it now fails loudly if a
 /// future schema/module adds a new reference into the rebuilt set without updating
-/// the plan — the exact class of omission that would corrupt the live WS-2 migration.
+/// the plan — the exact class of omission that would corrupt the live migration.
 /// (The seeded fixture only has core rows, so the *data*-level checks alone could
 /// miss an unhandled-but-empty referencing table; this schema-level check cannot.)
 #[tokio::test]
 async fn fk_fanout_is_fully_covered_by_the_migration_plan() {
     let db = setup().await;
-    let rebuilt = ["books", "authors", "tags", "contacts", "copies", "loans"];
-
-    // The references the plan handles (only those pointing INTO the rebuilt set;
-    // collection_books.collection_id -> collections is excluded, collections is not
-    // rebuilt).
-    let handled: BTreeSet<(String, String, String)> = ALL_REFS
-        .iter()
-        .filter(|(_, _, parent, _)| rebuilt.contains(parent))
-        .map(|(child, col, parent, _)| (child.to_string(), col.to_string(), parent.to_string()))
-        .collect();
-
     let pool = db.get_sqlite_connection_pool();
     let mut conn = pool.acquire().await.unwrap();
-    let tables = sqlx::query(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-    )
-    .fetch_all(&mut *conn)
-    .await
-    .unwrap();
 
-    let mut fanout: Vec<(String, String, String)> = Vec::new();
-    for t in &tables {
-        let name: String = t.get("name");
-        let fks = sqlx::query(&format!("PRAGMA foreign_key_list(\"{name}\")"))
-            .fetch_all(&mut *conn)
-            .await
-            .unwrap();
-        for fk in &fks {
-            let parent: String = fk.get("table");
-            if rebuilt.contains(&parent.as_str()) {
-                let from: String = fk.get("from");
-                fanout.push((name.clone(), from, parent));
-            }
-        }
-    }
-    fanout.sort();
+    let fanout = fanout_into_rebuilt(&mut conn).await;
     eprintln!(
-        "FK fan-out into the rebuilt tables (WS-2 must rewrite each):\n  {}",
+        "FK fan-out into the rebuilt tables (the real migration must rewrite each):\n  {}",
         fanout
             .iter()
             .map(|(c, col, p)| format!("{c}.{col} -> {p}"))
@@ -610,11 +644,7 @@ async fn fk_fanout_is_fully_covered_by_the_migration_plan() {
             .join("\n  ")
     );
 
-    let uncovered: Vec<String> = fanout
-        .iter()
-        .filter(|fk| !handled.contains(*fk))
-        .map(|(c, col, p)| format!("{c}.{col} -> {p}"))
-        .collect();
+    let uncovered = uncovered_fanout(&fanout, &handled_refs_into_rebuilt());
     assert!(
         uncovered.is_empty(),
         "unhandled FK(s) into the rebuilt tables — add to the migration plan (specs/ALL_REFS): {uncovered:?}"
@@ -626,4 +656,80 @@ async fn fk_fanout_is_fully_covered_by_the_migration_plan() {
             .any(|(c, col, p)| c == "copies" && col == "book_id" && p == "books"),
         "expected copies.book_id -> books in the FK fan-out"
     );
+}
+
+/// Pre-flight gate for the real migration: run the candidate migration against a COPY of a REAL library DB
+/// and assert the invariants on real data: volume, NULLs, in-the-wild orphans, and
+/// rows in module/peer tables the synthetic fixture does not exercise.
+///
+/// Opt-in: set `WS2_REAL_DB` to the path of a real `.sqlite` library file. When
+/// unset the test is a no-op (skips), so it never blocks CI. The original file is
+/// NEVER touched: it is copied to a temp location first and the copy is migrated.
+/// Run it before the live migration:
+///
+///   WS2_REAL_DB=/path/to/library_copy.sqlite \
+///     cargo test --test uuid_pk_migration_prototype real_library_copy -- --nocapture
+#[tokio::test]
+async fn real_library_copy_migrates_with_invariants_preserved() {
+    let Some(src) = std::env::var_os("WS2_REAL_DB") else {
+        eprintln!(
+            "WS2_REAL_DB not set; skipping the real-library validation gate. \
+             Set it to a real library .sqlite path to run it."
+        );
+        return;
+    };
+    let src = std::path::PathBuf::from(src);
+    assert!(
+        src.exists(),
+        "WS2_REAL_DB points at a missing file: {}",
+        src.display()
+    );
+
+    // The migration is destructive, so operate on a throwaway copy.
+    let dst = std::env::temp_dir().join("ws2_real_db_copy.sqlite");
+    let _ = std::fs::remove_file(&dst);
+    std::fs::copy(&src, &dst).expect("copy the real library DB to a temp file");
+
+    // Pin the pool to a single connection: the rebuild toggles PRAGMA foreign_keys /
+    // legacy_alter_table per-connection, so a multi-connection pool could leak an
+    // FK-state mismatch across connections (see memory: seaorm_pragma_per_connection_pool_leak).
+    let url = format!("sqlite://{}?mode=rwc", dst.display());
+    let mut opt = sea_orm::ConnectOptions::new(url);
+    opt.max_connections(1).min_connections(1);
+    let db = sea_orm::Database::connect(opt)
+        .await
+        .expect("open the real library copy");
+
+    // Forward-migrate the copy to the current schema (idempotent) so the uuid columns
+    // (migration 078) and module tables the candidate migration relies on are present
+    // even if the copy was taken from an older app version.
+    db::run_migrations(&db)
+        .await
+        .expect("forward-migrate the copy to the current schema");
+
+    // Schema drift guard on the REAL schema: every FK into a rebuilt table must be in
+    // the plan. Catches a module/peer table this fixture-blind prototype never saw.
+    {
+        let pool = db.get_sqlite_connection_pool();
+        let mut conn = pool.acquire().await.unwrap();
+        let fanout = fanout_into_rebuilt(&mut conn).await;
+        let uncovered = uncovered_fanout(&fanout, &handled_refs_into_rebuilt());
+        assert!(
+            uncovered.is_empty(),
+            "real DB has unhandled FK(s) into the rebuilt tables; extend the plan before the live migration: {uncovered:?}"
+        );
+    }
+
+    let before = capture_counts(&db).await;
+    run_migration(&db).await; // includes the foreign_key_check integrity gate
+    assert_counts_preserved(&db, &before).await;
+    assert_no_orphans(&db).await;
+
+    let total: i64 = before.iter().map(|(_, n)| n).sum();
+    eprintln!(
+        "real-library copy migrated cleanly: {} rows across {} tables preserved, no orphans.",
+        total,
+        before.len()
+    );
+    let _ = std::fs::remove_file(&dst);
 }
