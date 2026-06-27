@@ -16,6 +16,7 @@ pub mod repositories;
 pub mod seed;
 pub mod server;
 pub mod state;
+pub mod uuid_lookup;
 
 pub use repositories::*;
 pub use state::AppState;
