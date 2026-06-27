@@ -684,6 +684,25 @@ fn account_device_entry(
     })
 }
 
+/// Install the freshly unlocked session into the process-global slot, replacing any prior
+/// one (dropping it zeroizes the old trousseau, A1). Call AFTER building the status JSON,
+/// since this takes ownership of the metadata fields.
+async fn store_account_session(
+    bundle: crate::crypto::account_keys::AccountKeyBundle,
+    client: crate::services::account_sync_client::AccountSyncClient,
+    account_id: String,
+    device_id: String,
+    email: String,
+) {
+    *ACCOUNT_SESSION.lock().await = Some(AccountSession {
+        bundle,
+        client,
+        account_id,
+        device_id,
+        email,
+    });
+}
+
 /// JSON status object for the UI: signed-in flag plus the plaintext metadata.
 fn account_status_json(signed_in: bool, email: &str, account_id: &str, device_id: &str) -> String {
     serde_json::json!({
@@ -787,13 +806,14 @@ pub async fn account_enroll_passphrase_ffi(
     .map_err(|e| e.to_string())?;
 
     let status = account_status_json(true, &email, &enrolled.account_id, &device_id);
-    *ACCOUNT_SESSION.lock().await = Some(AccountSession {
-        bundle: enrolled.bundle,
+    store_account_session(
+        enrolled.bundle,
         client,
-        account_id: enrolled.account_id,
+        enrolled.account_id,
         device_id,
         email,
-    });
+    )
+    .await;
     Ok(status)
 }
 
@@ -893,13 +913,14 @@ pub async fn account_enroll_from_sealed_ffi(sealed_qr_payload: String) -> Result
 
     *PENDING_PAIRING_DEVICE_ID.lock().await = None;
     let status = account_status_json(true, &email, &enrolled.account_id, &device_id);
-    *ACCOUNT_SESSION.lock().await = Some(AccountSession {
-        bundle: enrolled.bundle,
+    store_account_session(
+        enrolled.bundle,
         client,
-        account_id: enrolled.account_id,
+        enrolled.account_id,
         device_id,
         email,
-    });
+    )
+    .await;
     Ok(status)
 }
 
@@ -936,6 +957,48 @@ pub async fn account_refresh_devices_ffi() -> Result<String, String> {
         })
         .unwrap_or_default();
     Ok(serde_json::json!({ "devices": devices }).to_string())
+}
+
+/// Trigger a sync cycle for this account (ST-05 Phase F / F2). The entrypoint the
+/// Phase E triggers and a manual refresh will share.
+///
+/// HONEST SCOPE: it always runs the real, available step — refreshing the signed
+/// device registry (H3) — and **deliberately does not fake a data convergence**.
+/// The data merge engine is Phase E (and a production cr-sqlite engine wired to
+/// the library DB is C2-prod), neither of which is built into any current binary,
+/// so the data leg is a no-op here. When that engine lands, this calls
+/// [`account_sync_engine::refresh_then_sync`] with it (registry refresh stays
+/// first, ADR-043 H3). Returns JSON `{synced, reason?, devices}`.
+pub async fn account_sync_now_ffi() -> Result<String, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let mut guard = ACCOUNT_SESSION.lock().await;
+    let session = ensure_account_session(&mut guard).await?;
+
+    let state = crate::services::account_sync_engine::DbSyncStateStore::new(db.clone());
+    // Real step: refresh + adopt the signed registry (anti-rollback). This is the
+    // H3 prerequisite `refresh_then_sync` runs before any data sync.
+    let registry = crate::services::account_sync_engine::refresh_authorized_devices(
+        &session.client,
+        &state,
+        &session.account_id,
+        &session.bundle.verifying_key(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let device_count = registry.map(|r| r.devices.len()).unwrap_or(0);
+
+    // No production merge engine in this binary: skip the data leg honestly rather
+    // than simulate a convergence that did not happen.
+    tracing::info!(
+        device_count,
+        "account_sync_now: refreshed authorized devices; data sync skipped (Phase E merge engine pending)"
+    );
+    Ok(serde_json::json!({
+        "synced": false,
+        "reason": "phase_e_pending",
+        "devices": device_count,
+    })
+    .to_string())
 }
 
 /// Sign out of the account on this device: drop the in-RAM session and delete the encrypted
@@ -1026,13 +1089,7 @@ pub async fn account_signup_ffi(
         "recovery_phrase": outcome.recovery_phrase,
     })
     .to_string();
-    *ACCOUNT_SESSION.lock().await = Some(AccountSession {
-        bundle: outcome.bundle,
-        client,
-        account_id: outcome.account_id,
-        device_id,
-        email,
-    });
+    store_account_session(outcome.bundle, client, outcome.account_id, device_id, email).await;
     Ok(status)
 }
 

@@ -429,6 +429,36 @@ pub async fn refresh_authorized_devices(
     Ok(Some(reg))
 }
 
+/// One full sync cycle: refresh the signed device registry (H3) FIRST, then run
+/// the data sync with that registry bound into the context.
+///
+/// Centralizes the "always refresh authorized devices before `sync_once`"
+/// invariant (ADR-043 H3) in a single place, so no caller can sync against a
+/// stale registry. Note: if the hub serves no registry the refresh yields
+/// `None` and `sync_once` then accepts all lanes (H3 disabled, see
+/// [`SyncContext::authorized_devices`]); Phase E should decide whether a `None`
+/// from an already-enrolled device must mean "deny" rather than "accept all".
+/// This is the seam the Phase F entrypoint
+/// (`account_sync_now_ffi`) and the future periodic/on-resume triggers call;
+/// the production merge `engine` is supplied by the caller (Phase E / C2-prod).
+pub async fn refresh_then_sync(
+    transport: &dyn LaneTransport,
+    engine: &dyn MergeEngine,
+    bundle: &AccountKeyBundle,
+    state: &dyn SyncStateStore,
+    account_id: &str,
+    device_id: &str,
+) -> std::result::Result<SyncStats, SyncError> {
+    let authorized_devices =
+        refresh_authorized_devices(transport, state, account_id, &bundle.verifying_key()).await?;
+    let ctx = SyncContext {
+        account_id: account_id.to_string(),
+        device_id: device_id.to_string(),
+        authorized_devices,
+    };
+    sync_once(transport, engine, bundle, state, &ctx).await
+}
+
 /// Enroll `new_device` into the account's signed registry: fetch the current registry,
 /// adopt it (so we always extend the latest signed version, never a stale one), append
 /// the device, bump the signed `registry_seq`, re-sign with the account key, and publish.
@@ -1189,6 +1219,60 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SyncError::Registry(_)));
+    }
+
+    #[tokio::test]
+    async fn refresh_then_sync_refreshes_registry_before_syncing() {
+        // The registry authorizes devA + devB only. An UNREGISTERED devX pushes a
+        // lane straight to the hub. refresh_then_sync must adopt the registry
+        // first, so the H3 filter drops devX's lane within the same cycle.
+        let bundle = AccountKeyBundle::generate();
+        let hub = MemHub::default();
+        let state = MemState::default();
+        seed_registry(&hub, &registry_for(&["devA", "devB"]), &bundle).await;
+
+        let eng_x = FakeEngine::new("devX");
+        let state_x = MemState::default();
+        eng_x.edit("book-x", "from an unauthorized device", false);
+        sync_once(&hub, &eng_x, &bundle, &state_x, &ctx("devX"))
+            .await
+            .unwrap();
+
+        // devA syncs without any pre-set context: the registry is fetched inside
+        // the cycle, so devX is filtered and nothing is applied.
+        let eng_a = FakeEngine::new("devA");
+        let stats = refresh_then_sync(&hub, &eng_a, &bundle, &state, "acct-1", "devA")
+            .await
+            .unwrap();
+        assert_eq!(
+            stats.applied, 0,
+            "unauthorized devX lane must be filtered by the refreshed registry"
+        );
+        // The signed seq is persisted, proving the refresh ran in this cycle.
+        assert_eq!(state.registry_seq("acct-1").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_then_sync_applies_an_authorized_lane() {
+        let bundle = AccountKeyBundle::generate();
+        let hub = MemHub::default();
+        seed_registry(&hub, &registry_for(&["devA", "devB"]), &bundle).await;
+
+        // devB is authorized; its lane must flow through to devA via the cycle.
+        let eng_b = FakeEngine::new("devB");
+        let state_b = MemState::default();
+        eng_b.edit("book-1", "from B", false);
+        sync_once(&hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+
+        let eng_a = FakeEngine::new("devA");
+        let state_a = MemState::default();
+        let stats = refresh_then_sync(&hub, &eng_a, &bundle, &state_a, "acct-1", "devA")
+            .await
+            .unwrap();
+        assert_eq!(stats.applied, 1);
+        assert!(eng_a.snapshot().iter().any(|(u, _, _)| u == "book-1"));
     }
 
     // C2 spike: the SAME sync_once pipeline, driven by the REAL cr-sqlite engine

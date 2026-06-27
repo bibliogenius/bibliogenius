@@ -108,6 +108,16 @@ pub struct SignupOutcome {
     /// The unlocked trousseau, for the caller to persist at rest.
     pub bundle: AccountKeyBundle,
     /// The 24-word BIP39 recovery phrase to display ONCE. Never persist or log it.
+    ///
+    /// SECURITY (intentionally a plain `String`, not `Zeroizing`): this phrase is a reversible
+    /// encoding of the recovery entropy, which IS already wiped on drop (`generate_recovery_key`
+    /// returns `Zeroizing<[u8; 32]>`, and the derived RWK is `Zeroizing` too). The phrase exists
+    /// only to be shown to a human, so it necessarily crosses the FFI boundary as a plaintext
+    /// JSON string and lands in Dart GC memory and on screen — neither of which Rust can zeroize.
+    /// Wrapping this field would wipe one heap copy while ≥2 identical un-wiped copies (serde JSON,
+    /// FFI marshalling, Dart string) coexist at display time, so it buys no real protection. An
+    /// attacker who can read this process's heap already finds the full unlocked trousseau (held in
+    /// RAM while signed in, A1). Display once, never persist (ADR-042 §8 / §14 L2).
     pub recovery_phrase: String,
 }
 
