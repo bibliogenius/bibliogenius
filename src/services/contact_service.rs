@@ -37,7 +37,7 @@ pub struct ContactDto {
     pub user_id: Option<i32>,
     pub library_owner_id: Option<i32>,
     pub is_active: bool,
-    /// Stable cross-device identifier (ST-03). None on inbound create/update
+    /// Stable cross-device identifier. None on inbound create/update
     /// DTOs (backend-owned); Some when read back from a persisted row.
     pub uuid: Option<String>,
 }
@@ -101,6 +101,18 @@ pub async fn get_contact(db: &DatabaseConnection, id: i32) -> Result<ContactDto,
         .await?
         .ok_or(ServiceError::NotFound)?;
 
+    Ok(ContactDto::from(contact))
+}
+
+/// Fetch a contact by its cross-device uuid (the device-local `id` cannot
+/// identify a row across devices). Single fetch, no id round-trip.
+pub async fn get_contact_by_uuid(
+    db: &DatabaseConnection,
+    uuid: &str,
+) -> Result<ContactDto, ServiceError> {
+    let contact = crate::infrastructure::uuid_lookup::find_contact_by_uuid(db, uuid)
+        .await?
+        .ok_or(ServiceError::NotFound)?;
     Ok(ContactDto::from(contact))
 }
 

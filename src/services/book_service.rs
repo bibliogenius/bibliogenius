@@ -233,7 +233,24 @@ pub async fn get_book(db: &DatabaseConnection, id: i32) -> Result<Book, ServiceE
         .one(db)
         .await?
         .ok_or(ServiceError::NotFound)?;
+    enrich_book(db, book_model).await
+}
 
+/// Fetch a book by its cross-device uuid. The device-local `id` cannot identify
+/// a row across devices, so the uuid is the stable handle. Shares the author
+/// enrichment with `get_book`, so it is a single fetch (no id round-trip).
+pub async fn get_book_by_uuid(db: &DatabaseConnection, uuid: &str) -> Result<Book, ServiceError> {
+    let book_model = crate::infrastructure::uuid_lookup::find_book_by_uuid(db, uuid)
+        .await?
+        .ok_or(ServiceError::NotFound)?;
+    enrich_book(db, book_model).await
+}
+
+/// Build the `Book` DTO from an already-fetched model, joining its authors' names.
+async fn enrich_book(
+    db: &DatabaseConnection,
+    book_model: crate::models::book::Model,
+) -> Result<Book, ServiceError> {
     let mut book_dto = Book::from(book_model.clone());
 
     // Fetch authors
@@ -1516,6 +1533,35 @@ mod tests {
             wrong.is_none(),
             "must not accept a cover for the wrong author"
         );
+    }
+
+    #[tokio::test]
+    async fn get_book_by_uuid_matches_get_book_by_id() {
+        use crate::db;
+        use crate::models::book;
+        use sea_orm::EntityTrait;
+
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+        let id = insert_test_book(&db, "Findable by uuid").await;
+        // The migration-078 trigger fills the uuid on insert.
+        let uuid = book::Entity::find_by_id(id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .uuid;
+
+        let by_uuid = get_book_by_uuid(&db, &uuid).await.expect("found by uuid");
+        let by_id = get_book(&db, id).await.expect("found by id");
+        assert_eq!(by_uuid.id, by_id.id);
+        assert_eq!(by_uuid.id, Some(id));
+        assert_eq!(by_uuid.title, "Findable by uuid");
+
+        // An unknown uuid is a clean NotFound, never a silent wrong row.
+        assert!(matches!(
+            get_book_by_uuid(&db, "00000000-0000-0000-0000-000000000000").await,
+            Err(ServiceError::NotFound)
+        ));
     }
 
     async fn insert_test_book(db: &DatabaseConnection, title: &str) -> i32 {

@@ -140,7 +140,7 @@ pub struct FrbBook {
     /// NULL when the most recent attempt succeeded or none ever ran. Read by
     /// the owner's UI to surface a warning badge while a retry pends.
     pub hub_cover_upload_failed_at: Option<String>,
-    /// Stable cross-device identifier (ST-03). Backend-generated; surfaced to
+    /// Stable cross-device identifier. Backend-generated; surfaced to
     /// Flutter for the upcoming account sync. None for transient/peer rows.
     pub uuid: Option<String>,
 }
@@ -628,7 +628,171 @@ pub async fn parse_invite_link_ffi(link: String) -> Result<String, String> {
     parse_qr_payload_ffi(json_str).await
 }
 
-// ============ Account E2EE Sync — session + enrollment (ST-05 Phase F / F1) ============
+// ============ uuid-addressable entity API (transitional) ============
+//
+// The integer `id` is device-local (autoincrement), so it cannot identify a row
+// across devices; the `uuid` column can. These thin wrappers let Flutter address
+// the replicated entities by uuid: each resolves the uuid to the device-local id
+// via the infrastructure lookups, then delegates to the existing id-based logic.
+// They are additive: the id-based functions stay, so nothing breaks here. Once
+// `uuid` becomes the primary key (the id column is dropped), the id leg disappears
+// and this whole section is removed in favour of natively uuid-keyed services.
+//
+// Reference-bearing creators (e.g. create_loan, which takes a copy reference) are
+// intentionally not migrated here: their references stay integer until the column
+// types flip together with the database, so they are handled at that later step.
+
+/// Resolve an entity uuid to its device-local integer id, erroring when no row
+/// carries that uuid. One per replicated entity Flutter addresses by uuid.
+macro_rules! id_by_uuid {
+    ($name:ident, $finder:path, $entity:literal) => {
+        async fn $name(uuid: &str) -> Result<i32, String> {
+            let db = db().ok_or("Database not initialized")?;
+            $finder(db, uuid)
+                .await
+                .map_err(|e| format!("{e:?}"))?
+                .map(|m| m.id)
+                .ok_or_else(|| format!("No {} with uuid {}", $entity, uuid))
+        }
+    };
+}
+
+id_by_uuid!(
+    book_id_by_uuid,
+    crate::infrastructure::uuid_lookup::find_book_by_uuid,
+    "book"
+);
+id_by_uuid!(
+    contact_id_by_uuid,
+    crate::infrastructure::uuid_lookup::find_contact_by_uuid,
+    "contact"
+);
+id_by_uuid!(
+    tag_id_by_uuid,
+    crate::infrastructure::uuid_lookup::find_tag_by_uuid,
+    "tag"
+);
+id_by_uuid!(
+    loan_id_by_uuid,
+    crate::infrastructure::uuid_lookup::find_loan_by_uuid,
+    "loan"
+);
+
+/// Fetch a book by its uuid (single fetch: resolves and enriches at once).
+pub async fn get_book_by_uuid(uuid: String) -> Result<FrbBook, String> {
+    let db = db().ok_or("Database not initialized")?;
+    match crate::services::book_service::get_book_by_uuid(db, &uuid).await {
+        Ok(book) => Ok(FrbBook::from(book)),
+        Err(crate::services::book_service::ServiceError::NotFound) => {
+            Err("Book not found".to_string())
+        }
+        Err(e) => Err(format!("{e:?}")),
+    }
+}
+
+/// Update a book identified by its uuid.
+pub async fn update_book_by_uuid(uuid: String, book: FrbBook) -> Result<FrbBook, String> {
+    update_book(book_id_by_uuid(&uuid).await?, book).await
+}
+
+/// Delete a book identified by its uuid.
+pub async fn delete_book_by_uuid(uuid: String) -> Result<(), String> {
+    delete_book(book_id_by_uuid(&uuid).await?).await
+}
+
+/// Update a tag identified by its uuid. `parent_id` stays integer until the
+/// reference columns flip with the database.
+pub async fn update_tag_by_uuid(
+    uuid: String,
+    name: String,
+    parent_id: Option<i32>,
+) -> Result<FrbTag, String> {
+    update_tag(tag_id_by_uuid(&uuid).await?, name, parent_id).await
+}
+
+/// Delete a tag identified by its uuid.
+pub async fn delete_tag_by_uuid(uuid: String) -> Result<(), String> {
+    delete_tag(tag_id_by_uuid(&uuid).await?).await
+}
+
+/// Fetch a contact by its uuid (single fetch, no id round-trip).
+pub async fn get_contact_by_uuid(uuid: String) -> Result<FrbContact, String> {
+    let db = db().ok_or("Database not initialized")?;
+    match crate::services::contact_service::get_contact_by_uuid(db, &uuid).await {
+        Ok(contact) => Ok(FrbContact::from(contact)),
+        Err(crate::services::contact_service::ServiceError::NotFound) => {
+            Err("Contact not found".to_string())
+        }
+        Err(e) => Err(format!("{e:?}")),
+    }
+}
+
+/// Delete a contact identified by its uuid.
+pub async fn delete_contact_by_uuid(uuid: String) -> Result<(), String> {
+    delete_contact(contact_id_by_uuid(&uuid).await?).await
+}
+
+/// Mark the loan identified by its uuid as returned.
+pub async fn return_loan_by_uuid(uuid: String) -> Result<String, String> {
+    return_loan(loan_id_by_uuid(&uuid).await?).await
+}
+
+/// Effective loan duration (days) for the book identified by its uuid.
+pub async fn get_effective_loan_duration_by_book_uuid(book_uuid: String) -> Result<i32, String> {
+    get_effective_loan_duration(book_id_by_uuid(&book_uuid).await?).await
+}
+
+/// Per-book loan duration override for the book identified by its uuid.
+pub async fn get_book_loan_duration_by_book_uuid(book_uuid: String) -> Result<Option<i32>, String> {
+    get_book_loan_duration(book_id_by_uuid(&book_uuid).await?).await
+}
+
+/// Set the per-book loan duration override for the book identified by its uuid.
+pub async fn set_book_loan_duration_by_book_uuid(
+    book_uuid: String,
+    days: Option<i32>,
+) -> Result<(), String> {
+    set_book_loan_duration(book_id_by_uuid(&book_uuid).await?, days).await
+}
+
+/// Add the book identified by its uuid to a collection.
+pub async fn add_book_to_collection_by_book_uuid(
+    collection_id: String,
+    book_uuid: String,
+) -> Result<(), String> {
+    add_book_to_collection(collection_id, book_id_by_uuid(&book_uuid).await?).await
+}
+
+/// Collections containing the book identified by its uuid.
+pub async fn get_book_collections_by_book_uuid(
+    book_uuid: String,
+) -> Result<Vec<FrbCollection>, String> {
+    get_book_collections(book_id_by_uuid(&book_uuid).await?).await
+}
+
+/// Notes attached to the book identified by its uuid.
+pub async fn get_book_notes_by_book_uuid(book_uuid: String) -> Result<Vec<FrbBookNote>, String> {
+    get_book_notes(book_id_by_uuid(&book_uuid).await?).await
+}
+
+/// Create a note on the book identified by its uuid.
+pub async fn create_book_note_by_book_uuid(
+    book_uuid: String,
+    content: String,
+    page: Option<i32>,
+) -> Result<FrbBookNote, String> {
+    create_book_note(book_id_by_uuid(&book_uuid).await?, content, page).await
+}
+
+/// Undo a metadata-fill batch for the book identified by its uuid.
+pub async fn metadata_fill_undo_book_by_uuid(
+    batch_id: String,
+    book_uuid: String,
+) -> Result<u32, String> {
+    metadata_fill_undo_book(batch_id, book_id_by_uuid(&book_uuid).await?).await
+}
+
+// ============ Account E2EE Sync — session + enrollment ============
 //
 // Exposes the already-built account-sync services (enrollment, signed device registry,
 // at-rest persistence) to Flutter. Scope of F1: JOIN an existing account (passphrase or
@@ -959,8 +1123,8 @@ pub async fn account_refresh_devices_ffi() -> Result<String, String> {
     Ok(serde_json::json!({ "devices": devices }).to_string())
 }
 
-/// Trigger a sync cycle for this account (ST-05 Phase F / F2). The entrypoint the
-/// Phase E triggers and a manual refresh will share.
+/// Trigger a sync cycle for this account. The entrypoint the
+/// automatic sync triggers and a manual refresh will share.
 ///
 /// HONEST SCOPE: it always runs the real, available step — refreshing the signed
 /// device registry (H3) — and **deliberately does not fake a data convergence**.
@@ -1127,7 +1291,7 @@ impl From<FrbBook> for crate::models::Book {
             marc_record: None,
             cataloguing_notes: None,
             source_data: None,
-            // uuid is owned by the backend (ST-03); Flutter never sends it.
+            // uuid is owned by the backend; Flutter never sends it.
             // None => NotSet on update (column preserved) / minted on insert.
             uuid: None,
             finished_reading_at: frb_book.finished_reading_at.map(Some),
@@ -1695,7 +1859,7 @@ pub struct FrbTag {
     pub name: String,
     pub parent_id: Option<i32>,
     pub count: i64,
-    /// Stable cross-device identifier (ST-03). None for synthetic "legacy"
+    /// Stable cross-device identifier. None for synthetic "legacy"
     /// subject-derived tags (negative ids) that have no `tags` row.
     pub uuid: Option<String>,
 }
@@ -1922,7 +2086,7 @@ pub struct FrbContact {
     pub user_id: Option<i32>,
     pub library_owner_id: Option<i32>,
     pub is_active: bool,
-    /// Stable cross-device identifier (ST-03). Backend-generated; surfaced to
+    /// Stable cross-device identifier. Backend-generated; surfaced to
     /// Flutter for the upcoming account sync.
     pub uuid: Option<String>,
 }
@@ -2110,7 +2274,7 @@ pub struct FrbLoan {
     pub book_id: Option<i32>,
     pub cover_url: Option<String>,
     pub isbn: Option<String>,
-    /// Stable cross-device identifier of the loan (ST-03).
+    /// Stable cross-device identifier of the loan.
     pub uuid: Option<String>,
 }
 
@@ -5411,8 +5575,8 @@ async fn upsert_directory_catalog_cache(
     // foreign_keys=OFF window is isolated. Directory entries reference no real
     // peer, so the insert needs FK enforcement off; disabling it on a pooled
     // connection could leak (a later delete reusing that connection would skip
-    // its ON DELETE CASCADE and orphan rows, the TICKET-fk-cascade-orphans root
-    // cause). A checked-out connection is invisible to concurrent operations
+    // its ON DELETE CASCADE and orphan rows, the foreign-key cascade-orphan
+    // root cause). A checked-out connection is invisible to concurrent operations
     // and is restored to ON before it returns to the pool.
     if !to_insert.is_empty() {
         match db.get_sqlite_connection_pool().acquire().await {
