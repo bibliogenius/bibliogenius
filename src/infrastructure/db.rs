@@ -2435,6 +2435,12 @@ pub async fn migrate_uuid_pk(db: &DatabaseConnection) -> Result<(), DbErr> {
         )));
     }
 
+    // Resolve the on-disk covers directory now (before the pragma toggles), so
+    // the local cover files can be renamed `<id>.jpg` -> `<uuid>.jpg` after the
+    // rebuild commits. `None` for an in-memory / unnamed DB (tests, the
+    // WS2_REAL_DB temp copy), where the rename is simply skipped.
+    let covers_dir = uuid_covers_dir(&mut conn).await;
+
     // SQLite's table-redefinition procedure. `foreign_keys` cannot change inside a
     // transaction, so it is toggled around it. `legacy_alter_table=ON` stops modern
     // SQLite (>= 3.25) from rewriting references in other objects on RENAME (which
@@ -2459,7 +2465,52 @@ pub async fn migrate_uuid_pk(db: &DatabaseConnection) -> Result<(), DbErr> {
         .execute(&mut *conn)
         .await;
     drop(conn);
-    result
+
+    // The rebuild committed; now apply the on-disk cover renames. Done AFTER
+    // commit so a rolled-back rebuild never leaves files renamed out from under
+    // a `cover_url` that reverted. Best-effort + idempotent per file.
+    let cover_renames = result?;
+    if let Some(dir) = covers_dir {
+        for (old, new) in &cover_renames {
+            uuid_apply_cover_rename(&dir, old, new);
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the on-disk covers directory (sibling of the SQLite database file),
+/// mirroring the registration in `api::frb`. Returns `None` for an in-memory or
+/// unnamed database (tests, the `WS2_REAL_DB` temp copy with no `covers/`
+/// sibling), so the cover-file rename is simply skipped there.
+async fn uuid_covers_dir(conn: &mut sqlx::SqliteConnection) -> Option<std::path::PathBuf> {
+    let rows = sqlx::query("PRAGMA database_list")
+        .fetch_all(&mut *conn)
+        .await
+        .ok()?;
+    let file = rows.iter().find_map(|r| {
+        let name: String = r.get("name");
+        let file: String = r.get("file");
+        (name == "main" && !file.is_empty()).then_some(file)
+    })?;
+    std::path::Path::new(&file)
+        .parent()
+        .map(|p| p.join("covers"))
+}
+
+/// Rename a local cover file `<covers_dir>/<old>` to `<covers_dir>/<new>` after
+/// the uuid migration commits. Best-effort + idempotent: a missing source or an
+/// already-present target is skipped (a genuinely missing cover renders a
+/// placeholder, recoverable by re-setting it). `old`/`new` are single-component
+/// basenames (`<id>.jpg` / `<uuid>.jpg`), so the join is traversal-safe.
+fn uuid_apply_cover_rename(covers_dir: &std::path::Path, old: &str, new: &str) {
+    let from = covers_dir.join(old);
+    let to = covers_dir.join(new);
+    if from.exists()
+        && !to.exists()
+        && let Err(e) = std::fs::rename(&from, &to)
+    {
+        tracing::warn!("uuid_pk: cover rename {old} -> {new} failed: {e}");
+    }
 }
 
 /// The transactional body of `migrate_uuid_pk`. Wraps `uuid_rebuild_inner` in a
@@ -2468,18 +2519,18 @@ pub async fn migrate_uuid_pk(db: &DatabaseConnection) -> Result<(), DbErr> {
 async fn run_uuid_rebuild(
     conn: &mut sqlx::SqliteConnection,
     specs: &[UuidRebuildSpec],
-) -> Result<(), DbErr> {
+) -> Result<Vec<(String, String)>, DbErr> {
     sqlx::query("BEGIN")
         .execute(&mut *conn)
         .await
         .map_err(map_sqlx)?;
     match uuid_rebuild_inner(conn, specs).await {
-        Ok(()) => {
+        Ok(cover_renames) => {
             sqlx::query("COMMIT")
                 .execute(&mut *conn)
                 .await
                 .map_err(map_sqlx)?;
-            Ok(())
+            Ok(cover_renames)
         }
         Err(e) => {
             let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
@@ -2489,10 +2540,13 @@ async fn run_uuid_rebuild(
 }
 
 /// The destructive rebuild itself (no transaction control — see `run_uuid_rebuild`).
+///
+/// Returns the local cover-file renames (`<id>.jpg` -> `<uuid>.jpg`) the caller
+/// must apply on disk AFTER the transaction commits.
 async fn uuid_rebuild_inner(
     conn: &mut sqlx::SqliteConnection,
     specs: &[UuidRebuildSpec],
-) -> Result<(), DbErr> {
+) -> Result<Vec<(String, String)>, DbErr> {
     // Phase 1: capture indexes + build every `_new` from intact originals.
     let mut indexes: Vec<String> = Vec::new();
     for spec in specs {
@@ -2526,7 +2580,11 @@ async fn uuid_rebuild_inner(
     }
 
     // Normalize `cover_url` to a device-independent value so it can replicate
-    // without one device clobbering another (ADR-044 Addendum A.4).
+    // without one device clobbering another (ADR-044 Addendum A.4), and re-key
+    // local custom covers from `<old id>.jpg` to `<uuid>.jpg` so the resolver
+    // finds them by the book's new uuid identity (S4d). The matching on-disk
+    // file renames are collected and returned to be applied after commit.
+    let mut cover_renames: Vec<(String, String)> = Vec::new();
     let rows = sqlx::query("SELECT uuid, cover_url FROM books WHERE cover_url IS NOT NULL")
         .fetch_all(&mut *conn)
         .await
@@ -2534,12 +2592,15 @@ async fn uuid_rebuild_inner(
     for row in &rows {
         let uuid: String = row.get("uuid");
         let current: String = row.get("cover_url");
-        if let Some(normalized) =
-            crate::utils::cover_url::normalize_cover_url_for_storage(Some(&current))
-            && normalized != current
+        let (stored, rename) = crate::utils::cover_url::plan_cover_migration(Some(&current), &uuid);
+        if let Some(rename) = rename {
+            cover_renames.push(rename);
+        }
+        if let Some(stored) = stored
+            && stored != current
         {
             sqlx::query("UPDATE books SET cover_url = ?1 WHERE uuid = ?2")
-                .bind(normalized)
+                .bind(stored)
                 .bind(uuid)
                 .execute(&mut *conn)
                 .await
@@ -2558,7 +2619,7 @@ async fn uuid_rebuild_inner(
             violations.len()
         )));
     }
-    Ok(())
+    Ok(cover_renames)
 }
 
 /// Remove rows orphaned by deletions that ran with SQLite `foreign_keys`

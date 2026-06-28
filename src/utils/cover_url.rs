@@ -197,6 +197,48 @@ pub fn normalize_cover_url_for_storage(cover_url: Option<&str>) -> Option<String
     }
 }
 
+/// True when a stored `cover_url` value is a local custom-cover reference (a
+/// device's own `<id>.jpg` file), as opposed to an external `http(s)` URL or a
+/// `/api/...` peer path. Used by the uuid migration to decide which covers need
+/// their on-disk file renamed `<id>.jpg` -> `<uuid>.jpg` (ADR-044 Addendum A.4).
+pub fn is_local_cover(cover_url: &str) -> bool {
+    !cover_url.is_empty() && !is_servable_on_lan(cover_url)
+}
+
+/// The canonical on-disk filename for a book's local custom cover, keyed by its
+/// uuid identity: `<uuid>.jpg`. Matches `rebase_local_cover_path`'s expectation
+/// and the Flutter `LocalCoverResolver`.
+pub fn local_cover_filename(uuid: &str) -> String {
+    format!("{uuid}.jpg")
+}
+
+/// Plan the `cover_url` migration for one book during the id -> uuid flip (S4d).
+///
+/// Given the currently-stored value and the book's uuid, returns:
+/// - the value to STORE in `cover_url` (`None` only when the input is `None`),
+/// - for a local custom cover, the on-disk file rename `(old_basename,
+///   new_basename)` the caller applies after the transaction commits.
+///
+/// Local custom covers (`<old id>.jpg`) are re-keyed to `<uuid>.jpg` so the
+/// resolver finds them by the book's new uuid identity. External `http(s)` URLs
+/// and `/api/...` peer paths are stored normalized, with no rename. A cover
+/// already named `<uuid>.jpg` yields no rename (idempotent).
+pub fn plan_cover_migration(
+    current: Option<&str>,
+    uuid: &str,
+) -> (Option<String>, Option<(String, String)>) {
+    let Some(normalized) = normalize_cover_url_for_storage(current) else {
+        return (None, None);
+    };
+    if is_local_cover(&normalized) {
+        let new_name = local_cover_filename(uuid);
+        let rename = (normalized != new_name).then(|| (normalized.clone(), new_name.clone()));
+        (Some(new_name), rename)
+    } else {
+        (Some(normalized), None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,5 +497,101 @@ mod tests {
             normalize_cover_url_for_storage(Some("1.jpg")).as_deref(),
             Some("1.jpg")
         );
+    }
+
+    // is_local_cover / local_cover_filename -------------------------------
+
+    #[test]
+    fn is_local_cover_only_for_device_local_files() {
+        // Local custom covers (bare basename or absolute path) are local.
+        assert!(is_local_cover("42.jpg"));
+        assert!(is_local_cover(
+            "/var/mobile/Containers/Data/Application/abc/covers/42.jpg"
+        ));
+        // External URLs and /api peer paths are NOT local.
+        assert!(!is_local_cover("https://cdn/x.jpg"));
+        assert!(!is_local_cover("http://h/c/7"));
+        assert!(!is_local_cover("/api/books/2/cover"));
+        // Empty is not a cover to rename.
+        assert!(!is_local_cover(""));
+    }
+
+    #[test]
+    fn local_cover_filename_is_uuid_dot_jpg() {
+        assert_eq!(
+            local_cover_filename("0190f5a2-1234-7abc-8def-0123456789ab"),
+            "0190f5a2-1234-7abc-8def-0123456789ab.jpg"
+        );
+    }
+
+    // plan_cover_migration ------------------------------------------------
+
+    const U: &str = "0190f5a2-1234-7abc-8def-0123456789ab";
+
+    #[test]
+    fn plan_rekeys_local_absolute_path_and_schedules_rename() {
+        // A device-local custom cover stored as an absolute path: re-keyed to
+        // <uuid>.jpg, and its on-disk file renamed from the old <id>.jpg.
+        let (stored, rename) = plan_cover_migration(
+            Some("/var/mobile/Containers/Data/Application/abc/covers/42.jpg"),
+            U,
+        );
+        assert_eq!(
+            stored.as_deref(),
+            Some("0190f5a2-1234-7abc-8def-0123456789ab.jpg")
+        );
+        assert_eq!(
+            rename,
+            Some((
+                "42.jpg".to_string(),
+                "0190f5a2-1234-7abc-8def-0123456789ab.jpg".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn plan_rekeys_bare_basename() {
+        let (stored, rename) = plan_cover_migration(Some("7.jpg"), U);
+        assert_eq!(
+            stored.as_deref(),
+            Some("0190f5a2-1234-7abc-8def-0123456789ab.jpg")
+        );
+        assert_eq!(
+            rename,
+            Some((
+                "7.jpg".to_string(),
+                "0190f5a2-1234-7abc-8def-0123456789ab.jpg".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn plan_leaves_external_url_untouched() {
+        let (stored, rename) = plan_cover_migration(Some("https://cdn/x.jpg"), U);
+        assert_eq!(stored.as_deref(), Some("https://cdn/x.jpg"));
+        assert_eq!(rename, None);
+    }
+
+    #[test]
+    fn plan_leaves_api_peer_path_untouched() {
+        let (stored, rename) = plan_cover_migration(Some("/api/books/9/cover"), U);
+        assert_eq!(stored.as_deref(), Some("/api/books/9/cover"));
+        assert_eq!(rename, None);
+    }
+
+    #[test]
+    fn plan_is_idempotent_when_already_uuid_named() {
+        // A cover already named <uuid>.jpg keeps its value and needs no rename.
+        let already = format!("{U}.jpg");
+        let (stored, rename) = plan_cover_migration(Some(&already), U);
+        assert_eq!(stored.as_deref(), Some(already.as_str()));
+        assert_eq!(rename, None);
+    }
+
+    #[test]
+    fn plan_passes_none_through() {
+        let (stored, rename) = plan_cover_migration(None, U);
+        assert_eq!(stored, None);
+        assert_eq!(rename, None);
     }
 }

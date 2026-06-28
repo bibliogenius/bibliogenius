@@ -171,10 +171,16 @@ async fn replicated_tables_have_uuid_pk_and_no_foreign_keys() {
         // `uuid` is the PRIMARY KEY (it carries a `DEFAULT (uuid_v7)` so inserts
         // that bypass the Rust `before_save` hook still get one).
         let (uuid_present, uuid_is_pk) = column_pk(&db, table, "uuid").await;
-        assert!(uuid_present && uuid_is_pk, "{table}.uuid must be the PRIMARY KEY");
+        assert!(
+            uuid_present && uuid_is_pk,
+            "{table}.uuid must be the PRIMARY KEY"
+        );
         // The device-local integer `id` column is gone.
         let (id_present, _) = column_pk(&db, table, "id").await;
-        assert!(!id_present, "{table} must no longer carry the integer id column");
+        assert!(
+            !id_present,
+            "{table} must no longer carry the integer id column"
+        );
         // No FOREIGN KEY clauses (cr-sqlite CRR rule).
         let sql = table_sql(&db, table).await;
         assert!(
