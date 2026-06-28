@@ -107,8 +107,8 @@ impl BookRepository for SeaOrmBookRepository {
         })
     }
 
-    async fn find_by_id(&self, id: i32) -> Result<Option<Book>, DomainError> {
-        let book_model = BookEntity::find_by_id(id).one(&self.db).await?;
+    async fn find_by_id(&self, id: &str) -> Result<Option<Book>, DomainError> {
+        let book_model = BookEntity::find_by_id(id.to_owned()).one(&self.db).await?;
 
         match book_model {
             Some(model) => {
@@ -169,8 +169,8 @@ impl BookRepository for SeaOrmBookRepository {
         Ok(Book::from(result))
     }
 
-    async fn update(&self, id: i32, book: Book) -> Result<Book, DomainError> {
-        let existing = BookEntity::find_by_id(id)
+    async fn update(&self, id: &str, book: Book) -> Result<Book, DomainError> {
+        let existing = BookEntity::find_by_id(id.to_owned())
             .one(&self.db)
             .await?
             .ok_or(DomainError::NotFound)?;
@@ -214,8 +214,10 @@ impl BookRepository for SeaOrmBookRepository {
         Ok(Book::from(result))
     }
 
-    async fn delete(&self, id: i32) -> Result<(), DomainError> {
-        let result = BookEntity::delete_by_id(id).exec(&self.db).await?;
+    async fn delete(&self, id: &str) -> Result<(), DomainError> {
+        let result = BookEntity::delete_by_id(id.to_owned())
+            .exec(&self.db)
+            .await?;
 
         if result.rows_affected == 0 {
             return Err(DomainError::NotFound);
@@ -224,7 +226,7 @@ impl BookRepository for SeaOrmBookRepository {
         Ok(())
     }
 
-    async fn find_missing_covers(&self) -> Result<Vec<(i32, String)>, DomainError> {
+    async fn find_missing_covers(&self) -> Result<Vec<(String, String)>, DomainError> {
         let models = BookEntity::find()
             .filter(Column::CoverUrl.is_null())
             .filter(Column::Isbn.is_not_null())
@@ -244,7 +246,7 @@ impl BookRepository for SeaOrmBookRepository {
             .collect())
     }
 
-    async fn update_cover_url(&self, id: i32, cover_url: &str) -> Result<(), DomainError> {
+    async fn update_cover_url(&self, id: &str, cover_url: &str) -> Result<(), DomainError> {
         BookEntity::update_many()
             .col_expr(
                 Column::CoverUrl,

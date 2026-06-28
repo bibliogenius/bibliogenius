@@ -273,7 +273,7 @@ pub async fn build_book_delta_response(
     // hub prefix fails the whole call), which only makes sense once every
     // upsert has been collected.
     enum Pending {
-        Delete(i32),
+        Delete(String),
         Upsert(usize),
     }
 
@@ -283,10 +283,10 @@ pub async fn build_book_delta_response(
     for op in &window.operations {
         match op.op {
             DeltaOp::Delete => {
-                pending.push(Pending::Delete(op.entity_id));
+                pending.push(Pending::Delete(op.entity_id.clone()));
             }
             DeltaOp::Upsert => {
-                let Some(mut book) = state.book_repo.find_by_id(op.entity_id).await? else {
+                let Some(mut book) = state.book_repo.find_by_id(&op.entity_id).await? else {
                     // Book existed at log time but has since been hard-deleted
                     // outside the log (rare). Skip silently — the peer cannot
                     // act on a row that no longer exists.
@@ -440,7 +440,7 @@ pub async fn create_book(
     // Create book via repository
     match state.book_repo.create(book).await {
         Ok(created_book) => {
-            let book_id = created_book.id.expect("Created book must have ID");
+            let book_id = created_book.id.clone().expect("Created book must have ID");
             let owned = created_book.owned.unwrap_or(true);
 
             // Handle authors - find or create, then link to book
@@ -474,7 +474,7 @@ pub async fn create_book(
                     };
 
                     let book_author = BookAuthorActive {
-                        book_id: Set(book_id),
+                        book_id: Set(book_id.clone()),
                         author_id: Set(author.id),
                         ..Default::default()
                     };
@@ -482,7 +482,7 @@ pub async fn create_book(
                 }
             }
 
-            let _ = crate::sync::log_operation(db, "book", book_id, "INSERT", None).await;
+            let _ = crate::sync::log_operation(db, "book", &book_id, "INSERT", None).await;
 
             // Notify accepted peers that our catalog changed (fire-and-forget,
             // debounced — safe to call on every book creation including bulk
@@ -495,7 +495,7 @@ pub async fn create_book(
             if owned && let Ok(lib_id) = crate::utils::library_helpers::resolve_library_id(db).await
             {
                 let copy = crate::models::copy::ActiveModel {
-                    book_id: Set(book_id),
+                    book_id: Set(book_id.clone()),
                     library_id: Set(lib_id),
                     status: Set("available".to_string()),
                     is_temporary: Set(false),
@@ -507,7 +507,7 @@ pub async fn create_book(
                     let _ = crate::sync::log_operation(
                         db,
                         "copy",
-                        saved_copy.id,
+                        &saved_copy.id,
                         "INSERT",
                         Some(serde_json::json!({ "book_id": book_id })),
                     )
@@ -546,17 +546,17 @@ pub async fn create_book(
 pub async fn delete_book(
     State(state): State<crate::infrastructure::AppState>,
     _claims: crate::auth::Claims,
-    axum::extract::Path(id): axum::extract::Path<i32>,
+    axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     use crate::domain::DomainError;
 
     // Idempotent DELETE: return 200 OK even if book doesn't exist
-    match state.book_repo.delete(id).await {
+    match state.book_repo.delete(&id).await {
         Ok(()) | Err(DomainError::NotFound) => {
-            let _ = crate::sync::log_operation(state.db(), "book", id, "DELETE", None).await;
+            let _ = crate::sync::log_operation(state.db(), "book", &id, "DELETE", None).await;
             // Best-effort hub cover cleanup — same rationale as the FFI
             // delete path. Non-fatal: the book is already gone locally.
-            if let Err(e) = state.hub_directory.delete_cover(state.db(), id).await {
+            if let Err(e) = state.hub_directory.delete_cover(state.db(), &id).await {
                 tracing::debug!("hub cover cleanup skipped for book {id}: {e}");
             }
             // Notify accepted peers that our catalog changed (debounced).
@@ -592,7 +592,7 @@ pub async fn delete_book(
 pub async fn update_book(
     State(state): State<crate::infrastructure::AppState>,
     _claims: crate::auth::Claims,
-    axum::extract::Path(id): axum::extract::Path<i32>,
+    axum::extract::Path(id): axum::extract::Path<String>,
     Json(book_data): Json<Book>,
 ) -> impl IntoResponse {
     use crate::domain::DomainError;
@@ -601,7 +601,7 @@ pub async fn update_book(
     let now = chrono::Utc::now();
 
     // Get current book to track owned status change
-    let current_book = match state.book_repo.find_by_id(id).await {
+    let current_book = match state.book_repo.find_by_id(&id).await {
         Ok(Some(b)) => b,
         Ok(None) => {
             return (
@@ -638,9 +638,9 @@ pub async fn update_book(
     };
 
     // Update book via repository
-    match state.book_repo.update(id, book_data).await {
+    match state.book_repo.update(&id, book_data).await {
         Ok(updated_book) => {
-            let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
+            let _ = crate::sync::log_operation(db, "book", &id, "UPDATE", None).await;
 
             // Update authors in book_authors join table
             {
@@ -652,7 +652,7 @@ pub async fn update_book(
 
                 // Remove existing author links
                 let _ = BookAuthorEntity::delete_many()
-                    .filter(BAColumn::BookId.eq(id))
+                    .filter(BAColumn::BookId.eq(id.as_str()))
                     .exec(db)
                     .await;
 
@@ -682,7 +682,7 @@ pub async fn update_book(
                     };
 
                     let book_author = BookAuthorActive {
-                        book_id: Set(id),
+                        book_id: Set(id.clone()),
                         author_id: Set(author.id),
                         ..Default::default()
                     };
@@ -698,7 +698,7 @@ pub async fn update_book(
                 if new_owned {
                     // owned: false -> true: create a copy if none exists
                     let existing = CopyEntity::find()
-                        .filter(copy_model::Column::BookId.eq(id))
+                        .filter(copy_model::Column::BookId.eq(id.as_str()))
                         .one(db)
                         .await;
                     if matches!(existing, Ok(None))
@@ -706,7 +706,7 @@ pub async fn update_book(
                             crate::utils::library_helpers::resolve_library_id(db).await
                     {
                         let copy = copy_model::ActiveModel {
-                            book_id: Set(id),
+                            book_id: Set(id.clone()),
                             library_id: Set(lib_id),
                             status: Set("available".to_string()),
                             is_temporary: Set(false),
@@ -718,7 +718,7 @@ pub async fn update_book(
                             let _ = crate::sync::log_operation(
                                 db,
                                 "copy",
-                                saved.id,
+                                &saved.id,
                                 "INSERT",
                                 Some(serde_json::json!({ "book_id": id })),
                             )
@@ -729,17 +729,17 @@ pub async fn update_book(
                     // owned: true -> false: delete all copies for this book
                     // Log each copy before bulk delete
                     if let Ok(copies) = CopyEntity::find()
-                        .filter(copy_model::Column::BookId.eq(id))
+                        .filter(copy_model::Column::BookId.eq(id.as_str()))
                         .all(db)
                         .await
                     {
                         for c in &copies {
                             let _ =
-                                crate::sync::log_operation(db, "copy", c.id, "DELETE", None).await;
+                                crate::sync::log_operation(db, "copy", &c.id, "DELETE", None).await;
                         }
                     }
                     let _ = CopyEntity::delete_many()
-                        .filter(copy_model::Column::BookId.eq(id))
+                        .filter(copy_model::Column::BookId.eq(id.as_str()))
                         .exec(db)
                         .await;
                 }
@@ -829,11 +829,11 @@ pub async fn list_tags(
 )]
 pub async fn get_book(
     State(state): State<crate::infrastructure::AppState>,
-    axum::extract::Path(id): axum::extract::Path<i32>,
+    axum::extract::Path(id): axum::extract::Path<String>,
     claims: Option<crate::auth::Claims>,
 ) -> impl IntoResponse {
     let is_owner = claims.is_some();
-    match state.book_repo.find_by_id(id).await {
+    match state.book_repo.find_by_id(&id).await {
         Ok(Some(mut book_dto)) => {
             if !is_owner {
                 // Hide private books behind a 404 rather than a 403 so an
@@ -870,9 +870,9 @@ pub async fn get_book(
 /// 300x450 target.
 pub async fn get_book_cover(
     State(state): State<crate::infrastructure::AppState>,
-    axum::extract::Path(id): axum::extract::Path<i32>,
+    axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Response, StatusCode> {
-    let book = crate::models::book::Entity::find_by_id(id)
+    let book = crate::models::book::Entity::find_by_id(id.clone())
         .one(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -898,7 +898,7 @@ pub async fn get_book_cover(
     // survives under the new one. In server-binary mode the covers dir is not
     // registered, so the stored path is read as-is (paths are stable there).
     let read_path = match crate::api::frb::covers_dir() {
-        Some(dir) => crate::utils::cover_url::rebase_local_cover_path(dir, cover_path, id),
+        Some(dir) => crate::utils::cover_url::rebase_local_cover_path(dir, cover_path, &id),
         None => std::path::PathBuf::from(cover_path),
     };
 

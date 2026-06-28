@@ -129,7 +129,7 @@ pub async fn export_data(State(db): State<DatabaseConnection>) -> impl IntoRespo
 /// FFI export format (with author field, subjects as array, missing timestamps).
 #[derive(Deserialize)]
 pub struct ImportBook {
-    pub id: Option<i32>,
+    pub id: Option<String>,
     pub title: String,
     pub isbn: Option<String>,
     pub summary: Option<String>,
@@ -168,7 +168,7 @@ pub struct ImportBook {
 /// Flexible contact type that accepts both formats.
 #[derive(Deserialize)]
 pub struct ImportContact {
-    pub id: Option<i32>,
+    pub id: Option<String>,
     #[serde(default = "default_contact_type")]
     pub r#type: String,
     pub name: String,
@@ -195,9 +195,9 @@ pub struct ImportContact {
 /// Flexible tag type that accepts both formats.
 #[derive(Deserialize)]
 pub struct ImportTag {
-    pub id: Option<i32>,
+    pub id: Option<String>,
     pub name: String,
-    pub parent_id: Option<i32>,
+    pub parent_id: Option<String>,
     #[serde(default)]
     pub path: String,
     pub created_at: Option<String>,
@@ -350,9 +350,8 @@ pub async fn import_data(
     if let Some(books) = backup.books {
         for b in books {
             let active = book::ActiveModel {
+                // Import DTOs may carry a uuid id; mint a fresh one via before_save when absent.
                 id: b.id.map_or(sea_orm::ActiveValue::NotSet, Set),
-                // Import DTOs carry no uuid; mint a fresh one via before_save.
-                uuid: sea_orm::ActiveValue::NotSet,
                 title: Set(b.title),
                 isbn: Set(b.isbn),
                 summary: Set(b.summary),
@@ -403,7 +402,6 @@ pub async fn import_data(
         for t in tags {
             let active = tag::ActiveModel {
                 id: t.id.map_or(sea_orm::ActiveValue::NotSet, Set),
-                uuid: sea_orm::ActiveValue::NotSet,
                 name: Set(t.name),
                 parent_id: Set(t.parent_id),
                 path: Set(t.path),
@@ -431,7 +429,6 @@ pub async fn import_data(
         for c in contacts {
             let active = contact::ActiveModel {
                 id: c.id.map_or(sea_orm::ActiveValue::NotSet, Set),
-                uuid: sea_orm::ActiveValue::NotSet,
                 r#type: Set(c.r#type),
                 name: Set(c.name),
                 first_name: Set(c.first_name),
@@ -677,9 +674,8 @@ pub async fn run_import_upsert(db: &DatabaseConnection, backup: ImportBackupData
     if let Some(books) = backup.books {
         for b in books {
             let active = book::ActiveModel {
-                id: b.id.map_or(sea_orm::ActiveValue::NotSet, Set),
                 // NotSet: new rows get a fresh uuid; existing rows keep theirs.
-                uuid: sea_orm::ActiveValue::NotSet,
+                id: b.id.map_or(sea_orm::ActiveValue::NotSet, Set),
                 title: Set(b.title),
                 isbn: Set(b.isbn),
                 summary: Set(b.summary),
@@ -768,7 +764,6 @@ pub async fn run_import_upsert(db: &DatabaseConnection, backup: ImportBackupData
         for t in tags {
             let active = tag::ActiveModel {
                 id: t.id.map_or(sea_orm::ActiveValue::NotSet, Set),
-                uuid: sea_orm::ActiveValue::NotSet,
                 name: Set(t.name),
                 parent_id: Set(t.parent_id),
                 path: Set(t.path),
@@ -813,7 +808,6 @@ pub async fn run_import_upsert(db: &DatabaseConnection, backup: ImportBackupData
         for c in contacts {
             let active = contact::ActiveModel {
                 id: c.id.map_or(sea_orm::ActiveValue::NotSet, Set),
-                uuid: sea_orm::ActiveValue::NotSet,
                 r#type: Set(c.r#type),
                 name: Set(c.name),
                 first_name: Set(c.first_name),
@@ -1198,7 +1192,7 @@ mod tests {
         }
     }
 
-    fn make_import_book(id: Option<i32>, title: &str) -> ImportBook {
+    fn make_import_book(id: Option<String>, title: &str) -> ImportBook {
         ImportBook {
             id,
             title: title.to_string(),

@@ -60,8 +60,8 @@ impl CopyRepository for SeaOrmCopyRepository {
         Ok(PaginatedCopies { copies, total })
     }
 
-    async fn find_by_id(&self, id: i32) -> Result<Option<Copy>, DomainError> {
-        let result = CopyEntity::find_by_id(id)
+    async fn find_by_id(&self, id: &str) -> Result<Option<Copy>, DomainError> {
+        let result = CopyEntity::find_by_id(id.to_owned())
             .find_also_related(BookEntity)
             .one(&self.db)
             .await?;
@@ -69,7 +69,7 @@ impl CopyRepository for SeaOrmCopyRepository {
         Ok(result.map(|(copy, book)| to_domain(copy, book)))
     }
 
-    async fn find_by_book_id(&self, book_id: i32) -> Result<PaginatedCopies, DomainError> {
+    async fn find_by_book_id(&self, book_id: &str) -> Result<PaginatedCopies, DomainError> {
         let copies = CopyEntity::find()
             .filter(Column::BookId.eq(book_id))
             .all(&self.db)
@@ -124,8 +124,8 @@ impl CopyRepository for SeaOrmCopyRepository {
         Ok(to_domain(result, None))
     }
 
-    async fn update(&self, id: i32, input: UpdateCopyInput) -> Result<Copy, DomainError> {
-        let existing = CopyEntity::find_by_id(id)
+    async fn update(&self, id: &str, input: UpdateCopyInput) -> Result<Copy, DomainError> {
+        let existing = CopyEntity::find_by_id(id.to_owned())
             .one(&self.db)
             .await?
             .ok_or(DomainError::NotFound)?;
@@ -162,8 +162,10 @@ impl CopyRepository for SeaOrmCopyRepository {
         Ok(to_domain(result, None))
     }
 
-    async fn delete(&self, id: i32) -> Result<(), DomainError> {
-        let result = CopyEntity::delete_by_id(id).exec(&self.db).await?;
+    async fn delete(&self, id: &str) -> Result<(), DomainError> {
+        let result = CopyEntity::delete_by_id(id.to_owned())
+            .exec(&self.db)
+            .await?;
 
         if result.rows_affected == 0 {
             return Err(DomainError::NotFound);

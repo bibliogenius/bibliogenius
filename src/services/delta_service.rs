@@ -38,7 +38,7 @@ pub struct DeltaOperation {
     /// outcome. Used by the wrapper as the per-row ordering key.
     pub id: i64,
     pub entity_type: String,
-    pub entity_id: i32,
+    pub entity_id: String,
     /// Either `"upsert"` or `"delete"`.
     pub op: DeltaOp,
 }
@@ -132,10 +132,10 @@ pub async fn fetch_delta(
         last_id: i32,
         is_delete: bool,
     }
-    let mut by_entity: HashMap<i32, Entry> = HashMap::new();
+    let mut by_entity: HashMap<String, Entry> = HashMap::new();
     for row in used {
         let is_delete = row.operation.eq_ignore_ascii_case("DELETE");
-        let entry = by_entity.entry(row.entity_id).or_insert(Entry {
+        let entry = by_entity.entry(row.entity_id.clone()).or_insert(Entry {
             last_id: row.id,
             is_delete,
         });
@@ -206,13 +206,13 @@ mod tests {
     async fn insert_log(
         db: &DatabaseConnection,
         entity_type: &str,
-        entity_id: i32,
+        entity_id: &str,
         operation: &str,
         source: &str,
     ) -> i32 {
         let row = operation_log::ActiveModel {
             entity_type: Set(entity_type.to_owned()),
-            entity_id: Set(entity_id),
+            entity_id: Set(entity_id.to_owned()),
             operation: Set(operation.to_owned()),
             payload: Set(None),
             source: Set(source.to_owned()),
@@ -245,18 +245,18 @@ mod tests {
     #[tokio::test]
     async fn rows_under_limit_returns_all_no_more() {
         let db = setup().await;
-        let id1 = insert_log(&db, "book", 1, "INSERT", "local").await;
-        let _id2 = insert_log(&db, "book", 2, "INSERT", "local").await;
-        let id3 = insert_log(&db, "book", 3, "INSERT", "local").await;
+        let id1 = insert_log(&db, "book", "1", "INSERT", "local").await;
+        let _id2 = insert_log(&db, "book", "2", "INSERT", "local").await;
+        let id3 = insert_log(&db, "book", "3", "INSERT", "local").await;
 
         let w = fetch_delta(&db, "book", Some(0), 10).await.unwrap();
         assert_eq!(w.operations.len(), 3);
         assert!(!w.has_more);
         assert_eq!(w.latest_cursor, id3 as i64);
-        assert_eq!(w.operations[0].entity_id, 1);
+        assert_eq!(w.operations[0].entity_id, "1");
         assert_eq!(w.operations[0].id, id1 as i64);
-        assert_eq!(w.operations[1].entity_id, 2);
-        assert_eq!(w.operations[2].entity_id, 3);
+        assert_eq!(w.operations[1].entity_id, "2");
+        assert_eq!(w.operations[2].entity_id, "3");
         assert!(w.operations.iter().all(|o| o.op == DeltaOp::Upsert));
     }
 
@@ -264,26 +264,26 @@ mod tests {
     async fn over_limit_caps_and_signals_more() {
         let db = setup().await;
         for i in 1..=5 {
-            insert_log(&db, "book", i, "INSERT", "local").await;
+            insert_log(&db, "book", &i.to_string(), "INSERT", "local").await;
         }
         let w = fetch_delta(&db, "book", Some(0), 3).await.unwrap();
         assert_eq!(w.operations.len(), 3);
         assert!(w.has_more);
         // Cursor must be the id of the last row in the window, not the
         // global max — the client re-queries with this cursor.
-        let last_returned_entity = w.operations.last().unwrap().entity_id;
-        assert_eq!(last_returned_entity, 3);
+        let last_returned_entity = w.operations.last().unwrap().entity_id.clone();
+        assert_eq!(last_returned_entity, "3");
     }
 
     #[tokio::test]
     async fn collapse_insert_then_update_yields_one_upsert() {
         let db = setup().await;
-        insert_log(&db, "book", 1, "INSERT", "local").await;
-        let update_id = insert_log(&db, "book", 1, "UPDATE", "local").await;
+        insert_log(&db, "book", "1", "INSERT", "local").await;
+        let update_id = insert_log(&db, "book", "1", "UPDATE", "local").await;
 
         let w = fetch_delta(&db, "book", Some(0), 100).await.unwrap();
         assert_eq!(w.operations.len(), 1);
-        assert_eq!(w.operations[0].entity_id, 1);
+        assert_eq!(w.operations[0].entity_id, "1");
         assert_eq!(w.operations[0].op, DeltaOp::Upsert);
         // Collapsed row's id is the latest underlying id.
         assert_eq!(w.operations[0].id, update_id as i64);
@@ -293,9 +293,9 @@ mod tests {
     #[tokio::test]
     async fn collapse_insert_update_delete_yields_one_delete() {
         let db = setup().await;
-        insert_log(&db, "book", 1, "INSERT", "local").await;
-        insert_log(&db, "book", 1, "UPDATE", "local").await;
-        let delete_id = insert_log(&db, "book", 1, "DELETE", "local").await;
+        insert_log(&db, "book", "1", "INSERT", "local").await;
+        insert_log(&db, "book", "1", "UPDATE", "local").await;
+        let delete_id = insert_log(&db, "book", "1", "DELETE", "local").await;
 
         let w = fetch_delta(&db, "book", Some(0), 100).await.unwrap();
         assert_eq!(w.operations.len(), 1);
@@ -306,13 +306,13 @@ mod tests {
     #[tokio::test]
     async fn remote_source_rows_are_filtered_out() {
         let db = setup().await;
-        insert_log(&db, "book", 1, "INSERT", "device:42").await;
-        insert_log(&db, "book", 2, "INSERT", "device:99").await;
-        let local_id = insert_log(&db, "book", 3, "INSERT", "local").await;
+        insert_log(&db, "book", "1", "INSERT", "device:42").await;
+        insert_log(&db, "book", "2", "INSERT", "device:99").await;
+        let local_id = insert_log(&db, "book", "3", "INSERT", "local").await;
 
         let w = fetch_delta(&db, "book", Some(0), 100).await.unwrap();
         assert_eq!(w.operations.len(), 1);
-        assert_eq!(w.operations[0].entity_id, 3);
+        assert_eq!(w.operations[0].entity_id, "3");
         assert_eq!(w.latest_cursor, local_id as i64);
     }
 
@@ -323,9 +323,9 @@ mod tests {
         // We can't realistically backfill ids in SQLite without manual
         // INSERTs that set the id, so we instead insert and then prune
         // the early rows.
-        let _drop = insert_log(&db, "book", 1, "INSERT", "local").await;
-        let _drop2 = insert_log(&db, "book", 2, "INSERT", "local").await;
-        let keep = insert_log(&db, "book", 3, "INSERT", "local").await;
+        let _drop = insert_log(&db, "book", "1", "INSERT", "local").await;
+        let _drop2 = insert_log(&db, "book", "2", "INSERT", "local").await;
+        let keep = insert_log(&db, "book", "3", "INSERT", "local").await;
         // Manually delete the early rows to simulate retention.
         operation_log::Entity::delete_many()
             .filter(operation_log::Column::Id.lt(keep))
@@ -344,7 +344,7 @@ mod tests {
     #[tokio::test]
     async fn cursor_at_oldest_minus_one_is_valid() {
         let db = setup().await;
-        let id1 = insert_log(&db, "book", 1, "INSERT", "local").await;
+        let id1 = insert_log(&db, "book", "1", "INSERT", "local").await;
         // Cursor exactly equal to oldest_id - 1 is valid: next fetch
         // returns the row at oldest_id.
         let w = fetch_delta(&db, "book", Some((id1 - 1) as i64), 100)
@@ -357,13 +357,13 @@ mod tests {
     #[tokio::test]
     async fn other_entity_types_do_not_leak() {
         let db = setup().await;
-        insert_log(&db, "contact", 1, "INSERT", "local").await;
-        insert_log(&db, "loan", 2, "INSERT", "local").await;
-        let book_id = insert_log(&db, "book", 3, "INSERT", "local").await;
+        insert_log(&db, "contact", "1", "INSERT", "local").await;
+        insert_log(&db, "loan", "2", "INSERT", "local").await;
+        let book_id = insert_log(&db, "book", "3", "INSERT", "local").await;
 
         let w = fetch_delta(&db, "book", Some(0), 100).await.unwrap();
         assert_eq!(w.operations.len(), 1);
-        assert_eq!(w.operations[0].entity_id, 3);
+        assert_eq!(w.operations[0].entity_id, "3");
         assert_eq!(w.latest_cursor, book_id as i64);
     }
 }

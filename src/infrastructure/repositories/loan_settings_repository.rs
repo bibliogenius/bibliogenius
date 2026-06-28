@@ -75,8 +75,8 @@ impl LoanSettingsRepository for SeaOrmLoanSettingsRepository {
         })
     }
 
-    async fn get_book_loan_duration(&self, book_id: i32) -> Result<Option<i32>, DomainError> {
-        let book = book::Entity::find_by_id(book_id)
+    async fn get_book_loan_duration(&self, book_id: &str) -> Result<Option<i32>, DomainError> {
+        let book = book::Entity::find_by_id(book_id.to_owned())
             .one(&self.db)
             .await
             .map_err(|e| DomainError::Database(e.to_string()))?
@@ -87,12 +87,12 @@ impl LoanSettingsRepository for SeaOrmLoanSettingsRepository {
 
     async fn set_book_loan_duration(
         &self,
-        book_id: i32,
+        book_id: &str,
         days: Option<i32>,
     ) -> Result<(), DomainError> {
         let clamped = days.map(|d| d.clamp(1, 365));
 
-        let book = book::Entity::find_by_id(book_id)
+        let book = book::Entity::find_by_id(book_id.to_owned())
             .one(&self.db)
             .await
             .map_err(|e| DomainError::Database(e.to_string()))?
@@ -107,7 +107,7 @@ impl LoanSettingsRepository for SeaOrmLoanSettingsRepository {
         Ok(())
     }
 
-    async fn get_effective_duration(&self, book_id: i32) -> Result<i32, DomainError> {
+    async fn get_effective_duration(&self, book_id: &str) -> Result<i32, DomainError> {
         let settings = self.get_settings().await?;
 
         if settings.per_book_duration_enabled

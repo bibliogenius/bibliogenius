@@ -245,7 +245,7 @@ fn base_title(title: &str) -> &str {
 pub async fn setup_game(
     repo: &dyn HangmanRepository,
     difficulty: HangmanDifficulty,
-    session_exclude_ids: &[i32],
+    session_exclude_ids: &[String],
 ) -> Result<HangmanSetup, DomainError> {
     let books = repo.find_eligible_books().await?;
     let valid_books: Vec<&HangmanBook> =
@@ -261,7 +261,7 @@ pub async fn setup_game(
 
     // Exclude recently played titles (up to half the pool, so we always have choices)
     let recent_limit = (valid_books.len() / 2).min(20) as u32;
-    let mut exclude_ids: HashSet<i32> = repo
+    let mut exclude_ids: HashSet<String> = repo
         .get_recent_book_ids(recent_limit)
         .await
         .unwrap_or_default()
@@ -269,7 +269,7 @@ pub async fn setup_game(
         .collect();
 
     // Merge session-level exclusions
-    exclude_ids.extend(session_exclude_ids);
+    exclude_ids.extend(session_exclude_ids.iter().cloned());
 
     // Build set of base titles for excluded books, so that
     // "One Piece 1" also excludes "One Piece 42", "One Piece 100", etc.
@@ -296,7 +296,7 @@ pub async fn setup_game(
     };
 
     Ok(HangmanSetup {
-        book_id: book.book_id,
+        book_id: book.book_id.clone(),
         title: book.title.clone(),
         display: build_display(&book.title),
         author: book.author.clone(),
@@ -374,7 +374,7 @@ mod tests {
         won: bool,
     ) -> HangmanResult {
         HangmanResult {
-            book_id: 1,
+            book_id: "1".to_string(),
             difficulty: difficulty.to_string(),
             elapsed_seconds: elapsed,
             errors,

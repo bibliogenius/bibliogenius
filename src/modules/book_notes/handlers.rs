@@ -21,9 +21,9 @@ fn repo(state: &AppState) -> SeaOrmBookNoteRepository {
 /// GET /books/:id/notes
 pub async fn list_notes(
     State(state): State<AppState>,
-    Path(book_id): Path<i32>,
+    Path(book_id): Path<String>,
 ) -> impl IntoResponse {
-    match repo(&state).find_by_book_id(book_id).await {
+    match repo(&state).find_by_book_id(&book_id).await {
         Ok(notes) => (StatusCode::OK, Json(json!(notes))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -36,7 +36,7 @@ pub async fn list_notes(
 /// POST /books/:id/notes
 pub async fn create_note(
     State(state): State<AppState>,
-    Path(book_id): Path<i32>,
+    Path(book_id): Path<String>,
     Json(input): Json<CreateBookNoteInput>,
 ) -> impl IntoResponse {
     if input.content.trim().is_empty() {
@@ -54,7 +54,7 @@ pub async fn create_note(
             .into_response();
     }
 
-    match repo(&state).create(book_id, input).await {
+    match repo(&state).create(&book_id, input).await {
         Ok(note) => {
             // Payload needed for device sync (linked devices only, not P2P peers).
             let payload = json!({
@@ -65,7 +65,7 @@ pub async fn create_note(
             let _ = crate::sync::log_operation(
                 state.db(),
                 "book_note",
-                note.id,
+                &note.id.to_string(),
                 "INSERT",
                 Some(payload),
             )
@@ -108,9 +108,14 @@ pub async fn update_note(
                 "content": note.content,
                 "page": note.page,
             });
-            let _ =
-                crate::sync::log_operation(state.db(), "book_note", id, "UPDATE", Some(payload))
-                    .await;
+            let _ = crate::sync::log_operation(
+                state.db(),
+                "book_note",
+                &id.to_string(),
+                "UPDATE",
+                Some(payload),
+            )
+            .await;
             (StatusCode::OK, Json(json!(note))).into_response()
         }
         Err(crate::domain::DomainError::NotFound) => (
@@ -130,7 +135,14 @@ pub async fn update_note(
 pub async fn delete_note(State(state): State<AppState>, Path(id): Path<i32>) -> impl IntoResponse {
     match repo(&state).delete(id).await {
         Ok(()) => {
-            let _ = crate::sync::log_operation(state.db(), "book_note", id, "DELETE", None).await;
+            let _ = crate::sync::log_operation(
+                state.db(),
+                "book_note",
+                &id.to_string(),
+                "DELETE",
+                None,
+            )
+            .await;
             (
                 StatusCode::OK,
                 Json(json!({"message": "Note deleted successfully"})),

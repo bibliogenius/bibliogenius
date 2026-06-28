@@ -20,7 +20,7 @@ impl From<sea_orm::DbErr> for ServiceError {
 /// Contact DTO for API responses
 #[derive(Debug, Clone)]
 pub struct ContactDto {
-    pub id: Option<i32>,
+    pub id: Option<String>,
     pub contact_type: String,
     pub name: String,
     pub first_name: Option<String>,
@@ -45,8 +45,8 @@ pub struct ContactDto {
 impl From<contact_model::Model> for ContactDto {
     fn from(model: contact_model::Model) -> Self {
         Self {
+            uuid: Some(model.id.clone()),
             id: Some(model.id),
-            uuid: Some(model.uuid),
             contact_type: model.r#type,
             name: model.name,
             first_name: model.first_name,
@@ -95,8 +95,8 @@ pub async fn list_contacts(
 }
 
 /// Get a single contact by ID
-pub async fn get_contact(db: &DatabaseConnection, id: i32) -> Result<ContactDto, ServiceError> {
-    let contact = Contact::find_by_id(id)
+pub async fn get_contact(db: &DatabaseConnection, id: &str) -> Result<ContactDto, ServiceError> {
+    let contact = Contact::find_by_id(id.to_owned())
         .one(db)
         .await?
         .ok_or(ServiceError::NotFound)?;
@@ -166,7 +166,7 @@ pub async fn create_contact(
 
     let saved_contact = new_contact.insert(db).await?;
 
-    let _ = crate::sync::log_operation(db, "contact", saved_contact.id, "INSERT", None).await;
+    let _ = crate::sync::log_operation(db, "contact", &saved_contact.id, "INSERT", None).await;
 
     Ok(ContactDto::from(saved_contact))
 }
@@ -210,14 +210,14 @@ pub async fn update_contact(
 
     let model = active_model.update(db).await?;
 
-    let _ = crate::sync::log_operation(db, "contact", model.id, "UPDATE", None).await;
+    let _ = crate::sync::log_operation(db, "contact", &model.id, "UPDATE", None).await;
 
     Ok(ContactDto::from(model))
 }
 
 /// Delete a contact (soft delete)
-pub async fn delete_contact(db: &DatabaseConnection, id: i32) -> Result<(), ServiceError> {
-    let contact = Contact::find_by_id(id)
+pub async fn delete_contact(db: &DatabaseConnection, id: &str) -> Result<(), ServiceError> {
+    let contact = Contact::find_by_id(id.to_owned())
         .one(db)
         .await?
         .ok_or(ServiceError::NotFound)?;

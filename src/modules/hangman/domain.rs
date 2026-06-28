@@ -11,7 +11,7 @@ pub use crate::domain::DomainError;
 /// A book eligible for the hangman game (title + hint data)
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HangmanBook {
-    pub book_id: i32,
+    pub book_id: String,
     pub title: String,
     pub author: String,
     pub cover_url: Option<String>,
@@ -33,7 +33,7 @@ pub struct HangmanChar {
 /// Game setup returned to the client
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HangmanSetup {
-    pub book_id: i32,
+    pub book_id: String,
     pub title: String,
     pub display: Vec<HangmanChar>,
     pub author: String,
@@ -46,7 +46,7 @@ pub struct HangmanSetup {
 /// Input from a completed hangman game
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct HangmanResult {
-    pub book_id: i32,
+    pub book_id: String,
     pub difficulty: String,
     pub elapsed_seconds: f64,
     pub errors: i32,
@@ -58,7 +58,7 @@ pub struct HangmanResult {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HangmanScore {
     pub id: Option<i32>,
-    pub book_id: i32,
+    pub book_id: String,
     pub difficulty: String,
     pub elapsed_seconds: f64,
     pub errors: i32,
@@ -85,7 +85,7 @@ pub trait HangmanRepository: Send + Sync {
     async fn find_eligible_books(&self) -> Result<Vec<HangmanBook>, DomainError>;
 
     /// Get book IDs from the N most recent games (for anti-repeat filtering)
-    async fn get_recent_book_ids(&self, limit: u32) -> Result<Vec<i32>, DomainError>;
+    async fn get_recent_book_ids(&self, limit: u32) -> Result<Vec<String>, DomainError>;
 
     /// Save a game score
     async fn save_score(&self, score: HangmanScore) -> Result<HangmanScore, DomainError>;

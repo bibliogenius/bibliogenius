@@ -14,8 +14,8 @@ use crate::services::sale_service::{self, SaleFilter};
 /// Request body for creating a sale
 #[derive(Debug, Deserialize)]
 pub struct CreateSaleRequest {
-    pub copy_id: i32,
-    pub contact_id: Option<i32>,
+    pub copy_id: String,
+    pub contact_id: Option<String>,
     /// Default to 1 if not provided (single library mode for FFI)
     pub library_id: Option<i32>,
     /// Default to current datetime if not provided

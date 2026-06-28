@@ -11,7 +11,7 @@ pub use crate::domain::DomainError;
 /// A book card for the memory game (book with a cover)
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MemoryGameCard {
-    pub book_id: i32,
+    pub book_id: String,
     pub title: String,
     pub cover_url: String,
 }

@@ -57,7 +57,7 @@ async fn delete_cover_204_returns_ok() {
         .await;
 
     let svc = HubDirectoryService::new();
-    let result = svc.delete_cover(&db, 42).await;
+    let result = svc.delete_cover(&db, "42").await;
 
     assert!(result.is_ok(), "204 must map to Ok, got {result:?}");
     hub.verify().await;
@@ -86,7 +86,7 @@ async fn delete_cover_404_surfaces_hub_error() {
 
     let svc = HubDirectoryService::new();
     let err = svc
-        .delete_cover(&db, 7)
+        .delete_cover(&db, "7")
         .await
         .expect_err("non-2xx must bubble up");
 
@@ -117,7 +117,7 @@ async fn delete_cover_401_surfaces_hub_error() {
 
     let svc = HubDirectoryService::new();
     let err = svc
-        .delete_cover(&db, 99)
+        .delete_cover(&db, "99")
         .await
         .expect_err("401 must bubble up");
 
@@ -164,7 +164,7 @@ async fn delete_book_triggers_hub_cleanup() {
         .mount(&hub)
         .await;
 
-    book_service::delete_book(&db, book_id)
+    book_service::delete_book(&db, &book_id)
         .await
         .expect("delete_book should succeed even if hub cover cleanup did");
 
@@ -211,7 +211,7 @@ async fn delete_book_succeeds_even_when_hub_cleanup_fails() {
         .mount(&hub)
         .await;
 
-    book_service::delete_book(&db, book_id)
+    book_service::delete_book(&db, &book_id)
         .await
         .expect("hub 500 must not fail the local deletion");
 
@@ -243,7 +243,7 @@ async fn delete_cover_not_registered_short_circuits() {
 
     let svc = HubDirectoryService::new();
     let err = svc
-        .delete_cover(&db, 1)
+        .delete_cover(&db, "1")
         .await
         .expect_err("missing config must fail fast");
 

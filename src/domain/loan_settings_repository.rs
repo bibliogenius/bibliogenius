@@ -22,16 +22,16 @@ pub trait LoanSettingsRepository: Send + Sync {
     async fn update_settings(&self, settings: LoanSettings) -> Result<LoanSettings, DomainError>;
 
     /// Get the per-book loan duration override (None = use global default)
-    async fn get_book_loan_duration(&self, book_id: i32) -> Result<Option<i32>, DomainError>;
+    async fn get_book_loan_duration(&self, book_id: &str) -> Result<Option<i32>, DomainError>;
 
     /// Set the per-book loan duration override (None = clear, use global default)
     async fn set_book_loan_duration(
         &self,
-        book_id: i32,
+        book_id: &str,
         days: Option<i32>,
     ) -> Result<(), DomainError>;
 
     /// Get the effective loan duration for a book:
     /// per-book value (if per_book_duration_enabled and set), else global default.
-    async fn get_effective_duration(&self, book_id: i32) -> Result<i32, DomainError>;
+    async fn get_effective_duration(&self, book_id: &str) -> Result<i32, DomainError>;
 }

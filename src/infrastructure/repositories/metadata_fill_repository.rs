@@ -92,7 +92,7 @@ impl SeaOrmMetadataFillRepository {
 
 fn row_to_incomplete(row: &sea_orm::QueryResult) -> Result<IncompleteBook, DomainError> {
     Ok(IncompleteBook {
-        id: row.try_get::<i32>("", "id")?,
+        id: row.try_get::<String>("", "id")?,
         title: row.try_get::<String>("", "title")?,
         isbn: row.try_get::<Option<String>>("", "isbn")?,
     })
@@ -107,7 +107,7 @@ fn row_to_run(row: &sea_orm::QueryResult) -> Result<FillRun, DomainError> {
         filled: row.try_get::<i64>("", "filled")?,
         skipped: row.try_get::<i64>("", "skipped")?,
         errored: row.try_get::<i64>("", "errored")?,
-        cursor_book_id: row.try_get::<i32>("", "cursor_book_id")?,
+        cursor_book_id: row.try_get::<String>("", "cursor_book_id")?,
         current_title: row.try_get::<Option<String>>("", "current_title")?,
     })
 }
@@ -136,20 +136,20 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
 
     async fn list_incomplete_with_isbn(
         &self,
-        after_id: i32,
+        after_id: &str,
         limit: u64,
     ) -> Result<Vec<IncompleteBook>, DomainError> {
         let sql = format!(
-            "SELECT id, title, isbn FROM books \
-             WHERE owned = 1 AND {INCOMPLETE_PRED} AND {HAS_ISBN_PRED} AND id > ? \
-             ORDER BY id ASC LIMIT ?"
+            "SELECT uuid AS id, title, isbn FROM books \
+             WHERE owned = 1 AND {INCOMPLETE_PRED} AND {HAS_ISBN_PRED} AND uuid > ? \
+             ORDER BY uuid ASC LIMIT ?"
         );
         let rows = self
             .db
             .query_all(Statement::from_sql_and_values(
                 self.backend(),
                 sql,
-                [Value::from(after_id), Value::from(limit as i64)],
+                [Value::from(after_id.to_string()), Value::from(limit as i64)],
             ))
             .await?;
         rows.iter().map(row_to_incomplete).collect()
@@ -164,9 +164,9 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
 
     async fn list_incomplete_without_isbn(&self) -> Result<Vec<IncompleteBook>, DomainError> {
         let sql = format!(
-            "SELECT id, title, isbn FROM books \
+            "SELECT uuid AS id, title, isbn FROM books \
              WHERE owned = 1 AND {INCOMPLETE_PRED} AND {NO_ISBN_PRED} \
-             ORDER BY id ASC"
+             ORDER BY uuid ASC"
         );
         let rows = self
             .db
@@ -177,7 +177,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
 
     async fn list_incomplete(&self, limit: u64) -> Result<Vec<IncompleteBookDetail>, DomainError> {
         let sql = format!(
-            "SELECT id, title, isbn, cover_url, summary, publisher, publication_year, page_count \
+            "SELECT uuid AS id, title, isbn, cover_url, summary, publisher, publication_year, page_count \
              FROM books WHERE owned = 1 AND {INCOMPLETE_PRED} ORDER BY title ASC LIMIT ?"
         );
         let rows = self
@@ -215,7 +215,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
             }
 
             out.push(IncompleteBookDetail {
-                id: row.try_get::<i32>("", "id")?,
+                id: row.try_get::<String>("", "id")?,
                 title: row.try_get::<String>("", "title")?,
                 isbn: row.try_get::<Option<String>>("", "isbn")?,
                 cover_url: cover,
@@ -230,7 +230,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
     async fn apply_fill(
         &self,
         batch_id: &str,
-        book_id: i32,
+        book_id: &str,
         candidate: GapValues,
     ) -> Result<Vec<FilledField>, DomainError> {
         if candidate.is_empty() {
@@ -244,8 +244,8 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
             .query_one(Statement::from_sql_and_values(
                 backend,
                 "SELECT summary, publisher, publication_year, cover_url, page_count \
-                 FROM books WHERE id = ?",
-                [Value::from(book_id)],
+                 FROM books WHERE uuid = ?",
+                [Value::from(book_id.to_string())],
             ))
             .await?;
         let Some(row) = row else {
@@ -297,8 +297,12 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
             // `field` is a compile-time literal from the set above; never user input.
             txn.execute(Statement::from_sql_and_values(
                 backend,
-                format!("UPDATE books SET {field} = ?, updated_at = ? WHERE id = ?"),
-                [value, Value::from(now.clone()), Value::from(book_id)],
+                format!("UPDATE books SET {field} = ?, updated_at = ? WHERE uuid = ?"),
+                [
+                    value,
+                    Value::from(now.clone()),
+                    Value::from(book_id.to_string()),
+                ],
             ))
             .await?;
             txn.execute(Statement::from_sql_and_values(
@@ -307,7 +311,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
                  (batch_id, book_id, field, value_set, created_at) VALUES (?, ?, ?, ?, ?)",
                 [
                     Value::from(batch_id.to_string()),
-                    Value::from(book_id),
+                    Value::from(book_id.to_string()),
                     Value::from(field.to_string()),
                     Value::from(value_str.clone()),
                     Value::from(now.clone()),
@@ -332,7 +336,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
                 "INSERT INTO metadata_fill_run \
                  (batch_id, status, total, done, filled, skipped, errored, cursor_book_id, \
                   current_title, started_at, updated_at) \
-                 VALUES (?, 'running', ?, 0, 0, 0, 0, 0, NULL, ?, ?)",
+                 VALUES (?, 'running', ?, 0, 0, 0, 0, '', NULL, ?, ?)",
                 [
                     Value::from(batch_id.to_string()),
                     Value::from(total),
@@ -394,7 +398,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
                     Value::from(run.filled),
                     Value::from(run.skipped),
                     Value::from(run.errored),
-                    Value::from(run.cursor_book_id),
+                    Value::from(run.cursor_book_id.clone()),
                     Value::from(run.current_title.clone()),
                     Value::from(now_rfc3339()),
                     Value::from(run.batch_id.clone()),
@@ -442,7 +446,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
                 "SELECT j.id AS jid, j.batch_id AS batch_id, j.book_id AS book_id, \
                  j.field AS field, j.value_set AS value_set, j.created_at AS created_at, \
                  b.title AS title, b.cover_url AS cover_url \
-                 FROM metadata_fill_journal j LEFT JOIN books b ON b.id = j.book_id \
+                 FROM metadata_fill_journal j LEFT JOIN books b ON b.uuid = j.book_id \
                  WHERE j.undone_at IS NULL ORDER BY j.created_at DESC, j.id DESC"
                     .to_owned(),
             ))
@@ -450,7 +454,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
 
         let mut out: Vec<RecentFilledBook> = Vec::new();
         for row in &rows {
-            let book_id = row.try_get::<i32>("", "book_id")?;
+            let book_id = row.try_get::<String>("", "book_id")?;
             let field = RecentFilledField {
                 journal_id: row.try_get::<i64>("", "jid")?,
                 batch_id: row.try_get::<String>("", "batch_id")?,
@@ -499,7 +503,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
             return Ok(UndoOutcome::NotFound);
         }
 
-        let book_id = entry.try_get::<i32>("", "book_id")?;
+        let book_id = entry.try_get::<String>("", "book_id")?;
         let field = entry.try_get::<String>("", "field")?;
         let value_set = entry.try_get::<String>("", "value_set")?;
         if !is_fill_field(&field) {
@@ -511,8 +515,8 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
         let book_row = txn
             .query_one(Statement::from_sql_and_values(
                 backend,
-                format!("SELECT {field} AS val FROM books WHERE id = ?"),
-                [Value::from(book_id)],
+                format!("SELECT {field} AS val FROM books WHERE uuid = ?"),
+                [Value::from(book_id.clone())],
             ))
             .await?;
         let current: Option<String> = match book_row {
@@ -531,7 +535,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
         if still_ours {
             txn.execute(Statement::from_sql_and_values(
                 backend,
-                format!("UPDATE books SET {field} = NULL, updated_at = ? WHERE id = ?"),
+                format!("UPDATE books SET {field} = NULL, updated_at = ? WHERE uuid = ?"),
                 [Value::from(now.clone()), Value::from(book_id)],
             ))
             .await?;
@@ -551,14 +555,17 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
         })
     }
 
-    async fn undo_book(&self, batch_id: &str, book_id: i32) -> Result<usize, DomainError> {
+    async fn undo_book(&self, batch_id: &str, book_id: &str) -> Result<usize, DomainError> {
         let ids = self
             .db
             .query_all(Statement::from_sql_and_values(
                 self.backend(),
                 "SELECT id FROM metadata_fill_journal \
                  WHERE batch_id = ? AND book_id = ? AND undone_at IS NULL",
-                [Value::from(batch_id.to_string()), Value::from(book_id)],
+                [
+                    Value::from(batch_id.to_string()),
+                    Value::from(book_id.to_string()),
+                ],
             ))
             .await?;
         let mut reverted = 0;
@@ -617,8 +624,11 @@ mod tests {
         year: Option<i32>,
         cover: Option<&str>,
         pages: Option<i32>,
-    ) -> i32 {
+    ) -> String {
         let now = now_rfc3339();
+        // The books PK is now the uuid String; generate it here, bind it, and
+        // return it (do not rely on last_insert_rowid — there is no integer id).
+        let uuid = crate::utils::uuid_gen::new_uuid_v7();
         db.execute(Statement::from_sql_and_values(
             db.get_database_backend(),
             "INSERT INTO books (title, isbn, owned, reading_status, shelf_position, private, \
@@ -633,31 +643,22 @@ mod tests {
                 Value::from(year),
                 Value::from(cover.map(|s| s.to_string())),
                 Value::from(pages),
-                // Raw insert bypasses before_save; set a uuid so model reads don't hit NULL.
-                Value::from(crate::utils::uuid_gen::new_uuid_v7()),
+                Value::from(uuid.clone()),
                 Value::from(now.clone()),
                 Value::from(now),
             ],
         ))
         .await
         .unwrap();
-        let row = db
-            .query_one(Statement::from_string(
-                db.get_database_backend(),
-                "SELECT last_insert_rowid() AS id".to_owned(),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
-        row.try_get::<i32>("", "id").unwrap()
+        uuid
     }
 
-    async fn book_field(db: &DatabaseConnection, id: i32, field: &str) -> Option<String> {
+    async fn book_field(db: &DatabaseConnection, id: &str, field: &str) -> Option<String> {
         let row = db
             .query_one(Statement::from_sql_and_values(
                 db.get_database_backend(),
-                format!("SELECT {field} AS v FROM books WHERE id = ?"),
-                [Value::from(id)],
+                format!("SELECT {field} AS v FROM books WHERE uuid = ?"),
+                [Value::from(id.to_string())],
             ))
             .await
             .unwrap()
@@ -747,15 +748,27 @@ mod tests {
         )
         .await;
 
-        let with_isbn = repo.list_incomplete_with_isbn(0, 50).await.unwrap();
+        // The work-list orders by uuid; uuid v7 is not strictly ordered within a
+        // millisecond, so derive the expected order from the ids themselves
+        // rather than assuming insertion order.
+        let (lo, hi) = if id1 < id2 {
+            (id1.clone(), id2.clone())
+        } else {
+            (id2.clone(), id1.clone())
+        };
+
+        let with_isbn = repo.list_incomplete_with_isbn("", 50).await.unwrap();
         assert_eq!(
-            with_isbn.iter().map(|b| b.id).collect::<Vec<_>>(),
-            vec![id1, id2]
+            with_isbn.iter().map(|b| b.id.clone()).collect::<Vec<_>>(),
+            vec![lo.clone(), hi.clone()]
         );
 
-        // after_id cursor excludes already-processed ids
-        let after = repo.list_incomplete_with_isbn(id1, 50).await.unwrap();
-        assert_eq!(after.iter().map(|b| b.id).collect::<Vec<_>>(), vec![id2]);
+        // after_id cursor excludes already-processed ids (everything <= lo)
+        let after = repo.list_incomplete_with_isbn(&lo, 50).await.unwrap();
+        assert_eq!(
+            after.iter().map(|b| b.id.clone()).collect::<Vec<_>>(),
+            vec![hi]
+        );
 
         let no_isbn = repo.list_incomplete_without_isbn().await.unwrap();
         assert_eq!(no_isbn.len(), 1);
@@ -856,36 +869,36 @@ mod tests {
             publication_year: Some(1999),
             cover_url: Some("http://cover".into()),
         };
-        let filled = repo.apply_fill("batch1", id, candidate).await.unwrap();
+        let filled = repo.apply_fill("batch1", &id, candidate).await.unwrap();
 
         // publisher must NOT be overwritten
         assert_eq!(
-            book_field(&db, id, "publisher").await.as_deref(),
+            book_field(&db, &id, "publisher").await.as_deref(),
             Some("KeepMe")
         );
         assert!(!filled.iter().any(|f| f.field == "publisher"));
         // the four empty fields are filled
         assert_eq!(
-            book_field(&db, id, "summary").await.as_deref(),
+            book_field(&db, &id, "summary").await.as_deref(),
             Some("New summary")
         );
         assert_eq!(
-            book_field(&db, id, "publication_year").await.as_deref(),
+            book_field(&db, &id, "publication_year").await.as_deref(),
             Some("1999")
         );
         assert_eq!(
-            book_field(&db, id, "page_count").await.as_deref(),
+            book_field(&db, &id, "page_count").await.as_deref(),
             Some("321")
         );
         assert_eq!(
-            book_field(&db, id, "cover_url").await.as_deref(),
+            book_field(&db, &id, "cover_url").await.as_deref(),
             Some("http://cover")
         );
         assert_eq!(filled.len(), 4);
 
         // After filling, the book is no longer incomplete (self-draining work-list).
         assert!(
-            repo.list_incomplete_with_isbn(0, 50)
+            repo.list_incomplete_with_isbn("", 50)
                 .await
                 .unwrap()
                 .is_empty()
@@ -912,7 +925,7 @@ mod tests {
         // fill summary + publisher
         repo.apply_fill(
             "batch1",
-            id,
+            &id,
             GapValues {
                 summary: Some("auto summary".into()),
                 publisher: Some("auto publisher".into()),
@@ -925,8 +938,11 @@ mod tests {
         // user re-edits the summary, leaves publisher as written
         db.execute(Statement::from_sql_and_values(
             db.get_database_backend(),
-            "UPDATE books SET summary = ? WHERE id = ?",
-            [Value::from("user edit".to_string()), Value::from(id)],
+            "UPDATE books SET summary = ? WHERE uuid = ?",
+            [
+                Value::from("user edit".to_string()),
+                Value::from(id.clone()),
+            ],
         ))
         .await
         .unwrap();
@@ -935,10 +951,10 @@ mod tests {
         // only publisher reverts; summary is the user's edit and is left intact
         assert_eq!(reverted, 1);
         assert_eq!(
-            book_field(&db, id, "summary").await.as_deref(),
+            book_field(&db, &id, "summary").await.as_deref(),
             Some("user edit")
         );
-        assert_eq!(book_field(&db, id, "publisher").await, None);
+        assert_eq!(book_field(&db, &id, "publisher").await, None);
 
         // both entries retired from the recently-completed list
         assert!(repo.recent_filled(50).await.unwrap().is_empty());
@@ -962,7 +978,7 @@ mod tests {
         .await;
         repo.apply_fill(
             "b1",
-            id,
+            &id,
             GapValues {
                 summary: Some("s".into()),
                 publisher: Some("p".into()),
@@ -990,17 +1006,20 @@ mod tests {
 
         run.done = 2;
         run.filled = 1;
-        run.cursor_book_id = 42;
+        // The cursor is now a book uuid String (not an int). Use a real uuid so it
+        // keeps TEXT affinity in the INTEGER column and round-trips as a String.
+        let cursor = crate::utils::uuid_gen::new_uuid_v7();
+        run.cursor_book_id = cursor.clone();
         run.current_title = Some("Current".into());
         repo.update_run_progress(&run).await.unwrap();
         let reloaded = repo.get_run("b1").await.unwrap().unwrap();
         assert_eq!(reloaded.done, 2);
-        assert_eq!(reloaded.cursor_book_id, 42);
+        assert_eq!(reloaded.cursor_book_id, cursor);
 
         // simulate a kill: a leftover running run becomes resumable
         repo.mark_running_as_interrupted().await.unwrap();
         let active = repo.get_active_run().await.unwrap().unwrap();
         assert_eq!(active.status, "interrupted");
-        assert_eq!(active.cursor_book_id, 42);
+        assert_eq!(active.cursor_book_id, cursor);
     }
 }

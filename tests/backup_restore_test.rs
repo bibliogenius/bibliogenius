@@ -40,10 +40,13 @@ async fn open_db(path: &Path) -> DatabaseConnection {
     db::init_db(&url).await.expect("init_db")
 }
 
-async fn seed_book(db: &DatabaseConnection, title: &str) -> i32 {
+async fn seed_book(db: &DatabaseConnection, title: &str) -> String {
     let now = chrono::Utc::now().to_rfc3339();
     let m = book::ActiveModel {
         title: Set(title.to_string()),
+        reading_status: Set("to_read".to_string()),
+        owned: Set(true),
+        private: Set(false),
         created_at: Set(now.clone()),
         updated_at: Set(now),
         ..Default::default()

@@ -17,7 +17,7 @@ async fn setup_db() -> DatabaseConnection {
     db::init_db("sqlite::memory:").await.expect("init db")
 }
 
-async fn seed_user_library_book(db: &DatabaseConnection) -> (i32, i32) {
+async fn seed_user_library_book(db: &DatabaseConnection) -> (i32, String) {
     let now = chrono::Utc::now().to_rfc3339();
 
     let u = user::ActiveModel {
@@ -59,7 +59,7 @@ async fn seed_user_library_book(db: &DatabaseConnection) -> (i32, i32) {
 
 async fn insert_legacy_borrowed(
     db: &DatabaseConnection,
-    book_id: i32,
+    book_id: String,
     library_id: i32,
     notes: &str,
 ) {
@@ -89,7 +89,7 @@ async fn fetch_copy_cols(
         .query_one(Statement::from_string(
             db.get_database_backend(),
             "SELECT lender_display_name, borrow_due_date, borrow_source, lender_peer_id \
-             FROM copies ORDER BY id DESC LIMIT 1"
+             FROM copies ORDER BY rowid DESC LIMIT 1"
                 .to_owned(),
         ))
         .await
@@ -104,6 +104,10 @@ async fn fetch_copy_cols(
 }
 
 // -------- Backfill --------
+//
+// `db::backfill_borrow_metadata` reads/updates by `uuid` (present since migration
+// 078), so it works after the ADR-044 uuid-PK migration dropped the integer
+// `copies.id` column.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn backfill_hydrates_peer_format() {

@@ -23,7 +23,7 @@ macro_rules! find_by_uuid {
             uuid: &str,
         ) -> Result<Option<$module::Model>, DbErr> {
             $module::Entity::find()
-                .filter($module::Column::Uuid.eq(uuid))
+                .filter($module::Column::Id.eq(uuid))
                 .one(db)
                 .await
         }
@@ -48,9 +48,11 @@ mod tests {
     use sqlx::Row;
 
     /// Build an in-memory DB at the current schema and seed one row per entity.
-    /// Inserts run with foreign keys off so no parent rows are needed; the
-    /// migration-078 trigger fills each `uuid`. Returns nothing: tests read the
-    /// generated uuids back through the lookups under test.
+    /// Inserts run with foreign keys off so no parent rows are needed. After the
+    /// uuid-PK flip (migration 082) the integer `id` column is gone and the
+    /// `uuid` column is the PRIMARY KEY with no AFTER INSERT trigger, so each
+    /// row's `uuid` is supplied explicitly here. Tests read those uuids back
+    /// through the lookups under test.
     async fn seeded_db() -> DatabaseConnection {
         let db = db::init_db("sqlite::memory:").await.expect("init db");
         let now = chrono::Utc::now().to_rfc3339();
@@ -62,22 +64,22 @@ mod tests {
             .unwrap();
         for sql in [
             format!(
-                "INSERT INTO books (id, title, created_at, updated_at) VALUES (1, 'B', '{now}', '{now}')"
+                "INSERT INTO books (uuid, title, created_at, updated_at) VALUES ('book-uuid', 'B', '{now}', '{now}')"
             ),
             format!(
-                "INSERT INTO authors (id, name, created_at, updated_at) VALUES (1, 'A', '{now}', '{now}')"
+                "INSERT INTO authors (uuid, name, created_at, updated_at) VALUES ('author-uuid', 'A', '{now}', '{now}')"
             ),
             format!(
-                "INSERT INTO tags (id, name, created_at, updated_at) VALUES (1, 'T', '{now}', '{now}')"
+                "INSERT INTO tags (uuid, name, created_at, updated_at) VALUES ('tag-uuid', 'T', '{now}', '{now}')"
             ),
             format!(
-                "INSERT INTO contacts (id, type, name, library_owner_id, created_at, updated_at) VALUES (1, 'borrower', 'C', 1, '{now}', '{now}')"
+                "INSERT INTO contacts (uuid, type, name, library_owner_id, created_at, updated_at) VALUES ('contact-uuid', 'borrower', 'C', 1, '{now}', '{now}')"
             ),
             format!(
-                "INSERT INTO copies (id, book_id, library_id, status, created_at, updated_at) VALUES (1, 1, 1, 'available', '{now}', '{now}')"
+                "INSERT INTO copies (uuid, book_id, library_id, status, created_at, updated_at) VALUES ('copy-uuid', 'book-uuid', 1, 'available', '{now}', '{now}')"
             ),
             format!(
-                "INSERT INTO loans (id, copy_id, contact_id, library_id, loan_date, due_date) VALUES (1, 1, 1, 1, '{now}', '{now}')"
+                "INSERT INTO loans (uuid, copy_id, contact_id, library_id, loan_date, due_date) VALUES ('loan-uuid', 'copy-uuid', 'contact-uuid', 1, '{now}', '{now}')"
             ),
         ] {
             sqlx::query(&sql)
@@ -89,11 +91,11 @@ mod tests {
         db
     }
 
-    /// Read the trigger-generated uuid for a seeded row.
+    /// Read the seeded row's uuid PK (one row per table).
     async fn uuid_of(db: &DatabaseConnection, table: &str) -> String {
         let pool = db.get_sqlite_connection_pool();
         let mut conn = pool.acquire().await.unwrap();
-        let row = sqlx::query(&format!("SELECT uuid FROM \"{table}\" WHERE id = 1"))
+        let row = sqlx::query(&format!("SELECT uuid FROM \"{table}\" LIMIT 1"))
             .fetch_one(&mut *conn)
             .await
             .unwrap();
@@ -104,6 +106,8 @@ mod tests {
     async fn every_lookup_resolves_its_seeded_row() {
         let db = seeded_db().await;
 
+        // The model's `.id` is now the uuid (PK), so each lookup must resolve
+        // the row whose `.id` equals the uuid it was queried with.
         let book_uuid = uuid_of(&db, "books").await;
         assert_eq!(
             find_book_by_uuid(&db, &book_uuid)
@@ -111,47 +115,48 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .id,
-            1
+            book_uuid
         );
+        let author_uuid = uuid_of(&db, "authors").await;
         assert_eq!(
-            find_author_by_uuid(&db, &uuid_of(&db, "authors").await)
+            find_author_by_uuid(&db, &author_uuid)
                 .await
                 .unwrap()
                 .unwrap()
                 .id,
-            1
+            author_uuid
         );
+        let tag_uuid = uuid_of(&db, "tags").await;
         assert_eq!(
-            find_tag_by_uuid(&db, &uuid_of(&db, "tags").await)
+            find_tag_by_uuid(&db, &tag_uuid).await.unwrap().unwrap().id,
+            tag_uuid
+        );
+        let contact_uuid = uuid_of(&db, "contacts").await;
+        assert_eq!(
+            find_contact_by_uuid(&db, &contact_uuid)
                 .await
                 .unwrap()
                 .unwrap()
                 .id,
-            1
+            contact_uuid
         );
+        let copy_uuid = uuid_of(&db, "copies").await;
         assert_eq!(
-            find_contact_by_uuid(&db, &uuid_of(&db, "contacts").await)
+            find_copy_by_uuid(&db, &copy_uuid)
                 .await
                 .unwrap()
                 .unwrap()
                 .id,
-            1
+            copy_uuid
         );
+        let loan_uuid = uuid_of(&db, "loans").await;
         assert_eq!(
-            find_copy_by_uuid(&db, &uuid_of(&db, "copies").await)
+            find_loan_by_uuid(&db, &loan_uuid)
                 .await
                 .unwrap()
                 .unwrap()
                 .id,
-            1
-        );
-        assert_eq!(
-            find_loan_by_uuid(&db, &uuid_of(&db, "loans").await)
-                .await
-                .unwrap()
-                .unwrap()
-                .id,
-            1
+            loan_uuid
         );
 
         // The resolved book really is the seeded one.
@@ -160,7 +165,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap()
-                .uuid,
+                .id,
             book_uuid
         );
     }

@@ -12,8 +12,12 @@ pub type CoverRewriteError = cover_url::CoverResolveError;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "books")]
 pub struct Model {
-    #[sea_orm(primary_key)]
-    pub id: i32,
+    /// Stable cross-device primary key (UUID v7). Stored in the `uuid` column
+    /// (named so since migration 078); the device-local integer `id` was dropped
+    /// when this became the PK (ADR-044 Addendum A). Generated on insert by
+    /// `before_save` when not provided.
+    #[sea_orm(primary_key, auto_increment = false, column_name = "uuid")]
+    pub id: String,
     pub title: String,
     pub isbn: Option<String>,
     pub summary: Option<String>,
@@ -63,10 +67,6 @@ pub struct Model {
     /// owner's UI reads this to surface a warning badge while a retry is
     /// pending. Cleared on successful upload and on hub purge.
     pub hub_cover_upload_failed_at: Option<String>,
-    /// Stable cross-device identifier. Generated on insert by
-    /// `before_save`; backfilled on existing rows by migration 078.
-    #[serde(default)]
-    pub uuid: String,
 }
 
 // ... (Relation enum and Related impls omit for brevity) ...
@@ -102,8 +102,8 @@ impl ActiveModelBehavior for ActiveModel {
     where
         C: ConnectionTrait,
     {
-        if insert && self.uuid.is_not_set() {
-            self.uuid = Set(crate::utils::uuid_gen::new_uuid_v7());
+        if insert && self.id.is_not_set() {
+            self.id = Set(crate::utils::uuid_gen::new_uuid_v7());
         }
         Ok(self)
     }
@@ -112,7 +112,7 @@ impl ActiveModelBehavior for ActiveModel {
 // DTO for API responses
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Book {
-    pub id: Option<i32>,
+    pub id: Option<String>,
     pub title: String,
     pub isbn: Option<String>,
     pub summary: Option<String>,
@@ -182,11 +182,6 @@ pub struct Book {
     /// visitors never see another library's internal sync state.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub hub_cover_upload_failed_at: Option<String>,
-    /// Stable cross-device identifier. Present on the owner's own
-    /// FFI/API responses; redacted from peer-facing payloads (see
-    /// `redact_for_peer`) so another library's internal merge id never leaks.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub uuid: Option<String>,
 }
 
 impl From<Model> for Book {
@@ -246,7 +241,6 @@ impl From<Model> for Book {
             added_at: Some(model.created_at),
             updated_at: Some(model.updated_at),
             hub_cover_upload_failed_at: model.hub_cover_upload_failed_at,
-            uuid: Some(model.uuid),
         }
     }
 }
@@ -287,7 +281,10 @@ impl Book {
     /// connectivity, use `rewrite_cover_urls_for_relay` instead.
     pub fn rewrite_local_cover_urls(books: &mut [Book], hub_cover_prefix: Option<&str>) {
         for book in books.iter_mut() {
-            let Some(id) = book.id else { continue };
+            let id = match book.id.clone() {
+                Some(id) => id,
+                None => continue,
+            };
             let Some(url) = book.cover_url.as_deref() else {
                 continue;
             };
@@ -296,7 +293,7 @@ impl Book {
             }
             if let Ok(Some(new_url)) = cover_url::resolve_single(
                 Some(url),
-                id,
+                &id,
                 book.updated_at.as_deref(),
                 hub_cover_prefix,
                 ResolveScope::Lan,
@@ -321,14 +318,14 @@ impl Book {
         // Validate the whole batch before mutating any entry so a failed
         // call leaves `books` untouched (the caller retains full knowledge
         // of what was missing).
-        let offenders: Vec<i32> = books
+        let offenders: Vec<String> = books
             .iter()
             .filter(|b| {
                 b.cover_url
                     .as_deref()
                     .is_some_and(|u| !cover_url::is_servable_on_lan(u))
             })
-            .filter_map(|b| b.id)
+            .filter_map(|b| b.id.clone())
             .collect();
 
         if !offenders.is_empty() && hub_cover_prefix.is_none() {
@@ -338,7 +335,10 @@ impl Book {
         }
 
         for book in books.iter_mut() {
-            let Some(id) = book.id else { continue };
+            let id = match book.id.clone() {
+                Some(id) => id,
+                None => continue,
+            };
             let Some(url) = book.cover_url.as_deref() else {
                 continue;
             };
@@ -347,7 +347,7 @@ impl Book {
             }
             if let Some(new_url) = cover_url::resolve_single(
                 Some(url),
-                id,
+                &id,
                 book.updated_at.as_deref(),
                 hub_cover_prefix,
                 ResolveScope::Relay,
@@ -395,6 +395,13 @@ impl Book {
     /// `None` here are dropped from the JSON output thanks to
     /// `#[serde(skip_serializing_if = "Option::is_none")]`.
     pub fn redact_for_peer(&mut self) {
+        // NB: `id` (the book's `uuid`, the cross-device PK since ADR-044) is
+        // intentionally NOT redacted. Post-uuid-flip it is the book's only
+        // identifier and the public P2P routing key: peers store it as
+        // `peer_book.remote_book_id` and address `/api/books/{id}/cover` with it.
+        // Stripping it would break peer cover/loan routing. The hub stays blind
+        // (ADR-043), so exposing it to LAN/relay friends does not weaken the E2EE
+        // account sync. Do not "restore" redaction of the id here.
         self.cataloguing_notes = None;
         self.source_data = None;
         self.shelf_position = None;
@@ -406,8 +413,6 @@ impl Book {
         self.private = None;
         // Internal sync state: peers have no business knowing our retry backlog.
         self.hub_cover_upload_failed_at = None;
-        // Stable merge id is account-internal; never expose it to peers.
-        self.uuid = None;
     }
 
     /// Appends the canonical `?v={tag}` cache-buster to an already-built
@@ -425,7 +430,7 @@ impl Book {
     /// re-upload without waiting for their image cache to expire.
     pub fn safe_cover_url_strict(
         cover_url: Option<&str>,
-        book_id: i32,
+        book_id: &str,
         updated_at: Option<&str>,
         hub_cover_prefix: Option<&str>,
     ) -> Result<Option<String>, CoverRewriteError> {
@@ -444,7 +449,7 @@ impl Book {
     /// paths.
     pub fn safe_cover_url_for_relay(
         cover_url: Option<&str>,
-        book_id: i32,
+        book_id: &str,
         updated_at: Option<&str>,
         hub_cover_prefix: Option<&str>,
     ) -> Option<String> {
@@ -478,9 +483,9 @@ impl Book {
             .all(db)
             .await
             .unwrap_or_default();
-        let mut pairs: Vec<(i32, String)> =
+        let mut pairs: Vec<(String, String)> =
             books.into_iter().map(|b| (b.id, b.updated_at)).collect();
-        pairs.sort_by_key(|(id, _)| *id);
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
 
         let mut hasher = Sha256::new();
         for (id, updated_at) in &pairs {
@@ -511,10 +516,10 @@ impl Book {
         use std::collections::HashMap;
 
         // Batch-fetch copy info for all book IDs
-        let book_ids: Vec<i32> = models.iter().map(|m| m.id).collect();
-        let mut available_map: HashMap<i32, i32> = HashMap::new();
-        let mut lent_set: std::collections::HashSet<i32> = std::collections::HashSet::new();
-        let mut borrowed_set: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        let book_ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
+        let mut available_map: HashMap<String, i32> = HashMap::new();
+        let mut lent_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut borrowed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
         if !book_ids.is_empty()
             && let Ok(copies) = super::copy::Entity::find()
                 .filter(super::copy::Column::BookId.is_in(book_ids.clone()))
@@ -523,20 +528,20 @@ impl Book {
         {
             for c in &copies {
                 if c.status == "available" {
-                    *available_map.entry(c.book_id).or_insert(0) += 1;
+                    *available_map.entry(c.book_id.clone()).or_insert(0) += 1;
                 }
                 if c.status == "loaned" {
-                    lent_set.insert(c.book_id);
+                    lent_set.insert(c.book_id.clone());
                 }
                 if c.status == "borrowed" && c.is_temporary {
-                    borrowed_set.insert(c.book_id);
+                    borrowed_set.insert(c.book_id.clone());
                 }
             }
         }
 
         let mut dtos = Vec::with_capacity(models.len());
         for model in models {
-            let book_id = model.id;
+            let book_id = model.id.clone();
             let mut dto = Book::from(model.clone());
             if let Ok(authors) = model.find_related(super::author::Entity).all(db).await
                 && !authors.is_empty()
@@ -595,9 +600,6 @@ impl From<Book> for ActiveModel {
             // Owned solely by the hub-sync loop; leave NotSet on DTO round
             // trips so regular CRUD never clobbers a pending-failure flag.
             hub_cover_upload_failed_at: NotSet,
-            // Preserve a round-tripped uuid; leave NotSet for new rows so
-            // `before_save` mints one. Absent on update => column untouched.
-            uuid: book.uuid.map_or(NotSet, Set),
         }
     }
 }
@@ -606,18 +608,18 @@ impl From<Book> for ActiveModel {
 mod tests {
     use super::*;
 
-    fn mk_book(id: Option<i32>, cover: Option<&str>) -> Book {
+    fn mk_book(id: Option<&str>, cover: Option<&str>) -> Book {
         Book {
-            id,
+            id: id.map(str::to_string),
             title: "t".into(),
             cover_url: cover.map(str::to_string),
             ..Default::default()
         }
     }
 
-    fn mk_book_with_updated(id: Option<i32>, cover: Option<&str>, updated_at: &str) -> Book {
+    fn mk_book_with_updated(id: Option<&str>, cover: Option<&str>, updated_at: &str) -> Book {
         Book {
-            id,
+            id: id.map(str::to_string),
             title: "t".into(),
             cover_url: cover.map(str::to_string),
             updated_at: Some(updated_at.into()),
@@ -628,8 +630,8 @@ mod tests {
     #[test]
     fn strict_rewrites_local_paths_with_hub_prefix() {
         let mut books = vec![
-            mk_book(Some(1), Some("/var/mobile/cover_1.jpg")),
-            mk_book(Some(2), Some("/Users/x/cover_2.png")),
+            mk_book(Some("1"), Some("/var/mobile/cover_1.jpg")),
+            mk_book(Some("2"), Some("/Users/x/cover_2.png")),
         ];
         Book::rewrite_cover_urls_strict(&mut books, Some("https://hub/api/directory/node/covers"))
             .expect("hub prefix provided");
@@ -647,14 +649,14 @@ mod tests {
     #[test]
     fn strict_errors_on_local_paths_without_hub_prefix() {
         let mut books = vec![
-            mk_book(Some(7), Some("/var/local_path.jpg")),
-            mk_book(Some(9), Some("https://cdn.example/ok.jpg")),
-            mk_book(Some(11), Some("/tmp/another.png")),
+            mk_book(Some("7"), Some("/var/local_path.jpg")),
+            mk_book(Some("9"), Some("https://cdn.example/ok.jpg")),
+            mk_book(Some("11"), Some("/tmp/another.png")),
         ];
         let err = Book::rewrite_cover_urls_strict(&mut books, None).unwrap_err();
 
         // Only books with local paths appear in the error list.
-        assert_eq!(err.book_ids, vec![7, 11]);
+        assert_eq!(err.book_ids, vec!["7".to_string(), "11".to_string()]);
         // Books themselves are left unchanged when the call fails so the
         // caller retains full knowledge of what was missing.
         assert_eq!(books[0].cover_url.as_deref(), Some("/var/local_path.jpg"));
@@ -667,8 +669,8 @@ mod tests {
     #[test]
     fn strict_passthrough_for_http_and_api_urls() {
         let mut books = vec![
-            mk_book(Some(1), Some("https://covers.openlibrary.org/x.jpg")),
-            mk_book(Some(2), Some("/api/books/2/cover")),
+            mk_book(Some("1"), Some("https://covers.openlibrary.org/x.jpg")),
+            mk_book(Some("2"), Some("/api/books/2/cover")),
         ];
         Book::rewrite_cover_urls_strict(&mut books, None).expect("no local paths => Ok");
 
@@ -691,8 +693,8 @@ mod tests {
     #[test]
     fn relay_wrapper_strips_offenders_to_none_on_failure() {
         let mut books = vec![
-            mk_book(Some(1), Some("/var/local.jpg")),
-            mk_book(Some(2), Some("https://cdn/ok.jpg")),
+            mk_book(Some("1"), Some("/var/local.jpg")),
+            mk_book(Some("2"), Some("https://cdn/ok.jpg")),
         ];
         Book::rewrite_cover_urls_for_relay(&mut books, None);
 
@@ -706,22 +708,22 @@ mod tests {
 
     #[test]
     fn safe_strict_http_passthrough() {
-        let out = Book::safe_cover_url_strict(Some("https://cdn/ok.jpg"), 1, None, None).unwrap();
+        let out = Book::safe_cover_url_strict(Some("https://cdn/ok.jpg"), "1", None, None).unwrap();
         assert_eq!(out.as_deref(), Some("https://cdn/ok.jpg"));
     }
 
     #[test]
     fn safe_strict_local_without_prefix_errors() {
         let err =
-            Book::safe_cover_url_strict(Some("/var/mobile/c.jpg"), 42, None, None).unwrap_err();
-        assert_eq!(err.book_ids, vec![42]);
+            Book::safe_cover_url_strict(Some("/var/mobile/c.jpg"), "42", None, None).unwrap_err();
+        assert_eq!(err.book_ids, vec!["42".to_string()]);
     }
 
     #[test]
     fn safe_strict_local_with_prefix_builds_hub_url() {
         let out = Book::safe_cover_url_strict(
             Some("/var/mobile/c.jpg"),
-            42,
+            "42",
             None,
             Some("https://hub/api/directory/n/covers"),
         )
@@ -736,7 +738,7 @@ mod tests {
     fn safe_strict_with_updated_at_appends_version() {
         let out = Book::safe_cover_url_strict(
             Some("/var/mobile/c.jpg"),
-            42,
+            "42",
             Some("2026-04-20 10:30:00"),
             Some("https://hub/api/directory/n/covers"),
         )
@@ -749,20 +751,20 @@ mod tests {
 
     #[test]
     fn safe_strict_none_in_none_out() {
-        let out = Book::safe_cover_url_strict(None, 1, None, None).unwrap();
+        let out = Book::safe_cover_url_strict(None, "1", None, None).unwrap();
         assert_eq!(out, None);
     }
 
     #[test]
     fn safe_relay_wrapper_returns_none_on_failure() {
-        let out = Book::safe_cover_url_for_relay(Some("/var/mobile/c.jpg"), 42, None, None);
+        let out = Book::safe_cover_url_for_relay(Some("/var/mobile/c.jpg"), "42", None, None);
         assert_eq!(out, None);
     }
 
     #[test]
     fn rewrite_versions_hub_urls_from_updated_at() {
         let mut books = vec![mk_book_with_updated(
-            Some(7),
+            Some("7"),
             Some("/var/mobile/c.jpg"),
             "2026-04-20 10:30:00",
         )];
@@ -778,7 +780,7 @@ mod tests {
     #[test]
     fn rewrite_versions_lan_urls_from_updated_at() {
         let mut books = vec![mk_book_with_updated(
-            Some(7),
+            Some("7"),
             Some("/var/mobile/c.jpg"),
             "2026-04-20 10:30:00",
         )];
@@ -794,7 +796,7 @@ mod tests {
     fn rewrite_skips_version_when_updated_at_missing() {
         // Book with id but no updated_at (shouldn't happen in practice, but
         // the rewrite must stay safe — no dangling `?v=` suffix).
-        let mut books = vec![mk_book(Some(7), Some("/var/mobile/c.jpg"))];
+        let mut books = vec![mk_book(Some("7"), Some("/var/mobile/c.jpg"))];
         Book::rewrite_cover_urls_strict(&mut books, Some("https://hub/covers")).unwrap();
 
         assert_eq!(books[0].cover_url.as_deref(), Some("https://hub/covers/7"));

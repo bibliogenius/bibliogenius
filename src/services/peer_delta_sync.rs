@@ -212,7 +212,7 @@ pub async fn apply_peer_delta_operations(
                         continue;
                     }
                 };
-                let Some(remote_id) = book.id else {
+                let Some(remote_id) = book.id.clone() else {
                     tracing::warn!(
                         "peer_delta_sync: upsert without book.id for peer {peer_id}, skipping"
                     );
@@ -223,7 +223,7 @@ pub async fn apply_peer_delta_operations(
                 applied += 1;
             }
             "delete" => {
-                let Some(book_id) = op.get("book_id").and_then(|v| v.as_i64()) else {
+                let Some(book_id) = op.get("book_id").and_then(|v| v.as_str()) else {
                     tracing::warn!(
                         "peer_delta_sync: delete op without 'book_id' for peer {peer_id}"
                     );
@@ -231,7 +231,7 @@ pub async fn apply_peer_delta_operations(
                 };
                 peer_book::Entity::delete_many()
                     .filter(peer_book::Column::PeerId.eq(peer_id))
-                    .filter(peer_book::Column::RemoteBookId.eq(book_id as i32))
+                    .filter(peer_book::Column::RemoteBookId.eq(book_id))
                     .exec(db)
                     .await?;
                 applied += 1;
@@ -250,13 +250,13 @@ pub async fn apply_peer_delta_operations(
 async fn upsert_peer_book_row(
     db: &DatabaseConnection,
     peer_id: i32,
-    remote_id: i32,
+    remote_id: String,
     book: &crate::models::Book,
     now: &str,
 ) -> Result<(), sea_orm::DbErr> {
     let existing = peer_book::Entity::find()
         .filter(peer_book::Column::PeerId.eq(peer_id))
-        .filter(peer_book::Column::RemoteBookId.eq(remote_id))
+        .filter(peer_book::Column::RemoteBookId.eq(remote_id.clone()))
         .one(db)
         .await?;
 
@@ -369,12 +369,12 @@ mod tests {
         p.id
     }
 
-    fn upsert_op(remote_book_id: i32, title: &str) -> serde_json::Value {
+    fn upsert_op(remote_book_id: &str, title: &str) -> serde_json::Value {
         upsert_op_with_added_at(remote_book_id, title, Some("2026-04-15T10:00:00+00:00"))
     }
 
     fn upsert_op_with_added_at(
-        remote_book_id: i32,
+        remote_book_id: &str,
         title: &str,
         added_at: Option<&str>,
     ) -> serde_json::Value {
@@ -399,7 +399,7 @@ mod tests {
         let db = setup().await;
         let peer_id = create_peer(&db).await;
 
-        let ops = vec![upsert_op(42, "Hello World")];
+        let ops = vec![upsert_op("42", "Hello World")];
         let applied = apply_peer_delta_operations(&db, peer_id, &ops)
             .await
             .unwrap();
@@ -407,7 +407,7 @@ mod tests {
 
         let row = peer_book::Entity::find()
             .filter(peer_book::Column::PeerId.eq(peer_id))
-            .filter(peer_book::Column::RemoteBookId.eq(42))
+            .filter(peer_book::Column::RemoteBookId.eq("42"))
             .one(&db)
             .await
             .unwrap()
@@ -429,7 +429,7 @@ mod tests {
             &db,
             peer_id,
             &[upsert_op_with_added_at(
-                10,
+                "10",
                 "Original",
                 Some("2026-01-01T00:00:00+00:00"),
             )],
@@ -441,7 +441,7 @@ mod tests {
             &db,
             peer_id,
             &[upsert_op_with_added_at(
-                10,
+                "10",
                 "Renamed",
                 Some("2026-03-01T00:00:00+00:00"),
             )],
@@ -451,7 +451,7 @@ mod tests {
 
         let row = peer_book::Entity::find()
             .filter(peer_book::Column::PeerId.eq(peer_id))
-            .filter(peer_book::Column::RemoteBookId.eq(10))
+            .filter(peer_book::Column::RemoteBookId.eq("10"))
             .one(&db)
             .await
             .unwrap()
@@ -473,7 +473,7 @@ mod tests {
             &db,
             peer_id,
             &[upsert_op_with_added_at(
-                11,
+                "11",
                 "Original",
                 Some("2026-01-01T00:00:00+00:00"),
             )],
@@ -482,13 +482,17 @@ mod tests {
         .unwrap();
 
         // Older peer (no added_at) pushes an update: preserve the value.
-        apply_peer_delta_operations(&db, peer_id, &[upsert_op_with_added_at(11, "Edited", None)])
-            .await
-            .unwrap();
+        apply_peer_delta_operations(
+            &db,
+            peer_id,
+            &[upsert_op_with_added_at("11", "Edited", None)],
+        )
+        .await
+        .unwrap();
 
         let row = peer_book::Entity::find()
             .filter(peer_book::Column::PeerId.eq(peer_id))
-            .filter(peer_book::Column::RemoteBookId.eq(11))
+            .filter(peer_book::Column::RemoteBookId.eq("11"))
             .one(&db)
             .await
             .unwrap()
@@ -505,11 +509,11 @@ mod tests {
         let db = setup().await;
         let peer_id = create_peer(&db).await;
 
-        apply_peer_delta_operations(&db, peer_id, &[upsert_op(7, "Doomed")])
+        apply_peer_delta_operations(&db, peer_id, &[upsert_op("7", "Doomed")])
             .await
             .unwrap();
 
-        let ops = vec![json!({ "op": "delete", "book_id": 7 })];
+        let ops = vec![json!({ "op": "delete", "book_id": "7" })];
         let applied = apply_peer_delta_operations(&db, peer_id, &ops)
             .await
             .unwrap();
@@ -517,7 +521,7 @@ mod tests {
 
         let row = peer_book::Entity::find()
             .filter(peer_book::Column::PeerId.eq(peer_id))
-            .filter(peer_book::Column::RemoteBookId.eq(7))
+            .filter(peer_book::Column::RemoteBookId.eq("7"))
             .one(&db)
             .await
             .unwrap();
@@ -529,7 +533,7 @@ mod tests {
         let db = setup().await;
         let peer_id = create_peer(&db).await;
 
-        let ops = vec![json!({ "op": "delete", "book_id": 404 })];
+        let ops = vec![json!({ "op": "delete", "book_id": "404" })];
         // Must not error even if the row never existed (idempotent replay).
         let applied = apply_peer_delta_operations(&db, peer_id, &ops)
             .await
@@ -543,10 +547,10 @@ mod tests {
         let peer_id = create_peer(&db).await;
 
         let ops = vec![
-            json!({ "op": "upsert" }),              // missing book
-            json!({ "op": "delete" }),              // missing book_id
-            json!({ "op": "patch", "book_id": 1 }), // unknown op
-            upsert_op(99, "Survivor"),
+            json!({ "op": "upsert" }),                // missing book
+            json!({ "op": "delete" }),                // missing book_id
+            json!({ "op": "patch", "book_id": "1" }), // unknown op
+            upsert_op("99", "Survivor"),
         ];
         let applied = apply_peer_delta_operations(&db, peer_id, &ops)
             .await
@@ -555,7 +559,7 @@ mod tests {
 
         let row = peer_book::Entity::find()
             .filter(peer_book::Column::PeerId.eq(peer_id))
-            .filter(peer_book::Column::RemoteBookId.eq(99))
+            .filter(peer_book::Column::RemoteBookId.eq("99"))
             .one(&db)
             .await
             .unwrap();
@@ -575,7 +579,7 @@ mod tests {
         let fully_lent = json!({
             "op": "upsert",
             "book": {
-                "id": 20,
+                "id": "20",
                 "title": "All lent out",
                 "owned": true,
                 "available_copies": 0,
@@ -586,7 +590,7 @@ mod tests {
         let peer_borrowed = json!({
             "op": "upsert",
             "book": {
-                "id": 21,
+                "id": "21",
                 "title": "I borrowed it",
                 "owned": false,
                 "available_copies": 1,
@@ -597,7 +601,7 @@ mod tests {
             .await
             .unwrap();
 
-        let fetch = |remote_id: i32| {
+        let fetch = |remote_id: String| {
             let db = db.clone();
             async move {
                 peer_book::Entity::find()
@@ -609,8 +613,8 @@ mod tests {
                     .unwrap()
             }
         };
-        let row_lent = fetch(20).await;
-        let row_borrowed = fetch(21).await;
+        let row_lent = fetch("20".to_string()).await;
+        let row_borrowed = fetch("21".to_string()).await;
         assert!(row_lent.owned);
         assert_eq!(row_lent.available_copies, Some(0));
         assert!(!row_borrowed.owned);
@@ -622,7 +626,7 @@ mod tests {
         let lent_updated = json!({
             "op": "upsert",
             "book": {
-                "id": 20,
+                "id": "20",
                 "title": "All lent out",
                 "owned": true,
                 "available_copies": 2,
@@ -632,7 +636,7 @@ mod tests {
         apply_peer_delta_operations(&db, peer_id, &[lent_updated])
             .await
             .unwrap();
-        let refreshed = fetch(20).await;
+        let refreshed = fetch("20".to_string()).await;
         assert_eq!(
             refreshed.available_copies,
             Some(2),

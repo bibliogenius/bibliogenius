@@ -7,7 +7,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub collection_id: String,
     #[sea_orm(primary_key, auto_increment = false)]
-    pub book_id: i32,
+    pub book_id: String,
     pub added_at: String,
 }
 

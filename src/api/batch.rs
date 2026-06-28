@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub struct BatchEditRequest {
-    pub ids: Vec<i32>,
+    pub ids: Vec<String>,
     pub action: BatchAction,
 }
 
@@ -42,7 +42,7 @@ pub async fn batch_edit(
             {
                 Ok(res) => {
                     for id in &ids_to_log {
-                        let _ = crate::sync::log_operation(&db, "book", *id, "DELETE", None).await;
+                        let _ = crate::sync::log_operation(&db, "book", id, "DELETE", None).await;
                     }
                     (
                         StatusCode::OK,

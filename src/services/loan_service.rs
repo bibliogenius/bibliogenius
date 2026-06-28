@@ -28,11 +28,11 @@ impl From<sea_orm::DbErr> for ServiceError {
 /// Enriched loan with related data
 #[derive(Debug, Clone)]
 pub struct LoanWithDetails {
-    pub id: i32,
+    pub id: String,
     /// Stable cross-device identifier of the loan row.
     pub uuid: String,
-    pub copy_id: i32,
-    pub contact_id: i32,
+    pub copy_id: String,
+    pub contact_id: String,
     pub library_id: i32,
     pub loan_date: String,
     pub due_date: String,
@@ -41,7 +41,7 @@ pub struct LoanWithDetails {
     pub notes: Option<String>,
     pub contact_name: String,
     pub book_title: String,
-    pub book_id: Option<i32>,
+    pub book_id: Option<String>,
     pub cover_url: Option<String>,
     pub isbn: Option<String>,
 }
@@ -81,10 +81,13 @@ pub async fn list_loans(
         .await?;
 
     // Collect copy IDs to fetch books
-    let copy_ids: Vec<i32> = loans_with_contacts.iter().map(|(l, _)| l.copy_id).collect();
+    let copy_ids: Vec<String> = loans_with_contacts
+        .iter()
+        .map(|(l, _)| l.copy_id.clone())
+        .collect();
 
     // Fetch copies with books (title, id, cover_url, isbn)
-    let mut copy_book_map: HashMap<i32, (String, i32, Option<String>, Option<String>)> =
+    let mut copy_book_map: HashMap<String, (String, String, Option<String>, Option<String>)> =
         HashMap::new();
 
     if !copy_ids.is_empty() {
@@ -112,13 +115,13 @@ pub async fn list_loans(
             let book_title = book_info
                 .map(|(title, _, _, _)| title.clone())
                 .unwrap_or_else(|| "Unknown".to_string());
-            let book_id = book_info.map(|(_, id, _, _)| *id);
+            let book_id = book_info.map(|(_, id, _, _)| id.clone());
             let cover_url = book_info.and_then(|(_, _, url, _)| url.clone());
             let isbn = book_info.and_then(|(_, _, _, isbn)| isbn.clone());
 
             LoanWithDetails {
+                uuid: loan.id.clone(),
                 id: loan.id,
-                uuid: loan.uuid,
                 copy_id: loan.copy_id,
                 contact_id: loan.contact_id,
                 library_id: loan.library_id,
@@ -147,7 +150,7 @@ pub async fn create_loan(
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     // 1. Check if copy exists and is available
-    let copy = Copy::find_by_id(dto.copy_id)
+    let copy = Copy::find_by_id(dto.copy_id.clone())
         .one(db)
         .await?
         .ok_or(ServiceError::NotFound)?;
@@ -161,7 +164,7 @@ pub async fn create_loan(
 
     // 2. Create Loan
     let new_loan = loan::ActiveModel {
-        copy_id: Set(dto.copy_id),
+        copy_id: Set(dto.copy_id.clone()),
         contact_id: Set(dto.contact_id),
         library_id: Set(dto.library_id),
         loan_date: Set(dto.loan_date),
@@ -179,7 +182,7 @@ pub async fn create_loan(
     let _ = crate::sync::log_operation(
         db,
         "loan",
-        saved_loan.id,
+        &saved_loan.id,
         "INSERT",
         Some(serde_json::json!({ "copy_id": saved_loan.copy_id })),
     )
@@ -193,7 +196,7 @@ pub async fn create_loan(
     let _ = crate::sync::log_operation(
         db,
         "copy",
-        dto.copy_id,
+        &dto.copy_id,
         "UPDATE",
         Some(serde_json::json!({ "status": "loaned" })),
     )
@@ -203,11 +206,11 @@ pub async fn create_loan(
 }
 
 /// Return a loan
-pub async fn return_loan(db: &DatabaseConnection, id: i32) -> Result<loan::Model, ServiceError> {
+pub async fn return_loan(db: &DatabaseConnection, id: &str) -> Result<loan::Model, ServiceError> {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     // 1. Find Loan
-    let loan = Loan::find_by_id(id)
+    let loan = Loan::find_by_id(id.to_owned())
         .one(db)
         .await?
         .ok_or(ServiceError::NotFound)?;
@@ -229,14 +232,14 @@ pub async fn return_loan(db: &DatabaseConnection, id: i32) -> Result<loan::Model
     let _ = crate::sync::log_operation(
         db,
         "loan",
-        updated_loan.id,
+        &updated_loan.id,
         "UPDATE",
         Some(serde_json::json!({ "status": "returned" })),
     )
     .await;
 
     // 3. Update Copy status to 'available'
-    let copy = Copy::find_by_id(loan.copy_id)
+    let copy = Copy::find_by_id(loan.copy_id.clone())
         .one(db)
         .await?
         .ok_or(ServiceError::NotFound)?;
@@ -248,7 +251,7 @@ pub async fn return_loan(db: &DatabaseConnection, id: i32) -> Result<loan::Model
     let _ = crate::sync::log_operation(
         db,
         "copy",
-        loan.copy_id,
+        &loan.copy_id,
         "UPDATE",
         Some(serde_json::json!({ "status": "available" })),
     )
@@ -336,7 +339,7 @@ mod tests {
     /// In-memory mock for testing effective duration logic
     struct MockLoanSettingsRepo {
         settings: Mutex<LoanSettings>,
-        book_durations: Mutex<std::collections::HashMap<i32, Option<i32>>>,
+        book_durations: Mutex<std::collections::HashMap<String, Option<i32>>>,
     }
 
     impl MockLoanSettingsRepo {
@@ -351,8 +354,11 @@ mod tests {
             }
         }
 
-        fn set_book_duration(&self, book_id: i32, days: Option<i32>) {
-            self.book_durations.lock().unwrap().insert(book_id, days);
+        fn set_book_duration(&self, book_id: &str, days: Option<i32>) {
+            self.book_durations
+                .lock()
+                .unwrap()
+                .insert(book_id.to_string(), days);
         }
     }
 
@@ -375,26 +381,29 @@ mod tests {
             Ok(clamped)
         }
 
-        async fn get_book_loan_duration(&self, book_id: i32) -> Result<Option<i32>, DomainError> {
+        async fn get_book_loan_duration(&self, book_id: &str) -> Result<Option<i32>, DomainError> {
             Ok(self
                 .book_durations
                 .lock()
                 .unwrap()
-                .get(&book_id)
+                .get(book_id)
                 .copied()
                 .flatten())
         }
 
         async fn set_book_loan_duration(
             &self,
-            book_id: i32,
+            book_id: &str,
             days: Option<i32>,
         ) -> Result<(), DomainError> {
-            self.book_durations.lock().unwrap().insert(book_id, days);
+            self.book_durations
+                .lock()
+                .unwrap()
+                .insert(book_id.to_string(), days);
             Ok(())
         }
 
-        async fn get_effective_duration(&self, book_id: i32) -> Result<i32, DomainError> {
+        async fn get_effective_duration(&self, book_id: &str) -> Result<i32, DomainError> {
             let settings = self.get_settings().await?;
             if settings.per_book_duration_enabled
                 && let Ok(Some(days)) = self.get_book_loan_duration(book_id).await
@@ -408,23 +417,23 @@ mod tests {
     #[tokio::test]
     async fn test_effective_duration_returns_global_default() {
         let repo = MockLoanSettingsRepo::new(21, false);
-        let duration = repo.get_effective_duration(1).await.unwrap();
+        let duration = repo.get_effective_duration("book-1").await.unwrap();
         assert_eq!(duration, 21);
     }
 
     #[tokio::test]
     async fn test_effective_duration_ignores_per_book_when_disabled() {
         let repo = MockLoanSettingsRepo::new(21, false);
-        repo.set_book_duration(1, Some(7));
-        let duration = repo.get_effective_duration(1).await.unwrap();
+        repo.set_book_duration("book-1", Some(7));
+        let duration = repo.get_effective_duration("book-1").await.unwrap();
         assert_eq!(duration, 21); // per-book disabled, should use global
     }
 
     #[tokio::test]
     async fn test_effective_duration_uses_per_book_when_enabled() {
         let repo = MockLoanSettingsRepo::new(21, true);
-        repo.set_book_duration(1, Some(7));
-        let duration = repo.get_effective_duration(1).await.unwrap();
+        repo.set_book_duration("book-1", Some(7));
+        let duration = repo.get_effective_duration("book-1").await.unwrap();
         assert_eq!(duration, 7);
     }
 
@@ -432,7 +441,7 @@ mod tests {
     async fn test_effective_duration_falls_back_to_global_when_no_per_book() {
         let repo = MockLoanSettingsRepo::new(21, true);
         // No per-book duration set for book 1
-        let duration = repo.get_effective_duration(1).await.unwrap();
+        let duration = repo.get_effective_duration("book-1").await.unwrap();
         assert_eq!(duration, 21);
     }
 
@@ -465,14 +474,19 @@ mod tests {
     async fn test_set_and_clear_book_duration() {
         let repo = MockLoanSettingsRepo::new(21, true);
 
-        repo.set_book_loan_duration(1, Some(14)).await.unwrap();
-        assert_eq!(repo.get_book_loan_duration(1).await.unwrap(), Some(14));
+        repo.set_book_loan_duration("book-1", Some(14))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_book_loan_duration("book-1").await.unwrap(),
+            Some(14)
+        );
 
-        repo.set_book_loan_duration(1, None).await.unwrap();
-        assert_eq!(repo.get_book_loan_duration(1).await.unwrap(), None);
+        repo.set_book_loan_duration("book-1", None).await.unwrap();
+        assert_eq!(repo.get_book_loan_duration("book-1").await.unwrap(), None);
 
         // Effective should fall back to global
-        let duration = repo.get_effective_duration(1).await.unwrap();
+        let duration = repo.get_effective_duration("book-1").await.unwrap();
         assert_eq!(duration, 21);
     }
 }

@@ -28,8 +28,8 @@ impl From<sea_orm::DbErr> for ServiceError {
 #[derive(Debug, Clone, serde::Serialize)] // Added Serialize for API responses
 pub struct SaleWithDetails {
     pub id: i32,
-    pub copy_id: i32,
-    pub contact_id: Option<i32>,
+    pub copy_id: String,
+    pub contact_id: Option<String>,
     pub library_id: i32,
     pub sale_date: String,
     pub sale_price: f64,
@@ -74,10 +74,13 @@ pub async fn list_sales(
         .await?;
 
     // Collect copy IDs to fetch books
-    let copy_ids: Vec<i32> = sales_with_contacts.iter().map(|(s, _)| s.copy_id).collect();
+    let copy_ids: Vec<String> = sales_with_contacts
+        .iter()
+        .map(|(s, _)| s.copy_id.clone())
+        .collect();
 
     // Fetch copies with books
-    let mut copy_book_map: HashMap<i32, String> = HashMap::new();
+    let mut copy_book_map: HashMap<String, String> = HashMap::new();
 
     if !copy_ids.is_empty() {
         let copies_with_books = Copy::find()
@@ -128,7 +131,7 @@ pub async fn record_sale(
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     // 1. Check if copy exists and is available
-    let _copy = Copy::find_by_id(dto.copy_id) // Prefixed with _ to avoid warning
+    let _copy = Copy::find_by_id(dto.copy_id.clone()) // Prefixed with _ to avoid warning
         .one(db)
         .await?
         .ok_or(ServiceError::NotFound)?;

@@ -168,7 +168,7 @@ impl CollectionRepository for SeaOrmCollectionRepository {
         Ok(result)
     }
 
-    async fn add_book(&self, collection_id: &str, book_id: i32) -> Result<(), DomainError> {
+    async fn add_book(&self, collection_id: &str, book_id: &str) -> Result<(), DomainError> {
         // Check if already exists
         let existing = CollectionBookEntity::find()
             .filter(collection_book::Column::CollectionId.eq(collection_id))
@@ -183,7 +183,7 @@ impl CollectionRepository for SeaOrmCollectionRepository {
         // Create new entry
         let new_entry = CollectionBookActiveModel {
             collection_id: Set(collection_id.to_string()),
-            book_id: Set(book_id),
+            book_id: Set(book_id.to_owned()),
             added_at: Set(chrono::Utc::now().to_rfc3339()),
         };
 
@@ -191,7 +191,7 @@ impl CollectionRepository for SeaOrmCollectionRepository {
         Ok(())
     }
 
-    async fn remove_book(&self, collection_id: &str, book_id: i32) -> Result<(), DomainError> {
+    async fn remove_book(&self, collection_id: &str, book_id: &str) -> Result<(), DomainError> {
         collection_book::Entity::delete_many()
             .filter(collection_book::Column::CollectionId.eq(collection_id))
             .filter(collection_book::Column::BookId.eq(book_id))
@@ -201,7 +201,7 @@ impl CollectionRepository for SeaOrmCollectionRepository {
         Ok(())
     }
 
-    async fn get_book_collections(&self, book_id: i32) -> Result<Vec<Collection>, DomainError> {
+    async fn get_book_collections(&self, book_id: &str) -> Result<Vec<Collection>, DomainError> {
         let collections = CollectionEntity::find()
             .join(
                 JoinType::InnerJoin,
@@ -230,7 +230,7 @@ impl CollectionRepository for SeaOrmCollectionRepository {
 
     async fn update_book_collections(
         &self,
-        book_id: i32,
+        book_id: &str,
         collection_ids: Vec<String>,
     ) -> Result<(), DomainError> {
         // 1. Remove existing associations
@@ -244,7 +244,7 @@ impl CollectionRepository for SeaOrmCollectionRepository {
         for col_id in collection_ids {
             let new_entry = CollectionBookActiveModel {
                 collection_id: Set(col_id),
-                book_id: Set(book_id),
+                book_id: Set(book_id.to_owned()),
                 added_at: Set(now.clone()),
             };
             new_entry.insert(&self.db).await?;

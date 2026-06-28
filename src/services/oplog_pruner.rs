@@ -146,7 +146,7 @@ mod tests {
         // days_offset < 0 yields a past date; passing positive yields future.
         let row = operation_log::ActiveModel {
             entity_type: Set("book".to_owned()),
-            entity_id: Set(1),
+            entity_id: Set("1".to_owned()),
             operation: Set("INSERT".to_owned()),
             payload: Set(None),
             source: Set("local".to_owned()),

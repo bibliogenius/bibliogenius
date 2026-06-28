@@ -158,7 +158,7 @@ pub struct HubCatalog {
 pub struct CatalogEntry {
     pub isbn: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub book_id: Option<i32>,
+    pub book_id: Option<String>,
     pub title: String,
     pub author: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -888,7 +888,7 @@ impl HubDirectoryService {
     pub async fn upload_cover(
         &self,
         db: &DatabaseConnection,
-        book_id: i32,
+        book_id: &str,
         jpeg_bytes: Vec<u8>,
     ) -> Result<String, HubDirectoryError> {
         let cfg = Self::get_config(db)
@@ -931,7 +931,7 @@ impl HubDirectoryService {
     pub async fn delete_cover(
         &self,
         db: &DatabaseConnection,
-        book_id: i32,
+        book_id: &str,
     ) -> Result<(), HubDirectoryError> {
         let cfg = Self::get_config(db)
             .await?
@@ -960,13 +960,13 @@ impl HubDirectoryService {
     /// warning badge until the next sync retry succeeds. Side-effect only:
     /// DB errors are logged and swallowed so a bookkeeping failure never
     /// aborts the surrounding sync loop.
-    pub async fn mark_hub_cover_upload_failure(db: &DatabaseConnection, book_id: i32) {
+    pub async fn mark_hub_cover_upload_failure(db: &DatabaseConnection, book_id: &str) {
         let now = chrono::Utc::now().to_rfc3339();
         let backend = db.get_database_backend();
         if let Err(e) = db
             .execute(Statement::from_sql_and_values(
                 backend,
-                "UPDATE books SET hub_cover_upload_failed_at = ? WHERE id = ?",
+                "UPDATE books SET hub_cover_upload_failed_at = ? WHERE uuid = ?",
                 [now.into(), book_id.into()],
             ))
             .await
@@ -977,12 +977,12 @@ impl HubDirectoryService {
 
     /// Clears the pending-failure flag after a successful hub cover upload.
     /// Side-effect only: DB errors are logged and swallowed.
-    pub async fn clear_hub_cover_upload_failure(db: &DatabaseConnection, book_id: i32) {
+    pub async fn clear_hub_cover_upload_failure(db: &DatabaseConnection, book_id: &str) {
         let backend = db.get_database_backend();
         if let Err(e) = db
             .execute(Statement::from_sql_and_values(
                 backend,
-                "UPDATE books SET hub_cover_upload_failed_at = NULL WHERE id = ?",
+                "UPDATE books SET hub_cover_upload_failed_at = NULL WHERE uuid = ?",
                 [book_id.into()],
             ))
             .await
@@ -1013,7 +1013,7 @@ impl HubDirectoryService {
     pub async fn resize_and_upload_cover(
         &self,
         db: &DatabaseConnection,
-        book_id: i32,
+        book_id: &str,
         path: &str,
     ) -> Result<String, String> {
         let bytes = tokio::fs::read(path)
@@ -1039,7 +1039,7 @@ impl HubDirectoryService {
     pub async fn process_local_cover_upload(
         &self,
         db: &DatabaseConnection,
-        book_id: i32,
+        book_id: &str,
         path: &str,
     ) -> Option<String> {
         match self.resize_and_upload_cover(db, book_id, path).await {

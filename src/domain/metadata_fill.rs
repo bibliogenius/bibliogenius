@@ -46,7 +46,7 @@ pub struct CompletenessStats {
 /// A minimal book projection for selection and the "no ISBN" list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncompleteBook {
-    pub id: i32,
+    pub id: String,
     pub title: String,
     pub isbn: Option<String>,
 }
@@ -55,7 +55,7 @@ pub struct IncompleteBook {
 /// "books to complete" overview (manual completion entry point).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncompleteBookDetail {
-    pub id: i32,
+    pub id: String,
     pub title: String,
     pub isbn: Option<String>,
     pub cover_url: Option<String>,
@@ -108,8 +108,9 @@ pub struct FillRun {
     pub skipped: i64,
     /// Books whose lookup errored.
     pub errored: i64,
-    /// Highest book id processed so far (monotonic; resume continues past it).
-    pub cursor_book_id: i32,
+    /// Highest book uuid processed so far (lexicographically; resume continues
+    /// past it). uuid v7 sorts ~chronologically so ordering still holds.
+    pub cursor_book_id: String,
     pub current_title: Option<String>,
 }
 
@@ -117,7 +118,7 @@ pub struct FillRun {
 /// fields this feature added to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentFilledBook {
-    pub book_id: i32,
+    pub book_id: String,
     pub title: String,
     pub cover_url: Option<String>,
     /// Active journal entries for this book, newest run first.
@@ -155,7 +156,7 @@ pub trait MetadataFillRepository: Send + Sync {
     /// book is filled it is no longer incomplete and drops out of this query.
     async fn list_incomplete_with_isbn(
         &self,
-        after_id: i32,
+        after_id: &str,
         limit: u64,
     ) -> Result<Vec<IncompleteBook>, DomainError>;
 
@@ -175,7 +176,7 @@ pub trait MetadataFillRepository: Send + Sync {
     async fn apply_fill(
         &self,
         batch_id: &str,
-        book_id: i32,
+        book_id: &str,
         candidate: GapValues,
     ) -> Result<Vec<FilledField>, DomainError>;
 
@@ -198,7 +199,7 @@ pub trait MetadataFillRepository: Send + Sync {
     /// Revert a single journal entry (safe rule applies).
     async fn undo_field(&self, journal_id: i64) -> Result<UndoOutcome, DomainError>;
     /// Revert all active entries of one book in one batch. Returns reverted count.
-    async fn undo_book(&self, batch_id: &str, book_id: i32) -> Result<usize, DomainError>;
+    async fn undo_book(&self, batch_id: &str, book_id: &str) -> Result<usize, DomainError>;
     /// Revert all active entries of a whole batch. Returns reverted count.
     async fn undo_run(&self, batch_id: &str) -> Result<usize, DomainError>;
 }

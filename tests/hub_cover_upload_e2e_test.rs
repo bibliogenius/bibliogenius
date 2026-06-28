@@ -58,10 +58,16 @@ async fn setup_db_with_hub_config() -> DatabaseConnection {
     db
 }
 
-async fn insert_book(db: &DatabaseConnection, title: &str) -> i32 {
+async fn insert_book(db: &DatabaseConnection, title: &str) -> String {
     let now = chrono::Utc::now().to_rfc3339();
+    // `Entity::insert().exec()` does not fire `before_save`, so the uuid PK is
+    // not auto-minted here; set it explicitly (the row's id is its uuid now).
     let active = book::ActiveModel {
+        id: Set(format!("test-book-{}", title.replace(' ', "-"))),
         title: Set(title.to_string()),
+        reading_status: Set("to_read".to_string()),
+        owned: Set(true),
+        private: Set(false),
         created_at: Set(now.clone()),
         updated_at: Set(now),
         ..Default::default()
@@ -90,8 +96,8 @@ fn write_tiny_png_to_temp(tag: &str) -> TempCoverFile {
     TempCoverFile { path }
 }
 
-async fn read_failure_flag(db: &DatabaseConnection, book_id: i32) -> Option<String> {
-    book::Entity::find_by_id(book_id)
+async fn read_failure_flag(db: &DatabaseConnection, book_id: &str) -> Option<String> {
+    book::Entity::find_by_id(book_id.to_string())
         .one(db)
         .await
         .expect("find")
@@ -114,7 +120,7 @@ async fn hub_500_sets_failure_flag() {
     unsafe { std::env::set_var("HUB_URL", hub.uri()) };
 
     Mock::given(method("POST"))
-        .and(path_regex(r"^/api/directory/my-node/covers/\d+$"))
+        .and(path_regex(r"^/api/directory/my-node/covers/[^/]+$"))
         .respond_with(ResponseTemplate::new(500))
         .expect(1)
         .mount(&hub)
@@ -122,12 +128,12 @@ async fn hub_500_sets_failure_flag() {
 
     let svc = HubDirectoryService::new();
     let url = svc
-        .process_local_cover_upload(&db, book_id, tmp.path().to_str().unwrap())
+        .process_local_cover_upload(&db, &book_id, tmp.path().to_str().unwrap())
         .await;
 
     assert!(url.is_none(), "hub 500 must be surfaced as None to caller");
     assert!(
-        read_failure_flag(&db, book_id).await.is_some(),
+        read_failure_flag(&db, &book_id).await.is_some(),
         "failure flag must be set after a 500"
     );
     hub.verify().await;
@@ -142,14 +148,14 @@ async fn retry_success_clears_failure_flag() {
     let tmp = write_tiny_png_to_temp("retry");
 
     // Seed the flag as if a prior attempt had failed.
-    HubDirectoryService::mark_hub_cover_upload_failure(&db, book_id).await;
-    assert!(read_failure_flag(&db, book_id).await.is_some());
+    HubDirectoryService::mark_hub_cover_upload_failure(&db, &book_id).await;
+    assert!(read_failure_flag(&db, &book_id).await.is_some());
 
     let hub = MockServer::start().await;
     unsafe { std::env::set_var("HUB_URL", hub.uri()) };
 
     Mock::given(method("POST"))
-        .and(path_regex(r"^/api/directory/my-node/covers/\d+$"))
+        .and(path_regex(r"^/api/directory/my-node/covers/[^/]+$"))
         .respond_with(ResponseTemplate::new(200))
         .expect(1)
         .mount(&hub)
@@ -157,12 +163,12 @@ async fn retry_success_clears_failure_flag() {
 
     let svc = HubDirectoryService::new();
     let url = svc
-        .process_local_cover_upload(&db, book_id, tmp.path().to_str().unwrap())
+        .process_local_cover_upload(&db, &book_id, tmp.path().to_str().unwrap())
         .await;
 
     assert!(url.is_some(), "successful upload must return the hub URL");
     assert!(
-        read_failure_flag(&db, book_id).await.is_none(),
+        read_failure_flag(&db, &book_id).await.is_none(),
         "flag must be cleared once the retry succeeds"
     );
     hub.verify().await;
@@ -182,7 +188,7 @@ async fn hub_401_also_sets_failure_flag() {
     unsafe { std::env::set_var("HUB_URL", hub.uri()) };
 
     Mock::given(method("POST"))
-        .and(path_regex(r"^/api/directory/my-node/covers/\d+$"))
+        .and(path_regex(r"^/api/directory/my-node/covers/[^/]+$"))
         .respond_with(ResponseTemplate::new(401))
         .expect(1)
         .mount(&hub)
@@ -190,10 +196,10 @@ async fn hub_401_also_sets_failure_flag() {
 
     let svc = HubDirectoryService::new();
     let url = svc
-        .process_local_cover_upload(&db, book_id, tmp.path().to_str().unwrap())
+        .process_local_cover_upload(&db, &book_id, tmp.path().to_str().unwrap())
         .await;
 
     assert!(url.is_none());
-    assert!(read_failure_flag(&db, book_id).await.is_some());
+    assert!(read_failure_flag(&db, &book_id).await.is_some());
     hub.verify().await;
 }

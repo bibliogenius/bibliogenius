@@ -110,7 +110,7 @@ async fn load_google_books_api_key() -> Option<String> {
 /// Simplified book structure for FFI
 #[frb(dart_metadata=("freezed"))]
 pub struct FrbBook {
-    pub id: Option<i32>,
+    pub id: Option<String>,
     pub title: String,
     pub author: Option<String>,
     pub isbn: Option<String>,
@@ -140,9 +140,6 @@ pub struct FrbBook {
     /// NULL when the most recent attempt succeeded or none ever ran. Read by
     /// the owner's UI to surface a warning badge while a retry pends.
     pub hub_cover_upload_failed_at: Option<String>,
-    /// Stable cross-device identifier. Backend-generated; surfaced to
-    /// Flutter for the upcoming account sync. None for transient/peer rows.
-    pub uuid: Option<String>,
 }
 
 /// Convert domain Book to FFI-safe FrbBook
@@ -175,7 +172,6 @@ impl From<crate::models::Book> for FrbBook {
             page_count: book.page_count,
             added_at: book.added_at,
             hub_cover_upload_failed_at: book.hub_cover_upload_failed_at,
-            uuid: book.uuid,
         }
     }
 }
@@ -642,42 +638,6 @@ pub async fn parse_invite_link_ffi(link: String) -> Result<String, String> {
 // intentionally not migrated here: their references stay integer until the column
 // types flip together with the database, so they are handled at that later step.
 
-/// Resolve an entity uuid to its device-local integer id, erroring when no row
-/// carries that uuid. One per replicated entity Flutter addresses by uuid.
-macro_rules! id_by_uuid {
-    ($name:ident, $finder:path, $entity:literal) => {
-        async fn $name(uuid: &str) -> Result<i32, String> {
-            let db = db().ok_or("Database not initialized")?;
-            $finder(db, uuid)
-                .await
-                .map_err(|e| format!("{e:?}"))?
-                .map(|m| m.id)
-                .ok_or_else(|| format!("No {} with uuid {}", $entity, uuid))
-        }
-    };
-}
-
-id_by_uuid!(
-    book_id_by_uuid,
-    crate::infrastructure::uuid_lookup::find_book_by_uuid,
-    "book"
-);
-id_by_uuid!(
-    contact_id_by_uuid,
-    crate::infrastructure::uuid_lookup::find_contact_by_uuid,
-    "contact"
-);
-id_by_uuid!(
-    tag_id_by_uuid,
-    crate::infrastructure::uuid_lookup::find_tag_by_uuid,
-    "tag"
-);
-id_by_uuid!(
-    loan_id_by_uuid,
-    crate::infrastructure::uuid_lookup::find_loan_by_uuid,
-    "loan"
-);
-
 /// Fetch a book by its uuid (single fetch: resolves and enriches at once).
 pub async fn get_book_by_uuid(uuid: String) -> Result<FrbBook, String> {
     let db = db().ok_or("Database not initialized")?;
@@ -692,27 +652,44 @@ pub async fn get_book_by_uuid(uuid: String) -> Result<FrbBook, String> {
 
 /// Update a book identified by its uuid.
 pub async fn update_book_by_uuid(uuid: String, book: FrbBook) -> Result<FrbBook, String> {
-    update_book(book_id_by_uuid(&uuid).await?, book).await
+    let db = db().ok_or("Database not initialized")?;
+    let book_dto: crate::models::Book = book.into();
+    match crate::services::book_service::update_book(db, &uuid, book_dto).await {
+        Ok(b) => Ok(FrbBook::from(b)),
+        Err(crate::services::book_service::ServiceError::InvalidInput(m)) => Err(m),
+        Err(e) => Err(format!("{e:?}")),
+    }
 }
 
 /// Delete a book identified by its uuid.
 pub async fn delete_book_by_uuid(uuid: String) -> Result<(), String> {
-    delete_book(book_id_by_uuid(&uuid).await?).await
+    let db = db().ok_or("Database not initialized")?;
+    match crate::services::book_service::delete_book(db, &uuid).await {
+        Ok(_) => {
+            // Notify peers that our catalog changed (same as create_book - HTTP handler bypassed).
+            if let Some(state) = global_app_state() {
+                crate::services::catalog_notification::schedule_catalog_changed_notification(
+                    state.clone(),
+                );
+            }
+            Ok(())
+        }
+        Err(e) => Err(format!("{e:?}")),
+    }
 }
 
-/// Update a tag identified by its uuid. `parent_id` stays integer until the
-/// reference columns flip with the database.
+/// Update a tag identified by its uuid.
 pub async fn update_tag_by_uuid(
     uuid: String,
     name: String,
-    parent_id: Option<i32>,
+    parent_id: Option<String>,
 ) -> Result<FrbTag, String> {
-    update_tag(tag_id_by_uuid(&uuid).await?, name, parent_id).await
+    update_tag(uuid, name, parent_id).await
 }
 
 /// Delete a tag identified by its uuid.
 pub async fn delete_tag_by_uuid(uuid: String) -> Result<(), String> {
-    delete_tag(tag_id_by_uuid(&uuid).await?).await
+    delete_tag(uuid).await
 }
 
 /// Fetch a contact by its uuid (single fetch, no id round-trip).
@@ -729,22 +706,26 @@ pub async fn get_contact_by_uuid(uuid: String) -> Result<FrbContact, String> {
 
 /// Delete a contact identified by its uuid.
 pub async fn delete_contact_by_uuid(uuid: String) -> Result<(), String> {
-    delete_contact(contact_id_by_uuid(&uuid).await?).await
+    let db = db().ok_or("Database not initialized")?;
+    match crate::services::contact_service::delete_contact(db, &uuid).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("{e:?}")),
+    }
 }
 
 /// Mark the loan identified by its uuid as returned.
 pub async fn return_loan_by_uuid(uuid: String) -> Result<String, String> {
-    return_loan(loan_id_by_uuid(&uuid).await?).await
+    return_loan(uuid).await
 }
 
 /// Effective loan duration (days) for the book identified by its uuid.
 pub async fn get_effective_loan_duration_by_book_uuid(book_uuid: String) -> Result<i32, String> {
-    get_effective_loan_duration(book_id_by_uuid(&book_uuid).await?).await
+    get_effective_loan_duration(book_uuid).await
 }
 
 /// Per-book loan duration override for the book identified by its uuid.
 pub async fn get_book_loan_duration_by_book_uuid(book_uuid: String) -> Result<Option<i32>, String> {
-    get_book_loan_duration(book_id_by_uuid(&book_uuid).await?).await
+    get_book_loan_duration(book_uuid).await
 }
 
 /// Set the per-book loan duration override for the book identified by its uuid.
@@ -752,7 +733,7 @@ pub async fn set_book_loan_duration_by_book_uuid(
     book_uuid: String,
     days: Option<i32>,
 ) -> Result<(), String> {
-    set_book_loan_duration(book_id_by_uuid(&book_uuid).await?, days).await
+    set_book_loan_duration(book_uuid, days).await
 }
 
 /// Add the book identified by its uuid to a collection.
@@ -760,19 +741,19 @@ pub async fn add_book_to_collection_by_book_uuid(
     collection_id: String,
     book_uuid: String,
 ) -> Result<(), String> {
-    add_book_to_collection(collection_id, book_id_by_uuid(&book_uuid).await?).await
+    add_book_to_collection(collection_id, book_uuid).await
 }
 
 /// Collections containing the book identified by its uuid.
 pub async fn get_book_collections_by_book_uuid(
     book_uuid: String,
 ) -> Result<Vec<FrbCollection>, String> {
-    get_book_collections(book_id_by_uuid(&book_uuid).await?).await
+    get_book_collections(book_uuid).await
 }
 
 /// Notes attached to the book identified by its uuid.
 pub async fn get_book_notes_by_book_uuid(book_uuid: String) -> Result<Vec<FrbBookNote>, String> {
-    get_book_notes(book_id_by_uuid(&book_uuid).await?).await
+    get_book_notes(book_uuid).await
 }
 
 /// Create a note on the book identified by its uuid.
@@ -781,7 +762,7 @@ pub async fn create_book_note_by_book_uuid(
     content: String,
     page: Option<i32>,
 ) -> Result<FrbBookNote, String> {
-    create_book_note(book_id_by_uuid(&book_uuid).await?, content, page).await
+    create_book_note(book_uuid, content, page).await
 }
 
 /// Undo a metadata-fill batch for the book identified by its uuid.
@@ -789,17 +770,17 @@ pub async fn metadata_fill_undo_book_by_uuid(
     batch_id: String,
     book_uuid: String,
 ) -> Result<u32, String> {
-    metadata_fill_undo_book(batch_id, book_id_by_uuid(&book_uuid).await?).await
+    metadata_fill_undo_book(batch_id, book_uuid).await
 }
 
 // ============ Account E2EE Sync — session + enrollment ============
 //
 // Exposes the already-built account-sync services (enrollment, signed device registry,
-// at-rest persistence) to Flutter. Scope of F1: JOIN an existing account (passphrase or
+// at-rest persistence) to Flutter. Scope here: JOIN an existing account (passphrase or
 // sealed QR pairing), manage authorized devices, and hold the unlocked trousseau in RAM
-// across calls. Out of F1 scope (separate slices): account SIGNUP (needs the descriptor
+// across calls. Out of scope (separate slices): account SIGNUP (needs the descriptor
 // signer + recovery kit + passphrase policy) and the data sync cycle `sync_once` (needs
-// the Phase E merge engine). `account_refresh_devices_ffi` already drives the real
+// the data merge engine, not built yet). `account_refresh_devices_ffi` already drives the real
 // registry adoption that `sync_once` will sit behind.
 
 /// The unlocked account session, held in RAM for the running process. Dropping it zeroizes
@@ -1128,8 +1109,8 @@ pub async fn account_refresh_devices_ffi() -> Result<String, String> {
 ///
 /// HONEST SCOPE: it always runs the real, available step — refreshing the signed
 /// device registry (H3) — and **deliberately does not fake a data convergence**.
-/// The data merge engine is Phase E (and a production cr-sqlite engine wired to
-/// the library DB is C2-prod), neither of which is built into any current binary,
+/// The data merge engine is not built yet (and a production cr-sqlite engine wired to
+/// the library DB is future work), neither of which is built into any current binary,
 /// so the data leg is a no-op here. When that engine lands, this calls
 /// [`account_sync_engine::refresh_then_sync`] with it (registry refresh stays
 /// first, ADR-043 H3). Returns JSON `{synced, reason?, devices}`.
@@ -1155,7 +1136,7 @@ pub async fn account_sync_now_ffi() -> Result<String, String> {
     // than simulate a convergence that did not happen.
     tracing::info!(
         device_count,
-        "account_sync_now: refreshed authorized devices; data sync skipped (Phase E merge engine pending)"
+        "account_sync_now: refreshed authorized devices; data sync skipped (data merge engine pending)"
     );
     Ok(serde_json::json!({
         "synced": false,
@@ -1291,9 +1272,6 @@ impl From<FrbBook> for crate::models::Book {
             marc_record: None,
             cataloguing_notes: None,
             source_data: None,
-            // uuid is owned by the backend; Flutter never sends it.
-            // None => NotSet on update (column preserved) / minted on insert.
-            uuid: None,
             finished_reading_at: frb_book.finished_reading_at.map(Some),
             started_reading_at: frb_book.started_reading_at.map(Some),
             source: None,
@@ -1459,55 +1437,6 @@ pub async fn get_all_books(
 
     match crate::services::book_service::list_books(db, filter).await {
         Ok(books) => Ok(books.into_iter().map(FrbBook::from).collect()),
-        Err(e) => Err(format!("{:?}", e)),
-    }
-}
-
-/// Get a single book by ID
-pub async fn get_book_by_id(id: i32) -> Result<FrbBook, String> {
-    let db = db().ok_or("Database not initialized")?;
-
-    match crate::services::book_service::get_book(db, id).await {
-        Ok(book) => {
-            println!(
-                "DEBUG FFI get_book_by_id({}): cover_url={:?}",
-                id, book.cover_url
-            );
-            Ok(FrbBook::from(book))
-        }
-        Err(crate::services::book_service::ServiceError::NotFound) => {
-            Err("Book not found".to_string())
-        }
-        Err(e) => Err(format!("{:?}", e)),
-    }
-}
-
-/// Update an existing book
-pub async fn update_book(id: i32, book: FrbBook) -> Result<FrbBook, String> {
-    let db = db().ok_or("Database not initialized")?;
-    let book_dto: crate::models::Book = book.into();
-
-    match crate::services::book_service::update_book(db, id, book_dto).await {
-        Ok(updated_book) => Ok(FrbBook::from(updated_book)),
-        Err(crate::services::book_service::ServiceError::InvalidInput(msg)) => Err(msg),
-        Err(e) => Err(format!("{:?}", e)),
-    }
-}
-
-/// Delete a book
-pub async fn delete_book(id: i32) -> Result<(), String> {
-    let db = db().ok_or("Database not initialized")?;
-
-    match crate::services::book_service::delete_book(db, id).await {
-        Ok(_) => {
-            // Notify peers that our catalog changed (same as create_book - HTTP handler bypassed).
-            if let Some(state) = global_app_state() {
-                crate::services::catalog_notification::schedule_catalog_changed_notification(
-                    state.clone(),
-                );
-            }
-            Ok(())
-        }
         Err(e) => Err(format!("{:?}", e)),
     }
 }
@@ -1688,7 +1617,7 @@ pub struct FrbFilledField {
 /// A recently-completed book with the fields the fill added to it.
 #[frb(dart_metadata=("freezed"))]
 pub struct FrbFilledBook {
-    pub book_id: i32,
+    pub book_id: String,
     pub title: String,
     pub cover_url: Option<String>,
     pub fields: Vec<FrbFilledField>,
@@ -1697,7 +1626,7 @@ pub struct FrbFilledBook {
 /// A book that could not be processed (no ISBN), for the manual-fix list.
 #[frb(dart_metadata=("freezed"))]
 pub struct FrbIncompleteBook {
-    pub id: i32,
+    pub id: String,
     pub title: String,
     pub isbn: Option<String>,
 }
@@ -1706,7 +1635,7 @@ pub struct FrbIncompleteBook {
 /// "books to complete" overview.
 #[frb(dart_metadata=("freezed"))]
 pub struct FrbIncompleteBookDetail {
-    pub id: i32,
+    pub id: String,
     pub title: String,
     pub isbn: Option<String>,
     pub cover_url: Option<String>,
@@ -1771,6 +1700,9 @@ pub async fn metadata_fill_recent(limit: u32) -> Result<Vec<FrbFilledBook>, Stri
     Ok(books
         .into_iter()
         .map(|b| FrbFilledBook {
+            // The book id is now a uuid String; FrbFilledBook.book_id is still an
+            // i32 (its codec is frozen in frb_generated.rs). Bridge here until the
+            // FFI struct is migrated to carry the uuid.
             book_id: b.book_id,
             title: b.title,
             cover_url: b.cover_url,
@@ -1794,6 +1726,7 @@ pub async fn metadata_fill_books_without_isbn() -> Result<Vec<FrbIncompleteBook>
     Ok(books
         .into_iter()
         .map(|b| FrbIncompleteBook {
+            // uuid String -> frozen i32 FFI field; bridge until the struct migrates.
             id: b.id,
             title: b.title,
             isbn: b.isbn,
@@ -1814,6 +1747,7 @@ pub async fn metadata_fill_incomplete(
     Ok(books
         .into_iter()
         .map(|b| FrbIncompleteBookDetail {
+            // uuid String -> frozen i32 FFI field; bridge until the struct migrates.
             id: b.id,
             title: b.title,
             isbn: b.isbn,
@@ -1831,8 +1765,8 @@ pub async fn metadata_fill_undo_field(journal_id: i64) -> Result<String, String>
 }
 
 /// Undo all fields the fill added to one book in a batch. Returns reverted count.
-pub async fn metadata_fill_undo_book(batch_id: String, book_id: i32) -> Result<u32, String> {
-    let n = crate::services::metadata_fill_service::undo_book(fill_state()?, &batch_id, book_id)
+pub async fn metadata_fill_undo_book(batch_id: String, book_id: String) -> Result<u32, String> {
+    let n = crate::services::metadata_fill_service::undo_book(fill_state()?, &batch_id, &book_id)
         .await?;
     Ok(n as u32)
 }
@@ -1855,13 +1789,10 @@ fn undo_outcome_str(outcome: crate::domain::metadata_fill::UndoOutcome) -> &'sta
 /// Simplified tag structure for FFI
 #[frb(dart_metadata=("freezed"))]
 pub struct FrbTag {
-    pub id: i32,
+    pub id: String,
     pub name: String,
-    pub parent_id: Option<i32>,
+    pub parent_id: Option<String>,
     pub count: i64,
-    /// Stable cross-device identifier. None for synthetic "legacy"
-    /// subject-derived tags (negative ids) that have no `tags` row.
-    pub uuid: Option<String>,
 }
 
 /// Get all tags with hierarchy info
@@ -1907,7 +1838,6 @@ pub async fn get_all_tags() -> Result<Vec<FrbTag>, String> {
         processed_names.insert(t.name.clone());
         result.push(FrbTag {
             id: t.id,
-            uuid: Some(t.uuid),
             name: t.name,
             parent_id: t.parent_id,
             count,
@@ -1915,13 +1845,12 @@ pub async fn get_all_tags() -> Result<Vec<FrbTag>, String> {
     }
 
     // Add remaining legacy tags (as orphans)
-    // Give them negative IDs to distinguish from DB tags (which are positive)
+    // Give them synthetic "legacy:" string ids to distinguish from DB tags (uuids).
     let mut next_legacy_id = -1;
     for (name, count) in tag_counts {
         if !processed_names.contains(&name) {
             result.push(FrbTag {
-                id: next_legacy_id,
-                uuid: None, // synthetic legacy tag: no DB row, no stable id
+                id: format!("legacy:{next_legacy_id}"),
                 name,
                 parent_id: None,
                 count,
@@ -1937,7 +1866,7 @@ pub async fn get_all_tags() -> Result<Vec<FrbTag>, String> {
 }
 
 /// Create a new tag
-pub async fn create_tag(name: String, parent_id: Option<i32>) -> Result<FrbTag, String> {
+pub async fn create_tag(name: String, parent_id: Option<String>) -> Result<FrbTag, String> {
     let db = db().ok_or("Database not initialized")?;
     use crate::models::tag;
     use sea_orm::{ActiveModelTrait, Set};
@@ -1952,10 +1881,9 @@ pub async fn create_tag(name: String, parent_id: Option<i32>) -> Result<FrbTag, 
 
     match new_tag.insert(db).await {
         Ok(t) => {
-            let _ = crate::sync::log_operation(db, "tag", t.id, "INSERT", None).await;
+            let _ = crate::sync::log_operation(db, "tag", &t.id, "INSERT", None).await;
             Ok(FrbTag {
                 id: t.id,
-                uuid: Some(t.uuid),
                 name: t.name,
                 parent_id: t.parent_id,
                 count: 0,
@@ -1966,7 +1894,11 @@ pub async fn create_tag(name: String, parent_id: Option<i32>) -> Result<FrbTag, 
 }
 
 /// Update a tag
-pub async fn update_tag(id: i32, name: String, parent_id: Option<i32>) -> Result<FrbTag, String> {
+pub async fn update_tag(
+    id: String,
+    name: String,
+    parent_id: Option<String>,
+) -> Result<FrbTag, String> {
     let db = db().ok_or("Database not initialized")?;
     use crate::models::tag;
     use sea_orm::{ActiveModelTrait, EntityTrait, Set};
@@ -1992,10 +1924,9 @@ pub async fn update_tag(id: i32, name: String, parent_id: Option<i32>) -> Result
             if old_name != name {
                 rename_subject_in_books(db, &old_name, &name).await;
             }
-            let _ = crate::sync::log_operation(db, "tag", t.id, "UPDATE", None).await;
+            let _ = crate::sync::log_operation(db, "tag", &t.id, "UPDATE", None).await;
             Ok(FrbTag {
                 id: t.id,
-                uuid: Some(t.uuid),
                 name: t.name,
                 parent_id: t.parent_id,
                 count: 0,
@@ -2052,14 +1983,14 @@ async fn rename_subject_in_books(db: &sea_orm::DatabaseConnection, old_name: &st
 }
 
 /// Delete a tag
-pub async fn delete_tag(id: i32) -> Result<(), String> {
+pub async fn delete_tag(id: String) -> Result<(), String> {
     let db = db().ok_or("Database not initialized")?;
     use crate::models::tag;
     use sea_orm::EntityTrait;
 
-    match tag::Entity::delete_by_id(id).exec(db).await {
+    match tag::Entity::delete_by_id(id.clone()).exec(db).await {
         Ok(_) => {
-            let _ = crate::sync::log_operation(db, "tag", id, "DELETE", None).await;
+            let _ = crate::sync::log_operation(db, "tag", &id, "DELETE", None).await;
             Ok(())
         }
         Err(e) => Err(format!("{:?}", e)),
@@ -2069,7 +2000,7 @@ pub async fn delete_tag(id: i32) -> Result<(), String> {
 /// Simplified contact structure for FFI
 #[frb(dart_metadata=("freezed"))]
 pub struct FrbContact {
-    pub id: Option<i32>,
+    pub id: Option<String>,
     pub contact_type: String,
     pub name: String,
     pub first_name: Option<String>,
@@ -2086,16 +2017,12 @@ pub struct FrbContact {
     pub user_id: Option<i32>,
     pub library_owner_id: Option<i32>,
     pub is_active: bool,
-    /// Stable cross-device identifier. Backend-generated; surfaced to
-    /// Flutter for the upcoming account sync.
-    pub uuid: Option<String>,
 }
 
 impl From<crate::services::contact_service::ContactDto> for FrbContact {
     fn from(c: crate::services::contact_service::ContactDto) -> Self {
         FrbContact {
             id: c.id,
-            uuid: c.uuid,
             contact_type: c.contact_type,
             name: c.name,
             first_name: c.first_name,
@@ -2117,14 +2044,14 @@ impl From<crate::services::contact_service::ContactDto> for FrbContact {
 }
 
 /// Reorder books by updating shelf positions
-pub async fn reorder_books(book_ids: Vec<i32>) -> Result<(), String> {
+pub async fn reorder_books(book_ids: Vec<String>) -> Result<(), String> {
     let db = db().ok_or("Database not initialized")?;
 
     // In a real app, this should be transactional.
     // For now, we just iterate and update.
     for (index, book_id) in book_ids.iter().enumerate() {
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
-        match crate::models::book::Entity::find_by_id(*book_id)
+        match crate::models::book::Entity::find_by_id(book_id.clone())
             .one(db)
             .await
         {
@@ -2155,19 +2082,6 @@ pub async fn get_all_contacts(
 
     match crate::services::contact_service::list_contacts(db, filter).await {
         Ok(contacts) => Ok(contacts.into_iter().map(FrbContact::from).collect()),
-        Err(e) => Err(format!("{:?}", e)),
-    }
-}
-
-/// Get a single contact by ID
-pub async fn get_contact_by_id(id: i32) -> Result<FrbContact, String> {
-    let db = db().ok_or("Database not initialized")?;
-
-    match crate::services::contact_service::get_contact(db, id).await {
-        Ok(contact) => Ok(FrbContact::from(contact)),
-        Err(crate::services::contact_service::ServiceError::NotFound) => {
-            Err("Contact not found".to_string())
-        }
         Err(e) => Err(format!("{:?}", e)),
     }
 }
@@ -2246,23 +2160,14 @@ pub async fn update_contact(contact: FrbContact) -> Result<FrbContact, String> {
     }
 }
 
-/// Delete a contact by ID (soft delete)
-pub async fn delete_contact(id: i32) -> Result<(), String> {
-    let db = db().ok_or("Database not initialized")?;
-    match crate::services::contact_service::delete_contact(db, id).await {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("{:?}", e)),
-    }
-}
-
 // ============ Loans API ============
 
 /// Simplified loan structure for FFI
 #[frb(dart_metadata=("freezed"))]
 pub struct FrbLoan {
-    pub id: i32,
-    pub copy_id: i32,
-    pub contact_id: i32,
+    pub id: String,
+    pub copy_id: String,
+    pub contact_id: String,
     pub library_id: i32,
     pub loan_date: String,
     pub due_date: String,
@@ -2271,18 +2176,15 @@ pub struct FrbLoan {
     pub notes: Option<String>,
     pub contact_name: String,
     pub book_title: String,
-    pub book_id: Option<i32>,
+    pub book_id: Option<String>,
     pub cover_url: Option<String>,
     pub isbn: Option<String>,
-    /// Stable cross-device identifier of the loan.
-    pub uuid: Option<String>,
 }
 
 impl From<crate::services::loan_service::LoanWithDetails> for FrbLoan {
     fn from(l: crate::services::loan_service::LoanWithDetails) -> Self {
         FrbLoan {
             id: l.id,
-            uuid: Some(l.uuid),
             copy_id: l.copy_id,
             contact_id: l.contact_id,
             library_id: l.library_id,
@@ -2332,13 +2234,13 @@ pub async fn count_active_loans() -> Result<i64, String> {
 
 /// Create a new loan
 pub async fn create_loan(
-    copy_id: i32,
-    contact_id: i32,
+    copy_id: String,
+    contact_id: String,
     library_id: i32,
     loan_date: String,
     due_date: String,
     notes: Option<String>,
-) -> Result<i32, String> {
+) -> Result<String, String> {
     let db = db().ok_or("Database not initialized")?;
 
     // Resolve library_id if 0 (sentinel for "not provided"): FK references libraries(id)
@@ -2427,15 +2329,15 @@ pub async fn delete_closed_outgoing_requests() -> Result<u64, String> {
 }
 
 /// Return a loan
-pub async fn return_loan(id: i32) -> Result<String, String> {
+pub async fn return_loan(id: String) -> Result<String, String> {
     let db = db().ok_or("Database not initialized")?;
 
-    match crate::services::loan_service::return_loan(db, id).await {
+    match crate::services::loan_service::return_loan(db, &id).await {
         Ok(_) => {
             // Dismiss any pending due-date reminders for this loan
             use crate::domain::NotificationRepository;
             let notif_repo = crate::infrastructure::SeaOrmNotificationRepository::new(db.clone());
-            let _ = notif_repo.dismiss_by_ref("loan", &id.to_string()).await;
+            let _ = notif_repo.dismiss_by_ref("loan", &id).await;
             Ok("Loan returned successfully".to_string())
         }
         Err(crate::services::loan_service::ServiceError::NotFound) => {
@@ -2676,34 +2578,34 @@ fn loan_due_reminder_text(lang: &str, title: &str, borrower: &str, days: i32) ->
 
 /// Get the effective loan duration for a specific book (in days).
 /// Returns the per-book override if enabled and set, otherwise the global default.
-pub async fn get_effective_loan_duration(book_id: i32) -> Result<i32, String> {
+pub async fn get_effective_loan_duration(book_id: String) -> Result<i32, String> {
     let db = db().ok_or("Database not initialized")?;
     let repo = crate::infrastructure::SeaOrmLoanSettingsRepository::new(db.clone());
     use crate::domain::LoanSettingsRepository;
 
-    repo.get_effective_duration(book_id)
+    repo.get_effective_duration(&book_id)
         .await
         .map_err(|e| e.to_string())
 }
 
 /// Get the per-book loan duration override (None = uses global default)
-pub async fn get_book_loan_duration(book_id: i32) -> Result<Option<i32>, String> {
+pub async fn get_book_loan_duration(book_id: String) -> Result<Option<i32>, String> {
     let db = db().ok_or("Database not initialized")?;
     let repo = crate::infrastructure::SeaOrmLoanSettingsRepository::new(db.clone());
     use crate::domain::LoanSettingsRepository;
 
-    repo.get_book_loan_duration(book_id)
+    repo.get_book_loan_duration(&book_id)
         .await
         .map_err(|e| e.to_string())
 }
 
 /// Set the per-book loan duration override (pass None to clear and use global default)
-pub async fn set_book_loan_duration(book_id: i32, days: Option<i32>) -> Result<(), String> {
+pub async fn set_book_loan_duration(book_id: String, days: Option<i32>) -> Result<(), String> {
     let db = db().ok_or("Database not initialized")?;
     let repo = crate::infrastructure::SeaOrmLoanSettingsRepository::new(db.clone());
     use crate::domain::LoanSettingsRepository;
 
-    repo.set_book_loan_duration(book_id, days)
+    repo.set_book_loan_duration(&book_id, days)
         .await
         .map_err(|e| e.to_string())
 }
@@ -3356,7 +3258,7 @@ pub async fn subscribe_leaderboard_changes(
 
 /// A card in the memory game (FFI-safe)
 pub struct FrbMemoryCard {
-    pub book_id: i32,
+    pub book_id: String,
     pub title: String,
     pub cover_url: String,
 }
@@ -3697,7 +3599,7 @@ pub async fn memory_game_refresh_leaderboard() -> Result<Vec<FrbMemoryLeaderboar
 
 /// A generated puzzle board (FFI-safe)
 pub struct FrbPuzzleBoard {
-    pub book_id: i32,
+    pub book_id: String,
     pub title: String,
     pub cover_url: String,
     pub grid_size: u8,
@@ -3994,7 +3896,7 @@ pub struct FrbHangmanChar {
 
 /// Game setup returned to Flutter (FFI-safe)
 pub struct FrbHangmanSetup {
-    pub book_id: i32,
+    pub book_id: String,
     pub title: String,
     pub display: Vec<FrbHangmanChar>,
     pub author: String,
@@ -4045,7 +3947,7 @@ pub async fn hangman_available_difficulties() -> Result<Vec<String>, String> {
 /// `exclude_book_ids` -- book IDs already played in the current session (avoids same series).
 pub async fn hangman_setup(
     difficulty: String,
-    exclude_book_ids: Vec<i32>,
+    exclude_book_ids: Vec<String>,
 ) -> Result<FrbHangmanSetup, String> {
     let db = db().ok_or("Database not initialized")?;
     let repo = crate::modules::hangman::repository::SeaOrmHangmanRepository::new(db.clone());
@@ -4078,7 +3980,7 @@ pub async fn hangman_setup(
 
 /// Submit a completed hangman game and get the score back
 pub async fn hangman_finish(
-    book_id: i32,
+    book_id: String,
     difficulty: String,
     elapsed_seconds: f64,
     errors: i32,
@@ -4783,7 +4685,7 @@ mod search_settings_conversion_tests {
 pub struct FrbOperationLogEntry {
     pub id: i32,
     pub entity_type: String,
-    pub entity_id: i32,
+    pub entity_id: String,
     pub operation: String,
     pub payload: Option<String>,
     pub status: String,
@@ -5281,11 +5183,12 @@ async fn hub_directory_sync_catalog_inner() -> Result<i32, String> {
 
     let mut entries: Vec<CatalogEntry> = Vec::new();
     // Map book_id -> entry index for updating cover URLs after upload
-    let mut id_to_index: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+    let mut id_to_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     // (book_id, local_cover_path, updated_at) - updated_at is needed at
     // upload-completion time to append the ?v=tag cache-buster so peers
     // refetch immediately after a re-upload.
-    let mut local_covers: Vec<(i32, String, String)> = Vec::new();
+    let mut local_covers: Vec<(String, String, String)> = Vec::new();
 
     for (book, authors) in books_with_authors {
         let isbn = book
@@ -5300,7 +5203,7 @@ async fn hub_directory_sync_catalog_inner() -> Result<i32, String> {
         // diff catalog entries against `covers/{node}/{book_id}.jpg` files
         // on disk. Omitting it on ISBN-bearing entries silently disables GC
         // and leaks orphan covers (see `skipped_empty_catalog` warnings).
-        let book_id = Some(book_id_val);
+        let book_id = Some(book_id_val.clone());
 
         // Skip books with neither ISBN nor title (unusable entries)
         if isbn.is_empty() && book.title.is_empty() {
@@ -5326,7 +5229,7 @@ async fn hub_directory_sync_catalog_inner() -> Result<i32, String> {
             Some(cover_url_raw)
         } else if !cover_url_raw.is_empty() {
             // Local file path: schedule for thumbnail upload
-            local_covers.push((book_id_val, cover_url_raw, book_updated_at));
+            local_covers.push((book_id_val.clone(), cover_url_raw, book_updated_at));
             None // Will be updated after upload
         } else {
             None
@@ -5357,7 +5260,7 @@ async fn hub_directory_sync_catalog_inner() -> Result<i32, String> {
     // goes through). Logged at ERROR so the failure is diagnosable rather
     // than drowned in warn-level noise.
     for (bid, path, updated_at) in &local_covers {
-        if let Some(hub_url) = svc.process_local_cover_upload(db, *bid, path).await
+        if let Some(hub_url) = svc.process_local_cover_upload(db, bid, path).await
             && let Some(&idx) = id_to_index.get(bid)
         {
             // Append the canonical ?v=tag so peers bust their
@@ -5933,7 +5836,7 @@ impl From<crate::domain::collection_repository::Collection> for FrbCollection {
 
 /// A book entry within a collection, exposed to Flutter.
 pub struct FrbCollectionBook {
-    pub book_id: i32,
+    pub book_id: String,
     pub title: String,
     pub author: Option<String>,
     pub cover_url: Option<String>,
@@ -6054,7 +5957,7 @@ pub async fn get_collection_deletion_preview(
 /// Deletes a collection along with its eligible books (no loaned/borrowed
 /// copy, not in another collection, on no shelf). Returns the IDs of books
 /// that were actually removed.
-pub async fn delete_collection_with_books(id: String) -> Result<Vec<i32>, String> {
+pub async fn delete_collection_with_books(id: String) -> Result<Vec<String>, String> {
     let db = db().ok_or("Database not initialized")?;
     crate::services::collection_service::delete_collection(db, &id, true)
         .await
@@ -6073,11 +5976,11 @@ pub async fn get_collection_books(collection_id: String) -> Result<Vec<FrbCollec
 }
 
 /// Adds a book to a collection (idempotent).
-pub async fn add_book_to_collection(collection_id: String, book_id: i32) -> Result<(), String> {
+pub async fn add_book_to_collection(collection_id: String, book_id: String) -> Result<(), String> {
     use crate::domain::collection_repository::CollectionRepository;
     let db = db().ok_or("Database not initialized")?;
     let repo = collection_repo!(db);
-    repo.add_book(&collection_id, book_id)
+    repo.add_book(&collection_id, &book_id)
         .await
         .map_err(|e| format!("{e:?}"))
 }
@@ -6085,12 +5988,12 @@ pub async fn add_book_to_collection(collection_id: String, book_id: i32) -> Resu
 /// Removes a book from a collection.
 pub async fn remove_book_from_collection(
     collection_id: String,
-    book_id: i32,
+    book_id: String,
 ) -> Result<(), String> {
     use crate::domain::collection_repository::CollectionRepository;
     let db = db().ok_or("Database not initialized")?;
     let repo = collection_repo!(db);
-    repo.remove_book(&collection_id, book_id)
+    repo.remove_book(&collection_id, &book_id)
         .await
         .map_err(|e| format!("{e:?}"))
 }
@@ -6107,11 +6010,11 @@ pub async fn get_library_view_stats() -> Result<String, String> {
 // ============ Collections (FFI) ============
 
 /// Returns all collections a book belongs to.
-pub async fn get_book_collections(book_id: i32) -> Result<Vec<FrbCollection>, String> {
+pub async fn get_book_collections(book_id: String) -> Result<Vec<FrbCollection>, String> {
     use crate::domain::collection_repository::CollectionRepository;
     let db = db().ok_or("Database not initialized")?;
     let repo = collection_repo!(db);
-    repo.get_book_collections(book_id)
+    repo.get_book_collections(&book_id)
         .await
         .map(|cs| cs.into_iter().map(FrbCollection::from).collect())
         .map_err(|e| format!("{e:?}"))
@@ -6119,13 +6022,13 @@ pub async fn get_book_collections(book_id: i32) -> Result<Vec<FrbCollection>, St
 
 /// Replaces the set of collections a book belongs to.
 pub async fn update_book_collections(
-    book_id: i32,
+    book_id: String,
     collection_ids: Vec<String>,
 ) -> Result<(), String> {
     use crate::domain::collection_repository::CollectionRepository;
     let db = db().ok_or("Database not initialized")?;
     let repo = collection_repo!(db);
-    repo.update_book_collections(book_id, collection_ids)
+    repo.update_book_collections(&book_id, collection_ids)
         .await
         .map_err(|e| format!("{e:?}"))
 }
@@ -6267,7 +6170,7 @@ pub async fn emit_welcome_notification() -> Result<(), String> {
 /// FFI-safe book note representation.
 pub struct FrbBookNote {
     pub id: i32,
-    pub book_id: i32,
+    pub book_id: String,
     pub content: String,
     pub page: Option<i32>,
     pub created_at: String,
@@ -6288,12 +6191,12 @@ impl From<crate::modules::book_notes::domain::BookNote> for FrbBookNote {
 }
 
 /// Get all notes for a book, ordered by creation date (newest first).
-pub async fn get_book_notes(book_id: i32) -> Result<Vec<FrbBookNote>, String> {
+pub async fn get_book_notes(book_id: String) -> Result<Vec<FrbBookNote>, String> {
     let db = db().ok_or("Database not initialized")?;
     let repo = crate::modules::book_notes::repository::SeaOrmBookNoteRepository::new(db.clone());
     use crate::modules::book_notes::domain::BookNoteRepository;
     let notes = repo
-        .find_by_book_id(book_id)
+        .find_by_book_id(&book_id)
         .await
         .map_err(|e| e.to_string())?;
     Ok(notes.into_iter().map(FrbBookNote::from).collect())
@@ -6301,7 +6204,7 @@ pub async fn get_book_notes(book_id: i32) -> Result<Vec<FrbBookNote>, String> {
 
 /// Create a new note for a book.
 pub async fn create_book_note(
-    book_id: i32,
+    book_id: String,
     content: String,
     page: Option<i32>,
 ) -> Result<FrbBookNote, String> {
@@ -6318,14 +6221,14 @@ pub async fn create_book_note(
     let repo = crate::modules::book_notes::repository::SeaOrmBookNoteRepository::new(db.clone());
     let input = CreateBookNoteInput { content, page };
     let note = repo
-        .create(book_id, input)
+        .create(&book_id, input)
         .await
         .map_err(|e| e.to_string())?;
     // Log for device sync (payload included for linked-device replication)
     let _ = crate::sync::log_operation(
         db,
         "book_note",
-        note.id,
+        &note.id.to_string(),
         "INSERT",
         Some(serde_json::json!({
             "book_id": note.book_id,
@@ -6359,7 +6262,7 @@ pub async fn update_book_note(
     let _ = crate::sync::log_operation(
         db,
         "book_note",
-        id,
+        &id.to_string(),
         "UPDATE",
         Some(serde_json::json!({
             "book_id": note.book_id,
@@ -6377,7 +6280,7 @@ pub async fn delete_book_note(id: i32) -> Result<(), String> {
     let repo = crate::modules::book_notes::repository::SeaOrmBookNoteRepository::new(db.clone());
     use crate::modules::book_notes::domain::BookNoteRepository;
     repo.delete(id).await.map_err(|e| e.to_string())?;
-    let _ = crate::sync::log_operation(db, "book_note", id, "DELETE", None).await;
+    let _ = crate::sync::log_operation(db, "book_note", &id.to_string(), "DELETE", None).await;
     Ok(())
 }
 

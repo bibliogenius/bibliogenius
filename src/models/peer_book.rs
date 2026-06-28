@@ -7,7 +7,7 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     pub peer_id: i32,
-    pub remote_book_id: i32,
+    pub remote_book_id: String,
     pub title: String,
     pub isbn: Option<String>,
     pub author: Option<String>,
@@ -59,8 +59,6 @@ impl From<Model> for super::Book {
     fn from(pb: Model) -> Self {
         super::Book {
             id: Some(pb.remote_book_id),
-            // Peer-cached rows have no local stable id; not ours to mint.
-            uuid: None,
             title: pb.title,
             isbn: pb.isbn,
             summary: pb.summary,

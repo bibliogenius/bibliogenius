@@ -49,13 +49,13 @@ async fn create_user_and_library(db: &DatabaseConnection) -> (i32, i32) {
 async fn insert_op(
     db: &DatabaseConnection,
     entity_type: &str,
-    entity_id: i32,
+    entity_id: &str,
     operation: &str,
     payload: Option<serde_json::Value>,
 ) -> i32 {
     let op = operation_log::ActiveModel {
         entity_type: Set(entity_type.to_owned()),
-        entity_id: Set(entity_id),
+        entity_id: Set(entity_id.to_owned()),
         operation: Set(operation.to_owned()),
         payload: Set(payload.map(|v| v.to_string())),
         status: Set("pending".to_owned()),
@@ -106,15 +106,15 @@ async fn process_one(db: &DatabaseConnection) {
     let result = match (entity_type.as_str(), operation.as_str()) {
         ("book", "create") | ("book", "insert") => apply_book_create(&txn, &op).await,
         ("book", "update") => apply_book_update(&txn, &op).await,
-        ("book", "delete") => apply_generic_delete(&txn, "books", op.entity_id).await,
+        ("book", "delete") => apply_generic_delete(&txn, "books", &op.entity_id).await,
         ("copy", "insert") => apply_copy_create(&txn, &op).await,
         ("contact", "insert") => apply_contact_create(&txn, &op).await,
         ("contact", "update") => apply_contact_update(&txn, &op).await,
-        ("contact", "delete") => apply_generic_delete(&txn, "contacts", op.entity_id).await,
+        ("contact", "delete") => apply_generic_delete(&txn, "contacts", &op.entity_id).await,
         ("loan", "insert") => apply_loan_create(&txn, &op).await,
         ("loan", "update") => apply_loan_update(&txn, &op).await,
         ("tag", "insert") => apply_tag_create(&txn, &op).await,
-        ("tag", "delete") => apply_generic_delete(&txn, "tags", op.entity_id).await,
+        ("tag", "delete") => apply_generic_delete(&txn, "tags", &op.entity_id).await,
         ("author", "insert") => apply_author_create(&txn, &op).await,
         ("book_tag", "insert") => apply_book_tag_insert(&txn, &op).await,
         ("book_author", "insert") => apply_book_author_insert(&txn, &op).await,
@@ -172,7 +172,9 @@ async fn apply_book_update(
     db: &sea_orm::DatabaseTransaction,
     op: &operation_log::Model,
 ) -> Result<(), sea_orm::DbErr> {
-    let existing = book::Entity::find_by_id(op.entity_id).one(db).await?;
+    let existing = book::Entity::find_by_id(op.entity_id.clone())
+        .one(db)
+        .await?;
     if let Some(b) = existing {
         let payload: serde_json::Value = serde_json::from_str(op.payload.as_ref().unwrap())
             .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
@@ -189,11 +191,12 @@ async fn apply_book_update(
 async fn apply_generic_delete(
     db: &sea_orm::DatabaseTransaction,
     table: &str,
-    id: i32,
+    id: &str,
 ) -> Result<(), sea_orm::DbErr> {
     db.execute(Statement::from_sql_and_values(
         db.get_database_backend(),
-        format!("DELETE FROM {table} WHERE id = $1"),
+        // The 6 entity tables key on the `uuid` column (no integer `id` anymore).
+        format!("DELETE FROM {table} WHERE uuid = $1"),
         [id.into()],
     ))
     .await?;
@@ -227,7 +230,9 @@ async fn apply_contact_update(
     db: &sea_orm::DatabaseTransaction,
     op: &operation_log::Model,
 ) -> Result<(), sea_orm::DbErr> {
-    let existing = contact::Entity::find_by_id(op.entity_id).one(db).await?;
+    let existing = contact::Entity::find_by_id(op.entity_id.clone())
+        .one(db)
+        .await?;
     if let Some(c) = existing {
         let payload: serde_json::Value = serde_json::from_str(op.payload.as_ref().unwrap())
             .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
@@ -252,7 +257,7 @@ async fn apply_copy_create(
         .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
     let now = chrono::Utc::now().to_rfc3339();
     let new = copy::ActiveModel {
-        book_id: Set(payload["book_id"].as_i64().unwrap_or(0) as i32),
+        book_id: Set(payload["book_id"].as_str().unwrap_or("").to_string()),
         library_id: Set(payload["library_id"].as_i64().unwrap_or(1) as i32),
         status: Set(payload["status"]
             .as_str()
@@ -276,8 +281,8 @@ async fn apply_loan_create(
         .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
     let now = chrono::Utc::now().to_rfc3339();
     let new = loan::ActiveModel {
-        copy_id: Set(payload["copy_id"].as_i64().unwrap_or(0) as i32),
-        contact_id: Set(payload["contact_id"].as_i64().unwrap_or(0) as i32),
+        copy_id: Set(payload["copy_id"].as_str().unwrap_or("").to_string()),
+        contact_id: Set(payload["contact_id"].as_str().unwrap_or("").to_string()),
         library_id: Set(payload["library_id"].as_i64().unwrap_or(1) as i32),
         loan_date: Set(payload["loan_date"].as_str().unwrap_or(&now).to_string()),
         due_date: Set(payload["due_date"].as_str().unwrap_or(&now).to_string()),
@@ -295,7 +300,9 @@ async fn apply_loan_update(
     db: &sea_orm::DatabaseTransaction,
     op: &operation_log::Model,
 ) -> Result<(), sea_orm::DbErr> {
-    let existing = loan::Entity::find_by_id(op.entity_id).one(db).await?;
+    let existing = loan::Entity::find_by_id(op.entity_id.clone())
+        .one(db)
+        .await?;
     if let Some(l) = existing {
         let payload: serde_json::Value = serde_json::from_str(op.payload.as_ref().unwrap())
             .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
@@ -322,7 +329,7 @@ async fn apply_tag_create(
     let now = chrono::Utc::now().to_rfc3339();
     let new = tag::ActiveModel {
         name: Set(name.clone()),
-        parent_id: Set(payload["parent_id"].as_i64().map(|v| v as i32)),
+        parent_id: Set(payload["parent_id"].as_str().map(|s| s.to_string())),
         path: Set(payload["path"].as_str().unwrap_or(&name).to_string()),
         created_at: Set(now.clone()),
         updated_at: Set(now),
@@ -355,8 +362,8 @@ async fn apply_book_tag_insert(
 ) -> Result<(), sea_orm::DbErr> {
     let payload: serde_json::Value = serde_json::from_str(op.payload.as_ref().unwrap())
         .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
-    let book_id = payload["book_id"].as_i64().unwrap_or(0) as i32;
-    let tag_id = payload["tag_id"].as_i64().unwrap_or(0) as i32;
+    let book_id = payload["book_id"].as_str().unwrap_or("").to_string();
+    let tag_id = payload["tag_id"].as_str().unwrap_or("").to_string();
     db.execute(Statement::from_sql_and_values(
         db.get_database_backend(),
         "INSERT OR IGNORE INTO book_tags (book_id, tag_id) VALUES ($1, $2)",
@@ -372,8 +379,8 @@ async fn apply_book_author_insert(
 ) -> Result<(), sea_orm::DbErr> {
     let payload: serde_json::Value = serde_json::from_str(op.payload.as_ref().unwrap())
         .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
-    let book_id = payload["book_id"].as_i64().unwrap_or(0) as i32;
-    let author_id = payload["author_id"].as_i64().unwrap_or(0) as i32;
+    let book_id = payload["book_id"].as_str().unwrap_or("").to_string();
+    let author_id = payload["author_id"].as_str().unwrap_or("").to_string();
     db.execute(Statement::from_sql_and_values(
         db.get_database_backend(),
         "INSERT OR IGNORE INTO book_authors (book_id, author_id) VALUES ($1, $2)",
@@ -423,7 +430,7 @@ async fn test_process_contact_create() {
         "library_owner_id": lib_id
     });
 
-    insert_op(&db, "contact", 0, "insert", Some(payload)).await;
+    insert_op(&db, "contact", "0", "insert", Some(payload)).await;
     process_one(&db).await;
 
     // Verify contact created
@@ -463,7 +470,7 @@ async fn test_process_contact_update() {
         "name": "Robert",
         "email": "bob@new.fr"
     });
-    insert_op(&db, "contact", contact.id, "update", Some(payload)).await;
+    insert_op(&db, "contact", &contact.id, "update", Some(payload)).await;
     process_one(&db).await;
 
     let updated = contact::Entity::find_by_id(contact.id)
@@ -483,7 +490,7 @@ async fn test_process_tag_create() {
         "name": "Science-fiction",
         "path": "Science-fiction"
     });
-    insert_op(&db, "tag", 0, "insert", Some(payload)).await;
+    insert_op(&db, "tag", "0", "insert", Some(payload)).await;
     process_one(&db).await;
 
     let tags = tag::Entity::find().all(&db).await.unwrap();
@@ -496,7 +503,7 @@ async fn test_process_author_create() {
     let db = setup().await;
 
     let payload = serde_json::json!({"name": "Victor Hugo"});
-    insert_op(&db, "author", 0, "insert", Some(payload)).await;
+    insert_op(&db, "author", "0", "insert", Some(payload)).await;
     process_one(&db).await;
 
     let authors = author::Entity::find().all(&db).await.unwrap();
@@ -519,11 +526,11 @@ async fn test_process_copy_create() {
     let book = b.insert(&db).await.unwrap();
 
     let payload = serde_json::json!({
-        "book_id": book.id,
+        "book_id": book.id.clone(),
         "library_id": lib_id,
         "status": "available"
     });
-    insert_op(&db, "copy", 0, "insert", Some(payload)).await;
+    insert_op(&db, "copy", "0", "insert", Some(payload)).await;
     process_one(&db).await;
 
     let copies = copy::Entity::find().all(&db).await.unwrap();
@@ -546,7 +553,7 @@ async fn test_process_book_update() {
     let book = b.insert(&db).await.unwrap();
 
     let payload = serde_json::json!({"title": "New Title"});
-    insert_op(&db, "book", book.id, "update", Some(payload)).await;
+    insert_op(&db, "book", &book.id, "update", Some(payload)).await;
     process_one(&db).await;
 
     let updated = book::Entity::find_by_id(book.id)
@@ -569,7 +576,7 @@ async fn test_process_book_delete() {
     };
     let book = b.insert(&db).await.unwrap();
 
-    insert_op(&db, "book", book.id, "delete", None).await;
+    insert_op(&db, "book", &book.id, "delete", None).await;
     process_one(&db).await;
 
     let found = book::Entity::find_by_id(book.id).one(&db).await.unwrap();
@@ -620,7 +627,7 @@ async fn test_process_loan_create_and_update() {
         "due_date": "2026-03-20",
         "status": "active"
     });
-    insert_op(&db, "loan", 0, "insert", Some(loan_payload)).await;
+    insert_op(&db, "loan", "0", "insert", Some(loan_payload)).await;
     process_one(&db).await;
 
     let loans = loan::Entity::find().all(&db).await.unwrap();
@@ -632,10 +639,10 @@ async fn test_process_loan_create_and_update() {
         "status": "returned",
         "return_date": "2026-03-15"
     });
-    insert_op(&db, "loan", loans[0].id, "update", Some(update_payload)).await;
+    insert_op(&db, "loan", &loans[0].id, "update", Some(update_payload)).await;
     process_one(&db).await;
 
-    let updated = loan::Entity::find_by_id(loans[0].id)
+    let updated = loan::Entity::find_by_id(loans[0].id.clone())
         .one(&db)
         .await
         .unwrap()
@@ -669,10 +676,10 @@ async fn test_process_book_tag_junction() {
 
     // Link book to tag
     let payload = serde_json::json!({
-        "book_id": book.id,
-        "tag_id": tag_row.id
+        "book_id": book.id.clone(),
+        "tag_id": tag_row.id.clone()
     });
-    insert_op(&db, "book_tag", 0, "insert", Some(payload)).await;
+    insert_op(&db, "book_tag", "0", "insert", Some(payload)).await;
     process_one(&db).await;
 
     // Verify junction created
@@ -707,10 +714,10 @@ async fn test_process_book_author_junction() {
     let author_row = a.insert(&db).await.unwrap();
 
     let payload = serde_json::json!({
-        "book_id": book.id,
-        "author_id": author_row.id
+        "book_id": book.id.clone(),
+        "author_id": author_row.id.clone()
     });
-    insert_op(&db, "book_author", 0, "insert", Some(payload)).await;
+    insert_op(&db, "book_author", "0", "insert", Some(payload)).await;
     process_one(&db).await;
 
     let rows = book_authors::Entity::find()
@@ -731,7 +738,7 @@ async fn test_process_collection_create() {
         "name": "My Favorites",
         "source": "user"
     });
-    insert_op(&db, "collection", 0, "insert", Some(payload)).await;
+    insert_op(&db, "collection", "0", "insert", Some(payload)).await;
     process_one(&db).await;
 
     let cols = collection::Entity::find().all(&db).await.unwrap();
@@ -744,7 +751,7 @@ async fn test_process_collection_create() {
 async fn test_process_unhandled_type_marked_applied() {
     let db = setup().await;
 
-    let op_id = insert_op(&db, "unknown_entity", 1, "insert", None).await;
+    let op_id = insert_op(&db, "unknown_entity", "1", "insert", None).await;
     process_one(&db).await;
 
     let op = operation_log::Entity::find_by_id(op_id)
@@ -763,7 +770,7 @@ async fn test_process_failed_op_gets_error_message() {
     let db = setup().await;
 
     // Book create without payload should fail
-    insert_op(&db, "book", 0, "insert", None).await;
+    insert_op(&db, "book", "0", "insert", None).await;
     process_one(&db).await;
 
     let ops = operation_log::Entity::find().all(&db).await.unwrap();

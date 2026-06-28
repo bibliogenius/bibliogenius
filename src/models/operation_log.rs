@@ -7,7 +7,7 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     pub entity_type: String,
-    pub entity_id: i32,
+    pub entity_id: String,
     pub operation: String,
     pub payload: Option<String>,
     #[sea_orm(default_value = "pending")]

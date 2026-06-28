@@ -19,7 +19,7 @@ async fn setup_test_db() -> DatabaseConnection {
 }
 
 /// Create admin user + library + book + contact, return (library_id, book_id, contact_id)
-async fn seed_test_data(db: &DatabaseConnection) -> (i32, i32, i32) {
+async fn seed_test_data(db: &DatabaseConnection) -> (i32, String, String) {
     let now = chrono::Utc::now().to_rfc3339();
 
     // User
@@ -47,6 +47,8 @@ async fn seed_test_data(db: &DatabaseConnection) -> (i32, i32, i32) {
     let book = rust_lib_app::models::book::ActiveModel {
         title: Set("Test Book".to_string()),
         owned: Set(true),
+        private: Set(false),
+        reading_status: Set("to_read".to_string()),
         created_at: Set(now.clone()),
         updated_at: Set(now.clone()),
         ..Default::default()
@@ -69,7 +71,12 @@ async fn seed_test_data(db: &DatabaseConnection) -> (i32, i32, i32) {
 }
 
 /// Create a copy with the given status
-async fn create_copy(db: &DatabaseConnection, book_id: i32, library_id: i32, status: &str) -> i32 {
+async fn create_copy(
+    db: &DatabaseConnection,
+    book_id: String,
+    library_id: i32,
+    status: &str,
+) -> String {
     let now = chrono::Utc::now().to_rfc3339();
     let copy = copy::ActiveModel {
         book_id: Set(book_id),
@@ -84,7 +91,7 @@ async fn create_copy(db: &DatabaseConnection, book_id: i32, library_id: i32, sta
     result.id
 }
 
-fn make_loan_dto(copy_id: i32, contact_id: i32, library_id: i32) -> LoanDto {
+fn make_loan_dto(copy_id: String, contact_id: String, library_id: i32) -> LoanDto {
     LoanDto {
         id: None,
         copy_id,
@@ -98,7 +105,7 @@ fn make_loan_dto(copy_id: i32, contact_id: i32, library_id: i32) -> LoanDto {
     }
 }
 
-fn make_sale_dto(copy_id: i32, library_id: i32) -> SaleDto {
+fn make_sale_dto(copy_id: String, library_id: i32) -> SaleDto {
     SaleDto {
         id: None,
         copy_id,
@@ -119,7 +126,8 @@ async fn test_loan_available_copy_succeeds() {
     let (lib_id, book_id, contact_id) = seed_test_data(&db).await;
     let copy_id = create_copy(&db, book_id, lib_id, "available").await;
 
-    let result = loan_service::create_loan(&db, make_loan_dto(copy_id, contact_id, lib_id)).await;
+    let result =
+        loan_service::create_loan(&db, make_loan_dto(copy_id.clone(), contact_id, lib_id)).await;
     assert!(result.is_ok(), "Loan on available copy should succeed");
 
     // Verify copy status changed to "loaned"
@@ -166,7 +174,11 @@ async fn test_loan_nonexistent_copy_returns_not_found() {
     let db = setup_test_db().await;
     let (lib_id, _book_id, contact_id) = seed_test_data(&db).await;
 
-    let result = loan_service::create_loan(&db, make_loan_dto(9999, contact_id, lib_id)).await;
+    let result = loan_service::create_loan(
+        &db,
+        make_loan_dto("nonexistent-copy".to_string(), contact_id, lib_id),
+    )
+    .await;
     assert!(result.is_err());
 
     match result.unwrap_err() {
@@ -184,12 +196,12 @@ async fn test_return_loan_restores_available_status() {
     let copy_id = create_copy(&db, book_id, lib_id, "available").await;
 
     // Create loan
-    let loan = loan_service::create_loan(&db, make_loan_dto(copy_id, contact_id, lib_id))
+    let loan = loan_service::create_loan(&db, make_loan_dto(copy_id.clone(), contact_id, lib_id))
         .await
         .unwrap();
 
     // Return loan
-    let returned = loan_service::return_loan(&db, loan.id).await.unwrap();
+    let returned = loan_service::return_loan(&db, &loan.id).await.unwrap();
     assert_eq!(returned.status, "returned");
 
     // Copy is available again
@@ -206,10 +218,10 @@ async fn test_return_already_returned_loan_rejected() {
     let loan = loan_service::create_loan(&db, make_loan_dto(copy_id, contact_id, lib_id))
         .await
         .unwrap();
-    loan_service::return_loan(&db, loan.id).await.unwrap();
+    loan_service::return_loan(&db, &loan.id).await.unwrap();
 
     // Try to return again
-    let result = loan_service::return_loan(&db, loan.id).await;
+    let result = loan_service::return_loan(&db, &loan.id).await;
     assert!(result.is_err(), "Double return must be rejected");
 
     match result.unwrap_err() {
@@ -228,7 +240,7 @@ async fn test_sale_changes_copy_to_sold() {
     let (lib_id, book_id, _contact_id) = seed_test_data(&db).await;
     let copy_id = create_copy(&db, book_id, lib_id, "available").await;
 
-    let sale = sale_service::record_sale(&db, make_sale_dto(copy_id, lib_id))
+    let sale = sale_service::record_sale(&db, make_sale_dto(copy_id.clone(), lib_id))
         .await
         .unwrap();
 
@@ -248,7 +260,7 @@ async fn test_cancel_sale_restores_available() {
     let copy_id = create_copy(&db, book_id, lib_id, "available").await;
 
     // Record sale
-    let sale = sale_service::record_sale(&db, make_sale_dto(copy_id, lib_id))
+    let sale = sale_service::record_sale(&db, make_sale_dto(copy_id.clone(), lib_id))
         .await
         .unwrap();
 
@@ -296,7 +308,8 @@ async fn test_sale_nonexistent_copy_returns_not_found() {
     let db = setup_test_db().await;
     let (lib_id, _book_id, _contact_id) = seed_test_data(&db).await;
 
-    let result = sale_service::record_sale(&db, make_sale_dto(9999, lib_id)).await;
+    let result =
+        sale_service::record_sale(&db, make_sale_dto("nonexistent-copy".to_string(), lib_id)).await;
     assert!(result.is_err());
 
     match result.unwrap_err() {

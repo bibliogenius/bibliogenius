@@ -36,7 +36,7 @@ pub async fn available_difficulties(State(state): State<AppState>) -> impl IntoR
 pub struct SetupRequest {
     pub difficulty: String,
     #[serde(default)]
-    pub exclude_book_ids: Vec<i32>,
+    pub exclude_book_ids: Vec<String>,
 }
 
 /// POST /api/game/hangman/setup

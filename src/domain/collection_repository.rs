@@ -20,7 +20,7 @@ pub struct Collection {
 /// Book data within a collection
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CollectionBook {
-    pub book_id: i32,
+    pub book_id: String,
     pub title: String,
     pub author: Option<String>,
     pub cover_url: Option<String>,
@@ -58,18 +58,18 @@ pub trait CollectionRepository: Send + Sync {
     async fn get_books(&self, collection_id: &str) -> Result<Vec<CollectionBook>, DomainError>;
 
     /// Add a book to a collection
-    async fn add_book(&self, collection_id: &str, book_id: i32) -> Result<(), DomainError>;
+    async fn add_book(&self, collection_id: &str, book_id: &str) -> Result<(), DomainError>;
 
     /// Remove a book from a collection
-    async fn remove_book(&self, collection_id: &str, book_id: i32) -> Result<(), DomainError>;
+    async fn remove_book(&self, collection_id: &str, book_id: &str) -> Result<(), DomainError>;
 
     /// Get all collections a book belongs to
-    async fn get_book_collections(&self, book_id: i32) -> Result<Vec<Collection>, DomainError>;
+    async fn get_book_collections(&self, book_id: &str) -> Result<Vec<Collection>, DomainError>;
 
     /// Update which collections a book belongs to (replaces existing associations)
     async fn update_book_collections(
         &self,
-        book_id: i32,
+        book_id: &str,
         collection_ids: Vec<String>,
     ) -> Result<(), DomainError>;
 }

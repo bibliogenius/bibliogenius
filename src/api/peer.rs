@@ -302,7 +302,7 @@ pub(crate) struct LoanAcceptResult {
 ///
 /// Reads from `loan_settings` (global default + per-book override).
 /// Falls back to 21 days if the settings table is unreachable.
-async fn resolve_loan_duration_days(db: &DatabaseConnection, book_id: i32) -> i64 {
+async fn resolve_loan_duration_days(db: &DatabaseConnection, book_id: &str) -> i64 {
     let repo = crate::infrastructure::SeaOrmLoanSettingsRepository::new(db.clone());
     use crate::domain::LoanSettingsRepository;
     match repo.get_effective_duration(book_id).await {
@@ -351,7 +351,7 @@ pub(crate) async fn perform_loan_acceptance(
 
     // 2. Find available copy
     let copy = match copy::Entity::find()
-        .filter(copy::Column::BookId.eq(book.id))
+        .filter(copy::Column::BookId.eq(book.id.clone()))
         .filter(copy::Column::Status.eq("available"))
         .one(db)
         .await
@@ -393,10 +393,10 @@ pub(crate) async fn perform_loan_acceptance(
     let lib_id = crate::utils::library_helpers::resolve_library_id(db)
         .await
         .map_err(|e| format!("No library: {e}"))?;
-    let duration_days = resolve_loan_duration_days(db, book.id).await;
+    let duration_days = resolve_loan_duration_days(db, &book.id).await;
     let due = Utc::now() + chrono::Duration::days(duration_days);
     let loan = loan::ActiveModel {
-        copy_id: Set(copy.id),
+        copy_id: Set(copy.id.clone()),
         contact_id: Set(contact.id),
         library_id: Set(lib_id),
         loan_date: Set(Utc::now().to_rfc3339()),
@@ -442,7 +442,7 @@ pub(crate) async fn perform_loan_acceptance(
         // variant: local paths without a hub prefix are stripped to None.
         book_cover_url: crate::models::Book::safe_cover_url_for_relay(
             book.cover_url.as_deref(),
-            book.id,
+            &book.id,
             Some(book.updated_at.as_str()),
             hub_prefix.as_deref(),
         ),
@@ -467,8 +467,8 @@ pub(crate) struct BorrowedCopyParams<'a> {
 
 /// Result of creating a borrowed copy.
 pub(crate) struct BorrowedCopyResult {
-    pub book_id: i32,
-    pub copy_id: i32,
+    pub book_id: String,
+    pub copy_id: String,
     /// `true` if an identical borrowed copy already existed (idempotency).
     pub already_existed: bool,
 }
@@ -560,7 +560,7 @@ pub(crate) async fn create_borrowed_copy(
 
     // 2. Idempotency: skip if a borrowed temporary copy already exists
     let existing_borrowed = copy::Entity::find()
-        .filter(copy::Column::BookId.eq(book_id))
+        .filter(copy::Column::BookId.eq(book_id.as_str()))
         .filter(copy::Column::Status.eq("borrowed"))
         .filter(copy::Column::IsTemporary.eq(true))
         .one(db)
@@ -596,7 +596,7 @@ pub(crate) async fn create_borrowed_copy(
     // real user notes; the migration-075 backfill hydrates these columns for
     // rows written before this change.
     let new_copy = copy::ActiveModel {
-        book_id: Set(book_id),
+        book_id: Set(book_id.clone()),
         library_id: Set(lib_id),
         status: Set("borrowed".to_string()),
         is_temporary: Set(true),
@@ -630,7 +630,7 @@ pub(crate) async fn create_borrowed_copy(
 
 #[derive(Debug, Deserialize)]
 pub struct OfferLoanRequest {
-    pub book_id: Option<i32>,
+    pub book_id: Option<String>,
     pub book_isbn: Option<String>,
 }
 
@@ -697,7 +697,7 @@ pub async fn offer_loan(
 
     // 3. Find available copy (no auto-creation)
     let available_copy = copy::Entity::find()
-        .filter(copy::Column::BookId.eq(book.id))
+        .filter(copy::Column::BookId.eq(book.id.clone()))
         .filter(copy::Column::Status.eq("available"))
         .one(db)
         .await
@@ -763,7 +763,7 @@ pub async fn offer_loan(
     };
 
     // 5. Calculate loan duration and create loan
-    let duration_days = resolve_loan_duration_days(db, book.id).await;
+    let duration_days = resolve_loan_duration_days(db, &book.id).await;
     let due = Utc::now() + chrono::Duration::days(duration_days);
     let due_date_str = due.format("%Y-%m-%d").to_string();
 
@@ -778,8 +778,8 @@ pub async fn offer_loan(
         }
     };
     let new_loan = loan::ActiveModel {
-        copy_id: Set(available_copy.id),
-        contact_id: Set(peer_contact.id),
+        copy_id: Set(available_copy.id.clone()),
+        contact_id: Set(peer_contact.id.clone()),
         library_id: Set(lib_id),
         loan_date: Set(Utc::now().to_rfc3339()),
         due_date: Set(due.to_rfc3339()),
@@ -788,8 +788,11 @@ pub async fn offer_loan(
         updated_at: Set(Utc::now().to_rfc3339()),
         ..Default::default()
     };
-    let loan_insert = match loan::Entity::insert(new_loan).exec(db).await {
-        Ok(r) => r,
+    // `insert` (ActiveModel) fires `before_save` to mint the uuid PK and returns
+    // the model carrying it; `Entity::insert(..).exec().last_insert_id` would yield
+    // the integer rowid, not the loan's uuid that the peer needs to reference it.
+    let loan_insert = match new_loan.insert(db).await {
+        Ok(m) => m,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -837,7 +840,7 @@ pub async fn offer_loan(
         // URL the borrower cannot reach from the hub relay.
         "cover_url": crate::models::Book::safe_cover_url_for_relay(
             book.cover_url.as_deref(),
-            book.id,
+            &book.id,
             Some(book.updated_at.as_str()),
             hub_prefix.as_deref(),
         ),
@@ -886,7 +889,7 @@ pub async fn offer_loan(
         StatusCode::OK,
         Json(json!({
             "message": "Loan created",
-            "loan_id": loan_insert.last_insert_id,
+            "loan_id": loan_insert.id,
             "contact_id": peer_contact.id,
             "due_date": due_date_str,
             "notification_sent": notification_sent,
@@ -2463,8 +2466,13 @@ async fn upsert_peer_books_cache(
     // Migration: a previous bug in Book.toJson() omitted the id field, causing
     // all cached entries to have remote_book_id=0. When incoming books now carry
     // real IDs, purge the corrupted rows so the fresh upsert replaces them.
-    let zero_id_count = existing.iter().filter(|e| e.remote_book_id == 0).count();
-    let incoming_have_real_ids = books.iter().any(|b| matches!(b.id, Some(id) if id != 0));
+    let zero_id_count = existing
+        .iter()
+        .filter(|e| e.remote_book_id.is_empty())
+        .count();
+    let incoming_have_real_ids = books
+        .iter()
+        .any(|b| matches!(&b.id, Some(id) if !id.is_empty()));
     if zero_id_count > 1 && incoming_have_real_ids {
         tracing::info!(
             "upsert_peer_books_cache: peer_id={} - purging {} corrupted entries \
@@ -2474,15 +2482,15 @@ async fn upsert_peer_books_cache(
         );
         let _ = peer_book::Entity::delete_many()
             .filter(peer_book::Column::PeerId.eq(peer_id))
-            .filter(peer_book::Column::RemoteBookId.eq(0))
+            .filter(peer_book::Column::RemoteBookId.eq(""))
             .exec(db)
             .await;
-        existing.retain(|e| e.remote_book_id != 0);
+        existing.retain(|e| !e.remote_book_id.is_empty());
     }
 
-    let existing_map: std::collections::HashMap<i32, peer_book::Model> = existing
+    let existing_map: std::collections::HashMap<String, peer_book::Model> = existing
         .into_iter()
-        .map(|e| (e.remote_book_id, e))
+        .map(|e| (e.remote_book_id.clone(), e))
         .collect();
 
     let mut fresh_ids = std::collections::HashSet::new();
@@ -2501,8 +2509,8 @@ async fn upsert_peer_books_cache(
 
     // 2. Upsert each book
     for book in books {
-        let remote_id = book.id.unwrap_or(0);
-        fresh_ids.insert(remote_id);
+        let remote_id = book.id.unwrap_or_default();
+        fresh_ids.insert(remote_id.clone());
 
         if let Some(existing_entry) = existing_map.get(&remote_id) {
             // UPDATE: refresh metadata. `added_at` from the peer overrides any
@@ -4036,7 +4044,7 @@ pub struct PushRequest {
 #[derive(Serialize, Deserialize)]
 pub struct OperationDto {
     entity_type: String,
-    entity_id: i32,
+    entity_id: String,
     operation: String,
     payload: Option<String>,
     created_at: String,
@@ -5114,7 +5122,7 @@ async fn process_borrower_acceptance(
 
     // 3. Idempotency: skip if a borrowed temporary copy already exists
     let existing_borrowed = copy::Entity::find()
-        .filter(copy::Column::BookId.eq(book_id))
+        .filter(copy::Column::BookId.eq(book_id.as_str()))
         .filter(copy::Column::Status.eq("borrowed"))
         .filter(copy::Column::IsTemporary.eq(true))
         .one(db)
@@ -5143,7 +5151,7 @@ async fn process_borrower_acceptance(
     // Deferring lender_peer_id resolution to a follow-up (would need to
     // join via `p2p_outgoing_request.to_peer_id`).
     let new_copy = copy::ActiveModel {
-        book_id: Set(book_id),
+        book_id: Set(book_id.clone()),
         library_id: Set(lib_id),
         status: Set("borrowed".to_string()),
         is_temporary: Set(true),
@@ -5832,7 +5840,7 @@ pub async fn list_outgoing_requests(State(db): State<DatabaseConnection>) -> imp
     // `/api/books/{id}/cover` fallback happens here, keyed on the same scope
     // as `api/books.rs` list endpoint.
     let hub_prefix = crate::models::Book::hub_cover_prefix(&db).await;
-    let mut isbn_book_map: std::collections::HashMap<String, (i32, Option<String>)> =
+    let mut isbn_book_map: std::collections::HashMap<String, (String, Option<String>)> =
         std::collections::HashMap::new();
     if !isbns.is_empty()
         && let Ok(books) = book::Entity::find()
@@ -5844,7 +5852,7 @@ pub async fn list_outgoing_requests(State(db): State<DatabaseConnection>) -> imp
             if let Some(isbn) = &b.isbn {
                 let resolved = cover_url::resolve_single(
                     b.cover_url.as_deref(),
-                    b.id,
+                    &b.id,
                     Some(&b.updated_at),
                     hub_prefix.as_deref(),
                     ResolveScope::Lan,
@@ -5863,7 +5871,7 @@ pub async fn list_outgoing_requests(State(db): State<DatabaseConnection>) -> imp
                 "id": req.id,
                 "book_title": req.book_title,
                 "book_isbn": req.book_isbn,
-                "book_id": book_info.map(|(id, _)| *id),
+                "book_id": book_info.map(|(id, _)| id.clone()),
                 "cover_url": book_info.and_then(|(_, url)| url.clone()),
                 "status": req.status,
                 "created_at": req.created_at,
@@ -6269,7 +6277,7 @@ pub async fn list_requests(State(db): State<DatabaseConnection>) -> impl IntoRes
     // requests, so the rewrite to a hub URL or `/api/books/{id}/cover`
     // fallback happens here, keyed on the same LAN scope as `api/books.rs`.
     let hub_prefix = crate::models::Book::hub_cover_prefix(&db).await;
-    let mut isbn_book_map: std::collections::HashMap<String, (i32, Option<String>)> =
+    let mut isbn_book_map: std::collections::HashMap<String, (String, Option<String>)> =
         std::collections::HashMap::new();
     if !isbns.is_empty()
         && let Ok(books) = book::Entity::find()
@@ -6281,7 +6289,7 @@ pub async fn list_requests(State(db): State<DatabaseConnection>) -> impl IntoRes
             if let Some(isbn) = &b.isbn {
                 let resolved = cover_url::resolve_single(
                     b.cover_url.as_deref(),
-                    b.id,
+                    &b.id,
                     Some(&b.updated_at),
                     hub_prefix.as_deref(),
                     ResolveScope::Lan,
@@ -6300,7 +6308,7 @@ pub async fn list_requests(State(db): State<DatabaseConnection>) -> impl IntoRes
                 "id": req.id,
                 "book_title": req.book_title,
                 "book_isbn": req.book_isbn,
-                "book_id": book_info.map(|(id, _)| *id),
+                "book_id": book_info.map(|(id, _)| id.clone()),
                 "cover_url": book_info.and_then(|(_, url)| url.clone()),
                 "status": req.status,
                 "created_at": req.created_at,
@@ -6417,7 +6425,7 @@ pub async fn update_request_status(
         };
 
         let copy = match copy::Entity::find()
-            .filter(copy::Column::BookId.eq(book.id))
+            .filter(copy::Column::BookId.eq(book.id.clone()))
             .filter(copy::Column::Status.eq("available"))
             .one(&db)
             .await
@@ -6426,7 +6434,7 @@ pub async fn update_request_status(
             _ => {
                 // Self-healing: Check if ANY copy exists
                 let any_copy = copy::Entity::find()
-                    .filter(copy::Column::BookId.eq(book.id))
+                    .filter(copy::Column::BookId.eq(book.id.clone()))
                     .one(&db)
                     .await
                     .unwrap_or(None);
@@ -6501,7 +6509,7 @@ pub async fn update_request_status(
 
         // 4. Create Loan
         let loan = loan::ActiveModel {
-            copy_id: Set(copy.id),
+            copy_id: Set(copy.id.clone()),
             contact_id: Set(contact.id),
             library_id: Set(
                 match crate::utils::library_helpers::resolve_library_id(&db).await {
@@ -6517,7 +6525,7 @@ pub async fn update_request_status(
             ),
             loan_date: Set(chrono::Utc::now().to_rfc3339()),
             due_date: Set((chrono::Utc::now()
-                + chrono::Duration::days(resolve_loan_duration_days(&db, book.id).await))
+                + chrono::Duration::days(resolve_loan_duration_days(&db, &book.id).await))
             .to_rfc3339()),
             status: Set("active".to_string()),
             created_at: Set(chrono::Utc::now().to_rfc3339()),
@@ -6558,12 +6566,12 @@ pub async fn update_request_status(
         // variant so unreachable local paths are stripped rather than sent.
         let book_cover = crate::models::Book::safe_cover_url_for_relay(
             book.cover_url.as_deref(),
-            book.id,
+            &book.id,
             Some(book.updated_at.as_str()),
             hub_prefix.as_deref(),
         );
         let due_date = (chrono::Utc::now()
-            + chrono::Duration::days(resolve_loan_duration_days(&db, book.id).await))
+            + chrono::Duration::days(resolve_loan_duration_days(&db, &book.id).await))
         .format("%Y-%m-%d")
         .to_string();
 
@@ -6663,12 +6671,12 @@ pub async fn update_request_status(
             if let Some(book) = book {
                 // 3. Find Active Loan for any copy of this book for this contact
                 let copies = copy::Entity::find()
-                    .filter(copy::Column::BookId.eq(book.id))
+                    .filter(copy::Column::BookId.eq(book.id.as_str()))
                     .all(&db)
                     .await
                     .unwrap_or(vec![]);
 
-                let copy_ids: Vec<i32> = copies.iter().map(|c| c.id).collect();
+                let copy_ids: Vec<String> = copies.iter().map(|c| c.id.clone()).collect();
 
                 let active_loan = loan::Entity::find()
                     .filter(loan::Column::ContactId.eq(contact.id))
@@ -7220,12 +7228,15 @@ pub async fn update_outgoing_status(
                 {
                     // 2. Find and delete the borrowed copy
                     if let Ok(Some(borrowed_copy)) = copy::Entity::find()
-                        .filter(copy::Column::BookId.eq(book.id))
+                        .filter(copy::Column::BookId.eq(book.id.as_str()))
                         .filter(copy::Column::Status.eq("borrowed"))
                         .one(&db)
                         .await
                     {
-                        match copy::Entity::delete_by_id(borrowed_copy.id).exec(&db).await {
+                        match copy::Entity::delete_by_id(borrowed_copy.id.clone())
+                            .exec(&db)
+                            .await
+                        {
                             Err(e) => {
                                 tracing::warn!("⚠️ Failed to delete borrowed copy: {}", e);
                             }
@@ -7244,7 +7255,7 @@ pub async fn update_outgoing_status(
                     let should_delete_book = !book.owned
                         && book.reading_status != "wanting"
                         && copy::Entity::find()
-                            .filter(copy::Column::BookId.eq(book.id))
+                            .filter(copy::Column::BookId.eq(book.id.as_str()))
                             .count(&db)
                             .await
                             .unwrap_or(1)
@@ -7256,7 +7267,7 @@ pub async fn update_outgoing_status(
                             book.id,
                             book_isbn
                         );
-                        match book::Entity::delete_by_id(book.id).exec(&db).await {
+                        match book::Entity::delete_by_id(book.id.clone()).exec(&db).await {
                             Err(e) => {
                                 tracing::warn!("⚠️ Failed to delete book: {}", e);
                             }
@@ -7321,7 +7332,7 @@ pub async fn update_outgoing_status(
 
 #[derive(Deserialize)]
 pub struct ReturnBorrowedBookPayload {
-    pub copy_id: i32,
+    pub copy_id: String,
 }
 
 /// Borrower initiates a return: notifies the lender and cleans up local data.
@@ -7338,7 +7349,10 @@ pub async fn return_borrowed_book(
     );
 
     // 1. Look up the copy to get book_id, then the book to get ISBN
-    let the_copy = match copy::Entity::find_by_id(payload.copy_id).one(&db).await {
+    let the_copy = match copy::Entity::find_by_id(payload.copy_id.clone())
+        .one(&db)
+        .await
+    {
         Ok(Some(c)) => c,
         Ok(None) => {
             return (
@@ -7356,7 +7370,10 @@ pub async fn return_borrowed_book(
         }
     };
 
-    let book_isbn = match book::Entity::find_by_id(the_copy.book_id).one(&db).await {
+    let book_isbn = match book::Entity::find_by_id(the_copy.book_id.clone())
+        .one(&db)
+        .await
+    {
         Ok(Some(b)) => b.isbn.unwrap_or_default(),
         _ => String::new(),
     };
@@ -7504,11 +7521,11 @@ pub async fn return_borrowed_book(
 }
 
 /// Delete a book if it has no remaining copies, is not owned, and is not in the wishlist.
-async fn cleanup_orphaned_book(db: &DatabaseConnection, book_id: i32) {
+async fn cleanup_orphaned_book(db: &DatabaseConnection, book_id: String) {
     use crate::models::{book, copy};
     if let Ok(Some(bk)) = book::Entity::find_by_id(book_id).one(db).await {
         let copy_count = copy::Entity::find()
-            .filter(copy::Column::BookId.eq(bk.id))
+            .filter(copy::Column::BookId.eq(bk.id.as_str()))
             .count(db)
             .await
             .unwrap_or(1);
@@ -7516,7 +7533,7 @@ async fn cleanup_orphaned_book(db: &DatabaseConnection, book_id: i32) {
         let should_delete = !bk.owned && bk.reading_status != "wanting" && copy_count == 0;
 
         if should_delete {
-            match book::Entity::delete_by_id(bk.id).exec(db).await {
+            match book::Entity::delete_by_id(bk.id.clone()).exec(db).await {
                 Ok(_) => tracing::info!("Deleted orphaned book {} after loan return", bk.id),
                 Err(e) => tracing::error!("Failed to delete orphaned book {}: {}", bk.id, e),
             }
@@ -8177,14 +8194,14 @@ mod added_at_tests {
     async fn insert_peer_book(
         db: &DatabaseConnection,
         peer_id: i32,
-        remote_book_id: i32,
+        remote_book_id: &str,
         title: &str,
         added_at: Option<&str>,
     ) {
         let now = chrono::Utc::now().to_rfc3339();
         let pb = peer_book::ActiveModel {
             peer_id: Set(peer_id),
-            remote_book_id: Set(remote_book_id),
+            remote_book_id: Set(remote_book_id.to_string()),
             title: Set(title.to_string()),
             isbn: Set(None),
             author: Set(None),
@@ -8210,7 +8227,7 @@ mod added_at_tests {
         let pb = peer_book::Model {
             id: 999, // local row PK — must NOT be exposed as Book.id
             peer_id: 1,
-            remote_book_id: 42,
+            remote_book_id: "42".to_string(),
             title: "Le Livre".to_string(),
             isbn: Some("978".to_string()),
             author: Some("X".to_string()),
@@ -8227,7 +8244,7 @@ mod added_at_tests {
         let book: crate::models::Book = pb.into();
         assert_eq!(
             book.id,
-            Some(42),
+            Some("42".to_string()),
             "Book.id must be remote_book_id, not peer_book.id"
         );
         assert_eq!(book.added_at.as_deref(), Some("2026-04-13T08:00:00Z"));
@@ -8246,21 +8263,21 @@ mod added_at_tests {
 
         let books = vec![
             crate::models::Book {
-                id: Some(10),
+                id: Some("10".to_string()),
                 title: "Borrowed by peer".to_string(),
                 owned: Some(false),
                 available_copies: Some(1),
                 ..Default::default()
             },
             crate::models::Book {
-                id: Some(11),
+                id: Some("11".to_string()),
                 title: "All copies on loan".to_string(),
                 owned: Some(true),
                 available_copies: Some(0),
                 ..Default::default()
             },
             crate::models::Book {
-                id: Some(12),
+                id: Some("12".to_string()),
                 title: "Available".to_string(),
                 owned: Some(true),
                 available_copies: Some(2),
@@ -8269,7 +8286,7 @@ mod added_at_tests {
         ];
         upsert_peer_books_cache(&db, peer_id, None, books, true).await;
 
-        let fetch = |remote_id: i32| {
+        let fetch = |remote_id: String| {
             let db = db.clone();
             async move {
                 peer_book::Entity::find()
@@ -8281,9 +8298,9 @@ mod added_at_tests {
                     .unwrap()
             }
         };
-        let borrowed = fetch(10).await;
-        let fully_lent = fetch(11).await;
-        let available = fetch(12).await;
+        let borrowed = fetch("10".to_string()).await;
+        let fully_lent = fetch("11".to_string()).await;
+        let available = fetch("12".to_string()).await;
 
         assert!(
             !borrowed.owned,
@@ -8301,14 +8318,14 @@ mod added_at_tests {
 
         // UPDATE path: a later sync marks the available book as fully lent.
         let updated = vec![crate::models::Book {
-            id: Some(12),
+            id: Some("12".to_string()),
             title: "Available".to_string(),
             owned: Some(true),
             available_copies: Some(0),
             ..Default::default()
         }];
         upsert_peer_books_cache(&db, peer_id, None, updated, true).await;
-        let refreshed = fetch(12).await;
+        let refreshed = fetch("12".to_string()).await;
         assert_eq!(
             refreshed.available_copies,
             Some(0),
@@ -8326,13 +8343,13 @@ mod added_at_tests {
         let peer_id = insert_peer(&db).await;
 
         // Cache three books from a previous full sync.
-        insert_peer_book(&db, peer_id, 1, "Alpha", None).await;
-        insert_peer_book(&db, peer_id, 2, "Beta", None).await;
-        insert_peer_book(&db, peer_id, 3, "Gamma", None).await;
+        insert_peer_book(&db, peer_id, "1", "Alpha", None).await;
+        insert_peer_book(&db, peer_id, "2", "Beta", None).await;
+        insert_peer_book(&db, peer_id, "3", "Gamma", None).await;
 
         // A partial batch arrives carrying only the first book.
         let partial = vec![crate::models::Book {
-            id: Some(1),
+            id: Some("1".to_string()),
             title: "Alpha".to_string(),
             ..Default::default()
         }];
@@ -8356,26 +8373,26 @@ mod added_at_tests {
         let db = setup().await;
         let peer_id = insert_peer(&db).await;
 
-        insert_peer_book(&db, peer_id, 1, "Alpha", None).await;
-        insert_peer_book(&db, peer_id, 2, "Beta", None).await;
-        insert_peer_book(&db, peer_id, 3, "Gamma", None).await;
+        insert_peer_book(&db, peer_id, "1", "Alpha", None).await;
+        insert_peer_book(&db, peer_id, "2", "Beta", None).await;
+        insert_peer_book(&db, peer_id, "3", "Gamma", None).await;
 
         // Full catalog: the owner now only has books 1 and 3 (book 2 deleted).
         let snapshot = vec![
             crate::models::Book {
-                id: Some(1),
+                id: Some("1".to_string()),
                 title: "Alpha".to_string(),
                 ..Default::default()
             },
             crate::models::Book {
-                id: Some(3),
+                id: Some("3".to_string()),
                 title: "Gamma".to_string(),
                 ..Default::default()
             },
         ];
         upsert_peer_books_cache(&db, peer_id, None, snapshot, true).await;
 
-        let ids: Vec<i32> = peer_book::Entity::find()
+        let ids: Vec<String> = peer_book::Entity::find()
             .filter(peer_book::Column::PeerId.eq(peer_id))
             .all(&db)
             .await
@@ -8384,7 +8401,10 @@ mod added_at_tests {
             .map(|r| r.remote_book_id)
             .collect();
         assert_eq!(ids.len(), 2, "full snapshot must prune the removed book");
-        assert!(!ids.contains(&2), "book 2 was deleted by the owner");
+        assert!(
+            !ids.contains(&"2".to_string()),
+            "book 2 was deleted by the owner"
+        );
     }
 
     /// `redact_for_peer` strips personal fields but MUST keep `added_at`:
@@ -8393,7 +8413,7 @@ mod added_at_tests {
     #[test]
     fn redact_for_peer_preserves_added_at() {
         let mut book = crate::models::Book {
-            id: Some(1),
+            id: Some("1".to_string()),
             title: "T".to_string(),
             user_rating: Some(8),
             reading_status: Some("read".to_string()),
@@ -8416,10 +8436,17 @@ mod added_at_tests {
     async fn upsert_peer_books_cache_refreshes_added_at() {
         let db = setup().await;
         let peer_id = insert_peer(&db).await;
-        insert_peer_book(&db, peer_id, 7, "Cached", Some("2026-01-01T00:00:00+00:00")).await;
+        insert_peer_book(
+            &db,
+            peer_id,
+            "7",
+            "Cached",
+            Some("2026-01-01T00:00:00+00:00"),
+        )
+        .await;
 
         let books = vec![crate::models::Book {
-            id: Some(7),
+            id: Some("7".to_string()),
             title: "Cached".to_string(),
             added_at: Some("2026-04-15T12:00:00+00:00".to_string()),
             ..Default::default()
@@ -8428,7 +8455,7 @@ mod added_at_tests {
 
         let row = peer_book::Entity::find()
             .filter(peer_book::Column::PeerId.eq(peer_id))
-            .filter(peer_book::Column::RemoteBookId.eq(7))
+            .filter(peer_book::Column::RemoteBookId.eq("7"))
             .one(&db)
             .await
             .unwrap()
@@ -8448,7 +8475,7 @@ mod added_at_tests {
         let peer_id = insert_peer(&db).await;
 
         let books = vec![crate::models::Book {
-            id: Some(99),
+            id: Some("99".to_string()),
             title: "New".to_string(),
             added_at: Some("2026-04-15T09:30:00+00:00".to_string()),
             ..Default::default()
@@ -8457,7 +8484,7 @@ mod added_at_tests {
 
         let row = peer_book::Entity::find()
             .filter(peer_book::Column::PeerId.eq(peer_id))
-            .filter(peer_book::Column::RemoteBookId.eq(99))
+            .filter(peer_book::Column::RemoteBookId.eq("99"))
             .one(&db)
             .await
             .unwrap()
@@ -8494,7 +8521,7 @@ mod hub_catalog_cache_tests {
         let now = chrono::Utc::now().to_rfc3339();
         let pb = peer_book::ActiveModel {
             peer_id: Set(0), // sentinel for directory entries
-            remote_book_id: Set(0),
+            remote_book_id: Set("0".to_string()),
             title: Set(format!("Book {}", isbn)),
             isbn: Set(Some(isbn.to_string())),
             author: Set(None),

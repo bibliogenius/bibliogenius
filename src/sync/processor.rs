@@ -72,24 +72,24 @@ async fn apply_operation(db: &DatabaseConnection, op: operation_log::Model) -> R
         // Books
         ("book", "create") | ("book", "insert") => apply_book_create(&txn, &op).await,
         ("book", "update") => apply_book_update(&txn, &op).await,
-        ("book", "delete") => apply_delete::<book::Entity>(&txn, op.entity_id).await,
+        ("book", "delete") => apply_delete::<book::Entity>(&txn, op.entity_id.clone()).await,
         // Copies
         ("copy", "insert") => apply_copy_create(&txn, &op).await,
         ("copy", "update") => apply_copy_update(&txn, &op).await,
-        ("copy", "delete") => apply_delete::<copy::Entity>(&txn, op.entity_id).await,
+        ("copy", "delete") => apply_delete::<copy::Entity>(&txn, op.entity_id.clone()).await,
         // Contacts
         ("contact", "insert") => apply_contact_create(&txn, &op).await,
         ("contact", "update") => apply_contact_update(&txn, &op).await,
-        ("contact", "delete") => apply_delete::<contact::Entity>(&txn, op.entity_id).await,
+        ("contact", "delete") => apply_delete::<contact::Entity>(&txn, op.entity_id.clone()).await,
         // Loans
         ("loan", "insert") => apply_loan_create(&txn, &op).await,
         ("loan", "update") => apply_loan_update(&txn, &op).await,
         // Tags
         ("tag", "insert") => apply_tag_create(&txn, &op).await,
-        ("tag", "delete") => apply_delete::<tag::Entity>(&txn, op.entity_id).await,
+        ("tag", "delete") => apply_delete::<tag::Entity>(&txn, op.entity_id.clone()).await,
         // Authors
         ("author", "insert") => apply_author_create(&txn, &op).await,
-        ("author", "delete") => apply_delete::<author::Entity>(&txn, op.entity_id).await,
+        ("author", "delete") => apply_delete::<author::Entity>(&txn, op.entity_id.clone()).await,
         // Book-Author / Book-Tag junction tables (resolved by natural keys)
         ("book_author", "insert") => apply_book_author_insert(&txn, &op).await,
         ("book_author", "delete") => apply_book_author_delete(&txn, &op).await,
@@ -104,7 +104,12 @@ async fn apply_operation(db: &DatabaseConnection, op: operation_log::Model) -> R
         ("book_note", "insert") => apply_book_note_create(&txn, &op).await,
         ("book_note", "update") => apply_book_note_update(&txn, &op).await,
         ("book_note", "delete") => {
-            apply_delete::<crate::modules::book_notes::models::Entity>(&txn, op.entity_id).await
+            // book_notes keeps an integer PK; entity_id is the stringified int id.
+            let nid: i32 = op.entity_id.parse().unwrap_or(0);
+            crate::modules::book_notes::models::Entity::delete_by_id(nid)
+                .exec(&txn)
+                .await
+                .map(|_| ())
         }
         _ => {
             tracing::warn!(
@@ -214,8 +219,10 @@ async fn apply_book_create(
         ..Default::default()
     };
 
-    let insert_result = book::Entity::insert(new_book).exec(db).await?;
-    let local_book_id = insert_result.last_insert_id;
+    // Use ActiveModel::insert (not Entity::insert(..).exec()) so `before_save`
+    // mints the uuid PK and the returned model carries it. `last_insert_id`
+    // would yield the integer rowid coerced to a string, not the uuid.
+    let local_book_id = new_book.insert(db).await?.id;
 
     // Create author records and book_authors junction entries
     if let Some(author_names) = payload["authors"].as_array() {
@@ -230,7 +237,7 @@ async fn apply_book_create(
                     .execute(Statement::from_sql_and_values(
                         db.get_database_backend(),
                         "INSERT OR IGNORE INTO book_authors (book_id, author_id) VALUES ($1, $2)",
-                        [local_book_id.into(), author_id.into()],
+                        [local_book_id.clone().into(), author_id.into()],
                     ))
                     .await;
             }
@@ -250,7 +257,7 @@ async fn apply_book_create(
                     .execute(Statement::from_sql_and_values(
                         db.get_database_backend(),
                         "INSERT OR IGNORE INTO book_tags (book_id, tag_id) VALUES ($1, $2)",
-                        [local_book_id.into(), tag_id.into()],
+                        [local_book_id.clone().into(), tag_id.into()],
                     ))
                     .await;
             }
@@ -262,7 +269,7 @@ async fn apply_book_create(
         let lib_id = crate::utils::library_helpers::resolve_library_id(db).await?;
         // Dedup: skip if a copy already exists for this book
         let existing_copy = copy::Entity::find()
-            .filter(copy::Column::BookId.eq(local_book_id))
+            .filter(copy::Column::BookId.eq(local_book_id.clone()))
             .one(db)
             .await?;
         if existing_copy.is_none() {
@@ -287,7 +294,7 @@ async fn find_or_create_author(
     db: &DatabaseTransaction,
     name: &str,
     now: &str,
-) -> Result<i32, DbErr> {
+) -> Result<String, DbErr> {
     if let Some(existing) = author::Entity::find()
         .filter(author::Column::Name.eq(name))
         .one(db)
@@ -301,12 +308,17 @@ async fn find_or_create_author(
         updated_at: Set(now.to_string()),
         ..Default::default()
     };
-    let res = author::Entity::insert(new_author).exec(db).await?;
-    Ok(res.last_insert_id)
+    // `insert` (ActiveModel) fires `before_save` to mint the uuid PK and returns
+    // it; `Entity::insert(..).exec().last_insert_id` would be the integer rowid.
+    Ok(new_author.insert(db).await?.id)
 }
 
 /// Find a tag by name or create one. Returns the tag's local ID.
-async fn find_or_create_tag(db: &DatabaseTransaction, name: &str, now: &str) -> Result<i32, DbErr> {
+async fn find_or_create_tag(
+    db: &DatabaseTransaction,
+    name: &str,
+    now: &str,
+) -> Result<String, DbErr> {
     if let Some(existing) = tag::Entity::find()
         .filter(tag::Column::Name.eq(name))
         .one(db)
@@ -321,8 +333,7 @@ async fn find_or_create_tag(db: &DatabaseTransaction, name: &str, now: &str) -> 
         updated_at: Set(now.to_string()),
         ..Default::default()
     };
-    let res = tag::Entity::insert(new_tag).exec(db).await?;
-    Ok(res.last_insert_id)
+    Ok(new_tag.insert(db).await?.id)
 }
 
 /// Generic helper to parse payload JSON from an operation
@@ -335,10 +346,10 @@ fn parse_payload(op: &operation_log::Model) -> Result<Value, DbErr> {
 }
 
 /// Generic delete by entity ID (works for any entity with i32 PK)
-async fn apply_delete<E>(db: &DatabaseTransaction, id: i32) -> Result<(), DbErr>
+async fn apply_delete<E>(db: &DatabaseTransaction, id: String) -> Result<(), DbErr>
 where
     E: EntityTrait,
-    E::PrimaryKey: PrimaryKeyTrait<ValueType = i32>,
+    E::PrimaryKey: PrimaryKeyTrait<ValueType = String>,
 {
     E::delete_by_id(id).exec(db).await?;
     Ok(())
@@ -349,7 +360,9 @@ async fn apply_book_update(
     op: &operation_log::Model,
 ) -> Result<(), DbErr> {
     // Retrieve existing book
-    let book = book::Entity::find_by_id(op.entity_id).one(db).await?;
+    let book = book::Entity::find_by_id(op.entity_id.clone())
+        .one(db)
+        .await?;
 
     if let Some(existing_book) = book {
         // CONFLICT RESOLUTION (Last-Write-Wins)
@@ -392,7 +405,7 @@ async fn apply_book_update(
 async fn resolve_local_book_id(
     db: &DatabaseTransaction,
     payload: &serde_json::Value,
-) -> Result<Option<i32>, DbErr> {
+) -> Result<Option<String>, DbErr> {
     // Priority 1: ISBN-based lookup (works across devices)
     if let Some(isbn) = payload
         .get("book_isbn")
@@ -423,12 +436,12 @@ async fn resolve_local_book_id(
         }
     }
 
-    // Fallback: use raw book_id (works for same-device backfill data)
-    let raw_id = payload["book_id"].as_i64().unwrap_or(0) as i32;
-    if raw_id > 0 {
-        let exists = book::Entity::find_by_id(raw_id).one(db).await?;
+    // Fallback: use raw book_id uuid (works for same-device backfill data)
+    let raw_id = payload["book_id"].as_str().unwrap_or("");
+    if !raw_id.is_empty() {
+        let exists = book::Entity::find_by_id(raw_id.to_string()).one(db).await?;
         if exists.is_some() {
-            return Ok(Some(raw_id));
+            return Ok(Some(raw_id.to_string()));
         }
     }
 
@@ -464,7 +477,7 @@ async fn apply_copy_create(
 
     // Deduplication: skip if a copy with same (book_id, status, is_temporary) already exists
     let existing = copy::Entity::find()
-        .filter(copy::Column::BookId.eq(book_id))
+        .filter(copy::Column::BookId.eq(book_id.clone()))
         .filter(copy::Column::Status.eq(status.clone()))
         .filter(copy::Column::IsTemporary.eq(is_temporary))
         .one(db)
@@ -495,7 +508,9 @@ async fn apply_copy_update(
     db: &DatabaseTransaction,
     op: &operation_log::Model,
 ) -> Result<(), DbErr> {
-    let existing = copy::Entity::find_by_id(op.entity_id).one(db).await?;
+    let existing = copy::Entity::find_by_id(op.entity_id.clone())
+        .one(db)
+        .await?;
     if let Some(c) = existing {
         let payload = parse_payload(op)?;
         let mut active: copy::ActiveModel = c.into();
@@ -556,7 +571,9 @@ async fn apply_contact_update(
     db: &DatabaseTransaction,
     op: &operation_log::Model,
 ) -> Result<(), DbErr> {
-    let existing = contact::Entity::find_by_id(op.entity_id).one(db).await?;
+    let existing = contact::Entity::find_by_id(op.entity_id.clone())
+        .one(db)
+        .await?;
     if let Some(c) = existing {
         let payload = parse_payload(op)?;
         let mut active: contact::ActiveModel = c.into();
@@ -585,8 +602,8 @@ async fn apply_loan_create(
     let now = chrono::Utc::now().to_rfc3339();
 
     let new_loan = loan::ActiveModel {
-        copy_id: Set(payload["copy_id"].as_i64().unwrap_or(0) as i32),
-        contact_id: Set(payload["contact_id"].as_i64().unwrap_or(0) as i32),
+        copy_id: Set(payload["copy_id"].as_str().unwrap_or("").to_string()),
+        contact_id: Set(payload["contact_id"].as_str().unwrap_or("").to_string()),
         library_id: Set(match payload["library_id"].as_i64().map(|v| v as i32) {
             Some(id) => id,
             None => crate::utils::library_helpers::resolve_library_id(db).await?,
@@ -607,7 +624,9 @@ async fn apply_loan_update(
     db: &DatabaseTransaction,
     op: &operation_log::Model,
 ) -> Result<(), DbErr> {
-    let existing = loan::Entity::find_by_id(op.entity_id).one(db).await?;
+    let existing = loan::Entity::find_by_id(op.entity_id.clone())
+        .one(db)
+        .await?;
     if let Some(l) = existing {
         let payload = parse_payload(op)?;
         let mut active: loan::ActiveModel = l.into();
@@ -645,7 +664,7 @@ async fn apply_tag_create(
 
     let new_tag = tag::ActiveModel {
         name: Set(name.clone()),
-        parent_id: Set(payload["parent_id"].as_i64().map(|v| v as i32)),
+        parent_id: Set(payload["parent_id"].as_str().map(|s| s.to_string())),
         path: Set(payload["path"].as_str().unwrap_or(&name).to_string()),
         created_at: Set(now.clone()),
         updated_at: Set(now),
@@ -698,9 +717,14 @@ async fn apply_book_author_insert(
     let book_id = match resolve_local_book_id(db, &payload).await? {
         Some(id) => id,
         None => {
-            // Fallback: raw book_id for same-device backfill
-            let raw = payload["book_id"].as_i64().unwrap_or(0) as i32;
-            if raw > 0 && book::Entity::find_by_id(raw).one(db).await?.is_some() {
+            // Fallback: raw book_id (uuid) for same-device backfill
+            let raw = payload["book_id"].as_str().unwrap_or("").to_string();
+            if !raw.is_empty()
+                && book::Entity::find_by_id(raw.clone())
+                    .one(db)
+                    .await?
+                    .is_some()
+            {
                 raw
             } else {
                 return Ok(());
@@ -716,8 +740,13 @@ async fn apply_book_author_insert(
     {
         find_or_create_author(db, name, &now).await?
     } else {
-        let raw = payload["author_id"].as_i64().unwrap_or(0) as i32;
-        if raw > 0 && author::Entity::find_by_id(raw).one(db).await?.is_some() {
+        let raw = payload["author_id"].as_str().unwrap_or("").to_string();
+        if !raw.is_empty()
+            && author::Entity::find_by_id(raw.clone())
+                .one(db)
+                .await?
+                .is_some()
+        {
             raw
         } else {
             return Ok(());
@@ -742,8 +771,8 @@ async fn apply_book_author_delete(
     let book_id = match resolve_local_book_id(db, &payload).await? {
         Some(id) => id,
         None => {
-            let raw = payload["book_id"].as_i64().unwrap_or(0) as i32;
-            if raw > 0 {
+            let raw = payload["book_id"].as_str().unwrap_or("").to_string();
+            if !raw.is_empty() {
                 raw
             } else {
                 return Ok(());
@@ -765,10 +794,10 @@ async fn apply_book_author_delete(
             None => return Ok(()),
         }
     } else {
-        payload["author_id"].as_i64().unwrap_or(0) as i32
+        payload["author_id"].as_str().unwrap_or("").to_string()
     };
 
-    if book_id > 0 && author_id > 0 {
+    if !book_id.is_empty() && !author_id.is_empty() {
         db.execute(Statement::from_sql_and_values(
             db.get_database_backend(),
             "DELETE FROM book_authors WHERE book_id = $1 AND author_id = $2",
@@ -789,8 +818,13 @@ async fn apply_book_tag_insert(
     let book_id = match resolve_local_book_id(db, &payload).await? {
         Some(id) => id,
         None => {
-            let raw = payload["book_id"].as_i64().unwrap_or(0) as i32;
-            if raw > 0 && book::Entity::find_by_id(raw).one(db).await?.is_some() {
+            let raw = payload["book_id"].as_str().unwrap_or("").to_string();
+            if !raw.is_empty()
+                && book::Entity::find_by_id(raw.clone())
+                    .one(db)
+                    .await?
+                    .is_some()
+            {
                 raw
             } else {
                 return Ok(());
@@ -805,8 +839,13 @@ async fn apply_book_tag_insert(
     {
         find_or_create_tag(db, name, &now).await?
     } else {
-        let raw = payload["tag_id"].as_i64().unwrap_or(0) as i32;
-        if raw > 0 && tag::Entity::find_by_id(raw).one(db).await?.is_some() {
+        let raw = payload["tag_id"].as_str().unwrap_or("").to_string();
+        if !raw.is_empty()
+            && tag::Entity::find_by_id(raw.clone())
+                .one(db)
+                .await?
+                .is_some()
+        {
             raw
         } else {
             return Ok(());
@@ -831,8 +870,8 @@ async fn apply_book_tag_delete(
     let book_id = match resolve_local_book_id(db, &payload).await? {
         Some(id) => id,
         None => {
-            let raw = payload["book_id"].as_i64().unwrap_or(0) as i32;
-            if raw > 0 {
+            let raw = payload["book_id"].as_str().unwrap_or("").to_string();
+            if !raw.is_empty() {
                 raw
             } else {
                 return Ok(());
@@ -854,10 +893,10 @@ async fn apply_book_tag_delete(
             None => return Ok(()),
         }
     } else {
-        payload["tag_id"].as_i64().unwrap_or(0) as i32
+        payload["tag_id"].as_str().unwrap_or("").to_string()
     };
 
-    if book_id > 0 && tag_id > 0 {
+    if !book_id.is_empty() && !tag_id.is_empty() {
         db.execute(Statement::from_sql_and_values(
             db.get_database_backend(),
             "DELETE FROM book_tags WHERE book_id = $1 AND tag_id = $2",
@@ -936,9 +975,14 @@ async fn apply_collection_book_insert(
     let book_id = match resolve_local_book_id(db, &payload).await? {
         Some(id) => id,
         None => {
-            // Fallback: try raw book_id for same-device backfill
-            let raw = payload["book_id"].as_i64().unwrap_or(0) as i32;
-            if raw > 0 && book::Entity::find_by_id(raw).one(db).await?.is_some() {
+            // Fallback: try raw book_id (uuid) for same-device backfill
+            let raw = payload["book_id"].as_str().unwrap_or("").to_string();
+            if !raw.is_empty()
+                && book::Entity::find_by_id(raw.clone())
+                    .one(db)
+                    .await?
+                    .is_some()
+            {
                 raw
             } else {
                 tracing::info!(
@@ -987,8 +1031,8 @@ async fn apply_collection_book_delete(
     let book_id = match resolve_local_book_id(db, &payload).await? {
         Some(id) => id,
         None => {
-            let raw = payload["book_id"].as_i64().unwrap_or(0) as i32;
-            if raw > 0 {
+            let raw = payload["book_id"].as_str().unwrap_or("").to_string();
+            if !raw.is_empty() {
                 raw
             } else {
                 return Ok(());
@@ -1037,7 +1081,7 @@ async fn apply_book_note_create(
 
     // Deduplication: skip if an identical note already exists for this book
     let mut dedup_query = bn::Entity::find()
-        .filter(bn::Column::BookId.eq(book_id))
+        .filter(bn::Column::BookId.eq(book_id.clone()))
         .filter(bn::Column::Content.eq(content.clone()));
     if let Some(p) = page {
         dedup_query = dedup_query.filter(bn::Column::Page.eq(p));
@@ -1067,7 +1111,9 @@ async fn apply_book_note_update(
 ) -> Result<(), DbErr> {
     use crate::modules::book_notes::models as bn;
 
-    let existing = bn::Entity::find_by_id(op.entity_id).one(db).await?;
+    let existing = bn::Entity::find_by_id(op.entity_id.parse::<i32>().unwrap_or(0))
+        .one(db)
+        .await?;
     if let Some(n) = existing {
         let payload = parse_payload(op)?;
         let mut active: bn::ActiveModel = n.into();
@@ -1093,13 +1139,13 @@ mod tests {
     async fn insert_remote_op(
         db: &DatabaseConnection,
         entity_type: &str,
-        entity_id: i32,
+        entity_id: &str,
         operation: &str,
         payload: serde_json::Value,
     ) -> operation_log::Model {
         let op = operation_log::ActiveModel {
             entity_type: Set(entity_type.to_owned()),
-            entity_id: Set(entity_id),
+            entity_id: Set(entity_id.to_owned()),
             operation: Set(operation.to_owned()),
             payload: Set(Some(payload.to_string())),
             status: Set("pending".to_owned()),
@@ -1120,7 +1166,7 @@ mod tests {
             "authors": "Test Author"
         });
 
-        let op = insert_remote_op(&db, "book", 1, "create", payload).await;
+        let op = insert_remote_op(&db, "book", "1", "create", payload).await;
 
         process_next_batch(&db).await.expect("Processing failed");
 
@@ -1169,7 +1215,7 @@ mod tests {
             "status": "available",
             "is_temporary": false,
         });
-        let op = insert_remote_op(&db, "copy", 50, "insert", payload).await;
+        let op = insert_remote_op(&db, "copy", "50", "insert", payload).await;
 
         process_next_batch(&db).await.expect("Processing failed");
 
@@ -1206,7 +1252,7 @@ mod tests {
             "status": "available",
             "is_temporary": false,
         });
-        let op = insert_remote_op(&db, "copy", 50, "insert", payload).await;
+        let op = insert_remote_op(&db, "copy", "50", "insert", payload).await;
 
         process_next_batch(&db).await.expect("Processing failed");
 
@@ -1248,7 +1294,7 @@ mod tests {
             "content": "Great chapter on page 10",
             "page": 10,
         });
-        let op = insert_remote_op(&db, "book_note", 30, "insert", payload).await;
+        let op = insert_remote_op(&db, "book_note", "30", "insert", payload).await;
 
         process_next_batch(&db).await.expect("Processing failed");
 
@@ -1297,11 +1343,11 @@ mod tests {
         });
 
         // First sync: copy created
-        insert_remote_op(&db, "copy", 50, "insert", payload.clone()).await;
+        insert_remote_op(&db, "copy", "50", "insert", payload.clone()).await;
         process_next_batch(&db).await.unwrap();
 
         // Second sync: same copy operation again
-        insert_remote_op(&db, "copy", 50, "insert", payload).await;
+        insert_remote_op(&db, "copy", "50", "insert", payload).await;
         process_next_batch(&db).await.unwrap();
 
         // Only ONE copy should exist
@@ -1327,7 +1373,7 @@ mod tests {
             "reading_status": "read",
         });
 
-        let op = insert_remote_op(&db, "book", 1, "insert", payload).await;
+        let op = insert_remote_op(&db, "book", "1", "insert", payload).await;
         process_next_batch(&db).await.expect("Processing failed");
 
         let updated_op = operation_log::Entity::find_by_id(op.id)
@@ -1416,7 +1462,7 @@ mod tests {
             "status": "available",
             "is_temporary": false,
         });
-        let op = insert_remote_op(&db, "copy", 50, "insert", payload).await;
+        let op = insert_remote_op(&db, "copy", "50", "insert", payload).await;
         process_next_batch(&db).await.expect("Processing failed");
 
         let updated_op = operation_log::Entity::find_by_id(op.id)
@@ -1470,7 +1516,7 @@ mod tests {
             "book_title": "Junction Test",
             "author_name": "Junction Author",
         });
-        let op = insert_remote_op(&db, "book_author", 0, "insert", payload).await;
+        let op = insert_remote_op(&db, "book_author", "0", "insert", payload).await;
         process_next_batch(&db).await.unwrap();
 
         let updated_op = operation_log::Entity::find_by_id(op.id)
@@ -1515,11 +1561,11 @@ mod tests {
         });
 
         // First sync: note created
-        insert_remote_op(&db, "book_note", 30, "insert", payload.clone()).await;
+        insert_remote_op(&db, "book_note", "30", "insert", payload.clone()).await;
         process_next_batch(&db).await.unwrap();
 
         // Second sync: same note again
-        insert_remote_op(&db, "book_note", 30, "insert", payload).await;
+        insert_remote_op(&db, "book_note", "30", "insert", payload).await;
         process_next_batch(&db).await.unwrap();
 
         // Only ONE note should exist

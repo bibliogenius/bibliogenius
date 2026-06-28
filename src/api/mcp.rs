@@ -180,7 +180,7 @@ async fn handle_request(
                         let mut books_by_author: Vec<book::Model> = Vec::new();
                         for auth in &matching_authors {
                             let author_books = book_authors::Entity::find()
-                                .filter(book_authors::Column::AuthorId.eq(auth.id))
+                                .filter(book_authors::Column::AuthorId.eq(auth.id.as_str()))
                                 .all(db)
                                 .await
                                 .unwrap_or_default();

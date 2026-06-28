@@ -35,7 +35,7 @@ async fn setup_db() -> DatabaseConnection {
         .expect("init_db in memory")
 }
 
-async fn insert_rich_book(db: &DatabaseConnection, title: &str, private: bool) -> i32 {
+async fn insert_rich_book(db: &DatabaseConnection, title: &str, private: bool) -> String {
     let now = chrono::Utc::now().to_rfc3339();
     let book = rust_lib_app::models::book::ActiveModel {
         title: Set(title.to_string()),

@@ -12,7 +12,7 @@ use serde_json::json;
 #[derive(Deserialize)]
 pub struct CreateTagRequest {
     name: String,
-    parent_id: Option<i32>,
+    parent_id: Option<String>,
 }
 
 pub async fn list_tags(State(db): State<DatabaseConnection>) -> impl IntoResponse {
@@ -25,8 +25,8 @@ pub async fn create_tag(
     Json(payload): Json<CreateTagRequest>,
 ) -> impl IntoResponse {
     // Compute path based on parent
-    let path = if let Some(parent_id) = payload.parent_id {
-        match Tag::find_by_id(parent_id).one(&db).await {
+    let path = if let Some(parent_id) = payload.parent_id.as_ref() {
+        match Tag::find_by_id(parent_id.clone()).one(&db).await {
             Ok(Some(parent)) => {
                 if parent.path.is_empty() {
                     parent.name.clone()
@@ -51,7 +51,7 @@ pub async fn create_tag(
 
     match tag.insert(&db).await {
         Ok(model) => {
-            let _ = crate::sync::log_operation(&db, "tag", model.id, "INSERT", None).await;
+            let _ = crate::sync::log_operation(&db, "tag", &model.id, "INSERT", None).await;
             (StatusCode::CREATED, Json(model)).into_response()
         }
         Err(e) => (
@@ -64,7 +64,7 @@ pub async fn create_tag(
 
 pub async fn get_tag(
     State(db): State<DatabaseConnection>,
-    Path(id): Path<i32>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let tag = Tag::find_by_id(id).one(&db).await.unwrap_or(None);
     match tag {
@@ -79,16 +79,16 @@ pub async fn get_tag(
 
 pub async fn delete_tag(
     State(db): State<DatabaseConnection>,
-    Path(id): Path<i32>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let tag = Tag::find_by_id(id).one(&db).await.unwrap_or(None);
     match tag {
         Some(tag) => {
-            let tag_id = tag.id;
+            let tag_id = tag.id.clone();
             let res = tag.delete(&db).await;
             match res {
                 Ok(_) => {
-                    let _ = crate::sync::log_operation(&db, "tag", tag_id, "DELETE", None).await;
+                    let _ = crate::sync::log_operation(&db, "tag", &tag_id, "DELETE", None).await;
                     (StatusCode::OK, Json(json!({ "message": "Tag deleted" }))).into_response()
                 }
                 Err(e) => (
@@ -110,9 +110,9 @@ use serde::Serialize;
 
 #[derive(Serialize)]
 pub struct TagTreeNode {
-    pub id: i32,
+    pub id: String,
     pub name: String,
-    pub parent_id: Option<i32>,
+    pub parent_id: Option<String>,
     pub path: String,
     pub count: usize,
     pub children: Vec<TagTreeNode>,
@@ -126,9 +126,9 @@ pub async fn list_tags_tree(State(db): State<DatabaseConnection>) -> impl IntoRe
     let nodes: Vec<TagTreeNode> = tags
         .iter()
         .map(|tag| TagTreeNode {
-            id: tag.id,
+            id: tag.id.clone(),
             name: tag.name.clone(),
-            parent_id: tag.parent_id,
+            parent_id: tag.parent_id.clone(),
             path: tag.path.clone(),
             count: 0, // TODO: compute from book_tags
             children: vec![],

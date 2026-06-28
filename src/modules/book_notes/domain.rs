@@ -14,7 +14,7 @@ pub const MAX_CONTENT_LENGTH: usize = 2000;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookNote {
     pub id: i32,
-    pub book_id: i32,
+    pub book_id: String,
     pub content: String,
     pub page: Option<i32>,
     pub created_at: String,
@@ -38,7 +38,7 @@ pub struct UpdateBookNoteInput {
 #[async_trait]
 pub trait BookNoteRepository: Send + Sync {
     /// List all notes for a given book, ordered by created_at DESC.
-    async fn find_by_book_id(&self, book_id: i32) -> Result<Vec<BookNote>, DomainError>;
+    async fn find_by_book_id(&self, book_id: &str) -> Result<Vec<BookNote>, DomainError>;
 
     /// Find a single note by its ID.
     async fn find_by_id(&self, id: i32) -> Result<Option<BookNote>, DomainError>;
@@ -46,7 +46,7 @@ pub trait BookNoteRepository: Send + Sync {
     /// Create a new note for a book.
     async fn create(
         &self,
-        book_id: i32,
+        book_id: &str,
         input: CreateBookNoteInput,
     ) -> Result<BookNote, DomainError>;
 

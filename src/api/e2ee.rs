@@ -975,7 +975,7 @@ async fn handle_status_update(
         {
             // Delete borrowed copies for this book
             let borrowed = copy::Entity::find()
-                .filter(copy::Column::BookId.eq(bk.id))
+                .filter(copy::Column::BookId.eq(bk.id.clone()))
                 .filter(copy::Column::Status.eq("borrowed"))
                 .all(db)
                 .await
@@ -987,7 +987,7 @@ async fn handle_status_update(
             // Clean up book if not owned, not wishlist, and no remaining copies
             if !bk.owned && bk.reading_status != "wanting" {
                 let remaining = copy::Entity::find()
-                    .filter(copy::Column::BookId.eq(bk.id))
+                    .filter(copy::Column::BookId.eq(bk.id.clone()))
                     .count(db)
                     .await
                     .unwrap_or(1);
@@ -1064,7 +1064,8 @@ async fn handle_status_update(
                                 .await
                                 .unwrap_or_default();
 
-                            let copy_ids: Vec<i32> = copies.iter().map(|c| c.id).collect();
+                            let copy_ids: Vec<String> =
+                                copies.iter().map(|c| c.id.clone()).collect();
 
                             let active_loan = loan::Entity::find()
                                 .filter(loan::Column::ContactId.eq(the_contact.id))
@@ -1075,7 +1076,7 @@ async fn handle_status_update(
                                 .unwrap_or(None);
 
                             if let Some(l) = active_loan {
-                                let copy_id = l.copy_id;
+                                let copy_id = l.copy_id.clone();
                                 let mut active_loan: loan::ActiveModel = l.into();
                                 active_loan.status = Set("returned".to_string());
                                 active_loan.return_date =
@@ -1414,8 +1415,8 @@ pub async fn handle_library_page_request(
     let cursor = msg
         .payload
         .get("cursor")
-        .and_then(|v| v.as_i64())
-        .map(|v| v as i32);
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let limit = msg
         .payload
         .get("limit")
@@ -1435,7 +1436,7 @@ pub async fn handle_library_page_request(
     let total = book::Entity::find().count(db).await.unwrap_or(0) as i64;
 
     let page: Vec<_> = books.into_iter().take(limit).collect();
-    let next_cursor = page.last().map(|b| b.id);
+    let next_cursor = page.last().map(|b| b.id.clone());
 
     // Populate authors for browse profile
     let mut book_dtos = crate::models::Book::populate_authors(db, page).await;
@@ -1683,7 +1684,7 @@ pub async fn handle_request_status_query(
                         .all(db)
                         .await
                         .unwrap_or_default();
-                    let copy_ids: Vec<i32> = copies.iter().map(|c| c.id).collect();
+                    let copy_ids: Vec<String> = copies.iter().map(|c| c.id.clone()).collect();
                     if !copy_ids.is_empty()
                         && let Ok(Some(loan)) = crate::models::loan::Entity::find()
                             .filter(crate::models::loan::Column::CopyId.is_in(copy_ids))

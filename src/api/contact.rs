@@ -14,7 +14,7 @@ use std::collections::HashSet;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ContactDto {
-    pub id: Option<i32>,
+    pub id: Option<String>,
     pub r#type: String,
     pub name: String,
     pub first_name: Option<String>,
@@ -143,7 +143,7 @@ pub async fn list_contacts(
 // Get single contact
 pub async fn get_contact(
     State(db): State<DatabaseConnection>,
-    Path(id): Path<i32>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     match Contact::find_by_id(id).one(&db).await {
         Ok(Some(contact)) => {
@@ -230,7 +230,7 @@ pub async fn create_contact(
 // Update contact
 pub async fn update_contact(
     State(db): State<DatabaseConnection>,
-    Path(id): Path<i32>,
+    Path(id): Path<String>,
     Json(contact_dto): Json<ContactDto>,
 ) -> impl IntoResponse {
     let contact = Contact::find_by_id(id).one(&db).await.unwrap_or(None);
@@ -289,7 +289,7 @@ pub async fn update_contact(
 // Delete contact (soft delete)
 pub async fn delete_contact(
     State(db): State<DatabaseConnection>,
-    Path(id): Path<i32>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let contact = Contact::find_by_id(id).one(&db).await.unwrap_or(None);
 
@@ -388,7 +388,7 @@ mod tests {
         // Peer owns this book
         peer_book::ActiveModel {
             peer_id: Set(saved_peer.id),
-            remote_book_id: Set(1),
+            remote_book_id: Set("1".to_string()),
             title: Set("Test Book".to_string()),
             isbn: Set(Some("9780123456789".to_string())),
             synced_at: Set(now.clone()),

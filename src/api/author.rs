@@ -33,7 +33,7 @@ pub async fn create_author(
     match state.author_repo.create(payload.name).await {
         Ok(author) => {
             let _ =
-                crate::sync::log_operation(state.db(), "author", author.id, "INSERT", None).await;
+                crate::sync::log_operation(state.db(), "author", &author.id, "INSERT", None).await;
             (StatusCode::CREATED, Json(author)).into_response()
         }
         Err(e) => (
@@ -44,8 +44,11 @@ pub async fn create_author(
     }
 }
 
-pub async fn get_author(State(state): State<AppState>, Path(id): Path<i32>) -> impl IntoResponse {
-    match state.author_repo.find_by_id(id).await {
+pub async fn get_author(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.author_repo.find_by_id(&id).await {
         Ok(Some(author)) => (StatusCode::OK, Json(author)).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -62,11 +65,11 @@ pub async fn get_author(State(state): State<AppState>, Path(id): Path<i32>) -> i
 
 pub async fn delete_author(
     State(state): State<AppState>,
-    Path(id): Path<i32>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.author_repo.delete(id).await {
+    match state.author_repo.delete(&id).await {
         Ok(()) => {
-            let _ = crate::sync::log_operation(state.db(), "author", id, "DELETE", None).await;
+            let _ = crate::sync::log_operation(state.db(), "author", &id, "DELETE", None).await;
             (StatusCode::OK, Json(json!({ "message": "Author deleted" }))).into_response()
         }
         Err(DomainError::NotFound) => (

@@ -18,7 +18,7 @@ use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use serde_json::json;
 use tower::util::ServiceExt;
 
-async fn setup() -> (AppState, i32, i32, i32) {
+async fn setup() -> (AppState, i32, String, String) {
     let db = db::init_db("sqlite::memory:")
         .await
         .expect("Failed to init DB");
@@ -72,10 +72,15 @@ async fn setup() -> (AppState, i32, i32, i32) {
     (state, library.id, book.id, contact.id)
 }
 
-async fn create_copy(db: &DatabaseConnection, book_id: i32, library_id: i32, status: &str) -> i32 {
+async fn create_copy(
+    db: &DatabaseConnection,
+    book_id: &str,
+    library_id: i32,
+    status: &str,
+) -> String {
     let now = chrono::Utc::now().to_rfc3339();
     let copy = copy::ActiveModel {
-        book_id: Set(book_id),
+        book_id: Set(book_id.to_string()),
         library_id: Set(library_id),
         status: Set(status.to_string()),
         is_temporary: Set(false),
@@ -92,7 +97,7 @@ fn loan_router() -> Router<AppState> {
         .route("/loans/:id/return", put(loan::return_loan))
 }
 
-fn loan_body(copy_id: i32, contact_id: i32, library_id: i32) -> String {
+fn loan_body(copy_id: &str, contact_id: &str, library_id: i32) -> String {
     json!({
         "copy_id": copy_id,
         "contact_id": contact_id,
@@ -108,14 +113,14 @@ fn loan_body(copy_id: i32, contact_id: i32, library_id: i32) -> String {
 #[tokio::test]
 async fn test_http_create_loan_sets_copy_status_to_loaned() {
     let (state, lib_id, book_id, contact_id) = setup().await;
-    let copy_id = create_copy(state.db(), book_id, lib_id, "available").await;
+    let copy_id = create_copy(state.db(), &book_id, lib_id, "available").await;
 
     let app = loan_router().with_state(state.clone());
     let req = Request::builder()
         .method("POST")
         .uri("/loans")
         .header("content-type", "application/json")
-        .body(Body::from(loan_body(copy_id, contact_id, lib_id)))
+        .body(Body::from(loan_body(&copy_id, &contact_id, lib_id)))
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
@@ -133,14 +138,14 @@ async fn test_http_create_loan_sets_copy_status_to_loaned() {
 #[tokio::test]
 async fn test_http_create_loan_on_loaned_copy_returns_400() {
     let (state, lib_id, book_id, contact_id) = setup().await;
-    let copy_id = create_copy(state.db(), book_id, lib_id, "loaned").await;
+    let copy_id = create_copy(state.db(), &book_id, lib_id, "loaned").await;
 
     let app = loan_router().with_state(state.clone());
     let req = Request::builder()
         .method("POST")
         .uri("/loans")
         .header("content-type", "application/json")
-        .body(Body::from(loan_body(copy_id, contact_id, lib_id)))
+        .body(Body::from(loan_body(&copy_id, &contact_id, lib_id)))
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
@@ -150,14 +155,14 @@ async fn test_http_create_loan_on_loaned_copy_returns_400() {
 #[tokio::test]
 async fn test_http_create_loan_on_sold_copy_returns_400() {
     let (state, lib_id, book_id, contact_id) = setup().await;
-    let copy_id = create_copy(state.db(), book_id, lib_id, "sold").await;
+    let copy_id = create_copy(state.db(), &book_id, lib_id, "sold").await;
 
     let app = loan_router().with_state(state.clone());
     let req = Request::builder()
         .method("POST")
         .uri("/loans")
         .header("content-type", "application/json")
-        .body(Body::from(loan_body(copy_id, contact_id, lib_id)))
+        .body(Body::from(loan_body(&copy_id, &contact_id, lib_id)))
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
@@ -167,14 +172,14 @@ async fn test_http_create_loan_on_sold_copy_returns_400() {
 #[tokio::test]
 async fn test_http_create_loan_on_lost_copy_returns_400() {
     let (state, lib_id, book_id, contact_id) = setup().await;
-    let copy_id = create_copy(state.db(), book_id, lib_id, "lost").await;
+    let copy_id = create_copy(state.db(), &book_id, lib_id, "lost").await;
 
     let app = loan_router().with_state(state.clone());
     let req = Request::builder()
         .method("POST")
         .uri("/loans")
         .header("content-type", "application/json")
-        .body(Body::from(loan_body(copy_id, contact_id, lib_id)))
+        .body(Body::from(loan_body(&copy_id, &contact_id, lib_id)))
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
@@ -184,7 +189,7 @@ async fn test_http_create_loan_on_lost_copy_returns_400() {
 #[tokio::test]
 async fn test_http_return_loan_restores_available() {
     let (state, lib_id, book_id, contact_id) = setup().await;
-    let copy_id = create_copy(state.db(), book_id, lib_id, "available").await;
+    let copy_id = create_copy(state.db(), &book_id, lib_id, "available").await;
 
     let app = loan_router().with_state(state.clone());
 
@@ -193,7 +198,7 @@ async fn test_http_return_loan_restores_available() {
         .method("POST")
         .uri("/loans")
         .header("content-type", "application/json")
-        .body(Body::from(loan_body(copy_id, contact_id, lib_id)))
+        .body(Body::from(loan_body(&copy_id, &contact_id, lib_id)))
         .unwrap();
 
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -203,7 +208,7 @@ async fn test_http_return_loan_restores_available() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let loan_id = json["loan"]["id"].as_i64().unwrap();
+    let loan_id = json["loan"]["id"].as_str().unwrap();
 
     // Return loan
     let req = Request::builder()

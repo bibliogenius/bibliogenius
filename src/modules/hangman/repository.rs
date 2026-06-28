@@ -43,7 +43,7 @@ impl HangmanRepository for SeaOrmHangmanRepository {
                     sea_orm::JoinType::InnerJoin,
                     crate::models::book_authors::Relation::Author.def().rev(),
                 )
-                .filter(crate::models::book_authors::Column::BookId.eq(book.id))
+                .filter(crate::models::book_authors::Column::BookId.eq(book.id.as_str()))
                 .all(&self.db)
                 .await
                 .unwrap_or_default();
@@ -61,7 +61,7 @@ impl HangmanRepository for SeaOrmHangmanRepository {
         Ok(result)
     }
 
-    async fn get_recent_book_ids(&self, limit: u32) -> Result<Vec<i32>, DomainError> {
+    async fn get_recent_book_ids(&self, limit: u32) -> Result<Vec<String>, DomainError> {
         let scores = ScoreEntity::find()
             .order_by_desc(super::models::hangman_score::Column::Id)
             .limit(Some(limit as u64))

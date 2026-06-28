@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    pub copy_id: i32,
-    pub contact_id: Option<i32>, // Client optionnel (peut vendre sans contact)
+    pub copy_id: String,
+    pub contact_id: Option<String>, // Client optionnel (peut vendre sans contact)
     pub library_id: i32,
     pub sale_date: String,
     pub sale_price: f64, // Prix effectif de la vente (EUR)
@@ -54,8 +54,8 @@ impl ActiveModelBehavior for ActiveModel {}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SaleDto {
     pub id: Option<i32>,
-    pub copy_id: i32,
-    pub contact_id: Option<i32>, // Client optionnel
+    pub copy_id: String,
+    pub contact_id: Option<String>, // Client optionnel
     pub library_id: i32,
     pub sale_date: String,
     pub sale_price: f64,

@@ -30,7 +30,7 @@ fn model_to_domain(m: models::Model) -> BookNote {
 
 #[async_trait]
 impl BookNoteRepository for SeaOrmBookNoteRepository {
-    async fn find_by_book_id(&self, book_id: i32) -> Result<Vec<BookNote>, DomainError> {
+    async fn find_by_book_id(&self, book_id: &str) -> Result<Vec<BookNote>, DomainError> {
         let notes = models::Entity::find()
             .filter(models::Column::BookId.eq(book_id))
             .order_by_desc(models::Column::CreatedAt)
@@ -46,12 +46,12 @@ impl BookNoteRepository for SeaOrmBookNoteRepository {
 
     async fn create(
         &self,
-        book_id: i32,
+        book_id: &str,
         input: CreateBookNoteInput,
     ) -> Result<BookNote, DomainError> {
         let now = chrono::Utc::now().to_rfc3339();
         let active = models::ActiveModel {
-            book_id: Set(book_id),
+            book_id: Set(book_id.to_owned()),
             content: Set(input.content),
             page: Set(input.page),
             created_at: Set(now.clone()),

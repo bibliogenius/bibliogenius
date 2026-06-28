@@ -169,7 +169,7 @@ async fn test_create_book_success() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["book"]["title"], "Test Book via Repository");
-    assert!(json["book"]["id"].as_i64().is_some());
+    assert!(json["book"]["id"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -202,7 +202,7 @@ async fn test_update_book_success() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let book_id = json["book"]["id"].as_i64().unwrap();
+    let book_id = json["book"]["id"].as_str().unwrap().to_string();
 
     // Now update the book
     let update_app = Router::new()
@@ -323,7 +323,7 @@ async fn test_author_crud_via_repository() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let author_id = json["id"].as_i64().unwrap();
+    let author_id = json["id"].as_str().unwrap().to_string();
     assert_eq!(json["name"], "Test Author");
 
     // Get author
@@ -412,7 +412,7 @@ async fn test_copy_crud_via_repository() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let book_id = json["book"]["id"].as_i64().unwrap() as i32;
+    let book_id = json["book"]["id"].as_str().unwrap().to_string();
 
     // Create a copy
     let create_copy_app = Router::new()
@@ -441,7 +441,7 @@ async fn test_copy_crud_via_repository() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let copy_id = json["copy"]["id"].as_i64().unwrap();
+    let copy_id = json["copy"]["id"].as_str().unwrap().to_string();
     assert_eq!(json["copy"]["status"], "available");
     assert_eq!(json["copy"]["notes"], "Test copy");
 
@@ -628,7 +628,7 @@ async fn test_borrowed_copies_via_repository() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let book_id = json["book"]["id"].as_i64().unwrap() as i32;
+    let book_id = json["book"]["id"].as_str().unwrap().to_string();
 
     // Create a borrowed copy (is_temporary=true)
     let create_copy_app = Router::new()
@@ -849,7 +849,7 @@ async fn test_collection_book_operations() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let book_id = json["book"]["id"].as_i64().unwrap() as i32;
+    let book_id = json["book"]["id"].as_str().unwrap().to_string();
 
     // Add book to collection
     let add_book_app = Router::new()

@@ -238,7 +238,8 @@ pub async fn start(
             repo.create_run(&batch_id, total)
                 .await
                 .map_err(err_to_string)?;
-            (batch_id, 0)
+            // Empty-string sentinel = start of the uuid-ordered work-list.
+            (batch_id, String::new())
         }
     };
 
@@ -296,7 +297,7 @@ pub async fn undo_field(state: &AppState, journal_id: i64) -> Result<UndoOutcome
         .map_err(err_to_string)
 }
 
-pub async fn undo_book(state: &AppState, batch_id: &str, book_id: i32) -> Result<usize, String> {
+pub async fn undo_book(state: &AppState, batch_id: &str, book_id: &str) -> Result<usize, String> {
     state
         .metadata_fill_repo
         .undo_book(batch_id, book_id)
@@ -322,7 +323,7 @@ async fn run_fill_loop(
     batch_id: String,
     languages: Option<String>,
     cancel: Arc<AtomicBool>,
-    start_cursor: i32,
+    start_cursor: String,
     lot_limit: Option<u64>,
 ) {
     // Reload counters so a resumed run keeps accumulating rather than resetting.
@@ -343,7 +344,7 @@ async fn run_fill_loop(
             let _ = repo.set_run_status(&batch_id, "cancelled").await;
             break;
         }
-        let batch = match repo.list_incomplete_with_isbn(cursor, PAGE).await {
+        let batch = match repo.list_incomplete_with_isbn(&cursor, PAGE).await {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!("metadata_fill: work-list query failed: {e}");
@@ -381,7 +382,7 @@ async fn run_fill_loop(
                 Ok(Some(meta)) => {
                     consecutive_fail = 0;
                     match repo
-                        .apply_fill(&batch_id, book.id, gap_values_from(meta))
+                        .apply_fill(&batch_id, &book.id, gap_values_from(meta))
                         .await
                     {
                         Ok(filled) if !filled.is_empty() => run.filled += 1,
@@ -405,7 +406,7 @@ async fn run_fill_loop(
 
             run.done += 1;
             cursor = book.id;
-            run.cursor_book_id = cursor;
+            run.cursor_book_id = cursor.clone();
             let _ = repo.update_run_progress(&run).await;
 
             // Pause once this lot's quota is met: mark the run resumable so the

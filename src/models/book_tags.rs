@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(table_name = "book_tags")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub book_id: i32,
+    pub book_id: String,
     #[sea_orm(primary_key, auto_increment = false)]
-    pub tag_id: i32,
+    pub tag_id: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

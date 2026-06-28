@@ -37,7 +37,7 @@ async fn create_book_with_log(
     title: &str,
     private: bool,
     cataloguing_notes: Option<&str>,
-) -> (i32, i32) {
+) -> (String, i32) {
     let now = chrono::Utc::now().to_rfc3339();
     let book = rust_lib_app::models::book::ActiveModel {
         title: Set(title.to_owned()),
@@ -54,7 +54,7 @@ async fn create_book_with_log(
 
     let log = operation_log::ActiveModel {
         entity_type: Set("book".to_owned()),
-        entity_id: Set(book.id),
+        entity_id: Set(book.id.clone()),
         operation: Set("INSERT".to_owned()),
         payload: Set(None),
         source: Set("local".to_owned()),
@@ -66,7 +66,7 @@ async fn create_book_with_log(
     (book.id, log_res.last_insert_id)
 }
 
-async fn log_delete(db: &DatabaseConnection, book_id: i32) -> i32 {
+async fn log_delete(db: &DatabaseConnection, book_id: String) -> i32 {
     let row = operation_log::ActiveModel {
         entity_type: Set("book".to_owned()),
         entity_id: Set(book_id),
@@ -136,7 +136,7 @@ async fn delete_emits_tombstone() {
     let state = setup().await;
     let (b1, _) = create_book_with_log(state.db(), "A", false, None).await;
     let (_, after_inserts) = create_book_with_log(state.db(), "B", false, None).await;
-    let _ = log_delete(state.db(), b1).await;
+    let _ = log_delete(state.db(), b1.clone()).await;
 
     let msg = request_message(json!({ "since": after_inserts as i64, "limit": 500 }));
     let resp = rust_lib_app::api::e2ee::handle_catalog_delta_request(&state, &msg).await;

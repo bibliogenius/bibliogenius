@@ -5,9 +5,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "copies")]
 pub struct Model {
-    #[sea_orm(primary_key)]
-    pub id: i32,
-    pub book_id: i32,
+    /// Stable cross-device primary key (UUID v7); stored in the `uuid` column
+    /// (ADR-044 Addendum A). Minted by `before_save` when not provided.
+    #[sea_orm(primary_key, auto_increment = false, column_name = "uuid")]
+    pub id: String,
+    pub book_id: String,
     pub library_id: i32,
     pub acquisition_date: Option<String>,
     pub notes: Option<String>,
@@ -44,10 +46,6 @@ pub struct Model {
     /// contact loan). Stored as TEXT; see `BorrowSource` for the typed
     /// representation used across the code. NULL for non-borrowed copies.
     pub borrow_source: Option<String>,
-    /// Stable cross-device identifier. Generated on insert by
-    /// `before_save`; backfilled on existing rows by migration 078.
-    #[serde(default)]
-    pub uuid: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -84,8 +82,8 @@ impl ActiveModelBehavior for ActiveModel {
     where
         C: ConnectionTrait,
     {
-        if insert && self.uuid.is_not_set() {
-            self.uuid = Set(crate::utils::uuid_gen::new_uuid_v7());
+        if insert && self.id.is_not_set() {
+            self.id = Set(crate::utils::uuid_gen::new_uuid_v7());
         }
         Ok(self)
     }

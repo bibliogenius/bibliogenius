@@ -1,4 +1,5 @@
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, Statement};
+use sqlx::Row as _;
 
 use crate::utils::default_library_name::compute_default_library_name_seed;
 
@@ -8,7 +9,7 @@ use crate::utils::default_library_name::compute_default_library_name_seed;
 /// can decide whether to migrate the archived DB forward or refuse a
 /// future-version archive. **Bump this constant whenever a new migration
 /// is appended to `run_migrations`.**
-pub const SCHEMA_VERSION: u32 = 79;
+pub const SCHEMA_VERSION: u32 = 80;
 
 pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     let db = Database::connect(database_url).await?;
@@ -256,7 +257,7 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         CREATE TABLE IF NOT EXISTS operation_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             entity_type TEXT NOT NULL,
-            entity_id INTEGER NOT NULL,
+            entity_id TEXT NOT NULL,
             operation TEXT NOT NULL, -- 'INSERT', 'UPDATE', 'DELETE'
             payload TEXT, -- JSON payload of the change
             created_at TEXT NOT NULL
@@ -447,7 +448,7 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         CREATE TABLE IF NOT EXISTS peer_books (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             peer_id INTEGER NOT NULL,
-            remote_book_id INTEGER NOT NULL,
+            remote_book_id TEXT NOT NULL,
             title TEXT NOT NULL,
             isbn TEXT,
             author TEXT,
@@ -2045,6 +2046,518 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 082: id INTEGER -> uuid PRIMARY KEY on the replicated entities
+    // (ADR-044 Addendum A + B). Runs last, once all tables (incl. module tables
+    // such as `book_notes`) exist. Gated on the still-present integer `id`, so it
+    // is a no-op once applied. This is the irreversible spine of the account-sync
+    // epic; see `migrate_uuid_pk` for the mechanics and risk controls.
+    migrate_uuid_pk(db).await?;
+
+    Ok(())
+}
+
+// =========================================================================
+// id INTEGER -> uuid PRIMARY KEY migration (ADR-044 Addendum A + B).
+//
+// The account-sync merge engine (cr-sqlite) replicates whole rows keyed by the
+// PRIMARY KEY, so the PK must be the cross-device-stable `uuid` (migration 078),
+// not the device-local autoincrement `id` (A's `id=5` is not B's `id=5`). This
+// migration drops the integer `id` on the six replicated entity tables, promotes
+// `uuid` to PRIMARY KEY, and rewrites every cross-entity reference from integer
+// id to the parent's uuid. FK enforcement is removed as a side effect (cr-sqlite
+// forbids FK on CRRs); SQLite has no `DROP CONSTRAINT`, so the PK switch and the
+// FK removal are the same table rebuild, done together.
+//
+// This is the highest-regression, effectively one-way step of the epic. It is a
+// one-shot rebuild gated on the still-present integer `id` (so it is a no-op once
+// applied and on uuid-native fresh installs), runs inside a single transaction
+// on a dedicated connection with FK enforcement scoped off, and validates the
+// final schema with `PRAGMA foreign_key_check` before committing.
+//
+// NB: `crsql_as_crr` is intentionally NOT applied here. The uuid-PK, FK-removed
+// schema is valid plain SQLite; turning the tables into CRRs needs a cr-sqlite
+// loaded connection and belongs to the static-link release step (ADR-044 §2).
+// =========================================================================
+
+/// The six replicated entity tables, rebuilt to a `uuid` PRIMARY KEY.
+const UUID_REBUILT_ENTITIES: &[&str] = &["books", "authors", "tags", "contacts", "copies", "loans"];
+
+/// One table to rebuild. The plan is generic (driven by `PRAGMA table_info`) so
+/// it survives column drift: a column added to a table later is carried over
+/// unchanged without touching this plan, as long as it is not a new reference
+/// INTO a rebuilt entity (which the fan-out drift guard below catches).
+struct UuidRebuildSpec {
+    table: &'static str,
+    /// Drop the integer `id` column (mode A: entities).
+    drop_id: bool,
+    /// Promote `uuid` to PRIMARY KEY (mode A: entities).
+    uuid_pk: bool,
+    /// Composite PK columns (mode B: junctions); empty otherwise.
+    composite: &'static [&'static str],
+    /// `(column, parent_table)` refs rewritten from integer id to the parent uuid.
+    refs: &'static [(&'static str, &'static str)],
+    /// Columns dropped from the rebuilt table (extracted to a sibling table).
+    drop_cols: &'static [&'static str],
+}
+
+/// The migration plan. Order is irrelevant for correctness: every `_new` table is
+/// populated by resolving references against the still-intact originals (phase 1),
+/// and only then are the originals dropped and the `_new` tables renamed (phase 2).
+///
+/// `book_notes` lives in an extension module (`src/modules/book_notes`); it is a
+/// LOCAL table (keeps its integer id) whose `book_id` ref is rewritten to the
+/// books uuid. Any new reference INTO a rebuilt entity that is missing here is
+/// caught by `uuid_fanout_uncovered` before the destructive phase runs.
+fn uuid_rebuild_specs() -> Vec<UuidRebuildSpec> {
+    vec![
+        // Mode A: entities -> uuid PK, integer id dropped.
+        UuidRebuildSpec {
+            table: "books",
+            drop_id: true,
+            uuid_pk: true,
+            composite: &[],
+            refs: &[],
+            // `hub_cover_upload_failed_at` (device-local, ADR-044 Addendum A.3)
+            // stays on the table for now: it only has to leave when `books`
+            // becomes a CRR (WS-5), and a recent-SQLite `DROP COLUMN` extraction
+            // then is cheap. Carrying it here would force a `book_local` read/write
+            // rework mid-flip with no replication benefit yet.
+            drop_cols: &[],
+        },
+        UuidRebuildSpec {
+            table: "authors",
+            drop_id: true,
+            uuid_pk: true,
+            composite: &[],
+            refs: &[],
+            drop_cols: &[],
+        },
+        UuidRebuildSpec {
+            table: "tags",
+            drop_id: true,
+            uuid_pk: true,
+            composite: &[],
+            refs: &[("parent_id", "tags")],
+            drop_cols: &[],
+        },
+        UuidRebuildSpec {
+            table: "contacts",
+            drop_id: true,
+            uuid_pk: true,
+            composite: &[],
+            refs: &[],
+            drop_cols: &[],
+        },
+        UuidRebuildSpec {
+            table: "copies",
+            drop_id: true,
+            uuid_pk: true,
+            composite: &[],
+            refs: &[("book_id", "books")],
+            drop_cols: &[],
+        },
+        UuidRebuildSpec {
+            table: "loans",
+            drop_id: true,
+            uuid_pk: true,
+            composite: &[],
+            refs: &[("copy_id", "copies"), ("contact_id", "contacts")],
+            drop_cols: &[],
+        },
+        // Mode B: junctions -> composite PK of the rewritten references.
+        UuidRebuildSpec {
+            table: "book_authors",
+            drop_id: false,
+            uuid_pk: false,
+            composite: &["book_id", "author_id"],
+            refs: &[("book_id", "books"), ("author_id", "authors")],
+            drop_cols: &[],
+        },
+        UuidRebuildSpec {
+            table: "book_tags",
+            drop_id: false,
+            uuid_pk: false,
+            composite: &["book_id", "tag_id"],
+            refs: &[("book_id", "books"), ("tag_id", "tags")],
+            drop_cols: &[],
+        },
+        UuidRebuildSpec {
+            table: "collection_books",
+            drop_id: false,
+            uuid_pk: false,
+            composite: &["collection_id", "book_id"],
+            refs: &[("book_id", "books")],
+            drop_cols: &[],
+        },
+        // Mode C: local (non-CRR) tables keeping their integer id, but referencing
+        // now-uuid-keyed parents -> only their reference columns move to uuid.
+        UuidRebuildSpec {
+            table: "sales",
+            drop_id: false,
+            uuid_pk: false,
+            composite: &[],
+            refs: &[("copy_id", "copies"), ("contact_id", "contacts")],
+            drop_cols: &[],
+        },
+        UuidRebuildSpec {
+            table: "book_notes",
+            drop_id: false,
+            uuid_pk: false,
+            composite: &[],
+            refs: &[("book_id", "books")],
+            drop_cols: &[],
+        },
+    ]
+}
+
+fn map_sqlx(e: sqlx::Error) -> DbErr {
+    DbErr::Custom(format!("uuid_pk migration: {e}"))
+}
+
+/// `(name, type, notnull, pk)` for every column of a table.
+async fn uuid_columns(
+    conn: &mut sqlx::SqliteConnection,
+    table: &str,
+) -> Result<Vec<(String, String, bool, bool, Option<String>)>, DbErr> {
+    let rows = sqlx::query(&format!("PRAGMA table_info(\"{table}\")"))
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<String, _>("name"),
+                r.get::<String, _>("type"),
+                r.get::<i64, _>("notnull") != 0,
+                r.get::<i64, _>("pk") != 0,
+                // Preserve the column's DEFAULT so the rebuilt table keeps it
+                // (PRAGMA `dflt_value` is the raw SQL literal, e.g. `0`, `'to_read'`).
+                r.get::<Option<String>, _>("dflt_value"),
+            )
+        })
+        .collect())
+}
+
+/// Every foreign key in the DB that points INTO a rebuilt entity table, as
+/// `(child_table, child_col, parent_table)`.
+async fn uuid_fanout_into_rebuilt(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<(String, String, String)>, DbErr> {
+    let tables = sqlx::query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(map_sqlx)?;
+
+    let mut fanout: Vec<(String, String, String)> = Vec::new();
+    for t in &tables {
+        let name: String = t.get("name");
+        let fks = sqlx::query(&format!("PRAGMA foreign_key_list(\"{name}\")"))
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(map_sqlx)?;
+        for fk in &fks {
+            let parent: String = fk.get("table");
+            if UUID_REBUILT_ENTITIES.contains(&parent.as_str()) {
+                fanout.push((name.clone(), fk.get::<String, _>("from"), parent));
+            }
+        }
+    }
+    fanout.sort();
+    Ok(fanout)
+}
+
+/// FK references INTO a rebuilt entity that the plan does NOT rewrite. A non-empty
+/// result means a table (often an extension module) references a rebuilt entity by
+/// integer id and would be left dangling — the exact omission that would corrupt
+/// the live migration. The migration aborts loudly rather than rebuild blindly.
+fn uuid_fanout_uncovered(
+    fanout: &[(String, String, String)],
+    specs: &[UuidRebuildSpec],
+) -> Vec<String> {
+    let handled: std::collections::BTreeSet<(String, String, String)> = specs
+        .iter()
+        .flat_map(|s| {
+            s.refs
+                .iter()
+                .filter(|(_, parent)| UUID_REBUILT_ENTITIES.contains(parent))
+                .map(|(col, parent)| (s.table.to_string(), col.to_string(), parent.to_string()))
+        })
+        .collect();
+    fanout
+        .iter()
+        .filter(|fk| !handled.contains(*fk))
+        .map(|(c, col, p)| format!("{c}.{col} -> {p}"))
+        .collect()
+}
+
+/// Phase 1: build and populate `<table>__new`, resolving refs against the intact
+/// original via LEFT JOIN to the parent's uuid.
+async fn uuid_build_new(
+    conn: &mut sqlx::SqliteConnection,
+    spec: &UuidRebuildSpec,
+) -> Result<(), DbErr> {
+    let cols = uuid_columns(conn, spec.table).await?;
+    let mut defs: Vec<String> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut sel: Vec<String> = Vec::new();
+    let mut joins = String::new();
+
+    for (name, ty, notnull, pk, dflt) in &cols {
+        if name == "id" && spec.drop_id {
+            continue;
+        }
+        if spec.drop_cols.contains(&name.as_str()) {
+            continue;
+        }
+        // Preserve the column's DEFAULT clause (PRAGMA reports the raw SQL literal).
+        let default_clause = dflt
+            .as_ref()
+            .map(|d| format!(" DEFAULT {d}"))
+            .unwrap_or_default();
+        if name == "uuid" {
+            // The migration-078 AFTER INSERT trigger that minted uuids cannot
+            // survive here: once `uuid` is a NOT NULL PRIMARY KEY, an insert that
+            // omits it violates the constraint *before* any AFTER INSERT trigger
+            // runs. A column DEFAULT is evaluated at insert time, so it covers
+            // every path that bypasses the Rust `before_save` hook
+            // (`Entity::insert(..).exec()`, raw SQL); `am.insert()` still
+            // overrides it with the app-generated v7 uuid.
+            defs.push(format!(
+                "uuid TEXT NOT NULL DEFAULT ({expr}){pk}",
+                expr = uuid_v7_sql_expr(),
+                pk = if spec.uuid_pk { " PRIMARY KEY" } else { "" }
+            ));
+            names.push("uuid".to_string());
+            sel.push("t.uuid".to_string());
+            continue;
+        }
+        if let Some((_, parent)) = spec.refs.iter().find(|(c, _)| c == name) {
+            defs.push(format!(
+                "\"{name}\" TEXT{}{default_clause}",
+                if *notnull { " NOT NULL" } else { "" }
+            ));
+            names.push(format!("\"{name}\""));
+            let alias = format!("p_{name}");
+            sel.push(format!("{alias}.uuid"));
+            joins.push_str(&format!(
+                " LEFT JOIN \"{parent}\" {alias} ON {alias}.id = t.\"{name}\""
+            ));
+            continue;
+        }
+        // Plain column (includes the integer `id` in mode C, which keeps its PK).
+        let keep_pk = *pk && !spec.drop_id && !spec.uuid_pk && spec.composite.is_empty();
+        let ty = if ty.is_empty() { "TEXT" } else { ty.as_str() };
+        defs.push(format!(
+            "\"{name}\" {ty}{}{}{default_clause}",
+            if *notnull { " NOT NULL" } else { "" },
+            if keep_pk { " PRIMARY KEY" } else { "" }
+        ));
+        names.push(format!("\"{name}\""));
+        sel.push(format!("t.\"{name}\""));
+    }
+
+    if !spec.composite.is_empty() {
+        let pk_cols = spec
+            .composite
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        defs.push(format!("PRIMARY KEY ({pk_cols})"));
+    }
+
+    let new = format!("{}__new", spec.table);
+    sqlx::query(&format!("CREATE TABLE \"{new}\" ({})", defs.join(", ")))
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
+    sqlx::query(&format!(
+        "INSERT INTO \"{new}\" ({}) SELECT {} FROM \"{}\" t{joins}",
+        names.join(", "),
+        sel.join(", "),
+        spec.table
+    ))
+    .execute(&mut *conn)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
+/// The `CREATE INDEX` statements of a table (user indexes only — the implicit PK
+/// index has a NULL `sql`), captured before the table is dropped so they can be
+/// replayed on the rebuilt table.
+async fn uuid_capture_indexes(
+    conn: &mut sqlx::SqliteConnection,
+    table: &str,
+) -> Result<Vec<String>, DbErr> {
+    let rows = sqlx::query(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=?1 AND sql IS NOT NULL",
+    )
+    .bind(table)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(rows.iter().map(|r| r.get::<String, _>("sql")).collect())
+}
+
+/// Promote the integer `id` PRIMARY KEY to the stable `uuid` on the replicated
+/// entity tables and rewrite every cross-entity reference to uuid (ADR-044
+/// Addendum A/B). Idempotent: a no-op once applied (or on a uuid-native install),
+/// detected by the absence of the integer `id` column on `books`.
+///
+/// Runs on a dedicated pooled connection so the FK-enforcement toggle never
+/// leaks to another connection (see `seaorm_pragma_per_connection_pool_leak`),
+/// inside one transaction validated by `PRAGMA foreign_key_check` before commit.
+pub async fn migrate_uuid_pk(db: &DatabaseConnection) -> Result<(), DbErr> {
+    let pool = db.get_sqlite_connection_pool();
+    let mut conn = pool.acquire().await.map_err(map_sqlx)?;
+
+    // Gate: skip if `books` no longer carries the integer `id` (already migrated,
+    // or a uuid-native fresh install).
+    let books_cols = uuid_columns(&mut conn, "books").await?;
+    if !books_cols.iter().any(|(n, _, _, _, _)| n == "id") {
+        return Ok(());
+    }
+
+    let specs = uuid_rebuild_specs();
+
+    // Drift guard (pre-flight, before any destructive op): every FK into a rebuilt
+    // entity must be in the plan, or a child would be left dangling.
+    let fanout = uuid_fanout_into_rebuilt(&mut conn).await?;
+    let uncovered = uuid_fanout_uncovered(&fanout, &specs);
+    if !uncovered.is_empty() {
+        return Err(DbErr::Custom(format!(
+            "uuid_pk migration aborted: unhandled FK(s) into the rebuilt tables \
+             (extend uuid_rebuild_specs before migrating): {uncovered:?}"
+        )));
+    }
+
+    // SQLite's table-redefinition procedure. `foreign_keys` cannot change inside a
+    // transaction, so it is toggled around it. `legacy_alter_table=ON` stops modern
+    // SQLite (>= 3.25) from rewriting references in other objects on RENAME (which
+    // would re-validate their FKs against an old-shaped sibling and raise "foreign
+    // key mismatch"); the final schema is validated by `foreign_key_check` instead.
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
+    sqlx::query("PRAGMA legacy_alter_table = ON")
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
+
+    let result = run_uuid_rebuild(&mut conn, &specs).await;
+
+    // Restore connection pragmas regardless of outcome, before releasing it.
+    let _ = sqlx::query("PRAGMA legacy_alter_table = OFF")
+        .execute(&mut *conn)
+        .await;
+    let _ = sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *conn)
+        .await;
+    drop(conn);
+    result
+}
+
+/// The transactional body of `migrate_uuid_pk`. Wraps `uuid_rebuild_inner` in a
+/// transaction so a failure (e.g. a `foreign_key_check` violation) rolls back the
+/// whole rebuild, leaving the integer `id` in place for a safe retry next launch.
+async fn run_uuid_rebuild(
+    conn: &mut sqlx::SqliteConnection,
+    specs: &[UuidRebuildSpec],
+) -> Result<(), DbErr> {
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
+    match uuid_rebuild_inner(conn, specs).await {
+        Ok(()) => {
+            sqlx::query("COMMIT")
+                .execute(&mut *conn)
+                .await
+                .map_err(map_sqlx)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(e)
+        }
+    }
+}
+
+/// The destructive rebuild itself (no transaction control — see `run_uuid_rebuild`).
+async fn uuid_rebuild_inner(
+    conn: &mut sqlx::SqliteConnection,
+    specs: &[UuidRebuildSpec],
+) -> Result<(), DbErr> {
+    // Phase 1: capture indexes + build every `_new` from intact originals.
+    let mut indexes: Vec<String> = Vec::new();
+    for spec in specs {
+        indexes.extend(uuid_capture_indexes(conn, spec.table).await?);
+        uuid_build_new(conn, spec).await?;
+    }
+
+    // Phase 2a: drop ALL originals first, so no surviving table references an
+    // old-shaped parent when we rename.
+    for spec in specs {
+        sqlx::query(&format!("DROP TABLE \"{}\"", spec.table))
+            .execute(&mut *conn)
+            .await
+            .map_err(map_sqlx)?;
+    }
+    // Phase 2b: rename `_new` into place, then replay the captured indexes.
+    for spec in specs {
+        sqlx::query(&format!(
+            "ALTER TABLE \"{}__new\" RENAME TO \"{}\"",
+            spec.table, spec.table
+        ))
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
+    }
+    for sql in &indexes {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .map_err(map_sqlx)?;
+    }
+
+    // Normalize `cover_url` to a device-independent value so it can replicate
+    // without one device clobbering another (ADR-044 Addendum A.4).
+    let rows = sqlx::query("SELECT uuid, cover_url FROM books WHERE cover_url IS NOT NULL")
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
+    for row in &rows {
+        let uuid: String = row.get("uuid");
+        let current: String = row.get("cover_url");
+        if let Some(normalized) =
+            crate::utils::cover_url::normalize_cover_url_for_storage(Some(&current))
+            && normalized != current
+        {
+            sqlx::query("UPDATE books SET cover_url = ?1 WHERE uuid = ?2")
+                .bind(normalized)
+                .bind(uuid)
+                .execute(&mut *conn)
+                .await
+                .map_err(map_sqlx)?;
+        }
+    }
+
+    // Integrity gate: no remaining FK is violated by the rebuilt schema.
+    let violations = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
+    if !violations.is_empty() {
+        return Err(DbErr::Custom(format!(
+            "uuid_pk migration aborted: foreign_key_check reported {} violation(s)",
+            violations.len()
+        )));
+    }
     Ok(())
 }
 
@@ -2368,7 +2881,10 @@ pub async fn backfill_borrow_metadata(db: &DatabaseConnection) -> Result<Backfil
     let rows = db
         .query_all(Statement::from_string(
             backend,
-            "SELECT id, notes FROM copies \
+            // Key by `uuid` (present since migration 078) so this works whether or
+            // not the integer `id` column still exists (it is dropped once the
+            // uuid-PK migration has run).
+            "SELECT uuid, notes FROM copies \
              WHERE status = 'borrowed' \
                AND notes IS NOT NULL \
                AND lender_display_name IS NULL"
@@ -2378,7 +2894,7 @@ pub async fn backfill_borrow_metadata(db: &DatabaseConnection) -> Result<Backfil
 
     let mut stats = BackfillStats::default();
     for row in rows {
-        let id: i32 = row.try_get("", "id")?;
+        let id: String = row.try_get("", "uuid")?;
         let notes: String = row.try_get("", "notes")?;
 
         let Some((name, due, source)) = parse_legacy_borrow_notes(&notes) else {
@@ -2390,7 +2906,7 @@ pub async fn backfill_borrow_metadata(db: &DatabaseConnection) -> Result<Backfil
             Some(due) => Statement::from_sql_and_values(
                 backend,
                 "UPDATE copies SET lender_display_name = ?, borrow_due_date = ?, borrow_source = ? \
-                 WHERE id = ?",
+                 WHERE uuid = ?",
                 [
                     sea_orm::Value::from(name),
                     sea_orm::Value::from(due),
@@ -2400,7 +2916,7 @@ pub async fn backfill_borrow_metadata(db: &DatabaseConnection) -> Result<Backfil
             ),
             None => Statement::from_sql_and_values(
                 backend,
-                "UPDATE copies SET lender_display_name = ?, borrow_source = ? WHERE id = ?",
+                "UPDATE copies SET lender_display_name = ?, borrow_source = ? WHERE uuid = ?",
                 [
                     sea_orm::Value::from(name),
                     sea_orm::Value::from(source.to_string()),
@@ -2457,31 +2973,29 @@ mod tests {
     #[tokio::test]
     async fn backfill_fills_pre_existing_null_uuid_rows() {
         let db = init_db("sqlite::memory:").await.expect("init db");
-        // Insert several rows, then force their uuids back to NULL to mimic rows
-        // that predate migration 078. (The AFTER INSERT trigger fills uuid on
-        // insert, but it does not fire on this UPDATE, so the NULLs stick and
-        // the set-based backfill is what must repair them.)
+        // `backfill_uuids` repairs rows whose `uuid` is NULL: the transient state a
+        // table is in after migration 078 adds the column but before each row's
+        // value is assigned. Post-082 the live entity tables make `uuid` the NOT
+        // NULL primary key, so that NULL state can no longer exist on them; exercise
+        // the generic helper against a throwaway table with a nullable `uuid`.
         for stmt in [
-            "INSERT INTO authors (name, created_at, updated_at) VALUES \
-             ('Old A', '2020-01-01', '2020-01-01'), \
-             ('Old B', '2020-01-01', '2020-01-01'), \
-             ('Old C', '2020-01-01', '2020-01-01')",
-            "UPDATE authors SET uuid = NULL",
+            "CREATE TABLE bf_probe (id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT)",
+            "INSERT INTO bf_probe (uuid) VALUES (NULL), (NULL), (NULL)",
         ] {
             db.execute(Statement::from_string(
                 db.get_database_backend(),
                 stmt.to_owned(),
             ))
             .await
-            .expect("seed pre-078 rows");
+            .expect("seed nullable-uuid rows");
         }
 
-        backfill_uuids(&db, "authors").await.expect("backfill");
+        backfill_uuids(&db, "bf_probe").await.expect("backfill");
 
         let rows = db
             .query_all(Statement::from_string(
                 db.get_database_backend(),
-                "SELECT uuid FROM authors ORDER BY id".to_owned(),
+                "SELECT uuid FROM bf_probe ORDER BY id".to_owned(),
             ))
             .await
             .expect("select uuids");
@@ -2524,10 +3038,11 @@ mod tests {
         use crate::models::author;
         use sea_orm::{ActiveValue::NotSet, EntityTrait, Set};
 
+        use sea_orm::{ColumnTrait, QueryFilter};
+
         let db = init_db("sqlite::memory:").await.expect("init db");
-        let res = author::Entity::insert(author::ActiveModel {
+        author::Entity::insert(author::ActiveModel {
             id: NotSet,
-            uuid: NotSet,
             name: Set("Trigger Test".to_owned()),
             created_at: Set("2020".to_owned()),
             updated_at: Set("2020".to_owned()),
@@ -2536,17 +3051,20 @@ mod tests {
         .await
         .expect("insert via Entity::insert");
 
-        let row = author::Entity::find_by_id(res.last_insert_id)
+        // The uuid PK is minted by the AFTER INSERT trigger (before_save is
+        // bypassed on the Entity::insert path), so fetch by name rather than id.
+        let row = author::Entity::find()
+            .filter(author::Column::Name.eq("Trigger Test"))
             .one(&db)
             .await
             .expect("find")
             .expect("row exists");
         assert!(
-            !row.uuid.is_empty(),
+            !row.id.is_empty(),
             "trigger must set uuid on the Entity::insert path"
         );
         assert_eq!(
-            uuid::Uuid::parse_str(&row.uuid)
+            uuid::Uuid::parse_str(&row.id)
                 .expect("valid uuid")
                 .get_version_num(),
             7,

@@ -9,7 +9,7 @@ pub mod hangman_score {
     pub struct Model {
         #[sea_orm(primary_key)]
         pub id: i32,
-        pub book_id: i32,
+        pub book_id: String,
         pub difficulty: String,
         #[sea_orm(column_type = "Double")]
         pub elapsed_seconds: f64,

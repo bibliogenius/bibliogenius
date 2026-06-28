@@ -22,7 +22,9 @@ async fn setup() -> DatabaseConnection {
 #[tokio::test]
 async fn test_local_op_has_source_local() {
     let db = setup().await;
-    log_operation(&db, "book", 1, "INSERT", None).await.unwrap();
+    log_operation(&db, "book", "book-1", "INSERT", None)
+        .await
+        .unwrap();
 
     let ops = operation_log::Entity::find().all(&db).await.unwrap();
     assert_eq!(ops.len(), 1);
@@ -32,7 +34,7 @@ async fn test_local_op_has_source_local() {
 #[tokio::test]
 async fn test_remote_op_has_device_source() {
     let db = setup().await;
-    let id = log_remote_operation(&db, "book", 1, "INSERT", None, 42, false)
+    let id = log_remote_operation(&db, "book", "book-1", "INSERT", None, 42, false)
         .await
         .unwrap();
 
@@ -47,7 +49,7 @@ async fn test_remote_op_has_device_source() {
 #[tokio::test]
 async fn test_remote_op_safety_on_sets_pending_review() {
     let db = setup().await;
-    let id = log_remote_operation(&db, "tag", 5, "DELETE", None, 7, true)
+    let id = log_remote_operation(&db, "tag", "tag-5", "DELETE", None, 7, true)
         .await
         .unwrap();
 
@@ -63,7 +65,7 @@ async fn test_remote_op_safety_on_sets_pending_review() {
 #[tokio::test]
 async fn test_remote_op_safety_off_sets_pending() {
     let db = setup().await;
-    let id = log_remote_operation(&db, "contact", 3, "INSERT", None, 7, false)
+    let id = log_remote_operation(&db, "contact", "contact-3", "INSERT", None, 7, false)
         .await
         .unwrap();
 
@@ -106,7 +108,9 @@ async fn test_first_insert_per_entity_type_is_auto_pinned() {
     let db = setup().await;
 
     // First book INSERT should be pinned
-    log_operation(&db, "book", 1, "INSERT", None).await.unwrap();
+    log_operation(&db, "book", "book-1", "INSERT", None)
+        .await
+        .unwrap();
     let ops = operation_log::Entity::find()
         .filter(operation_log::Column::EntityType.eq("book"))
         .all(&db)
@@ -115,7 +119,9 @@ async fn test_first_insert_per_entity_type_is_auto_pinned() {
     assert_eq!(ops[0].pinned, 1, "First book INSERT should be pinned");
 
     // Second book INSERT should NOT be pinned
-    log_operation(&db, "book", 2, "INSERT", None).await.unwrap();
+    log_operation(&db, "book", "book-2", "INSERT", None)
+        .await
+        .unwrap();
     let ops = operation_log::Entity::find()
         .filter(operation_log::Column::EntityType.eq("book"))
         .order_by_asc(operation_log::Column::Id)
@@ -126,7 +132,7 @@ async fn test_first_insert_per_entity_type_is_auto_pinned() {
     assert_eq!(ops[1].pinned, 0, "Second book INSERT should NOT be pinned");
 
     // First contact INSERT should also be pinned (different entity type)
-    log_operation(&db, "contact", 1, "INSERT", None)
+    log_operation(&db, "contact", "contact-1", "INSERT", None)
         .await
         .unwrap();
     let contact_ops = operation_log::Entity::find()
@@ -145,7 +151,9 @@ async fn test_update_operation_is_never_pinned() {
     let db = setup().await;
 
     // Even if it's the first operation for this entity type
-    log_operation(&db, "book", 1, "UPDATE", None).await.unwrap();
+    log_operation(&db, "book", "book-1", "UPDATE", None)
+        .await
+        .unwrap();
     let ops = operation_log::Entity::find().all(&db).await.unwrap();
     assert_eq!(ops[0].pinned, 0, "UPDATE operations should never be pinned");
 }
@@ -167,7 +175,10 @@ async fn test_log_operation_with_str_id_injects_str_id() {
         .await
         .unwrap();
     assert_eq!(ops.len(), 1);
-    assert_eq!(ops[0].entity_id, 0, "String-ID ops use entity_id=0");
+    assert_eq!(
+        ops[0].entity_id, "uuid-abc-123",
+        "String-ID ops store the str_id directly in entity_id"
+    );
 
     // Payload should contain _str_id
     let payload: serde_json::Value =
@@ -192,7 +203,9 @@ async fn test_log_rotation_prunes_old_non_pinned() {
     // can accumulate before the next prune.
     let total_inserted: usize = 200;
     for i in 1..=(total_inserted as i32) {
-        log_operation(&db, "book", i, "UPDATE", None).await.unwrap();
+        log_operation(&db, "book", &format!("book-{i}"), "UPDATE", None)
+            .await
+            .unwrap();
     }
 
     let count = operation_log::Entity::find()
@@ -226,9 +239,13 @@ async fn test_echo_prevention_only_local_ops_returned() {
     let db = setup().await;
 
     // Insert local + remote ops
-    log_operation(&db, "book", 1, "INSERT", None).await.unwrap();
-    log_operation(&db, "tag", 1, "INSERT", None).await.unwrap();
-    log_remote_operation(&db, "book", 2, "INSERT", None, 99, false)
+    log_operation(&db, "book", "book-1", "INSERT", None)
+        .await
+        .unwrap();
+    log_operation(&db, "tag", "tag-1", "INSERT", None)
+        .await
+        .unwrap();
+    log_remote_operation(&db, "book", "book-2", "INSERT", None, 99, false)
         .await
         .unwrap();
 

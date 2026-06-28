@@ -31,7 +31,7 @@ pub async fn list_copies(State(state): State<AppState>) -> impl IntoResponse {
 /// Request DTO for creating a copy
 #[derive(Debug, Deserialize)]
 pub struct CreateCopyRequest {
-    pub book_id: i32,
+    pub book_id: String,
     pub library_id: Option<i32>,
     pub acquisition_date: Option<String>,
     pub notes: Option<String>,
@@ -91,7 +91,7 @@ pub async fn create_copy(
 
     match state.copy_repo.create(input).await {
         Ok(copy) => {
-            if let Some(copy_id) = copy.id {
+            if let Some(copy_id) = &copy.id {
                 let _ = crate::sync::log_operation(
                     state.db(),
                     "copy",
@@ -119,8 +119,8 @@ pub async fn create_copy(
 }
 
 // Get a single copy by ID
-pub async fn get_copy(State(state): State<AppState>, Path(id): Path<i32>) -> impl IntoResponse {
-    match state.copy_repo.find_by_id(id).await {
+pub async fn get_copy(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    match state.copy_repo.find_by_id(&id).await {
         Ok(Some(copy)) => (StatusCode::OK, Json(json!({"copy": copy}))).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -138,9 +138,9 @@ pub async fn get_copy(State(state): State<AppState>, Path(id): Path<i32>) -> imp
 // Get copies of a specific book
 pub async fn get_book_copies(
     State(state): State<AppState>,
-    Path(book_id): Path<i32>,
+    Path(book_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.copy_repo.find_by_book_id(book_id).await {
+    match state.copy_repo.find_by_book_id(&book_id).await {
         Ok(result) => Json(json!({
             "copies": result.copies,
             "total": result.total
@@ -200,10 +200,13 @@ pub async fn get_borrowed_copies(State(state): State<AppState>) -> impl IntoResp
 }
 
 // Delete a copy
-pub async fn delete_copy(State(state): State<AppState>, Path(id): Path<i32>) -> impl IntoResponse {
-    match state.copy_repo.delete(id).await {
+pub async fn delete_copy(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.copy_repo.delete(&id).await {
         Ok(()) => {
-            let _ = crate::sync::log_operation(state.db(), "copy", id, "DELETE", None).await;
+            let _ = crate::sync::log_operation(state.db(), "copy", &id, "DELETE", None).await;
             (
                 StatusCode::OK,
                 Json(json!({"message": "Copy deleted successfully"})),
@@ -238,7 +241,7 @@ pub struct UpdateCopyRequest {
 /// Update a copy (mainly for status changes)
 pub async fn update_copy(
     State(state): State<AppState>,
-    Path(id): Path<i32>,
+    Path(id): Path<String>,
     Json(payload): Json<UpdateCopyRequest>,
 ) -> impl IntoResponse {
     let input = UpdateCopyInput {
@@ -249,9 +252,9 @@ pub async fn update_copy(
         ..Default::default()
     };
 
-    match state.copy_repo.update(id, input).await {
+    match state.copy_repo.update(&id, input).await {
         Ok(copy) => {
-            let _ = crate::sync::log_operation(state.db(), "copy", id, "UPDATE", None).await;
+            let _ = crate::sync::log_operation(state.db(), "copy", &id, "UPDATE", None).await;
             (StatusCode::OK, Json(json!({"copy": copy}))).into_response()
         }
         Err(DomainError::NotFound) => (

@@ -189,14 +189,15 @@ pub async fn undo_field(
 #[derive(serde::Deserialize)]
 pub struct UndoBookBody {
     pub batch_id: String,
-    pub book_id: i32,
+    /// Book uuid (the entity PK is now a uuid String).
+    pub book_id: String,
 }
 
 pub async fn undo_book(
     State(state): State<AppState>,
     Json(body): Json<UndoBookBody>,
 ) -> impl IntoResponse {
-    match svc::undo_book(&state, &body.batch_id, body.book_id).await {
+    match svc::undo_book(&state, &body.batch_id, &body.book_id).await {
         Ok(n) => (StatusCode::OK, Json(json!({ "reverted": n }))).into_response(),
         Err(e) => err(e).into_response(),
     }

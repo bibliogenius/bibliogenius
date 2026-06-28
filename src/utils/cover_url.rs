@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// `rewrite_cover_urls_for_relay` in `models::Book`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverResolveError {
-    pub book_ids: Vec<i32>,
+    pub book_ids: Vec<String>,
 }
 
 impl fmt::Display for CoverResolveError {
@@ -100,11 +100,11 @@ pub fn append_version(base: String, updated_at: Option<&str>) -> String {
     }
 }
 
-fn build_hub_url(hub_cover_prefix: &str, book_id: i32, updated_at: Option<&str>) -> String {
+fn build_hub_url(hub_cover_prefix: &str, book_id: &str, updated_at: Option<&str>) -> String {
     append_version(format!("{hub_cover_prefix}/{book_id}"), updated_at)
 }
 
-fn build_lan_url(book_id: i32, updated_at: Option<&str>) -> String {
+fn build_lan_url(book_id: &str, updated_at: Option<&str>) -> String {
     append_version(format!("/api/books/{book_id}/cover"), updated_at)
 }
 
@@ -122,7 +122,7 @@ fn build_lan_url(book_id: i32, updated_at: Option<&str>) -> String {
 /// so peers refetch after re-uploads.
 pub fn resolve_single(
     cover_url: Option<&str>,
-    book_id: i32,
+    book_id: &str,
     updated_at: Option<&str>,
     hub_cover_prefix: Option<&str>,
     scope: ResolveScope,
@@ -135,7 +135,7 @@ pub fn resolve_single(
             None => match scope {
                 ResolveScope::Lan => Ok(Some(build_lan_url(book_id, updated_at))),
                 ResolveScope::Relay => Err(CoverResolveError {
-                    book_ids: vec![book_id],
+                    book_ids: vec![book_id.to_string()],
                 }),
             },
         },
@@ -162,11 +162,38 @@ pub fn resolve_single(
 ///
 /// On macOS/Android the data directory is keyed by a fixed bundle id, so the
 /// re-based path is identical to the stored one: no behavior change there.
-pub fn rebase_local_cover_path(covers_dir: &Path, stored: &str, book_id: i32) -> PathBuf {
+pub fn rebase_local_cover_path(covers_dir: &Path, stored: &str, book_id: &str) -> PathBuf {
     let canonical = format!("{book_id}.jpg");
     match Path::new(stored).file_name() {
         Some(name) if name == canonical.as_str() => covers_dir.join(&canonical),
         _ => PathBuf::from(stored),
+    }
+}
+
+/// Reduce a stored `cover_url` to its device-independent form for storage.
+///
+/// The same logical cover must be stored identically on every device so the
+/// column can be replicated by field-level LWW without one device clobbering
+/// another with a path only valid locally (ADR-044 Addendum A.4). Two value
+/// kinds are already device-independent and pass through untouched:
+///
+/// - HTTP(S) URLs (external covers),
+/// - `/api/...` relative paths (peer covers).
+///
+/// Anything else is treated as a local filesystem path: only the final
+/// component (the basename, e.g. `<id>.jpg`) is kept. The absolute prefix
+/// (`/var/mobile/Containers/<UUID>/...`) is vestigial — it is recomputed at
+/// runtime by `rebase_local_cover_path` and the Flutter `LocalCoverResolver`,
+/// so dropping it loses nothing. `None`/empty in, same out.
+pub fn normalize_cover_url_for_storage(cover_url: Option<&str>) -> Option<String> {
+    match cover_url {
+        None => None,
+        Some(url) if url.is_empty() || is_servable_on_lan(url) => Some(url.to_string()),
+        Some(url) => Path::new(url)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .or_else(|| Some(url.to_string())),
     }
 }
 
@@ -216,7 +243,7 @@ mod tests {
 
     #[test]
     fn resolve_single_none_passthrough() {
-        let out = resolve_single(None, 1, None, None, ResolveScope::Relay).unwrap();
+        let out = resolve_single(None, "1", None, None, ResolveScope::Relay).unwrap();
         assert_eq!(out, None);
     }
 
@@ -224,7 +251,7 @@ mod tests {
     fn resolve_single_http_passthrough() {
         let out = resolve_single(
             Some("https://cdn/ok.jpg"),
-            1,
+            "1",
             None,
             None,
             ResolveScope::Relay,
@@ -237,7 +264,7 @@ mod tests {
     fn resolve_single_api_passthrough() {
         let out = resolve_single(
             Some("/api/books/2/cover"),
-            2,
+            "2",
             None,
             None,
             ResolveScope::Relay,
@@ -250,7 +277,7 @@ mod tests {
     fn resolve_single_local_with_hub_builds_hub_url() {
         let out = resolve_single(
             Some("/var/mobile/c.jpg"),
-            42,
+            "42",
             None,
             Some("https://hub/api/directory/n/covers"),
             ResolveScope::Relay,
@@ -264,8 +291,14 @@ mod tests {
 
     #[test]
     fn resolve_single_local_lan_without_hub_falls_back_to_api() {
-        let out =
-            resolve_single(Some("/var/mobile/c.jpg"), 7, None, None, ResolveScope::Lan).unwrap();
+        let out = resolve_single(
+            Some("/var/mobile/c.jpg"),
+            "7",
+            None,
+            None,
+            ResolveScope::Lan,
+        )
+        .unwrap();
         assert_eq!(out.as_deref(), Some("/api/books/7/cover"));
     }
 
@@ -273,20 +306,20 @@ mod tests {
     fn resolve_single_local_relay_without_hub_errors() {
         let err = resolve_single(
             Some("/var/mobile/c.jpg"),
-            42,
+            "42",
             None,
             None,
             ResolveScope::Relay,
         )
         .unwrap_err();
-        assert_eq!(err.book_ids, vec![42]);
+        assert_eq!(err.book_ids, vec!["42".to_string()]);
     }
 
     #[test]
     fn resolve_single_appends_version_from_updated_at() {
         let out = resolve_single(
             Some("/var/mobile/c.jpg"),
-            42,
+            "42",
             Some("2026-04-20 10:30:00"),
             Some("https://hub/api/directory/n/covers"),
             ResolveScope::Relay,
@@ -302,7 +335,7 @@ mod tests {
     fn resolve_single_lan_appends_version_for_local_fallback() {
         let out = resolve_single(
             Some("/var/mobile/c.jpg"),
-            7,
+            "7",
             Some("2026-04-20 10:30:00"),
             None,
             ResolveScope::Lan,
@@ -320,7 +353,7 @@ mod tests {
         );
         let stored = "/var/mobile/Containers/Data/Application/OLD-UUID/Library/Application Support/covers/42.jpg";
         assert_eq!(
-            rebase_local_cover_path(covers, stored, 42),
+            rebase_local_cover_path(covers, stored, "42"),
             covers.join("42.jpg")
         );
     }
@@ -332,7 +365,7 @@ mod tests {
         let covers = Path::new("/now/covers");
         let stored = "/var/mobile/.../Application Support/covers/42.jpg";
         assert_eq!(
-            rebase_local_cover_path(covers, stored, 87),
+            rebase_local_cover_path(covers, stored, "87"),
             Path::new(stored)
         );
     }
@@ -341,7 +374,7 @@ mod tests {
     fn rebase_rewrites_a_bare_basename_matching_id() {
         let covers = Path::new("/now/covers");
         assert_eq!(
-            rebase_local_cover_path(covers, "42.jpg", 42),
+            rebase_local_cover_path(covers, "42.jpg", "42"),
             covers.join("42.jpg")
         );
     }
@@ -351,7 +384,7 @@ mod tests {
         let covers = Path::new("/Users/x/Application Support/covers");
         let stored = "/Users/x/Application Support/covers/7.jpg";
         assert_eq!(
-            rebase_local_cover_path(covers, stored, 7),
+            rebase_local_cover_path(covers, stored, "7"),
             Path::new(stored)
         );
     }
@@ -375,5 +408,52 @@ mod tests {
                 "S5 leak: {bad:?} must not pass is_servable_remotely"
             );
         }
+    }
+
+    // normalize_cover_url_for_storage -------------------------------------
+
+    #[test]
+    fn normalize_storage_keeps_device_independent_values() {
+        // None / empty pass through.
+        assert_eq!(normalize_cover_url_for_storage(None), None);
+        assert_eq!(
+            normalize_cover_url_for_storage(Some("")).as_deref(),
+            Some("")
+        );
+        // External URLs and /api relative paths are already device-independent.
+        assert_eq!(
+            normalize_cover_url_for_storage(Some("https://cdn/x.jpg")).as_deref(),
+            Some("https://cdn/x.jpg")
+        );
+        assert_eq!(
+            normalize_cover_url_for_storage(Some("http://h/c/7")).as_deref(),
+            Some("http://h/c/7")
+        );
+        assert_eq!(
+            normalize_cover_url_for_storage(Some("/api/books/2/cover")).as_deref(),
+            Some("/api/books/2/cover")
+        );
+    }
+
+    #[test]
+    fn normalize_storage_strips_local_absolute_prefix_to_basename() {
+        for path in [
+            "/var/mobile/Containers/Data/Application/abc/Documents/covers/1.jpg",
+            "/Users/x/Library/Application Support/com.bibliogenius.app/covers/1.jpg",
+            "/data/user/0/com.bibliogenius.app/files/covers/1.jpg",
+            "covers/1.jpg",
+        ] {
+            assert_eq!(
+                normalize_cover_url_for_storage(Some(path)).as_deref(),
+                Some("1.jpg"),
+                "expected basename for {path:?}"
+            );
+        }
+        // A bare basename is already normalized (the `<id>.jpg` -> `<uuid>.jpg`
+        // rename of the file itself is a separate cover-transport step).
+        assert_eq!(
+            normalize_cover_url_for_storage(Some("1.jpg")).as_deref(),
+            Some("1.jpg")
+        );
     }
 }

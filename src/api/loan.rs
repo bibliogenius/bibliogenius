@@ -48,7 +48,10 @@ pub async fn list_loans(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Collect copy IDs to fetch books
-    let copy_ids: Vec<i32> = loans_with_contacts.iter().map(|(l, _)| l.copy_id).collect();
+    let copy_ids: Vec<String> = loans_with_contacts
+        .iter()
+        .map(|(l, _)| l.copy_id.clone())
+        .collect();
 
     // Fetch copies with books
     // We only need to fetch if there are loans
@@ -82,7 +85,7 @@ pub async fn list_loans(
                 .map(|b| b.title.clone())
                 .unwrap_or("Unknown".to_string());
 
-            let book_id = book.as_ref().map(|b| b.id);
+            let book_id = book.as_ref().map(|b| b.id.clone());
             let cover_url = book.as_ref().and_then(|b| b.cover_url.clone());
             let isbn = book.as_ref().and_then(|b| b.isbn.clone());
 
@@ -117,7 +120,7 @@ pub async fn create_loan(
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     // 1. Check if copy exists and is available
-    let copy = Copy::find_by_id(payload.copy_id)
+    let copy = Copy::find_by_id(payload.copy_id.clone())
         .one(&db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -165,12 +168,12 @@ pub async fn create_loan(
 
 pub async fn return_loan(
     State(db): State<DatabaseConnection>,
-    Path(id): Path<i32>,
+    Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     // 1. Find Loan
-    let loan = Loan::find_by_id(id)
+    let loan = Loan::find_by_id(id.clone())
         .one(&db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -196,7 +199,7 @@ pub async fn return_loan(
 
     // 3. Update Copy status to 'available'
     // First fetch the copy to get its full state
-    let copy = Copy::find_by_id(loan.copy_id)
+    let copy = Copy::find_by_id(loan.copy_id.clone())
         .one(&db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -213,8 +216,8 @@ pub async fn return_loan(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // 4. Emit book_returned notification
-    if let Ok(Some(book)) = Book::find_by_id(copy.book_id).one(&db).await {
-        let contact_name = Contact::find_by_id(loan.contact_id)
+    if let Ok(Some(book)) = Book::find_by_id(copy.book_id.clone()).one(&db).await {
+        let contact_name = Contact::find_by_id(loan.contact_id.clone())
             .one(&db)
             .await
             .ok()
@@ -389,11 +392,11 @@ pub async fn update_loan_settings(
 
 pub async fn get_effective_loan_duration(
     State(state): State<AppState>,
-    Path(book_id): Path<i32>,
+    Path(book_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let days = state
         .loan_settings_repo
-        .get_effective_duration(book_id)
+        .get_effective_duration(&book_id)
         .await
         .map_err(|e| {
             (

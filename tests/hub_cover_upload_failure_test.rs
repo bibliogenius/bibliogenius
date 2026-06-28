@@ -6,9 +6,9 @@
 use rust_lib_app::db;
 use rust_lib_app::models::book;
 use rust_lib_app::services::hub_directory_service::HubDirectoryService;
-use sea_orm::{EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
-async fn insert_book(db: &sea_orm::DatabaseConnection, title: &str) -> i32 {
+async fn insert_book(db: &sea_orm::DatabaseConnection, title: &str) -> String {
     let now = chrono::Utc::now().to_rfc3339();
     let active = book::ActiveModel {
         title: Set(title.to_string()),
@@ -16,11 +16,7 @@ async fn insert_book(db: &sea_orm::DatabaseConnection, title: &str) -> i32 {
         updated_at: Set(now),
         ..Default::default()
     };
-    book::Entity::insert(active)
-        .exec(db)
-        .await
-        .expect("insert book")
-        .last_insert_id
+    active.insert(db).await.expect("insert book").id
 }
 
 /// After `mark_hub_cover_upload_failure`, `books.hub_cover_upload_failed_at`
@@ -30,7 +26,7 @@ async fn mark_sets_the_failure_timestamp() {
     let db = db::init_db("sqlite::memory:").await.expect("init db");
     let id = insert_book(&db, "Martin Eden").await;
 
-    HubDirectoryService::mark_hub_cover_upload_failure(&db, id).await;
+    HubDirectoryService::mark_hub_cover_upload_failure(&db, &id).await;
 
     let row = book::Entity::find_by_id(id)
         .one(&db)
@@ -53,8 +49,8 @@ async fn clear_resets_the_failure_timestamp_to_null() {
     let db = db::init_db("sqlite::memory:").await.expect("init db");
     let id = insert_book(&db, "Les mouches").await;
 
-    HubDirectoryService::mark_hub_cover_upload_failure(&db, id).await;
-    HubDirectoryService::clear_hub_cover_upload_failure(&db, id).await;
+    HubDirectoryService::mark_hub_cover_upload_failure(&db, &id).await;
+    HubDirectoryService::clear_hub_cover_upload_failure(&db, &id).await;
 
     let row = book::Entity::find_by_id(id)
         .one(&db)
@@ -78,13 +74,13 @@ async fn reset_all_clears_every_book() {
     let id_b = insert_book(&db, "B").await;
     let id_clean = insert_book(&db, "C").await;
 
-    HubDirectoryService::mark_hub_cover_upload_failure(&db, id_a).await;
-    HubDirectoryService::mark_hub_cover_upload_failure(&db, id_b).await;
+    HubDirectoryService::mark_hub_cover_upload_failure(&db, &id_a).await;
+    HubDirectoryService::mark_hub_cover_upload_failure(&db, &id_b).await;
 
     HubDirectoryService::reset_all_hub_cover_upload_failures(&db).await;
 
     for id in [id_a, id_b, id_clean] {
-        let row = book::Entity::find_by_id(id)
+        let row = book::Entity::find_by_id(id.clone())
             .one(&db)
             .await
             .expect("find")
@@ -104,7 +100,7 @@ async fn reset_all_clears_every_book() {
 async fn mark_unknown_book_is_a_noop() {
     let db = db::init_db("sqlite::memory:").await.expect("init db");
 
-    HubDirectoryService::mark_hub_cover_upload_failure(&db, 9999).await;
+    HubDirectoryService::mark_hub_cover_upload_failure(&db, "9999").await;
 
     let count = book::Entity::find().all(&db).await.expect("find all").len();
     assert_eq!(count, 0, "no row should be created for an unknown book id");

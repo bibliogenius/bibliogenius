@@ -64,7 +64,7 @@ pub async fn populate_available_copies(
     db: &DatabaseConnection,
     books: &mut [Book],
 ) -> Result<(), sea_orm::DbErr> {
-    let book_ids: Vec<i32> = books.iter().filter_map(|b| b.id).collect();
+    let book_ids: Vec<String> = books.iter().filter_map(|b| b.id.clone()).collect();
     if book_ids.is_empty() {
         return Ok(());
     }
@@ -73,14 +73,14 @@ pub async fn populate_available_copies(
         .all(db)
         .await?;
 
-    let mut available_map: HashMap<i32, i32> = HashMap::new();
+    let mut available_map: HashMap<String, i32> = HashMap::new();
     for c in &copies {
         if c.status == "available" {
-            *available_map.entry(c.book_id).or_insert(0) += 1;
+            *available_map.entry(c.book_id.clone()).or_insert(0) += 1;
         }
     }
     for book in books.iter_mut() {
-        let id = book.id.unwrap_or(0);
+        let id = book.id.clone().unwrap_or_default();
         book.available_copies = Some(*available_map.get(&id).unwrap_or(&0));
     }
     Ok(())
@@ -146,9 +146,12 @@ pub async fn list_books(
     // override below. `available_copies` is populated separately via the
     // shared `populate_available_copies` helper so HTTP peer-facing paths
     // stay consistent with this FRB path.
-    let book_ids: Vec<i32> = books_with_authors.iter().map(|(m, _)| m.id).collect();
-    let mut lent_set: std::collections::HashSet<i32> = std::collections::HashSet::new();
-    let mut borrowed_set: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let book_ids: Vec<String> = books_with_authors
+        .iter()
+        .map(|(m, _)| m.id.clone())
+        .collect();
+    let mut lent_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut borrowed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     if !book_ids.is_empty()
         && let Ok(copies) = crate::models::copy::Entity::find()
             .filter(crate::models::copy::Column::BookId.is_in(book_ids))
@@ -157,10 +160,10 @@ pub async fn list_books(
     {
         for c in &copies {
             if c.status == "loaned" {
-                lent_set.insert(c.book_id);
+                lent_set.insert(c.book_id.clone());
             }
             if c.status == "borrowed" && c.is_temporary {
-                borrowed_set.insert(c.book_id);
+                borrowed_set.insert(c.book_id.clone());
             }
         }
     }
@@ -183,9 +186,9 @@ pub async fn list_books(
         // Override reading_status based on copy status:
         // - Temporary copy borrowed → I borrowed this book from someone
         // - Own copy borrowed → I lent this book to someone
-        if borrowed_set.contains(&book_dto.id.unwrap_or(0)) {
+        if borrowed_set.contains(book_dto.id.as_deref().unwrap_or("")) {
             book_dto.reading_status = Some("borrowed".to_string());
-        } else if lent_set.contains(&book_dto.id.unwrap_or(0)) {
+        } else if lent_set.contains(book_dto.id.as_deref().unwrap_or("")) {
             book_dto.reading_status = Some("lent".to_string());
         }
 
@@ -228,8 +231,8 @@ pub async fn list_books(
 }
 
 /// Get a single book by ID
-pub async fn get_book(db: &DatabaseConnection, id: i32) -> Result<Book, ServiceError> {
-    let book_model = BookEntity::find_by_id(id)
+pub async fn get_book(db: &DatabaseConnection, id: &str) -> Result<Book, ServiceError> {
+    let book_model = BookEntity::find_by_id(id.to_owned())
         .one(db)
         .await?
         .ok_or(ServiceError::NotFound)?;
@@ -329,17 +332,17 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
 
     // Handle author if provided
     if let Some(author_name) = book.author {
-        let _ = create_or_link_author(db, model.id, &author_name).await;
+        let _ = create_or_link_author(db, &model.id, &author_name).await;
     }
 
     // Log sync operation (minimal payload, no sensitive data)
-    let _ = crate::sync::log_operation(db, "book", model.id, "INSERT", None).await;
+    let _ = crate::sync::log_operation(db, "book", &model.id, "INSERT", None).await;
 
     // Create default copy if book is owned (wishlist items with owned=false skip this)
     if model.owned {
         if let Ok(Some(library)) = crate::models::library::Entity::find().one(db).await {
             let copy = crate::models::copy::ActiveModel {
-                book_id: Set(model.id),
+                book_id: Set(model.id.clone()),
                 library_id: Set(library.id),
                 status: Set("available".to_string()),
                 is_temporary: Set(false),
@@ -351,7 +354,7 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
                 let _ = crate::sync::log_operation(
                     db,
                     "copy",
-                    saved_copy.id,
+                    &saved_copy.id,
                     "INSERT",
                     Some(serde_json::json!({ "book_id": model.id })),
                 )
@@ -382,12 +385,12 @@ fn validate_reading_status(status: &str) -> Result<(), ServiceError> {
 /// Update an existing book
 pub async fn update_book(
     db: &DatabaseConnection,
-    id: i32,
+    id: &str,
     book_data: Book,
 ) -> Result<Book, ServiceError> {
     let now = chrono::Utc::now();
 
-    let book_model = BookEntity::find_by_id(id)
+    let book_model = BookEntity::find_by_id(id.to_owned())
         .one(db)
         .await?
         .ok_or(ServiceError::NotFound)?;
@@ -492,14 +495,14 @@ pub async fn update_book(
                     };
                     let created = new_author.insert(db).await?;
                     let _ =
-                        crate::sync::log_operation(db, "author", created.id, "INSERT", None).await;
+                        crate::sync::log_operation(db, "author", &created.id, "INSERT", None).await;
                     created
                 }
             };
 
             let book_author = BookAuthorActive {
-                book_id: Set(id),
-                author_id: Set(author_model.id),
+                book_id: Set(id.to_owned()),
+                author_id: Set(author_model.id.clone()),
                 ..Default::default()
             };
             if book_author.insert(db).await.is_ok() {
@@ -519,8 +522,8 @@ pub async fn update_book(
 }
 
 /// Delete a book by ID
-pub async fn delete_book(db: &DatabaseConnection, id: i32) -> Result<(), ServiceError> {
-    BookEntity::delete_by_id(id).exec(db).await?;
+pub async fn delete_book(db: &DatabaseConnection, id: &str) -> Result<(), ServiceError> {
+    BookEntity::delete_by_id(id.to_owned()).exec(db).await?;
 
     let _ = crate::sync::log_operation(db, "book", id, "DELETE", None).await;
 
@@ -653,7 +656,7 @@ pub async fn enrich_missing_covers(
         // accept a cover only when both the title and the author match — there is
         // no user confirmation on this path. Requires the book to have an author.
         if found.is_none() && enable_inventaire {
-            let (title, author) = fetch_book_title_author(db, *book_id).await;
+            let (title, author) = fetch_book_title_author(db, book_id).await;
             if let (Some(title), Some(author)) = (title, author) {
                 found = find_cover_by_title_for_author(&title, &author, isbn).await;
             }
@@ -661,7 +664,7 @@ pub async fn enrich_missing_covers(
 
         if let Some(url) = found {
             book_repo
-                .update_cover_url(*book_id, &url)
+                .update_cover_url(book_id, &url)
                 .await
                 .map_err(|e| ServiceError::Database(format!("{e}")))?;
             enriched += 1;
@@ -1200,7 +1203,7 @@ async fn find_cover_by_title_for_author(title: &str, author: &str, isbn: &str) -
 
 /// Comma-joined author names linked to a book, or `None` when the book has no
 /// author. Used to verify a title-based cover match on the silent bulk path.
-async fn fetch_book_author_names(db: &DatabaseConnection, book_id: i32) -> Option<String> {
+async fn fetch_book_author_names(db: &DatabaseConnection, book_id: &str) -> Option<String> {
     use crate::models::{author, book_authors};
     let links = book_authors::Entity::find()
         .filter(book_authors::Column::BookId.eq(book_id))
@@ -1210,7 +1213,7 @@ async fn fetch_book_author_names(db: &DatabaseConnection, book_id: i32) -> Optio
     if links.is_empty() {
         return None;
     }
-    let ids: Vec<i32> = links.iter().map(|l| l.author_id).collect();
+    let ids: Vec<String> = links.iter().map(|l| l.author_id.clone()).collect();
     let names: Vec<String> = author::Entity::find()
         .filter(author::Column::Id.is_in(ids))
         .all(db)
@@ -1231,9 +1234,9 @@ async fn fetch_book_author_names(db: &DatabaseConnection, book_id: i32) -> Optio
 /// fallback (both are required before a title-based cover is considered).
 async fn fetch_book_title_author(
     db: &DatabaseConnection,
-    book_id: i32,
+    book_id: &str,
 ) -> (Option<String>, Option<String>) {
-    let title = BookEntity::find_by_id(book_id)
+    let title = BookEntity::find_by_id(book_id.to_owned())
         .one(db)
         .await
         .ok()
@@ -1297,7 +1300,7 @@ async fn cleanup_stale_openlibrary_covers(db: &DatabaseConnection) {
                     Column::CoverUrl,
                     sea_orm::sea_query::Expr::value(Option::<String>::None),
                 )
-                .filter(Column::Id.eq(model.id))
+                .filter(Column::Id.eq(model.id.as_str()))
                 .exec(db)
                 .await;
             cleared += 1;
@@ -1332,7 +1335,7 @@ async fn load_google_books_api_key(db: &DatabaseConnection) -> Option<String> {
 // Helper: Create or link author to book
 async fn create_or_link_author(
     db: &DatabaseConnection,
-    book_id: i32,
+    book_id: &str,
     author_name: &str,
 ) -> Result<(), ServiceError> {
     use crate::models::author::{ActiveModel as AuthorActive, Entity as AuthorEntity};
@@ -1355,15 +1358,15 @@ async fn create_or_link_author(
                 ..Default::default()
             };
             let created = new_author.insert(db).await?;
-            let _ = crate::sync::log_operation(db, "author", created.id, "INSERT", None).await;
+            let _ = crate::sync::log_operation(db, "author", &created.id, "INSERT", None).await;
             created
         }
     };
 
     // Create book-author relation
     let book_author = BookAuthorActive {
-        book_id: Set(book_id),
-        author_id: Set(author.id),
+        book_id: Set(book_id.to_owned()),
+        author_id: Set(author.id.clone()),
         ..Default::default()
     };
     if book_author.insert(db).await.is_ok() {
@@ -1543,16 +1546,16 @@ mod tests {
 
         let db = db::init_db("sqlite::memory:").await.unwrap();
         let id = insert_test_book(&db, "Findable by uuid").await;
-        // The migration-078 trigger fills the uuid on insert.
-        let uuid = book::Entity::find_by_id(id)
+        // The PK is now the cross-device uuid: the model's `id` IS the uuid.
+        let uuid = book::Entity::find_by_id(id.clone())
             .one(&db)
             .await
             .unwrap()
             .unwrap()
-            .uuid;
+            .id;
 
         let by_uuid = get_book_by_uuid(&db, &uuid).await.expect("found by uuid");
-        let by_id = get_book(&db, id).await.expect("found by id");
+        let by_id = get_book(&db, &id).await.expect("found by id");
         assert_eq!(by_uuid.id, by_id.id);
         assert_eq!(by_uuid.id, Some(id));
         assert_eq!(by_uuid.title, "Findable by uuid");
@@ -1564,11 +1567,15 @@ mod tests {
         ));
     }
 
-    async fn insert_test_book(db: &DatabaseConnection, title: &str) -> i32 {
+    async fn insert_test_book(db: &DatabaseConnection, title: &str) -> String {
         use crate::models::book;
         use sea_orm::Set;
         let now = chrono::Utc::now().to_rfc3339();
+        // `Entity::insert` does not fire `before_save`, so the uuid PK must be
+        // set explicitly or the NOT NULL constraint on `books.id` would fail.
+        let id = uuid::Uuid::new_v4().to_string();
         book::Entity::insert(book::ActiveModel {
+            id: Set(id.clone()),
             title: Set(title.to_owned()),
             created_at: Set(now.clone()),
             updated_at: Set(now),
@@ -1576,13 +1583,13 @@ mod tests {
         })
         .exec(db)
         .await
-        .unwrap()
-        .last_insert_id
+        .unwrap();
+        id
     }
 
     async fn insert_test_copy(
         db: &DatabaseConnection,
-        book_id: i32,
+        book_id: &str,
         status: &str,
         is_temporary: bool,
     ) {
@@ -1590,7 +1597,8 @@ mod tests {
         use sea_orm::Set;
         let now = chrono::Utc::now().to_rfc3339();
         copy::Entity::insert(copy::ActiveModel {
-            book_id: Set(book_id),
+            id: Set(uuid::Uuid::new_v4().to_string()),
+            book_id: Set(book_id.to_string()),
             library_id: Set(0),
             status: Set(status.to_owned()),
             is_temporary: Set(is_temporary),
@@ -1625,11 +1633,11 @@ mod tests {
         let id_peer_borrowed = insert_test_book(&db, "I borrowed it").await;
         let id_no_copies = insert_test_book(&db, "Standalone metadata").await;
 
-        insert_test_copy(&db, id_two_avail, "available", false).await;
-        insert_test_copy(&db, id_two_avail, "available", false).await;
-        insert_test_copy(&db, id_two_avail, "loaned", false).await;
-        insert_test_copy(&db, id_all_lent, "loaned", false).await;
-        insert_test_copy(&db, id_peer_borrowed, "borrowed", true).await;
+        insert_test_copy(&db, &id_two_avail, "available", false).await;
+        insert_test_copy(&db, &id_two_avail, "available", false).await;
+        insert_test_copy(&db, &id_two_avail, "loaned", false).await;
+        insert_test_copy(&db, &id_all_lent, "loaned", false).await;
+        insert_test_copy(&db, &id_peer_borrowed, "borrowed", true).await;
 
         let mut books = vec![
             Book {
@@ -1717,7 +1725,7 @@ mod tests {
         .await
         .unwrap();
         BookAuthorActive {
-            book_id: Set(book_id),
+            book_id: Set(book_id.clone()),
             author_id: Set(a1.id),
             ..Default::default()
         }
@@ -1725,7 +1733,7 @@ mod tests {
         .await
         .unwrap();
         BookAuthorActive {
-            book_id: Set(book_id),
+            book_id: Set(book_id.clone()),
             author_id: Set(a2.id),
             ..Default::default()
         }
@@ -1734,7 +1742,7 @@ mod tests {
         .unwrap();
 
         let pre = BookAuthorEntity::find()
-            .filter(BACol::BookId.eq(book_id))
+            .filter(BACol::BookId.eq(book_id.as_str()))
             .all(&db)
             .await
             .unwrap();
@@ -1747,17 +1755,17 @@ mod tests {
         // The Dart→Rust conversion sends both fields when the user clears the
         // author input: `author = Some("")` and `authors = Some(vec![])`.
         let payload = Book {
-            id: Some(book_id),
+            id: Some(book_id.clone()),
             title: "Le Seigneur des Anneaux".to_string(),
             author: Some(String::new()),
             authors: Some(Vec::new()),
             ..Default::default()
         };
 
-        update_book(&db, book_id, payload).await.unwrap();
+        update_book(&db, &book_id, payload).await.unwrap();
 
         let post = BookAuthorEntity::find()
-            .filter(BACol::BookId.eq(book_id))
+            .filter(BACol::BookId.eq(book_id.as_str()))
             .all(&db)
             .await
             .unwrap();

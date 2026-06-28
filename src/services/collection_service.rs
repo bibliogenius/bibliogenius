@@ -67,7 +67,7 @@ pub async fn preview_deletion(
 
     let mut to_delete = 0i64;
     for book_id in &book_ids {
-        if is_book_eligible_for_deletion(db, *book_id, collection_id).await? {
+        if is_book_eligible_for_deletion(db, book_id, collection_id).await? {
             to_delete += 1;
         }
     }
@@ -92,7 +92,7 @@ pub async fn delete_collection(
     db: &DatabaseConnection,
     collection_id: &str,
     delete_books: bool,
-) -> Result<Vec<i32>, CollectionServiceError> {
+) -> Result<Vec<String>, CollectionServiceError> {
     if collection::Entity::find_by_id(collection_id)
         .one(db)
         .await?
@@ -103,12 +103,14 @@ pub async fn delete_collection(
 
     let txn = db.begin().await?;
 
-    let mut deleted_ids: Vec<i32> = Vec::new();
+    let mut deleted_ids: Vec<String> = Vec::new();
     if delete_books {
         let book_ids = book_ids_in_collection(&txn, collection_id).await?;
         for book_id in book_ids {
-            if is_book_eligible_for_deletion(&txn, book_id, collection_id).await? {
-                book::Entity::delete_by_id(book_id).exec(&txn).await?;
+            if is_book_eligible_for_deletion(&txn, &book_id, collection_id).await? {
+                book::Entity::delete_by_id(book_id.clone())
+                    .exec(&txn)
+                    .await?;
                 deleted_ids.push(book_id);
             }
         }
@@ -127,14 +129,14 @@ pub async fn delete_collection(
 
     // Post-commit side effects (best-effort, non-critical).
     for id in &deleted_ids {
-        let _ = crate::sync::log_operation(db, "book", *id, "DELETE", None).await;
+        let _ = crate::sync::log_operation(db, "book", id, "DELETE", None).await;
     }
     let _ = crate::sync::log_operation_with_str_id(db, "collection", collection_id, "DELETE", None)
         .await;
 
     let hub_svc = crate::services::hub_directory_service::HubDirectoryService::new();
     for id in &deleted_ids {
-        if let Err(e) = hub_svc.delete_cover(db, *id).await {
+        if let Err(e) = hub_svc.delete_cover(db, id).await {
             tracing::debug!("hub cover cleanup skipped for book {id}: {e}");
         }
     }
@@ -147,7 +149,7 @@ pub async fn delete_collection(
 async fn book_ids_in_collection<C: ConnectionTrait>(
     db: &C,
     collection_id: &str,
-) -> Result<Vec<i32>, CollectionServiceError> {
+) -> Result<Vec<String>, CollectionServiceError> {
     let rows = collection_book::Entity::find()
         .filter(collection_book::Column::CollectionId.eq(collection_id))
         .all(db)
@@ -157,7 +159,7 @@ async fn book_ids_in_collection<C: ConnectionTrait>(
 
 async fn is_book_eligible_for_deletion<C: ConnectionTrait>(
     db: &C,
-    book_id: i32,
+    book_id: &str,
     collection_id: &str,
 ) -> Result<bool, CollectionServiceError> {
     let active_copies = copy::Entity::find()
@@ -208,9 +210,15 @@ mod tests {
         db
     }
 
-    async fn insert_book(db: &DatabaseConnection, title: &str) -> i32 {
+    async fn insert_book(db: &DatabaseConnection, title: &str) -> String {
         let now = chrono::Utc::now().to_rfc3339();
+        // `Entity::insert(...).exec()` does NOT run `before_save`, and the
+        // post-uuid-flip schema has no AFTER INSERT trigger to mint the uuid
+        // PK, so set the id explicitly (else `NOT NULL constraint failed:
+        // books.uuid`). Return it as the book's stable id.
+        let id = crate::utils::uuid_gen::new_uuid_v7();
         book::Entity::insert(book::ActiveModel {
+            id: Set(id.clone()),
             title: Set(title.to_owned()),
             created_at: Set(now.clone()),
             updated_at: Set(now),
@@ -218,8 +226,8 @@ mod tests {
         })
         .exec(db)
         .await
-        .unwrap()
-        .last_insert_id
+        .unwrap();
+        id
     }
 
     async fn insert_collection(db: &DatabaseConnection, id: &str, name: &str) {
@@ -237,10 +245,10 @@ mod tests {
         .unwrap();
     }
 
-    async fn attach_book(db: &DatabaseConnection, collection_id: &str, book_id: i32) {
+    async fn attach_book(db: &DatabaseConnection, collection_id: &str, book_id: &str) {
         collection_book::ActiveModel {
             collection_id: Set(collection_id.to_owned()),
-            book_id: Set(book_id),
+            book_id: Set(book_id.to_owned()),
             added_at: Set(chrono::Utc::now().to_rfc3339()),
         }
         .insert(db)
@@ -248,10 +256,13 @@ mod tests {
         .unwrap();
     }
 
-    async fn insert_copy(db: &DatabaseConnection, book_id: i32, status: &str) {
+    async fn insert_copy(db: &DatabaseConnection, book_id: &str, status: &str) {
         let now = chrono::Utc::now().to_rfc3339();
         copy::Entity::insert(copy::ActiveModel {
-            book_id: Set(book_id),
+            // Explicit uuid PK: `Entity::insert` skips `before_save` and the
+            // schema has no trigger to mint it (see `insert_book`).
+            id: Set(crate::utils::uuid_gen::new_uuid_v7()),
+            book_id: Set(book_id.to_owned()),
             library_id: Set(0),
             status: Set(status.to_owned()),
             is_temporary: Set(status == "borrowed"),
@@ -264,11 +275,10 @@ mod tests {
         .unwrap();
     }
 
-    async fn insert_tag(db: &DatabaseConnection, id: i32, name: &str) {
+    async fn insert_tag(db: &DatabaseConnection, id: &str, name: &str) {
         let now = chrono::Utc::now().to_rfc3339();
         crate::models::tag::ActiveModel {
-            id: Set(id),
-            uuid: sea_orm::ActiveValue::NotSet,
+            id: Set(id.to_owned()),
             name: Set(name.to_owned()),
             parent_id: Set(None),
             path: Set(name.to_owned()),
@@ -280,18 +290,18 @@ mod tests {
         .unwrap();
     }
 
-    async fn attach_tag(db: &DatabaseConnection, book_id: i32, tag_id: i32) {
+    async fn attach_tag(db: &DatabaseConnection, book_id: &str, tag_id: &str) {
         book_tags::ActiveModel {
-            book_id: Set(book_id),
-            tag_id: Set(tag_id),
+            book_id: Set(book_id.to_owned()),
+            tag_id: Set(tag_id.to_owned()),
         }
         .insert(db)
         .await
         .unwrap();
     }
 
-    async fn book_exists(db: &DatabaseConnection, id: i32) -> bool {
-        book::Entity::find_by_id(id)
+    async fn book_exists(db: &DatabaseConnection, id: &str) -> bool {
+        book::Entity::find_by_id(id.to_owned())
             .one(db)
             .await
             .unwrap()
@@ -320,9 +330,9 @@ mod tests {
         let b1 = insert_book(&db, "A").await;
         let b2 = insert_book(&db, "B").await;
         let b3 = insert_book(&db, "C").await;
-        attach_book(&db, "c1", b1).await;
-        attach_book(&db, "c1", b2).await;
-        attach_book(&db, "c1", b3).await;
+        attach_book(&db, "c1", &b1).await;
+        attach_book(&db, "c1", &b2).await;
+        attach_book(&db, "c1", &b3).await;
 
         let preview = preview_deletion(&db, "c1").await.unwrap();
         assert_eq!(
@@ -341,10 +351,10 @@ mod tests {
         insert_collection(&db, "c1", "c1").await;
         let loaned = insert_book(&db, "lent").await;
         let free = insert_book(&db, "free").await;
-        attach_book(&db, "c1", loaned).await;
-        attach_book(&db, "c1", free).await;
-        insert_copy(&db, loaned, "loaned").await;
-        insert_copy(&db, free, "available").await;
+        attach_book(&db, "c1", &loaned).await;
+        attach_book(&db, "c1", &free).await;
+        insert_copy(&db, &loaned, "loaned").await;
+        insert_copy(&db, &free, "available").await;
 
         let preview = preview_deletion(&db, "c1").await.unwrap();
         assert_eq!(preview.total_books, 2);
@@ -357,8 +367,8 @@ mod tests {
         let db = setup_db().await;
         insert_collection(&db, "c1", "c1").await;
         let borrowed = insert_book(&db, "borrowed").await;
-        attach_book(&db, "c1", borrowed).await;
-        insert_copy(&db, borrowed, "borrowed").await;
+        attach_book(&db, "c1", &borrowed).await;
+        insert_copy(&db, &borrowed, "borrowed").await;
 
         let preview = preview_deletion(&db, "c1").await.unwrap();
         assert_eq!(preview.to_keep, 1);
@@ -372,9 +382,9 @@ mod tests {
         insert_collection(&db, "c2", "c2").await;
         let shared = insert_book(&db, "shared").await;
         let solo = insert_book(&db, "solo").await;
-        attach_book(&db, "c1", shared).await;
-        attach_book(&db, "c2", shared).await;
-        attach_book(&db, "c1", solo).await;
+        attach_book(&db, "c1", &shared).await;
+        attach_book(&db, "c2", &shared).await;
+        attach_book(&db, "c1", &solo).await;
 
         let preview = preview_deletion(&db, "c1").await.unwrap();
         assert_eq!(preview.to_delete, 1);
@@ -387,10 +397,10 @@ mod tests {
         insert_collection(&db, "c1", "c1").await;
         let shelved = insert_book(&db, "on shelf").await;
         let free = insert_book(&db, "free").await;
-        attach_book(&db, "c1", shelved).await;
-        attach_book(&db, "c1", free).await;
-        insert_tag(&db, 1, "fiction").await;
-        attach_tag(&db, shelved, 1).await;
+        attach_book(&db, "c1", &shelved).await;
+        attach_book(&db, "c1", &free).await;
+        insert_tag(&db, "1", "fiction").await;
+        attach_tag(&db, &shelved, "1").await;
 
         let preview = preview_deletion(&db, "c1").await.unwrap();
         assert_eq!(preview.to_delete, 1);
@@ -404,10 +414,10 @@ mod tests {
         let db = setup_db().await;
         insert_collection(&db, "c1", "c1").await;
         let blocked = insert_book(&db, "blocked").await;
-        attach_book(&db, "c1", blocked).await;
-        insert_copy(&db, blocked, "loaned").await;
-        insert_tag(&db, 1, "fiction").await;
-        attach_tag(&db, blocked, 1).await;
+        attach_book(&db, "c1", &blocked).await;
+        insert_copy(&db, &blocked, "loaned").await;
+        insert_tag(&db, "1", "fiction").await;
+        attach_tag(&db, &blocked, "1").await;
 
         let preview = preview_deletion(&db, "c1").await.unwrap();
         assert_eq!(preview.total_books, 1);
@@ -435,13 +445,13 @@ mod tests {
         let db = setup_db().await;
         insert_collection(&db, "c1", "c1").await;
         let b1 = insert_book(&db, "keep me").await;
-        attach_book(&db, "c1", b1).await;
+        attach_book(&db, "c1", &b1).await;
 
         let deleted = delete_collection(&db, "c1", false).await.unwrap();
 
         assert!(deleted.is_empty(), "flag=false must not delete any book");
         assert!(!collection_exists(&db, "c1").await);
-        assert!(book_exists(&db, b1).await, "book must remain orphaned");
+        assert!(book_exists(&db, &b1).await, "book must remain orphaned");
     }
 
     #[tokio::test]
@@ -454,25 +464,25 @@ mod tests {
         let loaned = insert_book(&db, "loaned").await;
         let in_c2 = insert_book(&db, "in_c2").await;
         let shelved = insert_book(&db, "shelved").await;
-        attach_book(&db, "c1", eligible).await;
-        attach_book(&db, "c1", loaned).await;
-        attach_book(&db, "c1", in_c2).await;
-        attach_book(&db, "c2", in_c2).await;
-        attach_book(&db, "c1", shelved).await;
-        insert_copy(&db, loaned, "loaned").await;
-        insert_tag(&db, 1, "fiction").await;
-        attach_tag(&db, shelved, 1).await;
+        attach_book(&db, "c1", &eligible).await;
+        attach_book(&db, "c1", &loaned).await;
+        attach_book(&db, "c1", &in_c2).await;
+        attach_book(&db, "c2", &in_c2).await;
+        attach_book(&db, "c1", &shelved).await;
+        insert_copy(&db, &loaned, "loaned").await;
+        insert_tag(&db, "1", "fiction").await;
+        attach_tag(&db, &shelved, "1").await;
 
         let deleted = delete_collection(&db, "c1", true).await.unwrap();
-        assert_eq!(deleted, vec![eligible]);
+        assert_eq!(deleted, vec![eligible.clone()]);
 
         assert!(!collection_exists(&db, "c1").await);
         assert!(collection_exists(&db, "c2").await, "c2 must not be touched");
 
-        assert!(!book_exists(&db, eligible).await);
-        assert!(book_exists(&db, loaned).await);
-        assert!(book_exists(&db, in_c2).await);
-        assert!(book_exists(&db, shelved).await);
+        assert!(!book_exists(&db, &eligible).await);
+        assert!(book_exists(&db, &loaned).await);
+        assert!(book_exists(&db, &in_c2).await);
+        assert!(book_exists(&db, &shelved).await);
     }
 
     #[tokio::test]

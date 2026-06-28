@@ -40,7 +40,7 @@ pub fn set_max_pinned_entries(max: u32) {
 pub async fn log_operation(
     db: &DatabaseConnection,
     entity_type: &str,
-    entity_id: i32,
+    entity_id: &str,
     operation: &str,
     payload: Option<Value>,
 ) -> Result<(), DbErr> {
@@ -49,7 +49,7 @@ pub async fn log_operation(
 
     let log = operation_log::ActiveModel {
         entity_type: Set(entity_type.to_owned()),
-        entity_id: Set(entity_id),
+        entity_id: Set(entity_id.to_owned()),
         operation: Set(operation.to_owned()),
         payload: Set(payload.map(|v| v.to_string())),
         pinned: Set(i32::from(should_pin)),
@@ -87,7 +87,7 @@ pub async fn log_operation_with_str_id(
 
     let log = operation_log::ActiveModel {
         entity_type: Set(entity_type.to_owned()),
-        entity_id: Set(0),
+        entity_id: Set(str_id.to_owned()),
         operation: Set(operation.to_owned()),
         payload: Set(Some(merged.to_string())),
         pinned: Set(i32::from(should_pin)),
@@ -116,7 +116,7 @@ pub async fn log_milestone(
 ) -> Result<(), DbErr> {
     let log = operation_log::ActiveModel {
         entity_type: Set("MILESTONE".to_owned()),
-        entity_id: Set(0),
+        entity_id: Set(String::new()),
         operation: Set(event_name.to_owned()),
         payload: Set(payload.map(|v| v.to_string())),
         pinned: Set(1),
@@ -144,7 +144,7 @@ pub async fn log_milestone(
 pub async fn log_remote_operation(
     db: &DatabaseConnection,
     entity_type: &str,
-    entity_id: i32,
+    entity_id: &str,
     operation: &str,
     payload: Option<Value>,
     source_device_id: i32,
@@ -163,7 +163,7 @@ pub async fn log_remote_operation(
     // Skip dedup for these; the processor handles duplicates via INSERT OR IGNORE.
     let op_upper = operation.to_uppercase();
 
-    if entity_id != 0 {
+    if !entity_id.is_empty() {
         let already_exists = operation_log::Entity::find()
             .filter(operation_log::Column::EntityType.eq(entity_type))
             .filter(operation_log::Column::EntityId.eq(entity_id))
@@ -221,7 +221,7 @@ pub async fn log_remote_operation(
 
     let log = operation_log::ActiveModel {
         entity_type: Set(entity_type.to_owned()),
-        entity_id: Set(entity_id),
+        entity_id: Set(entity_id.to_owned()),
         operation: Set(operation.to_owned()),
         payload: Set(payload.map(|v| v.to_string())),
         pinned: Set(0),

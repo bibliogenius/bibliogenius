@@ -33,8 +33,10 @@ impl AuthorRepository for SeaOrmAuthorRepository {
             .collect())
     }
 
-    async fn find_by_id(&self, id: i32) -> Result<Option<Author>, DomainError> {
-        let author = AuthorEntity::find_by_id(id).one(&self.db).await?;
+    async fn find_by_id(&self, id: &str) -> Result<Option<Author>, DomainError> {
+        let author = AuthorEntity::find_by_id(id.to_owned())
+            .one(&self.db)
+            .await?;
 
         Ok(author.map(|a| Author {
             id: a.id,
@@ -64,8 +66,10 @@ impl AuthorRepository for SeaOrmAuthorRepository {
         })
     }
 
-    async fn delete(&self, id: i32) -> Result<(), DomainError> {
-        let result = AuthorEntity::delete_by_id(id).exec(&self.db).await?;
+    async fn delete(&self, id: &str) -> Result<(), DomainError> {
+        let result = AuthorEntity::delete_by_id(id.to_owned())
+            .exec(&self.db)
+            .await?;
 
         if result.rows_affected == 0 {
             return Err(DomainError::NotFound);

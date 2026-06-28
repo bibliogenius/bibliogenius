@@ -29,7 +29,11 @@ fn build_app(db: DatabaseConnection) -> axum::Router {
 
 /// Insert a book and a matching operation_log row (source = "local"),
 /// returning (book_id, log_id).
-async fn create_book_with_log(db: &DatabaseConnection, title: &str, private: bool) -> (i32, i32) {
+async fn create_book_with_log(
+    db: &DatabaseConnection,
+    title: &str,
+    private: bool,
+) -> (String, i32) {
     let now = chrono::Utc::now().to_rfc3339();
     let book = rust_lib_app::models::book::ActiveModel {
         title: Set(title.to_owned()),
@@ -45,7 +49,7 @@ async fn create_book_with_log(db: &DatabaseConnection, title: &str, private: boo
 
     let log = operation_log::ActiveModel {
         entity_type: Set("book".to_owned()),
-        entity_id: Set(book.id),
+        entity_id: Set(book.id.clone()),
         operation: Set("INSERT".to_owned()),
         payload: Set(None),
         source: Set("local".to_owned()),
@@ -57,7 +61,7 @@ async fn create_book_with_log(db: &DatabaseConnection, title: &str, private: boo
     (book.id, log_res.last_insert_id)
 }
 
-async fn log_delete(db: &DatabaseConnection, book_id: i32) -> i32 {
+async fn log_delete(db: &DatabaseConnection, book_id: String) -> i32 {
     let row = operation_log::ActiveModel {
         entity_type: Set("book".to_owned()),
         entity_id: Set(book_id),
@@ -131,7 +135,7 @@ async fn delta_after_delete_emits_one_delete() {
     let (b1, _) = create_book_with_log(&db, "Book A", false).await;
     let (b2, _) = create_book_with_log(&db, "Book B", false).await;
     let (_, after_inserts) = create_book_with_log(&db, "Book C", false).await;
-    let _delete_log = log_delete(&db, b2).await;
+    let _delete_log = log_delete(&db, b2.clone()).await;
     let _ = b1;
     let app = build_app(db);
 
@@ -181,7 +185,7 @@ async fn delta_omits_private_book_for_peer() {
     assert_eq!(ops[0]["book"]["title"], "Public");
     let serialized = serde_json::to_string(&body).unwrap();
     assert!(
-        !serialized.contains(&format!("\"id\":{priv_id}")),
+        !serialized.contains(priv_id.as_str()),
         "private book id must not leak in any form"
     );
 }

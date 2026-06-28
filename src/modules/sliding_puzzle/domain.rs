@@ -11,7 +11,7 @@ pub use crate::domain::DomainError;
 /// A book selected for the puzzle (must have a cover image)
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PuzzleBook {
-    pub book_id: i32,
+    pub book_id: String,
     pub title: String,
     pub cover_url: String,
 }
@@ -19,7 +19,7 @@ pub struct PuzzleBook {
 /// A generated puzzle board ready to play
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PuzzleBoard {
-    pub book_id: i32,
+    pub book_id: String,
     pub title: String,
     pub cover_url: String,
     pub grid_size: u8,
