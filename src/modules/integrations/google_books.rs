@@ -345,7 +345,6 @@ async fn search_books_at(
                 private: false,
                 page_count: info.page_count.map(|p| p as i32),
                 loan_duration_days: None,
-                hub_cover_upload_failed_at: None,
             };
             result.books.push(book);
         }

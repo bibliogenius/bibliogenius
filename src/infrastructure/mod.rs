@@ -9,7 +9,10 @@
 //! - Application state (state)
 
 pub mod auth;
+pub mod book_local;
 pub mod config;
+#[cfg(feature = "crsqlite-static")]
+pub mod crsqlite_static;
 pub mod db;
 pub mod nonce_store;
 pub mod referential_integrity;

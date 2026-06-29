@@ -961,15 +961,11 @@ impl HubDirectoryService {
     /// DB errors are logged and swallowed so a bookkeeping failure never
     /// aborts the surrounding sync loop.
     pub async fn mark_hub_cover_upload_failure(db: &DatabaseConnection, book_id: &str) {
+        // Device-local flag: stored in `book_local`, never on the `books` CRR
+        // (ADR-044).
         let now = chrono::Utc::now().to_rfc3339();
-        let backend = db.get_database_backend();
-        if let Err(e) = db
-            .execute(Statement::from_sql_and_values(
-                backend,
-                "UPDATE books SET hub_cover_upload_failed_at = ? WHERE uuid = ?",
-                [now.into(), book_id.into()],
-            ))
-            .await
+        if let Err(e) =
+            crate::infrastructure::book_local::set_cover_upload_failed_at(db, book_id, &now).await
         {
             tracing::warn!("failed to mark hub_cover_upload_failed_at for book {book_id}: {e}");
         }
@@ -978,14 +974,8 @@ impl HubDirectoryService {
     /// Clears the pending-failure flag after a successful hub cover upload.
     /// Side-effect only: DB errors are logged and swallowed.
     pub async fn clear_hub_cover_upload_failure(db: &DatabaseConnection, book_id: &str) {
-        let backend = db.get_database_backend();
-        if let Err(e) = db
-            .execute(Statement::from_sql_and_values(
-                backend,
-                "UPDATE books SET hub_cover_upload_failed_at = NULL WHERE uuid = ?",
-                [book_id.into()],
-            ))
-            .await
+        if let Err(e) =
+            crate::infrastructure::book_local::clear_cover_upload_failed_at(db, book_id).await
         {
             tracing::warn!("failed to clear hub_cover_upload_failed_at for book {book_id}: {e}");
         }
@@ -995,13 +985,7 @@ impl HubDirectoryService {
     /// unregisters from the hub so stale warning badges do not survive a
     /// purge / re-registration cycle.
     pub async fn reset_all_hub_cover_upload_failures(db: &DatabaseConnection) {
-        let backend = db.get_database_backend();
-        if let Err(e) = db
-            .execute(Statement::from_string(
-                backend,
-                "UPDATE books SET hub_cover_upload_failed_at = NULL".to_owned(),
-            ))
-            .await
+        if let Err(e) = crate::infrastructure::book_local::clear_all_cover_upload_failures(db).await
         {
             tracing::warn!("failed to reset hub_cover_upload_failed_at: {e}");
         }

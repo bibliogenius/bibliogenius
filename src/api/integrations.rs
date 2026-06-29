@@ -296,7 +296,6 @@ pub async fn search_external(
                             private: false,
                             page_count: None,
                             loan_duration_days: None,
-                            hub_cover_upload_failed_at: None,
                         };
                         books.push(book);
                     }

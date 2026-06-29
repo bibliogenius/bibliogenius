@@ -24,7 +24,18 @@ desktop = []
 mcp = []
 # The real cr-sqlite merge engine over the sqlx + SeaORM
 # stack. Off by default so the normal build/CI needs no native cr-sqlite extension.
+# This is the DYNAMIC dev/test path: it loads `crsqlite.dylib` at runtime.
 crsqlite = []
+# Shipping path: statically link the vendored cr-sqlite archive (build.rs) and
+# register it in-process via `sqlite3_auto_extension`. iOS forbids runtime
+# extension loading, so static link is the cross-platform shipping mechanism
+# (ADR-044 section 2). Distinct from the dynamic `crsqlite` feature above.
+crsqlite-static = ["dep:libsqlite3-sys"]
+
+[build-dependencies]
+# Verify the vendored cr-sqlite static archive's SHA-256 against CHECKSUMS.txt
+# at build time (supply-chain defense, ADR-044). Only used by build.rs.
+sha2 = "0.10"
 
 [dependencies]
 # Flutter Rust Bridge
@@ -42,6 +53,11 @@ serde_json = "1.0"
 
 # Database
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite"] }
+# Direct handle on the SAME bundled SQLite that sqlx-sqlite links (Cargo unifies
+# the 0.27 instance + `bundled` feature, so there is a single SQLite in the
+# process). Used only to call `sqlite3_auto_extension` when statically linking
+# cr-sqlite. Compiled only under the `crsqlite-static` feature.
+libsqlite3-sys = { version = "0.27", optional = true }
 sea-orm = { version = "0.12", features = [
     "sqlx-sqlite",
     "runtime-tokio-rustls",

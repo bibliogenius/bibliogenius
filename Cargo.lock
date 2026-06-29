@@ -374,6 +374,7 @@ dependencies = [
  "image",
  "isbn2",
  "jsonwebtoken",
+ "libsqlite3-sys",
  "local-ip-address",
  "mdns-sd",
  "once_cell",

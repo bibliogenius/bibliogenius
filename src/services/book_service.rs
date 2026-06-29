@@ -150,6 +150,11 @@ pub async fn list_books(
         .iter()
         .map(|(m, _)| m.id.clone())
         .collect();
+    // Device-local hub-cover-upload retry flags (book_local, ADR-044). Scans the
+    // tiny flagged-only table once; the per-book lookup below filters to the page.
+    let cover_failed_map = crate::infrastructure::book_local::pending_cover_upload_failures(db)
+        .await
+        .unwrap_or_default();
     let mut lent_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut borrowed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     if !book_ids.is_empty()
@@ -172,6 +177,10 @@ pub async fn list_books(
 
     for (book_model, authors) in books_with_authors {
         let mut book_dto = Book::from(book_model);
+
+        if let Some(id) = book_dto.id.as_deref() {
+            book_dto.hub_cover_upload_failed_at = cover_failed_map.get(id).cloned();
+        }
 
         if !authors.is_empty() {
             book_dto.author = Some(
@@ -255,6 +264,14 @@ async fn enrich_book(
     book_model: crate::models::book::Model,
 ) -> Result<Book, ServiceError> {
     let mut book_dto = Book::from(book_model.clone());
+
+    // The hub-cover-upload retry flag is device-local: it lives in `book_local`,
+    // not on the `books` CRR (ADR-044). Populate it for the owner's badge;
+    // a lookup failure degrades to no badge rather than failing the read.
+    book_dto.hub_cover_upload_failed_at =
+        crate::infrastructure::book_local::cover_upload_failed_at(db, &book_model.id)
+            .await
+            .unwrap_or_default();
 
     // Fetch authors
     if let Ok(authors) = book_model

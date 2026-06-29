@@ -9,7 +9,7 @@ use crate::utils::default_library_name::compute_default_library_name_seed;
 /// can decide whether to migrate the archived DB forward or refuse a
 /// future-version archive. **Bump this constant whenever a new migration
 /// is appended to `run_migrations`.**
-pub const SCHEMA_VERSION: u32 = 80;
+pub const SCHEMA_VERSION: u32 = 81;
 
 pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     let db = Database::connect(database_url).await?;
@@ -1756,12 +1756,20 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // surface a warning badge while retries pend. NULL = no pending failure
     // (either never attempted, or last attempt succeeded). Reset to NULL on
     // successful upload and on hub purge (library unregistered).
-    let _ = db
-        .execute(Statement::from_string(
-            db.get_database_backend(),
-            "ALTER TABLE books ADD COLUMN hub_cover_upload_failed_at TEXT".to_owned(),
-        ))
-        .await;
+    //
+    // Skipped once migration 084 has moved the flag into `book_local` (the
+    // table's existence is the signal): re-adding the column every launch would
+    // just be churn for 084 to drop again. On a fresh DB `book_local` does not
+    // exist yet here (084 creates it later in this same pass), so the column is
+    // still added and then extracted as before.
+    if !table_exists(db, "book_local").await? {
+        let _ = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                "ALTER TABLE books ADD COLUMN hub_cover_upload_failed_at TEXT".to_owned(),
+            ))
+            .await;
+    }
 
     // Migration 073: Cache peer loan status in `peer_books`. Without these,
     // the carousel can't tell which of a peer's books are actually
@@ -2076,7 +2084,87 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 084: extract the device-local `hub_cover_upload_failed_at` flag
+    // off `books` into a sibling regular (non-CRR) table `book_local`. This must
+    // happen before `books` becomes a cr-sqlite CRR (ADR-044): cr-sqlite
+    // replicates every non-PK column with no per-column opt-out,
+    // and this negative per-device retry timestamp must stay local (replicating
+    // it would conflate two devices' upload states into false "upload failed"
+    // badges). `book_local` is intentionally NOT a CRR.
+    //
+    // Idempotent: the `book_local` create is gateless, and the column is dropped
+    // only while it is still present on `books`. A recent-SQLite `DROP COLUMN`
+    // (>= 3.35) does the extraction cheaply, with no table rebuild. By this
+    // point `migrate_uuid_pk` above has already given `books` its `uuid` PK, so
+    // the backfill keys `book_local` on `books.uuid`.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"CREATE TABLE IF NOT EXISTS book_local (
+            book_uuid TEXT PRIMARY KEY NOT NULL,
+            hub_cover_upload_failed_at TEXT
+        )"#
+            .to_owned(),
+        ))
+        .await;
+
+    if table_has_column(db, "books", "hub_cover_upload_failed_at").await? {
+        // Preserve pending flags before dropping the column.
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "INSERT OR IGNORE INTO book_local (book_uuid, hub_cover_upload_failed_at) \
+             SELECT uuid, hub_cover_upload_failed_at FROM books \
+             WHERE hub_cover_upload_failed_at IS NOT NULL"
+                .to_owned(),
+        ))
+        .await?;
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE books DROP COLUMN hub_cover_upload_failed_at".to_owned(),
+        ))
+        .await?;
+    }
+
     Ok(())
+}
+
+/// True if a table named `name` exists in the main schema.
+async fn table_exists(db: &DatabaseConnection, name: &str) -> Result<bool, DbErr> {
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = ?",
+            [name.into()],
+        ))
+        .await?;
+    Ok(row.is_some())
+}
+
+/// True if `table` currently has a column named `column` (via `PRAGMA
+/// table_info`). Used to make column-dropping migrations idempotent.
+///
+/// `table` is interpolated into the PRAGMA (SQLite cannot bind an identifier
+/// there), so callers MUST pass a trusted, hard-coded table name — never
+/// user-controlled input.
+async fn table_has_column(
+    db: &DatabaseConnection,
+    table: &str,
+    column: &str,
+) -> Result<bool, DbErr> {
+    let rows = db
+        .query_all(Statement::from_string(
+            db.get_database_backend(),
+            format!("PRAGMA table_info(\"{table}\")"),
+        ))
+        .await?;
+    for r in &rows {
+        if let Ok(name) = r.try_get::<String>("", "name")
+            && name == column
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // =========================================================================
@@ -2140,11 +2228,11 @@ fn uuid_rebuild_specs() -> Vec<UuidRebuildSpec> {
             uuid_pk: true,
             composite: &[],
             refs: &[],
-            // `hub_cover_upload_failed_at` (device-local, ADR-044 Addendum A.3)
-            // stays on the table for now: it only has to leave when `books`
-            // becomes a CRR (WS-5), and a recent-SQLite `DROP COLUMN` extraction
-            // then is cheap. Carrying it here would force a `book_local` read/write
-            // rework mid-flip with no replication benefit yet.
+            // The device-local `hub_cover_upload_failed_at` is NOT dropped here:
+            // it is extracted to the sibling `book_local` table by migration 084
+            // (a standalone `DROP COLUMN`, ADR-044), which runs
+            // after this rebuild. Keeping the rebuild generic avoids a
+            // `book_local` read/write rework inside the id-type flip.
             drop_cols: &[],
         },
         UuidRebuildSpec {

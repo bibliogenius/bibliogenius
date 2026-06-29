@@ -62,11 +62,10 @@ pub struct Model {
     pub private: bool,
     pub page_count: Option<i32>,
     pub loan_duration_days: Option<i32>,
-    /// ISO 8601 timestamp of the last failed hub cover upload for this book.
-    /// NULL when the most recent attempt succeeded or none ever ran. The
-    /// owner's UI reads this to surface a warning badge while a retry is
-    /// pending. Cleared on successful upload and on hub purge.
-    pub hub_cover_upload_failed_at: Option<String>,
+    // The device-local hub-cover-upload retry flag is NOT a column of `books`:
+    // it lives in the sibling non-CRR `book_local` table so it never replicates
+    // across account-sync devices (ADR-044). Read it via
+    // `infrastructure::book_local`, not off this model.
 }
 
 // ... (Relation enum and Related impls omit for brevity) ...
@@ -240,7 +239,10 @@ impl From<Model> for Book {
             loan_duration_days: model.loan_duration_days,
             added_at: Some(model.created_at),
             updated_at: Some(model.updated_at),
-            hub_cover_upload_failed_at: model.hub_cover_upload_failed_at,
+            // Device-local; not on the model. Owner-facing read paths populate
+            // this from `book_local` (see `book_service`); other callers leave
+            // it None.
+            hub_cover_upload_failed_at: None,
         }
     }
 }
@@ -597,9 +599,6 @@ impl From<Book> for ActiveModel {
             private: book.private.map_or(NotSet, Set),
             page_count: book.page_count.map_or(NotSet, |p| Set(Some(p))),
             loan_duration_days: book.loan_duration_days.map_or(NotSet, |d| Set(Some(d))),
-            // Owned solely by the hub-sync loop; leave NotSet on DTO round
-            // trips so regular CRUD never clobbers a pending-failure flag.
-            hub_cover_upload_failed_at: NotSet,
         }
     }
 }

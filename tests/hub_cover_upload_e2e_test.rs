@@ -2,8 +2,8 @@
 //!
 //! Exercises `HubDirectoryService::process_local_cover_upload` against a
 //! real `wiremock` hub:
-//! - when the hub returns 500, `books.hub_cover_upload_failed_at` must be
-//!   set (so the owner's UI surfaces the warning badge).
+//! - when the hub returns 500, the device-local failure flag (in `book_local`,
+//!   ADR-044) must be set (so the owner's UI surfaces the warning badge).
 //! - when a subsequent retry succeeds, the flag must be cleared (so the
 //!   badge disappears without requiring a manual action).
 //!
@@ -97,12 +97,11 @@ fn write_tiny_png_to_temp(tag: &str) -> TempCoverFile {
 }
 
 async fn read_failure_flag(db: &DatabaseConnection, book_id: &str) -> Option<String> {
-    book::Entity::find_by_id(book_id.to_string())
-        .one(db)
+    // The flag is device-local: stored in `book_local`, not on the `books`
+    // row (ADR-044).
+    rust_lib_app::infrastructure::book_local::cover_upload_failed_at(db, book_id)
         .await
-        .expect("find")
-        .expect("row exists")
-        .hub_cover_upload_failed_at
+        .expect("read flag")
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
