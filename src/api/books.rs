@@ -738,10 +738,14 @@ pub async fn update_book(
                                 crate::sync::log_operation(db, "copy", &c.id, "DELETE", None).await;
                         }
                     }
-                    let _ = CopyEntity::delete_many()
-                        .filter(copy_model::Column::BookId.eq(id.as_str()))
-                        .exec(db)
-                        .await;
+                    // Remove the copies and the loans/sales that referenced
+                    // them: the database no longer cascades these deletes since
+                    // the replicated tables lost their foreign keys (ADR-044).
+                    let _ = crate::infrastructure::referential_integrity::delete_copies_of_book_cascade(
+                        db,
+                        id.as_str(),
+                    )
+                    .await;
                 }
             }
 

@@ -1,7 +1,10 @@
 //! SeaORM implementation of CopyRepository
 
 use async_trait::async_trait;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    TransactionTrait,
+};
 
 use crate::domain::{
     Copy, CopyRepository, CreateCopyInput, DomainError, PaginatedCopies, UpdateCopyInput,
@@ -163,13 +166,18 @@ impl CopyRepository for SeaOrmCopyRepository {
     }
 
     async fn delete(&self, id: &str) -> Result<(), DomainError> {
-        let result = CopyEntity::delete_by_id(id.to_owned())
-            .exec(&self.db)
-            .await?;
-
-        if result.rows_affected == 0 {
+        // Cascade the copy's dependents (loans, sales) in one transaction: the
+        // database no longer does it since the replicated tables lost their
+        // foreign keys (ADR-044). Roll back when the copy does not exist so a
+        // not-found delete leaves the data untouched.
+        let txn = self.db.begin().await?;
+        let existed =
+            crate::infrastructure::referential_integrity::delete_copy_cascade(&txn, id).await?;
+        if !existed {
+            txn.rollback().await?;
             return Err(DomainError::NotFound);
         }
+        txn.commit().await?;
 
         Ok(())
     }

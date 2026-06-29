@@ -35,30 +35,10 @@ pub async fn delete_book_cascade<C>(conn: &C, book_uuid: &str) -> Result<(), DbE
 where
     C: ConnectionTrait,
 {
-    // Grandchildren first: loans and sales point at the book's copies, so they
-    // must go before the copies do. Match them with a subquery on copies so
-    // each delete is a single statement, without a round-trip to collect the
-    // copy ids (and an empty book naturally deletes nothing).
-    let copies_of_book = copy::Entity::find()
-        .select_only()
-        .column(copy::Column::Id)
-        .filter(copy::Column::BookId.eq(book_uuid))
-        .into_query();
+    // Copies and their loans/sales first (see `delete_copies_of_book_cascade`).
+    delete_copies_of_book_cascade(conn, book_uuid).await?;
 
-    loan::Entity::delete_many()
-        .filter(loan::Column::CopyId.in_subquery(copies_of_book.clone()))
-        .exec(conn)
-        .await?;
-    sale::Entity::delete_many()
-        .filter(sale::Column::CopyId.in_subquery(copies_of_book))
-        .exec(conn)
-        .await?;
-
-    // Direct children of the book.
-    copy::Entity::delete_many()
-        .filter(copy::Column::BookId.eq(book_uuid))
-        .exec(conn)
-        .await?;
+    // Remaining direct children of the book.
     book_authors::Entity::delete_many()
         .filter(book_authors::Column::BookId.eq(book_uuid))
         .exec(conn)
@@ -82,6 +62,67 @@ where
         .await?;
 
     Ok(())
+}
+
+/// Delete every copy of a book together with the loans and sales that
+/// referenced those copies, leaving the book row itself in place. Used when a
+/// book loses all its physical copies (e.g. ownership turned off) without being
+/// removed. Mirrors the `copy -> {loans, sales}` cascade dropped by the
+/// UUID-PK rebuild (ADR-044).
+///
+/// Loans and sales are matched with a subquery on the book's copies so each
+/// delete is a single statement (an empty book naturally deletes nothing), then
+/// the copies go. Pass a transaction when atomicity matters.
+pub async fn delete_copies_of_book_cascade<C>(conn: &C, book_uuid: &str) -> Result<(), DbErr>
+where
+    C: ConnectionTrait,
+{
+    let copies_of_book = copy::Entity::find()
+        .select_only()
+        .column(copy::Column::Id)
+        .filter(copy::Column::BookId.eq(book_uuid))
+        .into_query();
+
+    loan::Entity::delete_many()
+        .filter(loan::Column::CopyId.in_subquery(copies_of_book.clone()))
+        .exec(conn)
+        .await?;
+    sale::Entity::delete_many()
+        .filter(sale::Column::CopyId.in_subquery(copies_of_book))
+        .exec(conn)
+        .await?;
+    copy::Entity::delete_many()
+        .filter(copy::Column::BookId.eq(book_uuid))
+        .exec(conn)
+        .await?;
+
+    Ok(())
+}
+
+/// Delete a single copy together with the loans and sales that referenced it,
+/// in the caller-provided connection. Mirrors the `copy -> {loans, sales}`
+/// cascade dropped by the UUID-PK rebuild (ADR-044).
+///
+/// Returns `true` if a copy row was actually removed, so callers can keep
+/// their not-found semantics (and roll back if the copy did not exist). Pass a
+/// transaction so the child deletes and the copy delete commit together.
+pub async fn delete_copy_cascade<C>(conn: &C, copy_uuid: &str) -> Result<bool, DbErr>
+where
+    C: ConnectionTrait,
+{
+    loan::Entity::delete_many()
+        .filter(loan::Column::CopyId.eq(copy_uuid))
+        .exec(conn)
+        .await?;
+    sale::Entity::delete_many()
+        .filter(sale::Column::CopyId.eq(copy_uuid))
+        .exec(conn)
+        .await?;
+
+    let result = copy::Entity::delete_by_id(copy_uuid.to_owned())
+        .exec(conn)
+        .await?;
+    Ok(result.rows_affected > 0)
 }
 
 /// Delete every `collection_books` junction row for a collection. Mirrors the
@@ -338,5 +379,76 @@ mod tests {
         // Only collection-2's link survives; both books remain.
         assert_eq!(count::<collection_book::Entity>(&db).await, 1);
         assert_eq!(count::<book::Entity>(&db).await, 2);
+    }
+
+    #[tokio::test]
+    async fn delete_copy_cascade_removes_copy_and_its_loans_and_sales() {
+        let db = setup_db().await;
+        let book_id = insert_book(&db, "book").await;
+        let doomed = insert_copy(&db, &book_id).await;
+        insert_loan(&db, &doomed).await;
+        insert_sale(&db, &doomed).await;
+        // A sibling copy of the same book, with its own loan and sale.
+        let survivor = insert_copy(&db, &book_id).await;
+        insert_loan(&db, &survivor).await;
+        insert_sale(&db, &survivor).await;
+
+        let existed = delete_copy_cascade(&db, &doomed).await.unwrap();
+
+        assert!(existed, "an existing copy must report as removed");
+        assert_eq!(count::<copy::Entity>(&db).await, 1, "only the sibling copy");
+        assert_eq!(count::<loan::Entity>(&db).await, 1, "sibling loan survives");
+        assert_eq!(count::<sale::Entity>(&db).await, 1, "sibling sale survives");
+        assert!(
+            copy::Entity::find_by_id(survivor)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_copy_cascade_on_unknown_copy_returns_false() {
+        let db = setup_db().await;
+        let book_id = insert_book(&db, "book").await;
+        let kept = insert_copy(&db, &book_id).await;
+        insert_loan(&db, &kept).await;
+
+        let existed = delete_copy_cascade(&db, "does-not-exist").await.unwrap();
+
+        assert!(!existed, "an unknown copy must report as not removed");
+        assert_eq!(count::<copy::Entity>(&db).await, 1);
+        assert_eq!(count::<loan::Entity>(&db).await, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_copies_of_book_cascade_clears_copies_but_keeps_the_book() {
+        let db = setup_db().await;
+        let book_id = insert_book(&db, "unowned").await;
+        let c1 = insert_copy(&db, &book_id).await;
+        let c2 = insert_copy(&db, &book_id).await;
+        insert_loan(&db, &c1).await;
+        insert_sale(&db, &c2).await;
+        // A second book with its own copy/loan/sale must be left untouched.
+        let other_book = insert_book(&db, "owned").await;
+        let oc = insert_copy(&db, &other_book).await;
+        insert_loan(&db, &oc).await;
+        insert_sale(&db, &oc).await;
+
+        delete_copies_of_book_cascade(&db, &book_id).await.unwrap();
+
+        // The book row stays; only its copies and their loans/sales are gone.
+        assert!(
+            book::Entity::find_by_id(book_id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_some(),
+            "the book itself must remain"
+        );
+        assert_eq!(count::<copy::Entity>(&db).await, 1, "only the other copy");
+        assert_eq!(count::<loan::Entity>(&db).await, 1, "only the other loan");
+        assert_eq!(count::<sale::Entity>(&db).await, 1, "only the other sale");
     }
 }
