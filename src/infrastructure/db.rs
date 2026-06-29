@@ -20,6 +20,61 @@ pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     Ok(db)
 }
 
+/// Open the application database as a cr-sqlite-loaded, single-connection pool and
+/// promote the replicated tables to CRRs (account-sync builds only, ADR-044).
+///
+/// This is the database entrypoint for the real app bootstrap (the FFI
+/// `init_backend` and the server `main`); plain [`init_db`] stays the path for tests
+/// and the backup/restore subsystem, which must not load cr-sqlite into their
+/// transient connections.
+///
+/// cr-sqlite keeps per-connection state (site id, db version), so the whole pool is
+/// pinned to one physical connection: every query and the merge engine share it.
+/// The extension is made available before the connection is used — registered as a
+/// process-wide auto-extension for the static ship build, or loaded per connection
+/// for the dynamic dev build. CRR promotion runs after migrations so each table
+/// already has its uuid PK and no foreign keys.
+#[cfg(feature = "account_sync")]
+pub async fn init_db_account_sync(database_url: &str) -> Result<DatabaseConnection, DbErr> {
+    use sea_orm::{RuntimeErr, SqlxSqliteConnector};
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+
+    let conn_err = |e: sqlx::Error| DbErr::Conn(RuntimeErr::Internal(e.to_string()));
+
+    // Static ship build: register the statically-linked extension as a SQLite
+    // auto-extension so every connection opened afterwards exposes `crsql_*`.
+    // Must run before the first connection is opened.
+    #[cfg(feature = "crsqlite-static")]
+    crate::infrastructure::crsqlite_static::register();
+
+    let opts = SqliteConnectOptions::from_str(database_url).map_err(conn_err)?;
+
+    // Dynamic dev build: load the vendored extension per connection. cr-sqlite's
+    // entry point is non-standard, so it must be named explicitly. Not needed on the
+    // static build, where the auto-extension above already applies to every connection.
+    #[cfg(all(feature = "crsqlite", not(feature = "crsqlite-static")))]
+    let opts = opts.extension_with_entrypoint(
+        crate::infrastructure::crsqlite_dynamic::vendored_extension_path(),
+        "sqlite3_crsqlite_init",
+    );
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .min_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect_with(opts)
+        .await
+        .map_err(conn_err)?;
+    let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
+
+    run_migrations(&db).await?;
+    crate::infrastructure::crsqlite_crr::setup_crrs(&db).await?;
+
+    Ok(db)
+}
+
 /// Run filesystem-side maintenance that does NOT require an open SeaORM
 /// connection. Currently:
 ///

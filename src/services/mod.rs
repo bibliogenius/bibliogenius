@@ -14,7 +14,7 @@ pub mod catalog_events;
 pub mod catalog_notification;
 pub mod collection_service;
 pub mod contact_service;
-#[cfg(feature = "crsqlite")]
+#[cfg(any(feature = "crsqlite", feature = "crsqlite-static"))]
 pub mod crsqlite_engine;
 pub mod crypto_service;
 pub mod delta_service;

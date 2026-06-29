@@ -253,7 +253,14 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
     unsafe { std::env::set_var("DATABASE_URL", &db_url) };
     tracing::info!("FFI: DATABASE_URL configured");
 
-    match crate::db::init_db(&db_url).await {
+    // Account-sync builds open a single cr-sqlite connection with the replicated
+    // tables promoted to CRRs; default builds use a plain pool.
+    #[cfg(feature = "account_sync")]
+    let init = crate::db::init_db_account_sync(&db_url).await;
+    #[cfg(not(feature = "account_sync"))]
+    let init = crate::db::init_db(&db_url).await;
+
+    match init {
         Ok(conn) => match DB.set(conn) {
             Ok(_) => {
                 // ADR-037 §5: purge expired rollback siblings from prior
@@ -1107,43 +1114,95 @@ pub async fn account_refresh_devices_ffi() -> Result<String, String> {
 /// Trigger a sync cycle for this account. The entrypoint the
 /// automatic sync triggers and a manual refresh will share.
 ///
-/// HONEST SCOPE: it always runs the real, available step — refreshing the signed
-/// device registry (H3) — and **deliberately does not fake a data convergence**.
-/// The data merge engine is not built yet (and a production cr-sqlite engine wired to
-/// the library DB is future work), neither of which is built into any current binary,
-/// so the data leg is a no-op here. When that engine lands, this calls
-/// [`account_sync_engine::refresh_then_sync`] with it (registry refresh stays
-/// first, ADR-043 H3). Returns JSON `{synced, reason?, devices}`.
+/// On account-sync builds it runs a full cycle through
+/// [`account_sync_engine::refresh_then_sync`]: refresh + adopt the signed device
+/// registry (H3) FIRST, then pull/apply and push the data lanes through the real
+/// cr-sqlite merge engine over the library DB. Returns JSON `{synced, applied, pushed}`.
+///
+/// On default builds (no cr-sqlite linked) it still runs the real, available step —
+/// refreshing the signed registry — and **deliberately does not fake a data
+/// convergence**: the data leg is a no-op, reported honestly as
+/// `{synced:false, reason:"data_engine_unavailable", devices}`.
 pub async fn account_sync_now_ffi() -> Result<String, String> {
     let db = db().ok_or("Database not initialized")?;
     let mut guard = ACCOUNT_SESSION.lock().await;
     let session = ensure_account_session(&mut guard).await?;
 
     let state = crate::services::account_sync_engine::DbSyncStateStore::new(db.clone());
-    // Real step: refresh + adopt the signed registry (anti-rollback). This is the
-    // H3 prerequisite `refresh_then_sync` runs before any data sync.
-    let registry = crate::services::account_sync_engine::refresh_authorized_devices(
-        &session.client,
-        &state,
-        &session.account_id,
-        &session.bundle.verifying_key(),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let device_count = registry.map(|r| r.devices.len()).unwrap_or(0);
 
-    // No production merge engine in this binary: skip the data leg honestly rather
-    // than simulate a convergence that did not happen.
-    tracing::info!(
-        device_count,
-        "account_sync_now: refreshed authorized devices; data sync skipped (data merge engine pending)"
-    );
-    Ok(serde_json::json!({
-        "synced": false,
-        "reason": "phase_e_pending",
-        "devices": device_count,
-    })
-    .to_string())
+    #[cfg(feature = "account_sync")]
+    {
+        // The merge engine shares the app's single cr-sqlite connection (the pool is
+        // pinned to one connection on account-sync builds, see `db::init_db`).
+        let engine = crate::services::crsqlite_engine::CrSqliteMergeEngine::new(db.clone());
+        let stats = crate::services::account_sync_engine::refresh_then_sync(
+            &session.client,
+            &engine,
+            &session.bundle,
+            &state,
+            &session.account_id,
+            &session.device_id,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        tracing::info!(
+            applied = stats.applied,
+            pushed = stats.pushed,
+            "account_sync_now: data sync complete"
+        );
+        Ok(serde_json::json!({
+            "synced": true,
+            "applied": stats.applied,
+            "pushed": stats.pushed,
+        })
+        .to_string())
+    }
+
+    #[cfg(not(feature = "account_sync"))]
+    {
+        // Real step: refresh + adopt the signed registry (anti-rollback). This is the
+        // H3 prerequisite `refresh_then_sync` runs before any data sync.
+        let registry = crate::services::account_sync_engine::refresh_authorized_devices(
+            &session.client,
+            &state,
+            &session.account_id,
+            &session.bundle.verifying_key(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        let device_count = registry.map(|r| r.devices.len()).unwrap_or(0);
+
+        // No cr-sqlite merge engine in this binary: skip the data leg honestly rather
+        // than simulate a convergence that did not happen.
+        tracing::info!(
+            device_count,
+            "account_sync_now: refreshed authorized devices; data sync skipped (merge engine unavailable in this build)"
+        );
+        Ok(serde_json::json!({
+            "synced": false,
+            "reason": "data_engine_unavailable",
+            "devices": device_count,
+        })
+        .to_string())
+    }
+}
+
+/// Release the database's cr-sqlite state before the app process exits.
+///
+/// cr-sqlite requires `crsql_finalize()` on any connection that touched a CRR or it
+/// can abort on teardown. Flutter calls this from its app-lifecycle shutdown. On
+/// builds without account sync there is no cr-sqlite state, so this is a no-op.
+/// Best-effort and idempotent: a failure is logged, never surfaced, because the
+/// process is on its way down.
+pub async fn shutdown_backend_ffi() -> Result<String, String> {
+    #[cfg(feature = "account_sync")]
+    if let Some(db) = db()
+        && let Err(e) = crate::infrastructure::crsqlite_crr::finalize(db).await
+    {
+        tracing::warn!("crsql_finalize on shutdown failed: {e}");
+        return Ok("finalize failed".to_string());
+    }
+    Ok("OK".to_string())
 }
 
 /// Sign out of the account on this device: drop the in-RAM session and delete the encrypted

@@ -285,17 +285,6 @@ fn decode_any(row: &SqliteRow, col: &str) -> Result<SqlVal, MergeEngineError> {
     }
 }
 
-/// Path to the vendored cr-sqlite dynamic library (dev/test path only). The shipped
-/// app links cr-sqlite statically (see `infrastructure::crsqlite_static`); this is the
-/// local desktop dev/test path that loads the extension at runtime.
-#[cfg(feature = "crsqlite")]
-fn vendored_extension_path() -> String {
-    format!(
-        "{}/vendor/crsqlite/crsqlite.dylib",
-        env!("CARGO_MANIFEST_DIR")
-    )
-}
-
 #[cfg(feature = "crsqlite")]
 impl CrSqliteMergeEngine {
     /// Test/dev helper: build an in-memory cr-sqlite database with the REAL migrated
@@ -310,7 +299,10 @@ impl CrSqliteMergeEngine {
         // cr-sqlite's entry point is non-standard, so it must be named explicitly.
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .map_err(err)?
-            .extension_with_entrypoint(vendored_extension_path(), "sqlite3_crsqlite_init");
+            .extension_with_entrypoint(
+                crate::infrastructure::crsqlite_dynamic::vendored_extension_path(),
+                "sqlite3_crsqlite_init",
+            );
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .min_connections(1)

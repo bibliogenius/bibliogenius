@@ -98,7 +98,13 @@ async fn main() {
 
     let config = config::Config::from_env();
 
-    // Initialize database
+    // Initialize database. Account-sync builds open a single cr-sqlite connection
+    // with the replicated tables promoted to CRRs; default builds use a plain pool.
+    #[cfg(feature = "account_sync")]
+    let db = db::init_db_account_sync(&config.database_url)
+        .await
+        .expect("Failed to initialize database");
+    #[cfg(not(feature = "account_sync"))]
     let db = db::init_db(&config.database_url)
         .await
         .expect("Failed to initialize database");
@@ -245,10 +251,26 @@ async fn main() {
         .await
         .expect("Failed to bind to address");
 
-    axum::serve(
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    .expect("Failed to start server");
+    );
+
+    // On account-sync builds the pool is a single cr-sqlite connection that must run
+    // `crsql_finalize()` before it is closed. Serve until Ctrl-C, then finalize.
+    #[cfg(feature = "account_sync")]
+    {
+        serve
+            .with_graceful_shutdown(async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await
+            .expect("Failed to start server");
+        if let Err(e) = rust_lib_app::infrastructure::crsqlite_crr::finalize(state.db()).await {
+            tracing::warn!("crsql_finalize on shutdown failed: {}", e);
+        }
+    }
+
+    #[cfg(not(feature = "account_sync"))]
+    serve.await.expect("Failed to start server");
 }

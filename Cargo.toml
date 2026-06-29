@@ -31,6 +31,13 @@ crsqlite = []
 # extension loading, so static link is the cross-platform shipping mechanism
 # (ADR-044 section 2). Distinct from the dynamic `crsqlite` feature above.
 crsqlite-static = ["dep:libsqlite3-sys"]
+# Runtime gate for the account-sync data leg (ADR-044). Off by default, flipped
+# per platform. When on, the app DB pool is built single-connection on a
+# cr-sqlite-loaded connection, the replicated tables are promoted to CRRs after
+# migrations, and `account_sync_now` runs a real merge cycle instead of a no-op.
+# Requires a cr-sqlite loader alongside it: `crsqlite` (dynamic dev) or
+# `crsqlite-static` (ship). Enforced by a compile_error in `lib.rs`.
+account_sync = []
 
 [build-dependencies]
 # Verify the vendored cr-sqlite static archive's SHA-256 against CHECKSUMS.txt
