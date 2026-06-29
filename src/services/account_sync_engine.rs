@@ -790,6 +790,9 @@ mod tests {
         clock: Mutex<i64>,
         version: Mutex<i64>,
         store: Mutex<HashMap<String, Record>>, // uuid -> record
+        // Records every (entity_type, entity_uuid) sync_once passed to
+        // repair_after_apply, so a test can assert the hook fires per applied change.
+        repaired: Mutex<Vec<(String, String)>>,
     }
 
     impl FakeEngine {
@@ -799,6 +802,7 @@ mod tests {
                 clock: Mutex::new(0),
                 version: Mutex::new(0),
                 store: Mutex::new(HashMap::new()),
+                repaired: Mutex::new(Vec::new()),
             }
         }
 
@@ -891,6 +895,18 @@ mod tests {
                     },
                 );
             }
+            Ok(())
+        }
+
+        async fn repair_after_apply(
+            &self,
+            entity_type: &str,
+            entity_uuid: &str,
+        ) -> std::result::Result<(), MergeEngineError> {
+            self.repaired
+                .lock()
+                .unwrap()
+                .push((entity_type.to_string(), entity_uuid.to_string()));
             Ok(())
         }
     }
@@ -1011,6 +1027,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.applied, 0);
+    }
+
+    #[tokio::test]
+    async fn sync_once_repairs_referential_integrity_for_each_applied_change() {
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        let eng_a = FakeEngine::new("devA");
+        let eng_b = FakeEngine::new("devB");
+        let state_a = MemState::default();
+        let state_b = MemState::default();
+
+        eng_a.edit("book-1", "from A", false);
+        sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
+            .await
+            .unwrap();
+
+        let stats = sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+
+        // Every applied change runs the integrity-repair hook, with the entity it
+        // applied. (A never repaired anything: it only pushed.)
+        assert_eq!(stats.applied, 1);
+        assert_eq!(
+            *eng_b.repaired.lock().unwrap(),
+            vec![("book".to_string(), "book-1".to_string())]
+        );
+        assert!(eng_a.repaired.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
