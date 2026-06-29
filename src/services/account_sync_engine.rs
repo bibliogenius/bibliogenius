@@ -1606,18 +1606,69 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn real_crsqlite_two_devices_converge() {
         use crate::services::crsqlite_engine::CrSqliteMergeEngine;
+        use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait, Set, Statement};
+
+        // Seed a book + author into a real-schema engine (both are CRRs), exercising
+        // the multi-table path. `before_save` is bypassed by setting the uuid PK.
+        async fn seed(eng: &CrSqliteMergeEngine, book_uuid: &str, title: &str, author_uuid: &str) {
+            crate::models::book::ActiveModel {
+                id: Set(book_uuid.to_owned()),
+                title: Set(title.to_owned()),
+                created_at: Set("2026-06-29T00:00:00Z".to_owned()),
+                updated_at: Set("2026-06-29T00:00:00Z".to_owned()),
+                ..Default::default()
+            }
+            .insert(eng.db())
+            .await
+            .unwrap();
+            crate::models::author::ActiveModel {
+                id: Set(author_uuid.to_owned()),
+                name: Set(format!("author {author_uuid}")),
+                created_at: Set("2026-06-29T00:00:00Z".to_owned()),
+                updated_at: Set("2026-06-29T00:00:00Z".to_owned()),
+            }
+            .insert(eng.db())
+            .await
+            .unwrap();
+        }
+        async fn book_uuids(eng: &CrSqliteMergeEngine) -> Vec<String> {
+            let rows = eng
+                .db()
+                .query_all(Statement::from_string(
+                    eng.db().get_database_backend(),
+                    "SELECT uuid FROM books ORDER BY uuid".to_owned(),
+                ))
+                .await
+                .unwrap();
+            rows.iter()
+                .map(|r| r.try_get("", "uuid").unwrap())
+                .collect()
+        }
 
         let bundle = Arc::new(AccountKeyBundle::generate());
         let hub = Arc::new(MemHub::default());
-        let eng_a = CrSqliteMergeEngine::open_in_memory("books").await.unwrap();
-        let eng_b = CrSqliteMergeEngine::open_in_memory("books").await.unwrap();
+        let eng_a = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap();
+        let eng_b = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap();
         let state_a = MemState::default();
         let state_b = MemState::default();
 
-        // Offline divergence on two real cr-sqlite databases.
-        eng_a.upsert("book-1", "title from A").await.unwrap();
-        eng_b.upsert("book-1", "title from B").await.unwrap();
-        eng_b.upsert("book-2", "only on B").await.unwrap();
+        // Offline divergence across two CRR tables on two real cr-sqlite databases.
+        seed(&eng_a, "book-1", "title from A", "author-1").await;
+        seed(&eng_b, "book-1", "title from B", "author-2").await;
+        crate::models::book::ActiveModel {
+            id: Set("book-2".to_owned()),
+            title: Set("only on B".to_owned()),
+            created_at: Set("2026-06-29T00:00:00Z".to_owned()),
+            updated_at: Set("2026-06-29T00:00:00Z".to_owned()),
+            ..Default::default()
+        }
+        .insert(eng_b.db())
+        .await
+        .unwrap();
 
         for _ in 0..2 {
             sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
@@ -1631,13 +1682,25 @@ mod tests {
                 .unwrap();
         }
 
-        let snap_a = eng_a.snapshot().await.unwrap();
-        let snap_b = eng_b.snapshot().await.unwrap();
-        // cr-sqlite decides the LWW winner for book-1 by its own HLC; we only assert
-        // the two real engines converge and both rows propagated.
-        assert_eq!(snap_a, snap_b, "real cr-sqlite engines must converge");
-        assert!(snap_a.iter().any(|(u, _)| u == "book-1"));
-        assert!(snap_a.iter().any(|(u, _)| u == "book-2"));
+        // Both books propagated to both devices (cr-sqlite picks the book-1 LWW
+        // winner by its own HLC; we assert the row set converges).
+        let books_a = book_uuids(&eng_a).await;
+        let books_b = book_uuids(&eng_b).await;
+        assert_eq!(books_a, books_b, "real cr-sqlite engines must converge");
+        assert_eq!(books_a, vec!["book-1".to_string(), "book-2".to_string()]);
+        // The author rows (a second CRR table) converged too.
+        let authors_a = crate::models::author::Entity::find()
+            .all(eng_a.db())
+            .await
+            .unwrap()
+            .len();
+        let authors_b = crate::models::author::Entity::find()
+            .all(eng_b.db())
+            .await
+            .unwrap()
+            .len();
+        assert_eq!(authors_a, 2, "both authors must propagate");
+        assert_eq!(authors_b, 2);
 
         // Honour the cr-sqlite teardown contract.
         eng_a.finalize().await.unwrap();

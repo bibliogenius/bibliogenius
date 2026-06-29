@@ -1,39 +1,31 @@
 //! Real cr-sqlite merge engine (account-sync merge over the production DB stack).
 //!
-//! Implements the [`MergeEngine`](super::account_sync_engine::MergeEngine) seam from
-//! the local sync pipeline over an actual cr-sqlite (vlcn.io v0.16.3) database, so the
-//! sync pipeline can be validated against the real CRDT engine, not the in-memory fake.
+//! Implements the [`MergeEngine`](super::account_sync_engine::MergeEngine) seam over an
+//! actual cr-sqlite (vlcn.io v0.16.3) database, so the sync pipeline runs against the
+//! real CRDT engine, not the in-memory fake.
 //!
-//! This step runs that engine over the **production database stack**: an sqlx `SqlitePool`
-//! with cr-sqlite loaded as a runtime extension, wrapped into a SeaORM
-//! [`DatabaseConnection`]. This is the deliberate change from the earlier rusqlite
-//! spike — it proves cr-sqlite composes with sqlx 0.7 + SeaORM 0.12 (the stack the app
-//! actually uses), so local edits issued through SeaORM are captured by cr-sqlite and
-//! the `crsql_changes` lane round-trips through our encrypt/transport/cursor loop.
-//!
-//! Scope and isolation (deliberate):
-//! - Feature-gated behind `crsqlite`; the default build/CI needs no native extension.
-//! - cr-sqlite is loaded **dynamically** at runtime (`extension_with_entrypoint`). This
-//!   is the local desktop dev/test path only (macOS/Linux).
-//! - The SHIPPED app cannot load a separate extension file on iOS; the production
-//!   static-link build links cr-sqlite statically and registers it in-process via
-//!   `sqlite3_auto_extension`. See ADR-044 sections 2-3. This module is the
-//!   engine-semantics + stack-integration step, not the production static wiring.
+//! The production engine wraps the **application's own** `DatabaseConnection`: the
+//! library DB, opened on a cr-sqlite-loaded connection (static link +
+//! `sqlite3_auto_extension`, or the dynamic dev path) with every replicated table
+//! promoted to a CRR via [`crsqlite_crr::setup_crrs`](crate::infrastructure::crsqlite_crr).
+//! It is multi-table: `crsql_changes` is global across all CRRs, so one engine drives
+//! the whole replicated set (the seven entities + three junctions).
 //!
 //! cr-sqlite contract used (verified against the v0.16.3 source):
 //! - `crsql_changes` columns: `table, pk, cid, val, col_version, db_version, site_id, cl, seq`.
+//!   `pk` is `crsql_pack_columns(<pk cols>)` — a packed binary; [`decode_single_text_pk`]
+//!   recovers the uuid for our single-TEXT-PK entity tables.
 //! - locally-authored changes match `site_id IS crsql_site_id()` (so we never echo
-//!   changes we received from another device back into our own lane).
+//!   changes received from another device back into our own lane).
 //! - `crsql_db_version()` is the local merge clock; [`finalize`](Self::finalize) runs
 //!   `crsql_finalize()` before the connection is torn down.
 
 use std::collections::BTreeMap;
-use std::str::FromStr;
 
 use async_trait::async_trait;
-use sea_orm::{ConnectionTrait, DatabaseConnection, SqlxSqliteConnector, Statement};
+use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
+use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, TypeInfo, ValueRef};
 
 use super::account_sync_engine::{
@@ -65,22 +57,10 @@ struct ChangeRow {
 }
 
 /// cr-sqlite-backed [`MergeEngine`] running over a SeaORM [`DatabaseConnection`] whose
-/// underlying sqlx pool has the cr-sqlite extension loaded.
+/// underlying sqlx pool has the cr-sqlite extension loaded and the replicated tables
+/// promoted to CRRs.
 pub struct CrSqliteMergeEngine {
     db: DatabaseConnection,
-    table: String,
-}
-
-/// Path to the vendored cr-sqlite dynamic library (dev/test path only; see module docs).
-// Future hardening (uuid-PK migration over the real DB): the `.dylib` suffix is
-// macOS-only. A Linux dev path needs `.so` (gate on `cfg!(target_os = ...)`). Fine for
-// now: this is the macOS dev/test path, and the production static-link build links
-// statically instead of loading this file at all.
-fn vendored_extension_path() -> String {
-    format!(
-        "{}/vendor/crsqlite/crsqlite.dylib",
-        env!("CARGO_MANIFEST_DIR")
-    )
 }
 
 fn err<E: std::fmt::Display>(e: E) -> MergeEngineError {
@@ -88,39 +68,17 @@ fn err<E: std::fmt::Display>(e: E) -> MergeEngineError {
 }
 
 impl CrSqliteMergeEngine {
-    /// Open an in-memory cr-sqlite database with one CRR table (spike helper), backed by
-    /// an sqlx pool + SeaORM connection with the extension loaded.
-    pub async fn open_in_memory(table: &str) -> Result<Self, MergeEngineError> {
-        // cr-sqlite's entry point is non-standard, so it must be named explicitly.
-        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
-            .map_err(err)?
-            .extension_with_entrypoint(vendored_extension_path(), "sqlite3_crsqlite_init");
-        // Single connection: an in-memory database is per-connection, and cr-sqlite's
-        // db_version / crsql_changes state must live on exactly one connection. Pin it
-        // open for the engine's lifetime (no idle/lifetime reaping).
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .min_connections(1)
-            .idle_timeout(None)
-            .max_lifetime(None)
-            .connect_with(opts)
-            .await
-            .map_err(err)?;
-        let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
-        let engine = Self {
-            db,
-            table: table.to_string(),
-        };
-        // Spike schema: a single CRR table keyed by a stable text uuid.
-        engine
-            .exec(&format!(
-                "CREATE TABLE {table} (uuid TEXT PRIMARY KEY NOT NULL, title TEXT);"
-            ))
-            .await?;
-        engine
-            .exec(&format!("SELECT crsql_as_crr('{table}');"))
-            .await?;
-        Ok(engine)
+    /// Wrap the application's cr-sqlite-loaded database. The caller must have
+    /// registered the extension and run
+    /// [`crsqlite_crr::setup_crrs`](crate::infrastructure::crsqlite_crr::setup_crrs)
+    /// so the replicated tables are CRRs before any sync runs.
+    ///
+    /// The wrapped pool MUST be single-connection: cr-sqlite keeps per-connection
+    /// state (site id, db version) and an in-memory database is per-connection, so
+    /// every operation must land on the same physical connection. The caller owns
+    /// pool construction (e.g. `max_connections(1)`); the engine does not enforce it.
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self { db }
     }
 
     /// Run a statement with no result rows through the SeaORM connection.
@@ -138,50 +96,9 @@ impl CrSqliteMergeEngine {
     /// Run `crsql_finalize()` before the connection is closed (cr-sqlite contract).
     ///
     /// `Drop` cannot do this here because teardown is async (sqlx). Callers hold the
-    /// engine and must call this before dropping it; the production static-link build wires
-    /// it into the app's DB shutdown.
+    /// engine and must call this before dropping it; the app wires it into DB shutdown.
     pub async fn finalize(&self) -> Result<(), MergeEngineError> {
         self.exec("SELECT crsql_finalize();").await
-    }
-
-    /// Test helper: a local last-write-wins edit (upsert) of one row, issued through
-    /// SeaORM so we exercise the same write path the app uses.
-    pub async fn upsert(&self, uuid: &str, title: &str) -> Result<(), MergeEngineError> {
-        self.db
-            .execute(Statement::from_sql_and_values(
-                self.db.get_database_backend(),
-                format!(
-                    "INSERT INTO {t} (uuid, title) VALUES (?, ?) \
-                     ON CONFLICT(uuid) DO UPDATE SET title = excluded.title",
-                    t = self.table
-                ),
-                [uuid.into(), title.into()],
-            ))
-            .await
-            .map_err(err)?;
-        Ok(())
-    }
-
-    /// Test helper: ordered `(uuid, title)` snapshot of the live table.
-    // Future hardening (uuid-PK migration over the real DB): `title` is read as a non-null `String`; if this helper outlives the
-    // spike to inspect post-merge states where a column can be NULL, switch to `Option`.
-    pub async fn snapshot(&self) -> Result<Vec<(String, String)>, MergeEngineError> {
-        let rows = self
-            .db
-            .query_all(Statement::from_string(
-                self.db.get_database_backend(),
-                format!("SELECT uuid, title FROM {t} ORDER BY uuid", t = self.table),
-            ))
-            .await
-            .map_err(err)?;
-        let mut out = Vec::with_capacity(rows.len());
-        for r in rows {
-            out.push((
-                r.try_get::<String>("", "uuid").map_err(err)?,
-                r.try_get::<String>("", "title").map_err(err)?,
-            ));
-        }
-        Ok(out)
     }
 }
 
@@ -213,12 +130,15 @@ impl MergeEngine for CrSqliteMergeEngine {
         .await
         .map_err(err)?;
 
-        // Group rows per entity (pk) into one changeset, in deterministic order.
-        let mut grouped: BTreeMap<String, Vec<ChangeRow>> = Default::default();
+        // Group rows per entity — keyed by (table, packed pk), since cr-sqlite's
+        // `crsql_changes` spans every CRR and the same packed pk can recur across
+        // tables. Deterministic order via the BTreeMap.
+        let mut grouped: BTreeMap<(String, Vec<u8>), Vec<ChangeRow>> = Default::default();
         for row in rows {
             let pk: Vec<u8> = row.try_get("pk").map_err(err)?;
+            let table: String = row.try_get("tbl").map_err(err)?;
             let change = ChangeRow {
-                table: row.try_get("tbl").map_err(err)?,
+                table: table.clone(),
                 pk: pk.clone(),
                 cid: row.try_get("cid").map_err(err)?,
                 val: decode_any(&row, "val")?,
@@ -228,20 +148,30 @@ impl MergeEngine for CrSqliteMergeEngine {
                 cl: row.try_get("cl").map_err(err)?,
                 seq: row.try_get("seq").map_err(err)?,
             };
-            grouped.entry(hex::encode(&pk)).or_default().push(change);
+            grouped.entry((table, pk)).or_default().push(change);
         }
         let mut out = Vec::with_capacity(grouped.len());
-        for (uuid, change_rows) in grouped {
+        for ((table, pk), change_rows) in grouped {
             // The lane HLC is the highest `db_version` across the entity's rows:
             // cr-sqlite's `db_version` is monotonic per device, so each re-push of a
             // changed entity carries a strictly higher value, which the receiver uses
             // to reject a stale replay (ADR-042 §14 / ADR-044 §7).
             let hlc = change_rows.iter().map(|r| r.db_version).max().unwrap_or(0);
+            // The entity uuid is the table's single TEXT primary key (our entities);
+            // for a composite/non-text PK (the junctions) fall back to an opaque hex
+            // key — stable per entity, which is all the lane needs there. `repair`
+            // only acts on the single-uuid entity tables, where the decode succeeds.
+            let entity_uuid = decode_single_text_pk(&pk).unwrap_or_else(|| hex::encode(&pk));
             let changeset = rmp_serde::to_vec(&change_rows).map_err(err)?;
+            // `deleted` stays false: a cr-sqlite delete is carried as tombstone rows
+            // INSIDE the changeset (apply re-inserts them, and `repair_after_apply`
+            // cascades the orphans), so the delete propagates without a lane-level
+            // flag. Set this true only if the transport/hub ever needs a lane-level
+            // delete signal (e.g. for GC); today nothing reads it.
             out.push(OutboundChange {
                 entity: EntityRef {
-                    entity_type: self.table.clone(),
-                    entity_uuid: uuid,
+                    entity_type: table,
+                    entity_uuid,
                 },
                 deleted: false,
                 changeset,
@@ -255,9 +185,6 @@ impl MergeEngine for CrSqliteMergeEngine {
         let rows: Vec<ChangeRow> = rmp_serde::from_slice(&change.changeset).map_err(err)?;
         let pool = self.db.get_sqlite_connection_pool();
         let mut tx = pool.begin().await.map_err(err)?;
-        // Future hardening (uuid-PK migration over the real DB): `apply` is the ingestion hot path on the real DB. The per-row
-        // `.clone()` of each bound field below sidesteps sqlx's `'q` lifetime; revisit by
-        // binding references once this engine runs over the production library.
         for r in &rows {
             let mut q = sqlx::query(
                 "INSERT INTO crsql_changes \
@@ -287,6 +214,58 @@ impl MergeEngine for CrSqliteMergeEngine {
         tx.commit().await.map_err(err)?;
         Ok(())
     }
+
+    async fn repair_after_apply(
+        &self,
+        entity_type: &str,
+        entity_uuid: &str,
+    ) -> Result<(), MergeEngineError> {
+        // The replicated tables have no foreign keys (cr-sqlite forbids them), so a
+        // merged-in parent deletion leaves orphan children behind. `cascade_inbound_delete`
+        // acts only when the parent row is now absent (a real delete merged in), never on
+        // a parent that is merely not-yet-synced, so it cannot drop an in-flight row.
+        crate::infrastructure::referential_integrity::cascade_inbound_delete(
+            &self.db,
+            entity_type,
+            entity_uuid,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| MergeEngineError(e.to_string()))
+    }
+}
+
+/// Decode cr-sqlite's packed `crsql_changes.pk` to a single TEXT primary key (our
+/// entity uuid). Returns `None` for a composite or non-text PK (the junction tables),
+/// where the caller falls back to an opaque hex key.
+///
+/// Format (cr-sqlite v0.16.3 `pack_columns`): a `u8` column count, then per column a
+/// `type | (intlen << 3)` byte; for TEXT (SQLite type tag 3) an `intlen`-byte
+/// big-endian length follows, then the UTF-8 bytes. The round-trip is covered by a
+/// test against the real engine, so a format change on a version bump fails loudly.
+fn decode_single_text_pk(packed: &[u8]) -> Option<String> {
+    const SQLITE_TEXT_TAG: u8 = 3;
+    let mut it = packed.iter().copied();
+    if it.next()? != 1 {
+        return None; // not a single-column PK
+    }
+    let type_byte = it.next()?;
+    if type_byte & 0x07 != SQLITE_TEXT_TAG {
+        return None;
+    }
+    let intlen = (type_byte >> 3) as usize;
+    if intlen == 0 || intlen > 8 {
+        return None;
+    }
+    let mut len: usize = 0;
+    for _ in 0..intlen {
+        len = (len << 8) | (it.next()? as usize);
+    }
+    let bytes: Vec<u8> = it.by_ref().take(len).collect();
+    if bytes.len() != len {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 /// Decode an ANY-typed sqlx column into our serializable [`SqlVal`].
@@ -303,5 +282,155 @@ fn decode_any(row: &SqliteRow, col: &str) -> Result<SqlVal, MergeEngineError> {
         other => Err(MergeEngineError(format!(
             "unexpected crsql_changes.val type: {other}"
         ))),
+    }
+}
+
+/// Path to the vendored cr-sqlite dynamic library (dev/test path only). The shipped
+/// app links cr-sqlite statically (see `infrastructure::crsqlite_static`); this is the
+/// local desktop dev/test path that loads the extension at runtime.
+#[cfg(feature = "crsqlite")]
+fn vendored_extension_path() -> String {
+    format!(
+        "{}/vendor/crsqlite/crsqlite.dylib",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+#[cfg(feature = "crsqlite")]
+impl CrSqliteMergeEngine {
+    /// Test/dev helper: build an in-memory cr-sqlite database with the REAL migrated
+    /// schema (uuid PK, FK removed, defaults) and every replicated table promoted to a
+    /// CRR, then wrap it. Pinned to one connection (an in-memory DB and cr-sqlite's
+    /// per-connection state both require it). Loads the extension dynamically.
+    pub async fn open_real_schema_in_memory() -> Result<Self, MergeEngineError> {
+        use sea_orm::SqlxSqliteConnector;
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+
+        // cr-sqlite's entry point is non-standard, so it must be named explicitly.
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .map_err(err)?
+            .extension_with_entrypoint(vendored_extension_path(), "sqlite3_crsqlite_init");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .min_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_with(opts)
+            .await
+            .map_err(err)?;
+        let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
+        crate::db::run_migrations(&db)
+            .await
+            .map_err(|e| MergeEngineError(format!("run_migrations: {e}")))?;
+        crate::infrastructure::crsqlite_crr::setup_crrs(&db)
+            .await
+            .map_err(|e| MergeEngineError(format!("setup_crrs: {e}")))?;
+        Ok(Self::new(db))
+    }
+
+    /// Test accessor for the wrapped connection (to seed/inspect rows via SeaORM).
+    pub fn db(&self) -> &DatabaseConnection {
+        &self.db
+    }
+}
+
+#[cfg(all(test, feature = "crsqlite"))]
+mod tests {
+    use super::*;
+    use crate::services::account_sync_engine::MergeEngine;
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+    // The packed-pk decoder must recover the uuid cr-sqlite actually stores. Seed a
+    // row, read its packed `crsql_changes.pk`, and assert the decode round-trips —
+    // guarding the byte format against a cr-sqlite version bump.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn decode_single_text_pk_round_trips_against_real_engine() {
+        let eng = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap();
+        crate::models::author::ActiveModel {
+            id: Set("0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b".to_owned()),
+            name: Set("Jack London".to_owned()),
+            created_at: Set("2026-06-29T00:00:00Z".to_owned()),
+            updated_at: Set("2026-06-29T00:00:00Z".to_owned()),
+        }
+        .insert(eng.db())
+        .await
+        .unwrap();
+
+        let pool = eng.db().get_sqlite_connection_pool();
+        let pk: Vec<u8> = sqlx::query("SELECT pk FROM crsql_changes WHERE \"table\" = 'authors'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .get("pk");
+        assert_eq!(
+            decode_single_text_pk(&pk).as_deref(),
+            Some("0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b")
+        );
+
+        eng.finalize().await.unwrap();
+    }
+
+    // `repair_after_apply` must cascade orphan children once a parent delete has
+    // merged in. The replicated tables have no FK, so a vanished book leaves its
+    // copies dangling; the repair hook (via `cascade_inbound_delete`) removes them
+    // only because the parent row is now absent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repair_after_apply_cascades_orphan_children() {
+        let eng = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap();
+        let now = "2026-06-29T00:00:00Z".to_owned();
+
+        crate::models::book::ActiveModel {
+            id: Set("book-1".to_owned()),
+            title: Set("Martin Eden".to_owned()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(eng.db())
+        .await
+        .unwrap();
+        crate::models::copy::ActiveModel {
+            id: Set("copy-1".to_owned()),
+            book_id: Set("book-1".to_owned()),
+            library_id: Set(1),
+            status: Set("available".to_owned()),
+            is_temporary: Set(false),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(eng.db())
+        .await
+        .unwrap();
+
+        // Simulate a merged-in book deletion: the row vanishes but, with FKs
+        // removed, the copy is left orphaned.
+        eng.exec("DELETE FROM books WHERE uuid = 'book-1'")
+            .await
+            .unwrap();
+        let copy_exists = crate::models::copy::Entity::find_by_id("copy-1".to_owned())
+            .one(eng.db())
+            .await
+            .unwrap()
+            .is_some();
+        assert!(copy_exists, "copy is orphaned before repair");
+
+        eng.repair_after_apply("book", "book-1").await.unwrap();
+
+        let copy_after = crate::models::copy::Entity::find_by_id("copy-1".to_owned())
+            .one(eng.db())
+            .await
+            .unwrap();
+        assert!(
+            copy_after.is_none(),
+            "repair must cascade-delete the orphan copy of the deleted book"
+        );
+
+        eng.finalize().await.unwrap();
     }
 }
