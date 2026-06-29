@@ -521,9 +521,17 @@ pub async fn update_book(
     Ok(Book::from(model))
 }
 
-/// Delete a book by ID
+/// Delete a book by ID.
+///
+/// Removes the book together with every row that depended on it (copies and
+/// their loans/sales, author/tag/collection junctions, notes) in a single
+/// transaction. The database no longer cascades these deletes since the
+/// replicated tables were rebuilt without foreign keys (ADR-044), so the
+/// cascade is performed at the application level.
 pub async fn delete_book(db: &DatabaseConnection, id: &str) -> Result<(), ServiceError> {
-    BookEntity::delete_by_id(id.to_owned()).exec(db).await?;
+    let txn = db.begin().await?;
+    crate::infrastructure::referential_integrity::delete_book_cascade(&txn, id).await?;
+    txn.commit().await?;
 
     let _ = crate::sync::log_operation(db, "book", id, "DELETE", None).await;
 

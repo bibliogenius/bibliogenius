@@ -12,6 +12,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod nonce_store;
+pub mod referential_integrity;
 pub mod repositories;
 pub mod seed;
 pub mod server;

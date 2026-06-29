@@ -11,7 +11,7 @@ use sea_orm::{
     TransactionTrait,
 };
 
-use crate::models::{book, book_tags, collection, collection_book, copy};
+use crate::models::{book_tags, collection, collection_book, copy};
 
 #[derive(Debug)]
 pub enum CollectionServiceError {
@@ -108,13 +108,21 @@ pub async fn delete_collection(
         let book_ids = book_ids_in_collection(&txn, collection_id).await?;
         for book_id in book_ids {
             if is_book_eligible_for_deletion(&txn, &book_id, collection_id).await? {
-                book::Entity::delete_by_id(book_id.clone())
-                    .exec(&txn)
+                // Cascade the book's dependents (copies, junctions, notes) at
+                // the application level: the database no longer does it since
+                // the replicated tables lost their foreign keys (ADR-044).
+                crate::infrastructure::referential_integrity::delete_book_cascade(&txn, &book_id)
                     .await?;
                 deleted_ids.push(book_id);
             }
         }
     }
+
+    // Drop the collection's own junction rows, including links to books that
+    // stayed in the library. Mirrors the removed collection -> collection_books
+    // cascade so no orphan link survives the collection.
+    crate::infrastructure::referential_integrity::delete_collection_links(&txn, collection_id)
+        .await?;
 
     let result = collection::Entity::delete_by_id(collection_id)
         .exec(&txn)
@@ -194,6 +202,7 @@ async fn is_book_eligible_for_deletion<C: ConnectionTrait>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::book;
     use sea_orm::{ActiveModelTrait, ConnectionTrait, Set, Statement};
 
     async fn setup_db() -> DatabaseConnection {
