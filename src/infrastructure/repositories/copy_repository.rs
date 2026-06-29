@@ -104,6 +104,16 @@ impl CopyRepository for SeaOrmCopyRepository {
     }
 
     async fn create(&self, input: CreateCopyInput) -> Result<Copy, DomainError> {
+        // The replicated `copies` table no longer carries a foreign key into
+        // `libraries` (ADR-044), so reject a dangling library_id here, as the
+        // database constraint once did.
+        if !crate::utils::library_helpers::library_exists(&self.db, input.library_id).await? {
+            return Err(DomainError::Validation(format!(
+                "library {} does not exist",
+                input.library_id
+            )));
+        }
+
         let now = chrono::Utc::now().to_rfc3339();
 
         let new_copy = ActiveModel {

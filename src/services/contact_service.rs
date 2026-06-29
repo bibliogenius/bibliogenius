@@ -9,6 +9,7 @@ use crate::models::contact::{self as contact_model, Entity as Contact};
 pub enum ServiceError {
     Database(String),
     NotFound,
+    Validation(String),
 }
 
 impl From<sea_orm::DbErr> for ServiceError {
@@ -134,9 +135,18 @@ pub async fn create_contact(
         None
     };
 
-    // Resolve library_owner_id: FK references libraries(id)
+    // Resolve library_owner_id. The replicated `contacts` table no longer
+    // carries a foreign key into `libraries` (ADR-044), so reject a dangling
+    // owner id at the app layer, as the database constraint once did.
     let library_owner_id = match dto.library_owner_id {
-        Some(id) => id,
+        Some(id) => {
+            if !crate::utils::library_helpers::library_exists(db, id).await? {
+                return Err(ServiceError::Validation(format!(
+                    "library {id} does not exist"
+                )));
+            }
+            id
+        }
         None => crate::utils::library_helpers::resolve_library_id(db)
             .await
             .map_err(|e| ServiceError::Database(e.to_string()))?,

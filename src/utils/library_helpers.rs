@@ -7,6 +7,16 @@ use sea_orm::{ActiveModelTrait, DbErr, EntityTrait, Set};
 
 use crate::models::{library, library_config, user};
 
+/// Whether a library row with this id exists.
+///
+/// Used to validate `library_id` / `library_owner_id` references at the
+/// application layer: the `libraries` foreign keys were dropped when the
+/// replicated tables were rebuilt without constraints (ADR-044), so a dangling
+/// reference is no longer rejected by the database.
+pub async fn library_exists<C: sea_orm::ConnectionTrait>(db: &C, id: i32) -> Result<bool, DbErr> {
+    Ok(library::Entity::find_by_id(id).one(db).await?.is_some())
+}
+
 /// Resolve the library ID: return the first library's ID, or create one if none exists.
 ///
 /// This is the single source of truth for "which library does the local user own?".

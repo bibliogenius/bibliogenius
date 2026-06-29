@@ -110,6 +110,9 @@ pub async fn create_copy(
             )
                 .into_response()
         }
+        Err(DomainError::Validation(msg)) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("Failed to create copy: {}", e)})),

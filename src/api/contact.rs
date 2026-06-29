@@ -170,9 +170,27 @@ pub async fn create_contact(
 ) -> impl IntoResponse {
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Resolve library_owner_id: FK references libraries(id)
+    // Resolve library_owner_id. The replicated `contacts` table no longer
+    // carries a foreign key into `libraries` (ADR-044), so reject a dangling
+    // owner id at the app layer, as the database constraint once did.
     let library_owner_id = match contact_dto.library_owner_id {
-        Some(id) => id,
+        Some(id) => match crate::utils::library_helpers::library_exists(&db, id).await {
+            Ok(true) => id,
+            Ok(false) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("library {id} does not exist")})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Database error: {}", e)})),
+                )
+                    .into_response();
+            }
+        },
         None => match crate::utils::library_helpers::resolve_library_id(&db).await {
             Ok(id) => id,
             Err(e) => {

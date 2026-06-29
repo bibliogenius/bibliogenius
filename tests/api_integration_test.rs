@@ -451,13 +451,13 @@ async fn test_copy_creation_requires_valid_library() {
     let db = setup_test_db().await;
 
     let admin_id = create_test_admin(&db).await;
-    let _library_id = create_test_library(&db, admin_id, "Main Library").await;
+    let library_id = create_test_library(&db, admin_id, "Main Library").await;
     let book_id = create_test_book(&db, "Test Book", "123").await;
 
     // Try to create copy with INVALID library_id (foreign key violation)
     let now = chrono::Utc::now().to_rfc3339();
     let invalid_copy = rust_lib_app::models::copy::ActiveModel {
-        book_id: Set(book_id),
+        book_id: Set(book_id.clone()),
         library_id: Set(999), // Non-existent library
         status: Set("available".to_string()),
         is_temporary: Set(false),
@@ -497,6 +497,98 @@ async fn test_copy_creation_requires_valid_library() {
     assert!(
         !references_libraries,
         "uuid-PK migration must drop the copies -> libraries FK"
+    );
+
+    // The referential integrity the DB FK used to guarantee now lives at the
+    // app layer (ADR-044): the copy repository rejects a dangling library_id
+    // and accepts a valid one.
+    use rust_lib_app::domain::{CopyRepository, CreateCopyInput, DomainError};
+    let repo = rust_lib_app::infrastructure::repositories::SeaOrmCopyRepository::new(db.clone());
+
+    let rejected = repo
+        .create(CreateCopyInput {
+            book_id: book_id.clone(),
+            library_id: 999,
+            status: "available".to_string(),
+            ..Default::default()
+        })
+        .await;
+    assert!(
+        matches!(rejected, Err(DomainError::Validation(_))),
+        "app layer must reject a copy pointing at a non-existent library"
+    );
+
+    let accepted = repo
+        .create(CreateCopyInput {
+            book_id,
+            library_id,
+            status: "available".to_string(),
+            ..Default::default()
+        })
+        .await;
+    assert!(
+        accepted.is_ok(),
+        "app layer must accept a copy with a valid library_id"
+    );
+}
+
+#[tokio::test]
+async fn test_contact_creation_requires_valid_library() {
+    let db = setup_test_db().await;
+
+    let admin_id = create_test_admin(&db).await;
+    let library_id = create_test_library(&db, admin_id, "Main Library").await;
+
+    let base = || rust_lib_app::services::contact_service::ContactDto {
+        id: None,
+        uuid: None,
+        contact_type: "individual".to_string(),
+        name: "Jane".to_string(),
+        first_name: None,
+        email: None,
+        phone: None,
+        address: None,
+        street_address: None,
+        postal_code: None,
+        city: None,
+        country: None,
+        latitude: None,
+        longitude: None,
+        notes: None,
+        user_id: None,
+        library_owner_id: None,
+        is_active: true,
+    };
+
+    // A dangling library_owner_id is rejected at the app layer (ADR-044).
+    let rejected = rust_lib_app::services::contact_service::create_contact(
+        &db,
+        rust_lib_app::services::contact_service::ContactDto {
+            library_owner_id: Some(999),
+            ..base()
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            rejected,
+            Err(rust_lib_app::services::contact_service::ServiceError::Validation(_))
+        ),
+        "app layer must reject a contact pointing at a non-existent library"
+    );
+
+    // A valid owner id is accepted.
+    let accepted = rust_lib_app::services::contact_service::create_contact(
+        &db,
+        rust_lib_app::services::contact_service::ContactDto {
+            library_owner_id: Some(library_id),
+            ..base()
+        },
+    )
+    .await;
+    assert!(
+        accepted.is_ok(),
+        "app layer must accept a contact with a valid library_owner_id"
     );
 }
 
