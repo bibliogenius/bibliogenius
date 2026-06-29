@@ -17,11 +17,14 @@
 //! both for local consistency and so the per-row deletes propagate as a single
 //! coherent change set during sync.
 
+use sea_orm::sea_query::Expr;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, QueryTrait,
 };
 
-use crate::models::{book, book_authors, book_tags, collection_book, copy, loan, sale};
+use crate::models::{
+    author, book, book_authors, book_tags, collection_book, copy, loan, sale, tag,
+};
 use crate::modules::book_notes::models as book_note;
 
 /// Delete a book and every row that referenced it through a foreign key that
@@ -120,6 +123,57 @@ where
         .await?;
 
     let result = copy::Entity::delete_by_id(copy_uuid.to_owned())
+        .exec(conn)
+        .await?;
+    Ok(result.rows_affected > 0)
+}
+
+/// Delete an author together with the book-author links that referenced it, in
+/// the caller-provided connection. Mirrors the `author -> book_authors` cascade
+/// dropped by the UUID-PK rebuild (ADR-044).
+///
+/// Returns `true` if an author row was actually removed, so callers can keep
+/// their not-found semantics. Pass a transaction.
+pub async fn delete_author_cascade<C>(conn: &C, author_uuid: &str) -> Result<bool, DbErr>
+where
+    C: ConnectionTrait,
+{
+    book_authors::Entity::delete_many()
+        .filter(book_authors::Column::AuthorId.eq(author_uuid))
+        .exec(conn)
+        .await?;
+
+    let result = author::Entity::delete_by_id(author_uuid.to_owned())
+        .exec(conn)
+        .await?;
+    Ok(result.rows_affected > 0)
+}
+
+/// Delete a tag together with the book-tag links that referenced it, and clear
+/// the `parent_id` of its child tags. Mirrors the `tag -> book_tags` cascade
+/// and the self-referential `tags.parent_id` ON DELETE SET NULL, both dropped
+/// by the UUID-PK rebuild (ADR-044).
+///
+/// Returns `true` if a tag row was actually removed, so callers can keep their
+/// not-found semantics. Pass a transaction.
+pub async fn delete_tag_cascade<C>(conn: &C, tag_uuid: &str) -> Result<bool, DbErr>
+where
+    C: ConnectionTrait,
+{
+    // Re-parent the children to root: the parent link used to be SET NULL when
+    // the parent tag was deleted, so a deleted tag must not leave its children
+    // pointing at a vanished parent.
+    tag::Entity::update_many()
+        .col_expr(tag::Column::ParentId, Expr::value(Option::<String>::None))
+        .filter(tag::Column::ParentId.eq(tag_uuid))
+        .exec(conn)
+        .await?;
+    book_tags::Entity::delete_many()
+        .filter(book_tags::Column::TagId.eq(tag_uuid))
+        .exec(conn)
+        .await?;
+
+    let result = tag::Entity::delete_by_id(tag_uuid.to_owned())
         .exec(conn)
         .await?;
     Ok(result.rows_affected > 0)
@@ -228,6 +282,32 @@ mod tests {
             created_at: Set(now()),
             updated_at: Set(now()),
             ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_author(db: &DatabaseConnection, id: &str, name: &str) {
+        author::ActiveModel {
+            id: Set(id.to_owned()),
+            name: Set(name.to_owned()),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+        }
+        .insert(db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_tag(db: &DatabaseConnection, id: &str, name: &str, parent_id: Option<&str>) {
+        tag::ActiveModel {
+            id: Set(id.to_owned()),
+            name: Set(name.to_owned()),
+            parent_id: Set(parent_id.map(|p| p.to_owned())),
+            path: Set(name.to_owned()),
+            created_at: Set(now()),
+            updated_at: Set(now()),
         }
         .insert(db)
         .await
@@ -450,5 +530,103 @@ mod tests {
         assert_eq!(count::<copy::Entity>(&db).await, 1, "only the other copy");
         assert_eq!(count::<loan::Entity>(&db).await, 1, "only the other loan");
         assert_eq!(count::<sale::Entity>(&db).await, 1, "only the other sale");
+    }
+
+    #[tokio::test]
+    async fn delete_author_cascade_removes_author_and_its_book_links() {
+        let db = setup_db().await;
+        let book_id = insert_book(&db, "book").await;
+        insert_author(&db, "author-doomed", "Doomed").await;
+        insert_author(&db, "author-kept", "Kept").await;
+        attach_author(&db, &book_id, "author-doomed").await;
+        attach_author(&db, &book_id, "author-kept").await;
+
+        let existed = delete_author_cascade(&db, "author-doomed").await.unwrap();
+
+        assert!(existed, "an existing author must report as removed");
+        assert_eq!(
+            count::<author::Entity>(&db).await,
+            1,
+            "only the kept author"
+        );
+        assert_eq!(
+            count::<book_authors::Entity>(&db).await,
+            1,
+            "only the kept author's link"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_author_cascade_on_unknown_author_returns_false() {
+        let db = setup_db().await;
+        insert_author(&db, "author-kept", "Kept").await;
+
+        let existed = delete_author_cascade(&db, "does-not-exist").await.unwrap();
+
+        assert!(!existed, "an unknown author must report as not removed");
+        assert_eq!(count::<author::Entity>(&db).await, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_tag_cascade_removes_links_and_reparents_children() {
+        let db = setup_db().await;
+        let book_id = insert_book(&db, "book").await;
+        insert_tag(&db, "parent", "Parent", None).await;
+        insert_tag(&db, "child-a", "Child A", Some("parent")).await;
+        insert_tag(&db, "child-b", "Child B", Some("parent")).await;
+        attach_tag(&db, &book_id, "parent").await;
+        // A sibling tag with its own child and book link, untouched by the delete.
+        insert_tag(&db, "other", "Other", None).await;
+        insert_tag(&db, "other-child", "Other Child", Some("other")).await;
+        attach_tag(&db, &book_id, "other").await;
+
+        let existed = delete_tag_cascade(&db, "parent").await.unwrap();
+
+        assert!(existed, "an existing tag must report as removed");
+        // The tag is gone; its children survive but are re-parented to root.
+        assert!(
+            tag::Entity::find_by_id("parent".to_owned())
+                .one(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for child in ["child-a", "child-b"] {
+            let row = tag::Entity::find_by_id(child.to_owned())
+                .one(&db)
+                .await
+                .unwrap()
+                .expect("child tag must survive");
+            assert_eq!(row.parent_id, None, "child must be re-parented to root");
+        }
+        // Only the deleted tag's book link is removed.
+        assert_eq!(
+            count::<book_tags::Entity>(&db).await,
+            1,
+            "only other's link"
+        );
+        // The sibling subtree is intact.
+        let other_child = tag::Entity::find_by_id("other-child".to_owned())
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("sibling child must survive");
+        assert_eq!(other_child.parent_id.as_deref(), Some("other"));
+        assert_eq!(
+            count::<tag::Entity>(&db).await,
+            4,
+            "parent gone, four remain"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_tag_cascade_on_unknown_tag_returns_false() {
+        let db = setup_db().await;
+        insert_tag(&db, "kept", "Kept", None).await;
+
+        let existed = delete_tag_cascade(&db, "does-not-exist").await.unwrap();
+
+        assert!(!existed, "an unknown tag must report as not removed");
+        assert_eq!(count::<tag::Entity>(&db).await, 1);
     }
 }

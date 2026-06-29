@@ -1,7 +1,7 @@
 //! SeaORM implementation of AuthorRepository
 
 use async_trait::async_trait;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 
 use crate::domain::{Author, AuthorRepository, DomainError};
 use crate::models::author::{ActiveModel, Entity as AuthorEntity};
@@ -67,13 +67,18 @@ impl AuthorRepository for SeaOrmAuthorRepository {
     }
 
     async fn delete(&self, id: &str) -> Result<(), DomainError> {
-        let result = AuthorEntity::delete_by_id(id.to_owned())
-            .exec(&self.db)
-            .await?;
-
-        if result.rows_affected == 0 {
+        // Cascade the author's book links in one transaction: the database no
+        // longer does it since the replicated tables lost their foreign keys
+        // (ADR-044). Roll back when the author does not exist so a not-found
+        // delete leaves the data untouched.
+        let txn = self.db.begin().await?;
+        let existed =
+            crate::infrastructure::referential_integrity::delete_author_cascade(&txn, id).await?;
+        if !existed {
+            txn.rollback().await?;
             return Err(DomainError::NotFound);
         }
+        txn.commit().await?;
 
         Ok(())
     }
