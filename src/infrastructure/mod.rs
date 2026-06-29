@@ -11,6 +11,8 @@
 pub mod auth;
 pub mod book_local;
 pub mod config;
+#[cfg(any(feature = "crsqlite", feature = "crsqlite-static"))]
+pub mod crsqlite_crr;
 #[cfg(feature = "crsqlite-static")]
 pub mod crsqlite_static;
 pub mod db;

@@ -1927,42 +1927,51 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // enforce uniqueness via an index. Integer PKs and FKs are intentionally
     // left unchanged here — the switch to uuid-as-PK and the FK removal for
     // cr-sqlite happen in the account-sync work, not in this migration.
-    for table in ["books", "copies", "authors", "contacts", "tags", "loans"] {
-        // 1. Add the column (idempotent: error ignored if it already exists).
-        let _ = db
-            .execute(Statement::from_string(
-                db.get_database_backend(),
-                format!("ALTER TABLE {table} ADD COLUMN uuid TEXT"),
-            ))
-            .await;
-        // 2. Backfill rows that predate the column.
-        backfill_uuids(db, table).await?;
-        // 3. Generate a uuid on every future insert that does not already carry
-        //    one. The `before_save` ActiveModel hook only fires on `am.insert()`
-        //    (and is required there so the RETURNING'd model carries the uuid),
-        //    but the codebase also inserts via `Entity::insert(am).exec()` and
-        //    raw SQL, which bypass it. This trigger is the catch-all that keeps
-        //    every row's uuid non-NULL regardless of the insert path. Generates
-        //    a UUID v7 in SQL (timestamp-ordered, same shape as `new_uuid_v7`).
-        let _ = db
-            .execute(Statement::from_string(
-                db.get_database_backend(),
-                format!(
-                    "CREATE TRIGGER IF NOT EXISTS trg_{table}_uuid \
+    //
+    // Skipped once `migrate_uuid_pk` has flipped the schema (detected by the
+    // absence of the integer `id` column on `books`, the same signal that
+    // migration gates on). Post-flip this whole block is obsolete: `uuid` is the
+    // PK, the backfill is a no-op, and the AFTER-INSERT trigger is dormant. Most
+    // importantly it must NOT re-create the `idx_<table>_uuid` UNIQUE index,
+    // which cr-sqlite forbids on a CRR and the rebuild deliberately dropped.
+    if table_has_column(db, "books", "id").await? {
+        for table in ["books", "copies", "authors", "contacts", "tags", "loans"] {
+            // 1. Add the column (idempotent: error ignored if it already exists).
+            let _ = db
+                .execute(Statement::from_string(
+                    db.get_database_backend(),
+                    format!("ALTER TABLE {table} ADD COLUMN uuid TEXT"),
+                ))
+                .await;
+            // 2. Backfill rows that predate the column.
+            backfill_uuids(db, table).await?;
+            // 3. Generate a uuid on every future insert that does not already carry
+            //    one. The `before_save` ActiveModel hook only fires on `am.insert()`
+            //    (and is required there so the RETURNING'd model carries the uuid),
+            //    but the codebase also inserts via `Entity::insert(am).exec()` and
+            //    raw SQL, which bypass it. This trigger is the catch-all that keeps
+            //    every row's uuid non-NULL regardless of the insert path. Generates
+            //    a UUID v7 in SQL (timestamp-ordered, same shape as `new_uuid_v7`).
+            let _ = db
+                .execute(Statement::from_string(
+                    db.get_database_backend(),
+                    format!(
+                        "CREATE TRIGGER IF NOT EXISTS trg_{table}_uuid \
                      AFTER INSERT ON {table} FOR EACH ROW WHEN NEW.uuid IS NULL \
                      BEGIN UPDATE {table} SET uuid = {expr} WHERE id = NEW.id; END",
-                    expr = uuid_v7_sql_expr()
-                ),
-            ))
-            .await;
-        // 4. Enforce global uniqueness. Built after the backfill so the index
-        //    never has to reconcile the transient all-NULL state.
-        let _ = db
-            .execute(Statement::from_string(
-                db.get_database_backend(),
-                format!("CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uuid ON {table}(uuid)"),
-            ))
-            .await;
+                        expr = uuid_v7_sql_expr()
+                    ),
+                ))
+                .await;
+            // 4. Enforce global uniqueness. Built after the backfill so the index
+            //    never has to reconcile the transient all-NULL state.
+            let _ = db
+                .execute(Statement::from_string(
+                    db.get_database_backend(),
+                    format!("CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uuid ON {table}(uuid)"),
+                ))
+                .await;
+        }
     }
 
     // Extension modules — migrations 045+
@@ -2209,6 +2218,15 @@ struct UuidRebuildSpec {
     refs: &'static [(&'static str, &'static str)],
     /// Columns dropped from the rebuilt table (extracted to a sibling table).
     drop_cols: &'static [&'static str],
+    /// Whether this table becomes a cr-sqlite CRR (account-sync replicated).
+    /// CRRs may not carry a non-PK UNIQUE index, so those indexes are NOT
+    /// replayed for these tables (the redundant migration-078 `uuid` UNIQUE
+    /// index, in particular). Local tables (`sales`, `book_notes`) keep theirs.
+    ///
+    /// The set of `crr: true` tables MUST match `crsqlite_crr::CRR_TABLES` (the
+    /// list `setup_crrs` calls `crsql_as_crr` on); the `crrs_set_up_*` test
+    /// guards that coupling against the real migrated schema.
+    crr: bool,
 }
 
 /// The migration plan. Order is irrelevant for correctness: every `_new` table is
@@ -2234,6 +2252,7 @@ fn uuid_rebuild_specs() -> Vec<UuidRebuildSpec> {
             // after this rebuild. Keeping the rebuild generic avoids a
             // `book_local` read/write rework inside the id-type flip.
             drop_cols: &[],
+            crr: true,
         },
         UuidRebuildSpec {
             table: "authors",
@@ -2242,6 +2261,7 @@ fn uuid_rebuild_specs() -> Vec<UuidRebuildSpec> {
             composite: &[],
             refs: &[],
             drop_cols: &[],
+            crr: true,
         },
         UuidRebuildSpec {
             table: "tags",
@@ -2250,6 +2270,7 @@ fn uuid_rebuild_specs() -> Vec<UuidRebuildSpec> {
             composite: &[],
             refs: &[("parent_id", "tags")],
             drop_cols: &[],
+            crr: true,
         },
         UuidRebuildSpec {
             table: "contacts",
@@ -2258,6 +2279,7 @@ fn uuid_rebuild_specs() -> Vec<UuidRebuildSpec> {
             composite: &[],
             refs: &[],
             drop_cols: &[],
+            crr: true,
         },
         UuidRebuildSpec {
             table: "copies",
@@ -2266,6 +2288,7 @@ fn uuid_rebuild_specs() -> Vec<UuidRebuildSpec> {
             composite: &[],
             refs: &[("book_id", "books")],
             drop_cols: &[],
+            crr: true,
         },
         UuidRebuildSpec {
             table: "loans",
@@ -2274,6 +2297,23 @@ fn uuid_rebuild_specs() -> Vec<UuidRebuildSpec> {
             composite: &[],
             refs: &[("copy_id", "copies"), ("contact_id", "contacts")],
             drop_cols: &[],
+            crr: true,
+        },
+        // `collections` already has a TEXT uuid `id` PK (no integer id to drop),
+        // so it is NOT an id->uuid conversion and is absent from
+        // UUID_REBUILT_ENTITIES. It is rebuilt here only to gain the DEFAULTs
+        // that cr-sqlite requires on its NOT NULL columns before it can become a
+        // CRR (ADR-044); `crr_default_clause` synthesizes them. `id` keeps its
+        // PK, values are preserved, so `collection_books.collection_id` refs stay
+        // valid.
+        UuidRebuildSpec {
+            table: "collections",
+            drop_id: false,
+            uuid_pk: false,
+            composite: &[],
+            refs: &[],
+            drop_cols: &[],
+            crr: true,
         },
         // Mode B: junctions -> composite PK of the rewritten references.
         UuidRebuildSpec {
@@ -2283,6 +2323,7 @@ fn uuid_rebuild_specs() -> Vec<UuidRebuildSpec> {
             composite: &["book_id", "author_id"],
             refs: &[("book_id", "books"), ("author_id", "authors")],
             drop_cols: &[],
+            crr: true,
         },
         UuidRebuildSpec {
             table: "book_tags",
@@ -2291,6 +2332,7 @@ fn uuid_rebuild_specs() -> Vec<UuidRebuildSpec> {
             composite: &["book_id", "tag_id"],
             refs: &[("book_id", "books"), ("tag_id", "tags")],
             drop_cols: &[],
+            crr: true,
         },
         UuidRebuildSpec {
             table: "collection_books",
@@ -2299,6 +2341,7 @@ fn uuid_rebuild_specs() -> Vec<UuidRebuildSpec> {
             composite: &["collection_id", "book_id"],
             refs: &[("book_id", "books")],
             drop_cols: &[],
+            crr: true,
         },
         // Mode C: local (non-CRR) tables keeping their integer id, but referencing
         // now-uuid-keyed parents -> only their reference columns move to uuid.
@@ -2309,6 +2352,7 @@ fn uuid_rebuild_specs() -> Vec<UuidRebuildSpec> {
             composite: &[],
             refs: &[("copy_id", "copies"), ("contact_id", "contacts")],
             drop_cols: &[],
+            crr: false,
         },
         UuidRebuildSpec {
             table: "book_notes",
@@ -2317,6 +2361,7 @@ fn uuid_rebuild_specs() -> Vec<UuidRebuildSpec> {
             composite: &[],
             refs: &[("book_id", "books")],
             drop_cols: &[],
+            crr: false,
         },
     ]
 }
@@ -2404,6 +2449,39 @@ fn uuid_fanout_uncovered(
         .collect()
 }
 
+/// The ` DEFAULT <x>` clause for a rebuilt column.
+///
+/// cr-sqlite requires every NOT NULL, non-PK column of a CRR to carry a DEFAULT
+/// (a row synthesized during merge before all of its columns have arrived must
+/// still satisfy NOT NULL). This returns the column's own default if it has
+/// one; otherwise, for a NOT NULL non-PK column, a type-appropriate placeholder
+/// (`0` for numeric, `x''` for blobs, `''` otherwise) which the real merged
+/// value always overwrites; otherwise the empty string. PK columns are exempt
+/// (cr-sqlite checks `pk = 0`), so they never get a synthesized default.
+fn crr_default_clause(dflt: &Option<String>, notnull: bool, is_pk: bool, ty: &str) -> String {
+    if let Some(d) = dflt {
+        return format!(" DEFAULT {d}");
+    }
+    if !notnull || is_pk {
+        return String::new();
+    }
+    let t = ty.to_ascii_uppercase();
+    let placeholder = if t.contains("INT")
+        || t.contains("REAL")
+        || t.contains("FLOA")
+        || t.contains("DOUB")
+        || t.contains("NUM")
+        || t.contains("DEC")
+    {
+        "0"
+    } else if t.contains("BLOB") {
+        "x''"
+    } else {
+        "''"
+    };
+    format!(" DEFAULT {placeholder}")
+}
+
 /// Phase 1: build and populate `<table>__new`, resolving refs against the intact
 /// original via LEFT JOIN to the parent's uuid.
 async fn uuid_build_new(
@@ -2423,11 +2501,6 @@ async fn uuid_build_new(
         if spec.drop_cols.contains(&name.as_str()) {
             continue;
         }
-        // Preserve the column's DEFAULT clause (PRAGMA reports the raw SQL literal).
-        let default_clause = dflt
-            .as_ref()
-            .map(|d| format!(" DEFAULT {d}"))
-            .unwrap_or_default();
         if name == "uuid" {
             // The migration-078 AFTER INSERT trigger that minted uuids cannot
             // survive here: once `uuid` is a NOT NULL PRIMARY KEY, an insert that
@@ -2446,9 +2519,11 @@ async fn uuid_build_new(
             continue;
         }
         if let Some((_, parent)) = spec.refs.iter().find(|(c, _)| c == name) {
+            let is_pk = spec.composite.iter().any(|c| c == name);
             defs.push(format!(
-                "\"{name}\" TEXT{}{default_clause}",
-                if *notnull { " NOT NULL" } else { "" }
+                "\"{name}\" TEXT{}{}",
+                if *notnull { " NOT NULL" } else { "" },
+                crr_default_clause(dflt, *notnull, is_pk, "TEXT")
             ));
             names.push(format!("\"{name}\""));
             let alias = format!("p_{name}");
@@ -2461,10 +2536,12 @@ async fn uuid_build_new(
         // Plain column (includes the integer `id` in mode C, which keeps its PK).
         let keep_pk = *pk && !spec.drop_id && !spec.uuid_pk && spec.composite.is_empty();
         let ty = if ty.is_empty() { "TEXT" } else { ty.as_str() };
+        let is_pk = keep_pk || spec.composite.iter().any(|c| c == name);
         defs.push(format!(
-            "\"{name}\" {ty}{}{}{default_clause}",
+            "\"{name}\" {ty}{}{}{}",
             if *notnull { " NOT NULL" } else { "" },
-            if keep_pk { " PRIMARY KEY" } else { "" }
+            if keep_pk { " PRIMARY KEY" } else { "" },
+            crr_default_clause(dflt, *notnull, is_pk, ty)
         ));
         names.push(format!("\"{name}\""));
         sel.push(format!("t.\"{name}\""));
@@ -2495,6 +2572,15 @@ async fn uuid_build_new(
     .await
     .map_err(map_sqlx)?;
     Ok(())
+}
+
+/// True if a captured `CREATE INDEX` statement is a UNIQUE index (which
+/// cr-sqlite forbids on a CRR). Matches the `CREATE UNIQUE INDEX` keyword
+/// precisely so an ordinary index on a column merely named `*unique*` is kept.
+fn is_unique_index_sql(sql: &str) -> bool {
+    sql.trim_start()
+        .to_ascii_uppercase()
+        .starts_with("CREATE UNIQUE INDEX")
 }
 
 /// The `CREATE INDEX` statements of a table (user indexes only — the implicit PK
@@ -2661,7 +2747,16 @@ async fn uuid_rebuild_inner(
     // Phase 1: capture indexes + build every `_new` from intact originals.
     let mut indexes: Vec<String> = Vec::new();
     for spec in specs {
-        indexes.extend(uuid_capture_indexes(conn, spec.table).await?);
+        for sql in uuid_capture_indexes(conn, spec.table).await? {
+            // cr-sqlite forbids a non-PK UNIQUE index on a CRR, so they are not
+            // replayed for CRR tables. The migration-078 `uuid` UNIQUE index in
+            // particular is redundant once `uuid` is the PK. Non-unique indexes
+            // (and all indexes on local tables) are kept.
+            if spec.crr && is_unique_index_sql(&sql) {
+                continue;
+            }
+            indexes.push(sql);
+        }
         uuid_build_new(conn, spec).await?;
     }
 
@@ -3108,8 +3203,14 @@ mod tests {
 
     // --- Migration 078: stable UUIDs ---
 
+    // After the full migration chain (including `migrate_uuid_pk`), every
+    // replicated entity carries its stable `uuid` as the PRIMARY KEY. The
+    // migration-078 era added `uuid` as a plain column plus a separate
+    // `idx_<table>_uuid` UNIQUE index; the uuid-PK rebuild promotes `uuid` to the
+    // PK and drops that now-redundant index, which is also required because
+    // cr-sqlite forbids a non-PK UNIQUE index on a CRR.
     #[tokio::test]
-    async fn migration_078_adds_uuid_column_and_unique_index() {
+    async fn replicated_entities_have_uuid_primary_key_and_no_secondary_unique_index() {
         let db = init_db("sqlite::memory:").await.expect("init db");
         for table in ["books", "copies", "authors", "contacts", "tags", "loans"] {
             let cols = db
@@ -3119,12 +3220,15 @@ mod tests {
                 ))
                 .await
                 .expect("table_info");
-            let has_uuid = cols.iter().any(|r| {
-                r.try_get::<String>("", "name")
-                    .map(|n| n == "uuid")
-                    .unwrap_or(false)
+            let uuid_is_pk = cols.iter().any(|r| {
+                let name = r.try_get::<String>("", "name").unwrap_or_default();
+                let pk = r.try_get::<i32>("", "pk").unwrap_or(0);
+                name == "uuid" && pk > 0
             });
-            assert!(has_uuid, "table {table} must have a uuid column");
+            assert!(
+                uuid_is_pk,
+                "table {table} must have uuid as its primary key"
+            );
 
             let idx = db
                 .query_all(Statement::from_string(
@@ -3133,13 +3237,55 @@ mod tests {
                 ))
                 .await
                 .expect("index_list");
-            let has_idx = idx.iter().any(|r| {
+            let has_legacy_idx = idx.iter().any(|r| {
                 r.try_get::<String>("", "name")
                     .map(|n| n == format!("idx_{table}_uuid"))
                     .unwrap_or(false)
             });
-            assert!(has_idx, "table {table} must have idx_{table}_uuid");
+            assert!(
+                !has_legacy_idx,
+                "table {table} must NOT keep the secondary idx_{table}_uuid (CRRs forbid it)"
+            );
         }
+    }
+
+    // The CRR default synthesis: cr-sqlite requires every NOT NULL non-PK column
+    // of a CRR to carry a DEFAULT. `crr_default_clause` preserves an existing
+    // default, synthesizes a type-appropriate placeholder for NOT NULL non-PK
+    // columns that lack one, and leaves PK / nullable columns untouched.
+    #[test]
+    fn crr_default_clause_synthesizes_only_where_needed() {
+        let none: Option<String> = None;
+
+        // An existing default is preserved verbatim (even on a PK / nullable col).
+        assert_eq!(
+            crr_default_clause(&Some("'to_read'".to_owned()), true, false, "TEXT"),
+            " DEFAULT 'to_read'"
+        );
+        assert_eq!(
+            crr_default_clause(&Some("1".to_owned()), true, true, "INTEGER"),
+            " DEFAULT 1"
+        );
+
+        // NOT NULL, non-PK, no default -> a type-appropriate placeholder.
+        assert_eq!(
+            crr_default_clause(&none, true, false, "TEXT"),
+            " DEFAULT ''"
+        );
+        assert_eq!(crr_default_clause(&none, true, false, ""), " DEFAULT ''");
+        assert_eq!(
+            crr_default_clause(&none, true, false, "INTEGER"),
+            " DEFAULT 0"
+        );
+        assert_eq!(crr_default_clause(&none, true, false, "REAL"), " DEFAULT 0");
+        assert_eq!(
+            crr_default_clause(&none, true, false, "BLOB"),
+            " DEFAULT x''"
+        );
+
+        // PK columns and nullable columns get no synthesized default.
+        assert_eq!(crr_default_clause(&none, true, true, "TEXT"), "");
+        assert_eq!(crr_default_clause(&none, false, false, "TEXT"), "");
     }
 
     #[tokio::test]
