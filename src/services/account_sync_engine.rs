@@ -137,6 +137,23 @@ pub trait MergeEngine: Send + Sync {
     ) -> std::result::Result<Vec<OutboundChange>, MergeEngineError>;
     /// Apply a remote changeset; the engine merges (field-level LWW, OR-Set, tombstones).
     async fn apply(&self, change: InboundChange) -> std::result::Result<(), MergeEngineError>;
+
+    /// Repair referential integrity right after [`MergeEngine::apply`] merged a
+    /// change: if the change deleted a parent entity, remove the orphan children
+    /// it left behind on this device (cascade-on-inbound-delete). Acts only when
+    /// a real delete was merged in, never on a parent that is merely not-yet
+    /// synced, so it cannot drop a legitimately in-flight row.
+    ///
+    /// Default no-op: the in-memory test store and the single-table spike have no
+    /// child relationships. The production library engine overrides this to run
+    /// `referential_integrity::cascade_inbound_delete` on the real schema.
+    async fn repair_after_apply(
+        &self,
+        _entity_type: &str,
+        _entity_uuid: &str,
+    ) -> std::result::Result<(), MergeEngineError> {
+        Ok(())
+    }
 }
 
 /// Hub lane transport. Wraps [`AccountSyncClient`] in production; in-memory in tests.
@@ -309,15 +326,23 @@ pub async fn sync_once(
             );
             let frame: LaneBlob = rmp_serde::from_slice(&plaintext)
                 .map_err(|e| SyncError::Encoding(format!("bad lane frame: {e}")))?;
+            let entity = EntityRef {
+                entity_type: frame.t,
+                entity_uuid: frame.u,
+            };
             engine
                 .apply(InboundChange {
-                    entity: EntityRef {
-                        entity_type: frame.t,
-                        entity_uuid: frame.u,
-                    },
+                    entity: entity.clone(),
                     deleted: frame.d,
                     changeset: frame.c,
                 })
+                .await
+                .map_err(|e| SyncError::Merge(e.0))?;
+            // If this change deleted a parent entity, cascade the orphan children
+            // it left behind (the database no longer enforces foreign keys since
+            // the replicated tables were rebuilt without them, ADR-044).
+            engine
+                .repair_after_apply(&entity.entity_type, &entity.entity_uuid)
                 .await
                 .map_err(|e| SyncError::Merge(e.0))?;
             stats.applied += 1;

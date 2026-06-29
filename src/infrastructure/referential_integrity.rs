@@ -23,7 +23,7 @@ use sea_orm::{
 };
 
 use crate::models::{
-    author, book, book_authors, book_tags, collection_book, copy, loan, sale, tag,
+    author, book, book_authors, book_tags, collection, collection_book, copy, loan, sale, tag,
 };
 use crate::modules::book_notes::models as book_note;
 
@@ -192,6 +192,79 @@ where
         .exec(conn)
         .await?;
     Ok(())
+}
+
+/// Repair referential integrity after a merge applied an inbound change for one
+/// entity. If the entity is a replicated PARENT and its row is now ABSENT (the
+/// merge deleted it), remove the orphan children it left behind by running the
+/// matching cascade. A still-present row (the change was an insert or update) or
+/// an unknown entity type is a no-op; the returned bool says whether a cascade
+/// ran.
+///
+/// This is the safe counterpart to a blanket "delete children whose parent is
+/// missing" sweep: it acts ONLY when a real delete was merged in (the row is
+/// gone), never on a parent that is merely not-yet-synced. A blanket sweep
+/// cannot tell those apart and would delete - and propagate the deletion of - a
+/// legitimately in-flight row during a cold or partial sync. Accepts the
+/// singular entity name and the table name for each parent so it matches either
+/// naming the merge layer uses. Pass a transaction.
+pub async fn cascade_inbound_delete<C>(
+    conn: &C,
+    entity_type: &str,
+    entity_uuid: &str,
+) -> Result<bool, DbErr>
+where
+    C: ConnectionTrait,
+{
+    // Map the entity name (singular or table form) to a known replicated parent.
+    enum Parent {
+        Book,
+        Copy,
+        Author,
+        Tag,
+        Collection,
+    }
+    let parent = match entity_type {
+        "book" | "books" => Parent::Book,
+        "copy" | "copies" => Parent::Copy,
+        "author" | "authors" => Parent::Author,
+        "tag" | "tags" => Parent::Tag,
+        "collection" | "collections" => Parent::Collection,
+        _ => return Ok(false),
+    };
+
+    // Act only when the parent row is now absent: a present row means the change
+    // was an insert or update, not the delete we repair after. (Match guards
+    // cannot host the fallible async lookup, hence the explicit two phases.)
+    let id = entity_uuid.to_owned();
+    let absent = match parent {
+        Parent::Book => book::Entity::find_by_id(id).one(conn).await?.is_none(),
+        Parent::Copy => copy::Entity::find_by_id(id).one(conn).await?.is_none(),
+        Parent::Author => author::Entity::find_by_id(id).one(conn).await?.is_none(),
+        Parent::Tag => tag::Entity::find_by_id(id).one(conn).await?.is_none(),
+        Parent::Collection => collection::Entity::find_by_id(id)
+            .one(conn)
+            .await?
+            .is_none(),
+    };
+    if !absent {
+        return Ok(false);
+    }
+
+    match parent {
+        Parent::Book => delete_book_cascade(conn, entity_uuid).await?,
+        Parent::Copy => {
+            delete_copy_cascade(conn, entity_uuid).await?;
+        }
+        Parent::Author => {
+            delete_author_cascade(conn, entity_uuid).await?;
+        }
+        Parent::Tag => {
+            delete_tag_cascade(conn, entity_uuid).await?;
+        }
+        Parent::Collection => delete_collection_links(conn, entity_uuid).await?,
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -628,5 +701,52 @@ mod tests {
 
         assert!(!existed, "an unknown tag must report as not removed");
         assert_eq!(count::<tag::Entity>(&db).await, 1);
+    }
+
+    #[tokio::test]
+    async fn cascade_inbound_delete_cleans_orphans_of_a_merged_away_book() {
+        let db = setup_db().await;
+        let (book_id, _copy) = seed_full_book(&db, "merged-away").await;
+        // Simulate the merge having removed just the book row (a delete arrived
+        // from another device), leaving this device's children orphaned.
+        book::Entity::delete_by_id(book_id.clone())
+            .exec(&db)
+            .await
+            .unwrap();
+
+        let ran = cascade_inbound_delete(&db, "book", &book_id).await.unwrap();
+
+        assert!(ran, "an absent parent must trigger the cascade");
+        assert_eq!(count::<copy::Entity>(&db).await, 0, "orphan copies removed");
+        assert_eq!(count::<loan::Entity>(&db).await, 0, "orphan loans removed");
+        assert_eq!(count::<sale::Entity>(&db).await, 0, "orphan sales removed");
+        assert_eq!(count::<book_authors::Entity>(&db).await, 0);
+        assert_eq!(count::<book_tags::Entity>(&db).await, 0);
+        assert_eq!(count::<collection_book::Entity>(&db).await, 0);
+        assert_eq!(count::<book_note::Entity>(&db).await, 0);
+    }
+
+    #[tokio::test]
+    async fn cascade_inbound_delete_is_noop_when_parent_still_present() {
+        let db = setup_db().await;
+        let (book_id, _copy) = seed_full_book(&db, "still-here").await;
+
+        // Plural table name, present parent (the change was an insert/update).
+        let ran = cascade_inbound_delete(&db, "books", &book_id)
+            .await
+            .unwrap();
+
+        assert!(!ran, "a present parent must not trigger the cascade");
+        assert_eq!(count::<copy::Entity>(&db).await, 1, "children untouched");
+        assert_eq!(count::<book::Entity>(&db).await, 1);
+    }
+
+    #[tokio::test]
+    async fn cascade_inbound_delete_ignores_unknown_entity_type() {
+        let db = setup_db().await;
+        let ran = cascade_inbound_delete(&db, "widget", "whatever")
+            .await
+            .unwrap();
+        assert!(!ran, "an unknown entity type must be a no-op");
     }
 }
