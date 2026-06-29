@@ -232,6 +232,11 @@ impl MergeEngine for CrSqliteMergeEngine {
         }
         let mut out = Vec::with_capacity(grouped.len());
         for (uuid, change_rows) in grouped {
+            // The lane HLC is the highest `db_version` across the entity's rows:
+            // cr-sqlite's `db_version` is monotonic per device, so each re-push of a
+            // changed entity carries a strictly higher value, which the receiver uses
+            // to reject a stale replay (ADR-042 §14 / ADR-044 §7).
+            let hlc = change_rows.iter().map(|r| r.db_version).max().unwrap_or(0);
             let changeset = rmp_serde::to_vec(&change_rows).map_err(err)?;
             out.push(OutboundChange {
                 entity: EntityRef {
@@ -240,6 +245,7 @@ impl MergeEngine for CrSqliteMergeEngine {
                 },
                 deleted: false,
                 changeset,
+                hlc,
             });
         }
         Ok(out)

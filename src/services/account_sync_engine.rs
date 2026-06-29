@@ -89,6 +89,10 @@ pub struct OutboundChange {
     pub deleted: bool,
     /// Opaque changeset bytes (cr-sqlite `crsql_changes` rows for this entity).
     pub changeset: Vec<u8>,
+    /// This change's merge clock (cr-sqlite `db_version`), monotonic per sending
+    /// device. Sealed into the lane blob so the receiver can reject a stale replay
+    /// (ADR-042 §14 / ADR-044 §7 rollback detection).
+    pub hlc: i64,
 }
 
 /// A remote change pulled from another device's lane, decrypted, to apply locally.
@@ -239,6 +243,22 @@ pub trait SyncStateStore: Send + Sync {
         account_id: &str,
         seq: i64,
     ) -> std::result::Result<(), SyncError>;
+    /// Highest in-ciphertext HLC already applied for a lane `(opaque_id, device_id)`
+    /// (0 = never applied). The anti-rollback floor for H5: a pulled blob whose HLC
+    /// is `<=` this value is a stale replay and must be rejected.
+    async fn lane_hlc(
+        &self,
+        account_id: &str,
+        opaque_id: &str,
+        device_id: &str,
+    ) -> std::result::Result<i64, SyncError>;
+    async fn set_lane_hlc(
+        &self,
+        account_id: &str,
+        opaque_id: &str,
+        device_id: &str,
+        hlc: i64,
+    ) -> std::result::Result<(), SyncError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +278,9 @@ struct LaneBlob {
     d: bool,
     /// opaque changeset bytes.
     c: Vec<u8>,
+    /// sender merge clock (HLC). Monotonic per lane; the receiver rejects a blob
+    /// whose `h` does not advance past the last applied one (anti-rollback, H5).
+    h: i64,
 }
 
 fn decode_opaque_id(b64url: &str) -> std::result::Result<[u8; 32], SyncError> {
@@ -326,6 +349,20 @@ pub async fn sync_once(
             );
             let frame: LaneBlob = rmp_serde::from_slice(&plaintext)
                 .map_err(|e| SyncError::Encoding(format!("bad lane frame: {e}")))?;
+            // H5 rollback detection (ADR-042 §14 / ADR-044 §7): the AEAD binds a blob
+            // to its lane but NOT to a sequence, so a hostile hub can re-serve an
+            // old-but-valid blob that still decrypts. Reject any blob whose
+            // in-ciphertext HLC does not advance past the last one we applied for
+            // this lane. This closes the cold-bootstrap / per-lane-regression gap
+            // that the monotonic pull cursor + LWW leave open: even after the cursor
+            // is reset (e.g. a forced resync) the per-lane floor persists, so a
+            // stale or duplicate blob is dropped rather than rolling the entity back.
+            let last_hlc = state
+                .lane_hlc(&ctx.account_id, &lane.opaque_id, &lane.device_id)
+                .await?;
+            if frame.h <= last_hlc {
+                continue;
+            }
             let entity = EntityRef {
                 entity_type: frame.t,
                 entity_uuid: frame.u,
@@ -345,6 +382,10 @@ pub async fn sync_once(
                 .repair_after_apply(&entity.entity_type, &entity.entity_uuid)
                 .await
                 .map_err(|e| SyncError::Merge(e.0))?;
+            // Raise the per-lane anti-rollback floor only after a successful apply.
+            state
+                .set_lane_hlc(&ctx.account_id, &lane.opaque_id, &lane.device_id, frame.h)
+                .await?;
             stats.applied += 1;
         }
 
@@ -378,6 +419,7 @@ pub async fn sync_once(
                 u: change.entity.entity_uuid,
                 d: change.deleted,
                 c: change.changeset,
+                h: change.hlc,
             };
             let plaintext = Zeroizing::new(
                 rmp_serde::to_vec(&frame)
@@ -609,6 +651,62 @@ impl SyncStateStore for DbSyncStateStore {
     ) -> std::result::Result<(), SyncError> {
         self.upsert(account_id, "registry_seq", seq).await
     }
+
+    async fn lane_hlc(
+        &self,
+        account_id: &str,
+        opaque_id: &str,
+        device_id: &str,
+    ) -> std::result::Result<i64, SyncError> {
+        let row = self
+            .db
+            .query_one(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "SELECT last_hlc AS v FROM account_lane_hlc \
+                 WHERE account_id = ? AND opaque_id = ? AND device_id = ?",
+                [account_id.into(), opaque_id.into(), device_id.into()],
+            ))
+            .await
+            .map_err(|e| SyncError::State(e.to_string()))?;
+        match row {
+            Some(r) => r
+                .try_get::<i64>("", "v")
+                .map_err(|e| SyncError::State(e.to_string())),
+            None => Ok(0),
+        }
+    }
+
+    async fn set_lane_hlc(
+        &self,
+        account_id: &str,
+        opaque_id: &str,
+        device_id: &str,
+        hlc: i64,
+    ) -> std::result::Result<(), SyncError> {
+        self.db
+            .execute(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                // The floor is monotonic: take MAX so it can never regress, even if two
+                // sync cycles for the same account interleave their reads and writes (the
+                // single-threaded caller already only raises it; this hardens the invariant
+                // at the storage layer for when concurrent triggers are wired).
+                "INSERT INTO account_lane_hlc \
+                 (account_id, opaque_id, device_id, last_hlc, updated_at) \
+                 VALUES (?, ?, ?, ?, datetime('now')) \
+                 ON CONFLICT(account_id, opaque_id, device_id) DO UPDATE SET \
+                 last_hlc = MAX(account_lane_hlc.last_hlc, excluded.last_hlc), \
+                 updated_at = datetime('now')",
+                [
+                    account_id.into(),
+                    opaque_id.into(),
+                    device_id.into(),
+                    hlc.into(),
+                ],
+            ))
+            .await
+            .map_err(|e| SyncError::State(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -625,6 +723,8 @@ mod tests {
         pull: Mutex<HashMap<String, i64>>,
         push: Mutex<HashMap<String, i64>>,
         registry: Mutex<HashMap<String, i64>>,
+        // key: (account_id, opaque_id, device_id) -> last applied HLC.
+        lane: Mutex<HashMap<(String, String, String), i64>>,
     }
 
     #[async_trait]
@@ -665,11 +765,39 @@ mod tests {
                 .insert(account_id.to_string(), seq);
             Ok(())
         }
+        async fn lane_hlc(
+            &self,
+            account_id: &str,
+            opaque_id: &str,
+            device_id: &str,
+        ) -> std::result::Result<i64, SyncError> {
+            let key = (
+                account_id.to_string(),
+                opaque_id.to_string(),
+                device_id.to_string(),
+            );
+            Ok(*self.lane.lock().unwrap().get(&key).unwrap_or(&0))
+        }
+        async fn set_lane_hlc(
+            &self,
+            account_id: &str,
+            opaque_id: &str,
+            device_id: &str,
+            hlc: i64,
+        ) -> std::result::Result<(), SyncError> {
+            let key = (
+                account_id.to_string(),
+                opaque_id.to_string(),
+                device_id.to_string(),
+            );
+            self.lane.lock().unwrap().insert(key, hlc);
+            Ok(())
+        }
     }
 
     // --- in-memory stateful hub (mirrors the ADR-043 lane semantics) ---
 
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct HubLane {
         device_id: String,
         change_seq: i64,
@@ -862,6 +990,9 @@ mod tests {
                         },
                         deleted: rec.deleted,
                         changeset: rmp_serde::to_vec(&cs).unwrap(),
+                        // The HLC counter is monotonic per device, so each re-edit of an
+                        // entity pushes a strictly higher lane HLC (anti-rollback).
+                        hlc: rec.hlc.0,
                     });
                 }
             }
@@ -1079,6 +1210,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn h5_rejects_a_replayed_older_blob() {
+        // A hostile hub re-serves an old-but-valid blob of a lane after a newer one
+        // was already applied. The blob still decrypts (the AEAD binds it to its lane,
+        // not to a sequence), so only the per-lane HLC floor can reject it.
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        let eng_a = FakeEngine::new("devA");
+        let eng_b = FakeEngine::new("devB");
+        let state_a = MemState::default();
+        let state_b = MemState::default();
+
+        // devB publishes v1 of book-1, then devA applies it.
+        eng_b.edit("book-1", "v1", false);
+        sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+        // Capture the v1 lane exactly as the hub stored it (the stale blob to replay).
+        let (lane_key, stale_v1) = {
+            let store = hub.lanes.lock().unwrap();
+            let (k, l) = store.iter().next().expect("v1 lane pushed");
+            (k.clone(), l.clone())
+        };
+        sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
+            .await
+            .unwrap();
+        assert_eq!(
+            eng_a
+                .snapshot()
+                .iter()
+                .find(|(u, ..)| u == "book-1")
+                .unwrap()
+                .1,
+            "v1"
+        );
+
+        // devB publishes v2 (higher HLC, overwrites the lane); devA applies it.
+        eng_b.edit("book-1", "v2", false);
+        sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+        sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
+            .await
+            .unwrap();
+        assert_eq!(
+            eng_a
+                .snapshot()
+                .iter()
+                .find(|(u, ..)| u == "book-1")
+                .unwrap()
+                .1,
+            "v2"
+        );
+
+        // Hostile hub: replay the captured v1 blob under a fresh change_seq so devA's
+        // monotonic pull cursor does not filter it (this is exactly the gap H5 closes).
+        {
+            let mut store = hub.lanes.lock().unwrap();
+            let mut seq = hub.seq.lock().unwrap();
+            *seq += 1;
+            store.insert(
+                lane_key,
+                HubLane {
+                    change_seq: *seq,
+                    ..stale_v1
+                },
+            );
+        }
+
+        // devA syncs again: the replayed blob decrypts but its HLC has regressed, so
+        // it is rejected. book-1 must NOT roll back to v1.
+        let stats = sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
+            .await
+            .unwrap();
+        assert_eq!(stats.applied, 0, "stale replay must be rejected (H5)");
+        assert_eq!(
+            eng_a
+                .snapshot()
+                .iter()
+                .find(|(u, ..)| u == "book-1")
+                .unwrap()
+                .1,
+            "v2",
+            "entity must not roll back to the replayed older blob"
+        );
+    }
+
+    #[tokio::test]
     async fn h3_drops_lanes_from_unauthorized_devices() {
         let bundle = Arc::new(AccountKeyBundle::generate());
         let hub = Arc::new(MemHub::default());
@@ -1136,6 +1354,16 @@ mod tests {
         ))
         .await
         .unwrap();
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE TABLE account_lane_hlc (account_id TEXT NOT NULL, \
+             opaque_id TEXT NOT NULL, device_id TEXT NOT NULL, \
+             last_hlc INTEGER NOT NULL DEFAULT 0, updated_at TEXT, \
+             PRIMARY KEY (account_id, opaque_id, device_id))"
+                .to_owned(),
+        ))
+        .await
+        .unwrap();
 
         let store = DbSyncStateStore::new(db);
 
@@ -1160,6 +1388,31 @@ mod tests {
 
         // Distinct accounts are isolated.
         assert_eq!(store.pull_cursor("acct-2").await.unwrap(), 0);
+
+        // Per-lane HLC store (H5): unknown lane defaults to 0, then roundtrips,
+        // and distinct lanes / accounts stay isolated.
+        assert_eq!(store.lane_hlc("acct-1", "oid-1", "devB").await.unwrap(), 0);
+        store
+            .set_lane_hlc("acct-1", "oid-1", "devB", 42)
+            .await
+            .unwrap();
+        assert_eq!(store.lane_hlc("acct-1", "oid-1", "devB").await.unwrap(), 42);
+        // Upsert raises the same lane.
+        store
+            .set_lane_hlc("acct-1", "oid-1", "devB", 99)
+            .await
+            .unwrap();
+        assert_eq!(store.lane_hlc("acct-1", "oid-1", "devB").await.unwrap(), 99);
+        // The floor is monotonic: writing a lower value must NOT lower it (MAX).
+        store
+            .set_lane_hlc("acct-1", "oid-1", "devB", 50)
+            .await
+            .unwrap();
+        assert_eq!(store.lane_hlc("acct-1", "oid-1", "devB").await.unwrap(), 99);
+        // A different device on the same opaque_id is a distinct lane.
+        assert_eq!(store.lane_hlc("acct-1", "oid-1", "devC").await.unwrap(), 0);
+        // A different account is isolated.
+        assert_eq!(store.lane_hlc("acct-2", "oid-1", "devB").await.unwrap(), 0);
     }
 
     // --- device registry: fetch/adopt + enroll ---

@@ -2053,6 +2053,29 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // epic; see `migrate_uuid_pk` for the mechanics and risk controls.
     migrate_uuid_pk(db).await?;
 
+    // Migration 083: per-lane rollback-detection state for the account E2EE sync
+    // layer (ADR-042 §14 / ADR-044 §7). One row per lane keyed by
+    // `(account_id, opaque_id, device_id)`, holding the highest in-ciphertext HLC
+    // applied for that lane. On pull a blob whose HLC does not advance past
+    // `last_hlc` is rejected as a stale replay (a hostile hub re-serving an
+    // old-but-valid blob passes the AEAD but cannot pass this check). Purely
+    // additive and isolated from the replicated entity tables, so it is safe to
+    // create after the uuid-PK rebuild above (it is not a rebuild target).
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"CREATE TABLE IF NOT EXISTS account_lane_hlc (
+            account_id TEXT NOT NULL,
+            opaque_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            last_hlc INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT,
+            PRIMARY KEY (account_id, opaque_id, device_id)
+        )"#
+            .to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
 
