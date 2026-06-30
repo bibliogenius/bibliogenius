@@ -68,6 +68,66 @@ pub async fn finalize(db: &DatabaseConnection) -> Result<(), DbErr> {
     Ok(())
 }
 
+/// Whether any replicated table is currently a cr-sqlite CRR on this database,
+/// detected by the presence of a `*__crsql_clock` companion table. A plain read
+/// of `sqlite_master`, safe on any connection.
+///
+/// Used to decide whether the merge engine can run: the CRR machinery only exists
+/// after [`setup_crrs`], which is gated on account enrollment plus a restart (see
+/// `db::init_db_account_sync`), so a freshly-enrolled session that has not yet
+/// restarted has no clock tables and cannot sync data.
+pub async fn crrs_present(db: &DatabaseConnection) -> Result<bool, DbErr> {
+    let row = db
+        .query_one(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+             WHERE type = 'table' AND name LIKE '%\\_\\_crsql\\_clock' ESCAPE '\\') AS present"
+                .to_owned(),
+        ))
+        .await?;
+    match row {
+        Some(r) => Ok(r.try_get::<i32>("", "present")? != 0),
+        None => Ok(false),
+    }
+}
+
+/// Demote every replicated CRR back to a plain table (`crsql_as_table`) and then
+/// release cr-sqlite's per-connection state (`crsql_finalize`). After this the
+/// database holds only flat tables again, with no CRR triggers calling the
+/// extension: it is writable by ANY build, reversing the lock-in that
+/// [`setup_crrs`] introduces. The app wires this into account logout / disable.
+///
+/// Idempotent and order-robust: a table that is not currently a CRR is skipped, so
+/// this is safe whether or not [`setup_crrs`] ever ran on the database (e.g. an
+/// enrollment that never reached its post-enrollment restart). Must run on a
+/// cr-sqlite-loaded connection.
+pub async fn teardown_crrs(db: &DatabaseConnection) -> Result<(), DbErr> {
+    let backend = db.get_database_backend();
+    for table in CRR_TABLES {
+        // Only demote tables that are actually CRRs; calling `crsql_as_table` on a
+        // table that was never promoted is unnecessary and keeps teardown idempotent.
+        // `table` is a fixed name from CRR_TABLES (never user input).
+        let clock = db
+            .query_one(Statement::from_string(
+                backend,
+                format!(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '{table}__crsql_clock'"
+                ),
+            ))
+            .await?;
+        if clock.is_none() {
+            continue;
+        }
+        db.execute(Statement::from_string(
+            backend,
+            format!("SELECT crsql_as_table('{table}')"),
+        ))
+        .await?;
+    }
+    // The CRRs are gone; release cr-sqlite's per-connection state.
+    finalize(db).await
+}
+
 #[cfg(all(test, feature = "crsqlite-static"))]
 mod tests {
     use super::*;
@@ -120,5 +180,76 @@ mod tests {
         );
 
         finalize(&db).await.expect("crsql_finalize");
+    }
+
+    // Roundtrip: a CRR-ified DB demoted by `teardown_crrs` becomes plain tables
+    // again (no `*__crsql_clock`) and still accepts writes — proving the lock-in is
+    // reversed. `register()` is process-wide, so run isolated:
+    // `cargo test --features crsqlite-static crr_teardown`.
+    #[tokio::test]
+    async fn crr_teardown_demotes_to_plain_tables_and_writes_still_work() {
+        crsqlite_static::register();
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory");
+        crate::db::run_migrations(&db)
+            .await
+            .expect("run_migrations");
+
+        setup_crrs(&db).await.expect("setup_crrs");
+        assert!(
+            crrs_present(&db).await.expect("crrs_present"),
+            "the schema must be CRR-ified after setup_crrs"
+        );
+
+        teardown_crrs(&db).await.expect("teardown_crrs");
+        assert!(
+            !crrs_present(&db).await.expect("crrs_present"),
+            "no clock tables must remain after teardown"
+        );
+
+        // A write to a previously-CRR table must succeed on the flat schema (no CRR
+        // trigger reaching for cr-sqlite internals).
+        author::ActiveModel {
+            id: Set("a-after-teardown".to_owned()),
+            name: Set("George Orwell".to_owned()),
+            created_at: Set("2026-06-30T00:00:00Z".to_owned()),
+            updated_at: Set("2026-06-30T00:00:00Z".to_owned()),
+        }
+        .insert(&db)
+        .await
+        .expect("insert into a demoted, flat table");
+
+        // Leave the connection clean for teardown (the static extension is loaded
+        // process-wide; finalize before drop, see `static_crsqlite_loads...`).
+        finalize(&db).await.expect("crsql_finalize");
+    }
+
+    // Demotion is idempotent and safe when no CRR was ever set up (an enrollment
+    // that never reached its post-enrollment restart): teardown over a plain schema
+    // is a no-op, and a second teardown over an already-demoted schema is too.
+    #[tokio::test]
+    async fn crr_teardown_is_idempotent_and_safe_without_setup() {
+        crsqlite_static::register();
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory");
+        crate::db::run_migrations(&db)
+            .await
+            .expect("run_migrations");
+
+        // No setup_crrs ran: teardown must not error.
+        teardown_crrs(&db)
+            .await
+            .expect("teardown over plain schema");
+        assert!(!crrs_present(&db).await.expect("crrs_present"));
+
+        // Now set up, tear down twice — the second call is a no-op.
+        setup_crrs(&db).await.expect("setup_crrs");
+        teardown_crrs(&db).await.expect("first teardown");
+        teardown_crrs(&db)
+            .await
+            .expect("idempotent second teardown");
+        assert!(!crrs_present(&db).await.expect("crrs_present"));
     }
 }

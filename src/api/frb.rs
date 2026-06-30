@@ -836,6 +836,25 @@ fn account_device_entry(
     })
 }
 
+/// Whether enrollment must be followed by an app restart to activate data sync.
+///
+/// CRR-ification (and the cr-sqlite pool) is gated on enrollment + a restart: a device
+/// that just enrolled booted in plain mode, so its replicated tables are not yet CRRs and
+/// the merge engine cannot run until the next boot flips it into sync mode (see
+/// `db::init_db_account_sync`). True iff the live database has no CRRs yet; on builds
+/// without account sync there is no cr-sqlite, so a restart changes nothing → false.
+#[cfg(feature = "account_sync")]
+async fn enrollment_restart_required(db: &DatabaseConnection) -> bool {
+    // On error, assume a restart is needed (safer: the user reboots and `setup_crrs` runs).
+    !crate::infrastructure::crsqlite_crr::crrs_present(db)
+        .await
+        .unwrap_or(false)
+}
+#[cfg(not(feature = "account_sync"))]
+async fn enrollment_restart_required(_db: &DatabaseConnection) -> bool {
+    false
+}
+
 /// Install the freshly unlocked session into the process-global slot, replacing any prior
 /// one (dropping it zeroizes the old trousseau, A1). Call AFTER building the status JSON,
 /// since this takes ownership of the metadata fields.
@@ -862,6 +881,25 @@ fn account_status_json(signed_in: bool, email: &str, account_id: &str, device_id
         "email": email,
         "account_id": account_id,
         "device_id": device_id,
+    })
+    .to_string()
+}
+
+/// Status JSON returned by the join / sealed-pairing enrollment FFIs: the signed-in
+/// metadata plus the restart-required flag. (Signup builds its own variant since it also
+/// carries the one-time recovery phrase.)
+fn enrollment_status_json(
+    email: &str,
+    account_id: &str,
+    device_id: &str,
+    restart_required: bool,
+) -> String {
+    serde_json::json!({
+        "signed_in": true,
+        "email": email,
+        "account_id": account_id,
+        "device_id": device_id,
+        "restart_required": restart_required,
     })
     .to_string()
 }
@@ -957,7 +995,8 @@ pub async fn account_enroll_passphrase_ffi(
     .await
     .map_err(|e| e.to_string())?;
 
-    let status = account_status_json(true, &email, &enrolled.account_id, &device_id);
+    let restart_required = enrollment_restart_required(db).await;
+    let status = enrollment_status_json(&email, &enrolled.account_id, &device_id, restart_required);
     store_account_session(
         enrolled.bundle,
         client,
@@ -1064,7 +1103,8 @@ pub async fn account_enroll_from_sealed_ffi(sealed_qr_payload: String) -> Result
     .map_err(|e| e.to_string())?;
 
     *PENDING_PAIRING_DEVICE_ID.lock().await = None;
-    let status = account_status_json(true, &email, &enrolled.account_id, &device_id);
+    let restart_required = enrollment_restart_required(db).await;
+    let status = enrollment_status_json(&email, &enrolled.account_id, &device_id, restart_required);
     store_account_session(
         enrolled.bundle,
         client,
@@ -1132,8 +1172,23 @@ pub async fn account_sync_now_ffi() -> Result<String, String> {
 
     #[cfg(feature = "account_sync")]
     {
+        // CRR-ification is gated on enrollment + a restart. If this device enrolled
+        // but has not restarted yet, the replicated tables are not CRRs and the merge
+        // engine cannot run: report it honestly so the UI can prompt for a restart
+        // rather than failing on a missing `crsql_*` function.
+        if !crate::infrastructure::crsqlite_crr::crrs_present(db)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(serde_json::json!({
+                "synced": false,
+                "reason": "restart_required",
+            })
+            .to_string());
+        }
+
         // The merge engine shares the app's single cr-sqlite connection (the pool is
-        // pinned to one connection on account-sync builds, see `db::init_db`).
+        // pinned to one connection on account-sync builds, see `db::init_db_account_sync`).
         let engine = crate::services::crsqlite_engine::CrSqliteMergeEngine::new(db.clone());
         let stats = crate::services::account_sync_engine::refresh_then_sync(
             &session.client,
@@ -1210,6 +1265,17 @@ pub async fn shutdown_backend_ffi() -> Result<String, String> {
 /// from another device). Idempotent.
 pub async fn account_logout_ffi() -> Result<String, String> {
     let db = db().ok_or("Database not initialized")?;
+
+    // Demote the replicated tables from CRRs back to plain tables so the database is
+    // no longer locked to cr-sqlite builds (writable by any build), reversing the
+    // enrollment lock-in. Done before clearing the session row so the invariant
+    // "CRRs present OR account_session row == sync mode" never leaves CRRs behind
+    // without a session to explain them. Best-effort: a failure must not block sign-out.
+    #[cfg(feature = "account_sync")]
+    if let Err(e) = crate::infrastructure::crsqlite_crr::teardown_crrs(db).await {
+        tracing::warn!("crsql teardown on logout failed: {e}");
+    }
+
     crate::services::account_session_service::clear(db)
         .await
         .map_err(|e| e.to_string())?;
@@ -1285,12 +1351,14 @@ pub async fn account_signup_ffi(
     .await
     .map_err(|e| e.to_string())?;
 
+    let restart_required = enrollment_restart_required(db).await;
     let status = serde_json::json!({
         "signed_in": true,
         "email": email,
         "account_id": outcome.account_id,
         "device_id": device_id,
         "recovery_phrase": outcome.recovery_phrase,
+        "restart_required": restart_required,
     })
     .to_string();
     store_account_session(outcome.bundle, client, outcome.account_id, device_id, email).await;

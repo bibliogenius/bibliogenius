@@ -20,20 +20,28 @@ pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     Ok(db)
 }
 
-/// Open the application database as a cr-sqlite-loaded, single-connection pool and
-/// promote the replicated tables to CRRs (account-sync builds only, ADR-044).
+/// Adaptive database entrypoint for the real app bootstrap (the FFI `init_backend`
+/// and the server `main`) on account-sync builds (ADR-044). The mode is chosen at
+/// runtime from the database itself — NOT from the compile feature — so a build that
+/// merely *can* sync does not CRR-ify every user's database:
 ///
-/// This is the database entrypoint for the real app bootstrap (the FFI
-/// `init_backend` and the server `main`); plain [`init_db`] stays the path for tests
-/// and the backup/restore subsystem, which must not load cr-sqlite into their
-/// transient connections.
+/// - **Sync mode** (the user enrolled an account, see [`detect_sync_mode`]): open a
+///   cr-sqlite-loaded, single-connection pool and promote the replicated tables to
+///   CRRs. cr-sqlite keeps per-connection state (site id, db version), so the whole
+///   pool is pinned to one physical connection that every query and the merge engine
+///   share. The extension is made available before the connection is used — a
+///   process-wide auto-extension on the static ship build, or a per-connection load
+///   on the dynamic dev build. CRR promotion runs after migrations so each table
+///   already has its uuid PK and no foreign keys.
+/// - **Default mode** (not enrolled): fall through to plain [`init_db`] — a NORMAL
+///   multi-connection pool with no cr-sqlite and no CRRs. Non-sync users pay zero
+///   cr-sqlite cost and their database stays a plain, lock-in-free SQLite file that
+///   any build can write.
 ///
-/// cr-sqlite keeps per-connection state (site id, db version), so the whole pool is
-/// pinned to one physical connection: every query and the merge engine share it.
-/// The extension is made available before the connection is used — registered as a
-/// process-wide auto-extension for the static ship build, or loaded per connection
-/// for the dynamic dev build. CRR promotion runs after migrations so each table
-/// already has its uuid PK and no foreign keys.
+/// CRR-ification is therefore gated on enrollment, and reversed by
+/// [`crsqlite_crr::teardown_crrs`](crate::infrastructure::crsqlite_crr::teardown_crrs)
+/// on logout. Plain [`init_db`] stays the path for tests and the backup/restore
+/// subsystem, which must not load cr-sqlite into their transient connections.
 #[cfg(feature = "account_sync")]
 pub async fn init_db_account_sync(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     use sea_orm::{RuntimeErr, SqlxSqliteConnector};
@@ -42,9 +50,22 @@ pub async fn init_db_account_sync(database_url: &str) -> Result<DatabaseConnecti
 
     let conn_err = |e: sqlx::Error| DbErr::Conn(RuntimeErr::Internal(e.to_string()));
 
+    // Peek (a plain, read-only connection) whether this database is in account-sync
+    // mode before deciding how to open it. Closed before the real pool opens so the
+    // two never contend on the SQLite file lock.
+    let peek = Database::connect(database_url).await?;
+    let sync_mode = detect_sync_mode(&peek).await?;
+    peek.close().await?;
+
+    if !sync_mode {
+        // Not enrolled (or enrolled but awaiting the post-enrollment restart): a
+        // NORMAL multi-connection pool with no cr-sqlite and no CRRs.
+        return init_db(database_url).await;
+    }
+
     // Static ship build: register the statically-linked extension as a SQLite
     // auto-extension so every connection opened afterwards exposes `crsql_*`.
-    // Must run before the first connection is opened.
+    // Must run before the cr-sqlite connection is opened.
     #[cfg(feature = "crsqlite-static")]
     crate::infrastructure::crsqlite_static::register();
 
@@ -73,6 +94,58 @@ pub async fn init_db_account_sync(database_url: &str) -> Result<DatabaseConnecti
     crate::infrastructure::crsqlite_crr::setup_crrs(&db).await?;
 
     Ok(db)
+}
+
+/// Decide whether a database must be opened in account-sync (cr-sqlite) mode. True when:
+///
+/// 1. The replicated tables are already CRRs (a `*__crsql_clock` companion table
+///    exists). Once CRR-ified the database MUST be opened with cr-sqlite — plain
+///    writes would fail on the CRR triggers that call the extension.
+/// 2. An `account_session` row is present. Enrollment is restart-gated: it persists
+///    the session row but defers the first `setup_crrs` to the next boot, where this
+///    peek flips the database into sync mode.
+///
+/// Reads only (`sqlite_master` plus a single-row `account_session` probe), so it is
+/// safe on a plain connection opened before the real pool. The `account_session`
+/// table only exists once migrations have run at least once, so its presence is
+/// probed first (a fresh database has neither signal → default mode).
+#[cfg(feature = "account_sync")]
+async fn detect_sync_mode(db: &DatabaseConnection) -> Result<bool, DbErr> {
+    let backend = db.get_database_backend();
+
+    // 1. Any replicated table already promoted to a CRR?
+    let clock = db
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+             WHERE type = 'table' AND name LIKE '%\\_\\_crsql\\_clock' ESCAPE '\\') AS present"
+                .to_owned(),
+        ))
+        .await?;
+    if let Some(row) = clock
+        && row.try_get::<i32>("", "present")? != 0
+    {
+        return Ok(true);
+    }
+
+    // 2. An enrolled session waiting for its post-enrollment restart.
+    let has_table = db
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'account_session'"
+                .to_owned(),
+        ))
+        .await?;
+    if has_table.is_none() {
+        return Ok(false);
+    }
+    let session = db
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT 1 FROM account_session WHERE id = 0".to_owned(),
+        ))
+        .await?;
+    Ok(session.is_some())
 }
 
 /// Run filesystem-side maintenance that does NOT require an open SeaORM
@@ -3512,5 +3585,33 @@ mod tests {
         assert!(parse_legacy_borrow_notes("Some freeform user note").is_none());
         assert!(parse_legacy_borrow_notes("").is_none());
         assert!(parse_legacy_borrow_notes("Emprunté de ").is_none());
+    }
+
+    // --- Account-sync boot-mode detection (`detect_sync_mode`) ---
+
+    // A migrated but un-enrolled database (no CRR clock tables, no account_session
+    // row) is NOT in sync mode, so the real bootstrap opens a plain pool.
+    #[cfg(feature = "account_sync")]
+    #[tokio::test]
+    async fn detect_sync_mode_is_false_for_an_unenrolled_db() {
+        let db = init_db("sqlite::memory:").await.expect("init db");
+        assert!(!detect_sync_mode(&db).await.expect("detect_sync_mode"));
+    }
+
+    // Enrollment persists an account_session row but defers the first setup_crrs to
+    // the next boot; that pending row alone must flip the next boot into sync mode.
+    #[cfg(feature = "account_sync")]
+    #[tokio::test]
+    async fn detect_sync_mode_is_true_once_an_account_session_exists() {
+        let db = init_db("sqlite::memory:").await.expect("init db");
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "INSERT INTO account_session (id, account_id, email, device_id, encrypted_bundle, salt) \
+             VALUES (0, 'acct-1', 'r@e.org', 'dev-1', x'00', x'00')"
+                .to_owned(),
+        ))
+        .await
+        .expect("insert account_session");
+        assert!(detect_sync_mode(&db).await.expect("detect_sync_mode"));
     }
 }
