@@ -127,6 +127,13 @@ pub struct SyncContext {
 pub struct SyncStats {
     pub applied: usize,
     pub pushed: usize,
+    /// `(book_uuid, file_mtime)` of every custom cover whose bytes pushed
+    /// successfully this cycle (ADR-046). The caller records these in the local
+    /// cover dedup state AFTER the cycle succeeds, so an unchanged cover is not
+    /// re-encoded and re-uploaded on the next (e.g. periodic) sync. Empty for
+    /// row-only entrypoints. Kept out of the `CoverSource` trait so the
+    /// flutter_rust_bridge parser never has to materialize its impls.
+    pub pushed_covers: Vec<(String, i64)>,
 }
 
 /// One custom cover's bytes to publish this cycle (ADR-046, producer side).
@@ -284,7 +291,7 @@ pub trait SyncStateStore: Send + Sync {
 /// Produces this device's custom covers to push (ADR-046). cr-sqlite replicates
 /// the `books` row (including the normalized `cover_url`) but not the cover file
 /// itself, so the bytes come from here. The production impl reads the local
-/// `covers/` directory; the row-only sync entrypoints use [`NoopCovers`].
+/// `covers/` directory; the row-only sync entrypoints use `NoopCovers`.
 #[async_trait]
 pub trait CoverSource: Send + Sync {
     async fn pending_covers(&self) -> std::result::Result<Vec<OutboundCover>, SyncError>;
@@ -293,7 +300,7 @@ pub trait CoverSource: Send + Sync {
 /// Persists a custom cover received from another device (ADR-046). The bytes are
 /// written under the book's uuid so the existing resolver finds them once the
 /// already-replicated `cover_url` row lands. The production impl writes the local
-/// `covers/` directory; the row-only sync entrypoints use [`NoopCovers`].
+/// `covers/` directory; the row-only sync entrypoints use `NoopCovers`.
 #[async_trait]
 pub trait CoverSink: Send + Sync {
     async fn write_cover(
@@ -307,7 +314,7 @@ pub trait CoverSink: Send + Sync {
 /// A cover source/sink that produces and persists nothing. Used by the row-only
 /// entrypoints (`sync_once`, `refresh_then_sync`) and by tests/engines that do
 /// not transport cover bytes.
-pub struct NoopCovers;
+pub struct NoopCovers {}
 
 #[async_trait]
 impl CoverSource for NoopCovers {
@@ -423,8 +430,8 @@ pub async fn sync_once(
         bundle,
         state,
         ctx,
-        &NoopCovers,
-        &NoopCovers,
+        &NoopCovers {},
+        &NoopCovers {},
     )
     .await
 }
@@ -577,12 +584,16 @@ pub async fn sync_once_with_covers(
     }
 
     // Custom cover bytes (ADR-046). cr-sqlite carries the cover_url row but not the
-    // file, so the bytes ride their own "cover" lanes here. v1 re-pushes every local
-    // cover each cycle (overwrite-in-place on the hub, idempotent on the receiver via
-    // the HLC floor); a local dedup table to push only changed covers is a follow-up
-    // that belongs with the automatic-sync-trigger work, not with manual sync today.
-    // The source has already re-encoded each cover to fit a lane blob.
+    // file, so the bytes ride their own "cover" lanes here. The source dedups
+    // against its local `cover_sync_state`, so only covers that changed since the
+    // last successful push are re-encoded and uploaded. We report the ones pushed
+    // this cycle in `stats.pushed_covers`; the caller records them in the dedup
+    // state AFTER the whole cycle succeeds. The source has already re-encoded each
+    // returned cover to fit a lane blob.
     for cover in cover_source.pending_covers().await? {
+        stats
+            .pushed_covers
+            .push((cover.book_uuid.clone(), cover.hlc));
         lanes.push(seal_lane(
             bundle,
             account_aad,
@@ -688,8 +699,8 @@ pub async fn refresh_then_sync(
         state,
         account_id,
         device_id,
-        &NoopCovers,
-        &NoopCovers,
+        &NoopCovers {},
+        &NoopCovers {},
     )
     .await
 }
@@ -1345,17 +1356,20 @@ mod tests {
         let b_covers = CollectingCovers::default();
 
         // A pushes its cover lane (no row edits needed for this test).
-        sync_once_with_covers(
+        let a_stats = sync_once_with_covers(
             &*hub,
             &eng_a,
             &bundle,
             &state_a,
             &ctx("devA"),
             &a_covers,
-            &NoopCovers,
+            &NoopCovers {},
         )
         .await
         .unwrap();
+        // The pushed cover is reported back so the caller can record it in the
+        // local dedup state (ADR-046): it carries the book uuid + file mtime.
+        assert_eq!(a_stats.pushed_covers, vec![("book-1".to_string(), 100)]);
 
         // B pulls: the cover lane goes to B's sink, never into B's merge engine.
         sync_once_with_covers(
@@ -1364,7 +1378,7 @@ mod tests {
             &bundle,
             &state_b,
             &ctx("devB"),
-            &NoopCovers,
+            &NoopCovers {},
             &b_covers,
         )
         .await
@@ -1390,7 +1404,7 @@ mod tests {
             &bundle,
             &state_b,
             &ctx("devB"),
-            &NoopCovers,
+            &NoopCovers {},
             &b_covers,
         )
         .await
@@ -1422,7 +1436,7 @@ mod tests {
             &state_a,
             &ctx("devA"),
             &a_covers,
-            &NoopCovers,
+            &NoopCovers {},
         )
         .await
         .unwrap();
@@ -1435,7 +1449,7 @@ mod tests {
             &bundle,
             &state_b,
             &ctx("devB"),
-            &NoopCovers,
+            &NoopCovers {},
             &FailingCoverSink,
         )
         .await
@@ -1457,7 +1471,7 @@ mod tests {
             &bundle,
             &state_b,
             &ctx("devB"),
-            &NoopCovers,
+            &NoopCovers {},
             &good,
         )
         .await

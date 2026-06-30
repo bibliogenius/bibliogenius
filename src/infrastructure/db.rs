@@ -2262,6 +2262,24 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         .await?;
     }
 
+    // Migration 085: device-local dedup state for custom-cover transport
+    // (ADR-046). One row per book holding the cover file's last-synced mtime, so
+    // the periodic auto-sync re-encodes and re-uploads a cover only when it
+    // actually changed (and never bounces back a cover received from another
+    // device). Like `book_local`, it is intentionally NOT a CRR: it records what
+    // THIS device transported, which is meaningless to replicate. Gateless and
+    // additive, so it is safe to create after the uuid-PK rebuild.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"CREATE TABLE IF NOT EXISTS cover_sync_state (
+            book_uuid TEXT PRIMARY KEY NOT NULL,
+            file_mtime INTEGER NOT NULL
+        )"#
+            .to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
 

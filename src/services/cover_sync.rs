@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect};
 
+use crate::infrastructure::cover_sync_state;
 use crate::models::book;
 use crate::services::account_sync_engine::{CoverSink, CoverSource, OutboundCover, SyncError};
 use crate::utils::cover_image;
@@ -43,6 +44,17 @@ impl DbCoverSource {
     pub fn new(db: DatabaseConnection, covers_dir: PathBuf) -> Self {
         Self { db, covers_dir }
     }
+
+    /// Record that the given `(book_uuid, file_mtime)` covers pushed successfully,
+    /// so a later [`Self::pending_covers`] skips re-encoding and re-uploading them
+    /// while unchanged (ADR-046 dedup). The caller invokes this only after the
+    /// whole sync cycle succeeds (mirroring the row-push watermark): a failed push
+    /// leaves the covers un-recorded so they are retried next cycle.
+    pub async fn mark_pushed(&self, pushed: &[(String, i64)]) -> Result<(), SyncError> {
+        cover_sync_state::mark_synced_many(&self.db, pushed)
+            .await
+            .map_err(|e| SyncError::State(format!("record {} pushed covers: {e}", pushed.len())))
+    }
 }
 
 #[async_trait]
@@ -59,6 +71,15 @@ impl CoverSource for DbCoverSource {
             .all(&self.db)
             .await
             .map_err(|e| SyncError::State(format!("scan covers: {e}")))?;
+
+        // Dedup state: the last mtime we already pushed (or received) per book. A
+        // cover whose file mtime is unchanged is skipped BEFORE the costly re-read
+        // and re-encode, so the periodic auto-sync does not churn every cover each
+        // cycle (ADR-046). Loaded once here on the async side, then moved into the
+        // blocking scan.
+        let synced = cover_sync_state::synced_mtimes(&self.db)
+            .await
+            .map_err(|e| SyncError::State(format!("load cover dedup state: {e}")))?;
 
         let covers_dir = self.covers_dir.clone();
         // File reads + JPEG re-encodes are blocking and CPU-bound; keep them off the
@@ -84,6 +105,10 @@ impl CoverSource for DbCoverSource {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
+                // Already synced at this exact mtime: skip the re-read/re-encode.
+                if synced.get(&uuid) == Some(&hlc) {
+                    continue;
+                }
                 let raw = match std::fs::read(&path) {
                     Ok(r) => r,
                     Err(e) => {
@@ -115,12 +140,13 @@ impl CoverSource for DbCoverSource {
 
 /// Writes a custom cover received from another device under the book's uuid.
 pub struct FsCoverSink {
+    db: DatabaseConnection,
     covers_dir: PathBuf,
 }
 
 impl FsCoverSink {
-    pub fn new(covers_dir: PathBuf) -> Self {
-        Self { covers_dir }
+    pub fn new(db: DatabaseConnection, covers_dir: PathBuf) -> Self {
+        Self { db, covers_dir }
     }
 }
 
@@ -135,7 +161,11 @@ impl CoverSink for FsCoverSink {
         let dir = self.covers_dir.clone();
         let uuid = book_uuid.to_string();
         let bytes = bytes.to_vec();
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        // Stat the file we just wrote so the dedup state records its ACTUAL local
+        // mtime (the receiver's write time, not the sender's): this is what the next
+        // `pending_covers` scan reads, so recording it prevents this device from
+        // bouncing the cover straight back to the sender (the A->B->A echo).
+        let written_mtime = tokio::task::spawn_blocking(move || -> std::io::Result<i64> {
             std::fs::create_dir_all(&dir)?;
             let final_path = dir.join(cover_url::local_cover_filename(&uuid));
             // Write a temp sibling then rename over the target so a reader never
@@ -143,11 +173,20 @@ impl CoverSink for FsCoverSink {
             let tmp_path = dir.join(format!("{uuid}.jpg.tmp"));
             std::fs::write(&tmp_path, &bytes)?;
             std::fs::rename(&tmp_path, &final_path)?;
-            Ok(())
+            let mtime = std::fs::metadata(&final_path)?
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            Ok(mtime)
         })
         .await
         .map_err(|e| SyncError::State(format!("cover write task: {e}")))?
         .map_err(|e| SyncError::State(format!("write cover {book_uuid}: {e}")))?;
+        cover_sync_state::mark_synced(&self.db, book_uuid, written_mtime)
+            .await
+            .map_err(|e| SyncError::State(format!("record received cover {book_uuid}: {e}")))?;
         Ok(())
     }
 }
@@ -155,6 +194,11 @@ impl CoverSink for FsCoverSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::init_db;
+
+    async fn db() -> DatabaseConnection {
+        init_db("sqlite::memory:").await.expect("init db")
+    }
 
     #[test]
     fn rejects_unsafe_uuids() {
@@ -168,9 +212,10 @@ mod tests {
 
     #[tokio::test]
     async fn sink_writes_cover_under_uuid_filename() {
+        let db = db().await;
         let dir = std::env::temp_dir().join(format!("bg_cover_sink_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let sink = FsCoverSink::new(dir.clone());
+        let sink = FsCoverSink::new(db.clone(), dir.clone());
 
         sink.write_cover("test-uuid-1", b"JPEGDATA", 42)
             .await
@@ -184,15 +229,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sink_records_received_cover_in_dedup_state() {
+        // A received cover must be recorded so this device never bounces it back
+        // to the sender (the A->B->A echo).
+        let db = db().await;
+        let dir = std::env::temp_dir().join(format!("bg_cover_echo_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = FsCoverSink::new(db.clone(), dir.clone());
+
+        sink.write_cover("book-echo", b"JPEGDATA", 99)
+            .await
+            .unwrap();
+
+        let synced = cover_sync_state::synced_mtimes(&db).await.unwrap();
+        let written_mtime = std::fs::metadata(dir.join("book-echo.jpg"))
+            .unwrap()
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap();
+        // Recorded under the local write mtime (not the sender's hlc of 99), which
+        // is exactly what `pending_covers` will read back and skip on.
+        assert_eq!(synced.get("book-echo"), Some(&written_mtime));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn sink_skips_unsafe_uuid_without_writing() {
+        let db = db().await;
         let dir = std::env::temp_dir().join(format!("bg_cover_sink_unsafe_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let sink = FsCoverSink::new(dir.clone());
+        let sink = FsCoverSink::new(db.clone(), dir.clone());
 
         // Must not create anything and must not error the sync cycle.
         sink.write_cover("../escape", b"x", 1).await.unwrap();
         assert!(!dir.join("../escape.jpg").exists());
+        // And nothing recorded for an unsafe uuid.
+        assert!(
+            cover_sync_state::synced_mtimes(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn source_skips_a_cover_already_synced_at_the_same_mtime() {
+        let db = db().await;
+        let dir = std::env::temp_dir().join(format!("bg_cover_dedup_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A book whose cover is a local custom photo `<uuid>.jpg`.
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+        let uuid = "book-dedup-1";
+        book::ActiveModel {
+            id: Set(uuid.to_string()),
+            title: Set("T".to_string()),
+            reading_status: Set("to_read".to_string()),
+            owned: Set(true),
+            private: Set(false),
+            created_at: Set("2026-06-30T00:00:00Z".to_string()),
+            updated_at: Set("2026-06-30T00:00:00Z".to_string()),
+            cover_url: Set(Some(format!("{uuid}.jpg"))),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        // A real (decodable) JPEG so the re-encode step keeps it; the dedup logic
+        // under test runs only on covers that survive re-encoding.
+        let mut jpeg = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            120,
+            180,
+            image::Rgb([10, 20, 30]),
+        ))
+        .write_to(
+            &mut std::io::Cursor::new(&mut jpeg),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+        std::fs::write(dir.join(format!("{uuid}.jpg")), &jpeg).unwrap();
+
+        let source = DbCoverSource::new(db.clone(), dir.clone());
+
+        // First scan: the cover is new, so it is produced for push.
+        let first = source.pending_covers().await.unwrap();
+        assert_eq!(first.len(), 1, "new cover should be pushed");
+        let mtime = first[0].hlc;
+
+        // Simulate a successful push recording the dedup state.
+        source
+            .mark_pushed(&[(uuid.to_string(), mtime)])
+            .await
+            .unwrap();
+
+        // Second scan, file unchanged: skipped (no re-encode, no push).
+        let second = source.pending_covers().await.unwrap();
+        assert!(second.is_empty(), "unchanged cover must be skipped");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

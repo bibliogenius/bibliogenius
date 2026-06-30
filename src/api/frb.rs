@@ -1163,6 +1163,15 @@ pub async fn account_refresh_devices_ffi() -> Result<String, String> {
 /// refreshing the signed registry — and **deliberately does not fake a data
 /// convergence**: the data leg is a no-op, reported honestly as
 /// `{synced:false, reason:"data_engine_unavailable", devices}`.
+/// Whether this build can actually converge data across devices, i.e. it was
+/// compiled with the `account_sync` feature (a cr-sqlite merge engine is linked).
+/// The Flutter auto-sync scheduler queries this once and stays fully inert on
+/// default builds, where [`account_sync_now_ffi`]'s data leg is a no-op: no point
+/// waking a periodic timer or hitting the network for a sync that cannot happen.
+pub fn account_sync_capable_ffi() -> bool {
+    cfg!(feature = "account_sync")
+}
+
 pub async fn account_sync_now_ffi() -> Result<String, String> {
     let db = db().ok_or("Database not initialized")?;
     let mut guard = ACCOUNT_SESSION.lock().await;
@@ -1196,8 +1205,9 @@ pub async fn account_sync_now_ffi() -> Result<String, String> {
         let stats = if let Some(covers_dir) = covers_dir() {
             let cover_source =
                 crate::services::cover_sync::DbCoverSource::new(db.clone(), covers_dir.clone());
-            let cover_sink = crate::services::cover_sync::FsCoverSink::new(covers_dir.clone());
-            crate::services::account_sync_engine::refresh_then_sync_with_covers(
+            let cover_sink =
+                crate::services::cover_sync::FsCoverSink::new(db.clone(), covers_dir.clone());
+            let stats = crate::services::account_sync_engine::refresh_then_sync_with_covers(
                 &session.client,
                 &engine,
                 &session.bundle,
@@ -1208,6 +1218,18 @@ pub async fn account_sync_now_ffi() -> Result<String, String> {
                 &cover_sink,
             )
             .await
+            .map_err(|e| e.to_string())?;
+            // Record the covers we pushed in the local dedup state, now that the
+            // whole cycle succeeded (ADR-046): the next sync skips them while their
+            // file mtime is unchanged, so periodic auto-sync does not re-encode and
+            // re-upload every cover each cycle. Best-effort: the data already
+            // converged on the hub, so a local bookkeeping write failure must NOT
+            // surface the cycle as failed; the worst case is re-pushing those
+            // covers next cycle (idempotent).
+            if let Err(e) = cover_source.mark_pushed(&stats.pushed_covers).await {
+                tracing::warn!(error = %e, "failed to record pushed covers in dedup state; they will re-push next cycle");
+            }
+            stats
         } else {
             crate::services::account_sync_engine::refresh_then_sync(
                 &session.client,
@@ -1218,8 +1240,8 @@ pub async fn account_sync_now_ffi() -> Result<String, String> {
                 &session.device_id,
             )
             .await
-        }
-        .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+        };
         tracing::info!(
             applied = stats.applied,
             pushed = stats.pushed,
