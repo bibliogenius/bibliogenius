@@ -504,7 +504,14 @@ pub async fn sync_once_with_covers(
                 // already-replicated cover_url row points the resolver at it. The
                 // HLC floor below makes this idempotent — the file is written once
                 // per content change, not on every cycle.
-                cover_sink.write_cover(&frame.u, &frame.c, frame.h).await?;
+                //
+                // A cover write failure (e.g. a full disk) is isolated: log and skip
+                // this lane WITHOUT raising the HLC floor, so the cover is retried on
+                // the next cycle and one bad cover never blocks row convergence.
+                if let Err(e) = cover_sink.write_cover(&frame.u, &frame.c, frame.h).await {
+                    tracing::warn!(book = %frame.u, error = %e, "failed to write a synced cover; will retry next cycle");
+                    continue;
+                }
             } else {
                 let entity = EntityRef {
                     entity_type: frame.t,
@@ -1305,6 +1312,21 @@ mod tests {
         }
     }
 
+    /// A sink whose every write fails, to exercise cover-write error isolation.
+    struct FailingCoverSink;
+
+    #[async_trait]
+    impl CoverSink for FailingCoverSink {
+        async fn write_cover(
+            &self,
+            _book_uuid: &str,
+            _bytes: &[u8],
+            _hlc: i64,
+        ) -> std::result::Result<(), SyncError> {
+            Err(SyncError::State("disk full".to_string()))
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cover_pushed_by_one_device_is_written_by_another() {
         let bundle = Arc::new(AccountKeyBundle::generate());
@@ -1374,6 +1396,79 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(b_covers.written.lock().unwrap().len(), 1, "no rewrite");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failing_cover_write_is_isolated_and_does_not_block_row_sync() {
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        let eng_a = FakeEngine::new("devA");
+        let eng_b = FakeEngine::new("devB");
+        let state_a = MemState::default();
+        let state_b = MemState::default();
+
+        // A pushes both a row edit and a custom cover.
+        eng_a.edit("book-1", "v1", false);
+        let a_covers = CollectingCovers::default();
+        a_covers.to_push.lock().unwrap().push(OutboundCover {
+            book_uuid: "book-9".to_string(),
+            bytes: b"jpeg".to_vec(),
+            hlc: 5,
+        });
+        sync_once_with_covers(
+            &*hub,
+            &eng_a,
+            &bundle,
+            &state_a,
+            &ctx("devA"),
+            &a_covers,
+            &NoopCovers,
+        )
+        .await
+        .unwrap();
+
+        // B pulls with a sink that always fails: the cycle still succeeds and the
+        // row still applies.
+        sync_once_with_covers(
+            &*hub,
+            &eng_b,
+            &bundle,
+            &state_b,
+            &ctx("devB"),
+            &NoopCovers,
+            &FailingCoverSink,
+        )
+        .await
+        .expect("a failing cover write must not abort the sync cycle");
+        assert_eq!(
+            eng_b.snapshot(),
+            vec![("book-1".to_string(), "v1".to_string(), false)],
+            "row sync must complete despite the failing cover write"
+        );
+
+        // The cover's HLC floor was NOT raised, so a later working sink retries it.
+        // (Reset B's cursor to re-pull the same lanes; the already-applied row lane
+        // is skipped by its own floor, only the never-applied cover is retried.)
+        state_b.set_pull_cursor("acct-1", 0).await.unwrap();
+        let good = CollectingCovers::default();
+        sync_once_with_covers(
+            &*hub,
+            &eng_b,
+            &bundle,
+            &state_b,
+            &ctx("devB"),
+            &NoopCovers,
+            &good,
+        )
+        .await
+        .unwrap();
+        let written = good.written.lock().unwrap();
+        assert_eq!(
+            written.len(),
+            1,
+            "cover retried after the floor stayed unraised"
+        );
+        assert_eq!(written[0].0, "book-9");
     }
 
     #[test]
