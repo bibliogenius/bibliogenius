@@ -1190,15 +1190,35 @@ pub async fn account_sync_now_ffi() -> Result<String, String> {
         // The merge engine shares the app's single cr-sqlite connection (the pool is
         // pinned to one connection on account-sync builds, see `db::init_db_account_sync`).
         let engine = crate::services::crsqlite_engine::CrSqliteMergeEngine::new(db.clone());
-        let stats = crate::services::account_sync_engine::refresh_then_sync(
-            &session.client,
-            &engine,
-            &session.bundle,
-            &state,
-            &session.account_id,
-            &session.device_id,
-        )
-        .await
+        // Custom cover bytes ride their own lanes (ADR-046): cr-sqlite syncs the
+        // cover_url row but not the file. The covers directory is registered in
+        // `init_backend`; without it (server binary) covers are not transported.
+        let stats = if let Some(covers_dir) = covers_dir() {
+            let cover_source =
+                crate::services::cover_sync::DbCoverSource::new(db.clone(), covers_dir.clone());
+            let cover_sink = crate::services::cover_sync::FsCoverSink::new(covers_dir.clone());
+            crate::services::account_sync_engine::refresh_then_sync_with_covers(
+                &session.client,
+                &engine,
+                &session.bundle,
+                &state,
+                &session.account_id,
+                &session.device_id,
+                &cover_source,
+                &cover_sink,
+            )
+            .await
+        } else {
+            crate::services::account_sync_engine::refresh_then_sync(
+                &session.client,
+                &engine,
+                &session.bundle,
+                &state,
+                &session.account_id,
+                &session.device_id,
+            )
+            .await
+        }
         .map_err(|e| e.to_string())?;
         tracing::info!(
             applied = stats.applied,

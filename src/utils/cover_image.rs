@@ -26,6 +26,23 @@ pub const COVER_MAX_INPUT_BYTES: usize = 10 * 1024 * 1024;
 /// Quality steps tried in order when the output exceeds the soft size cap.
 const QUALITY_STEPS: [u8; 3] = [COVER_JPEG_QUALITY, 75, 65];
 
+/// Hard size cap for a cover whose bytes ride an account-sync lane (ADR-046).
+///
+/// The hub caps a lane blob at 64 KiB of base64. Working back through the
+/// transport: base64 expands by 4/3, AES-256-GCM adds a 12-byte nonce and a
+/// 16-byte tag, and `account_keys::seal_entity` pads the plaintext up to the
+/// next size bucket — a multiple of 16384 once past 16 KiB. The largest bucket
+/// whose sealed, base64-encoded form still fits 64 KiB is 32768; the next one
+/// (49152) overshoots by a few dozen bytes. Leaving room for the msgpack lane
+/// frame around the image, an image under ~31 KiB keeps the padded plaintext
+/// inside the 32768 bucket. `account_sync_engine` has a test that seals a
+/// worst-case cover at this cap and asserts the result fits the hub limit.
+pub const COVER_SYNC_CAP_BYTES: usize = 31 * 1024;
+
+/// Quality ladder for the sync re-encode. Steps reach lower than the serve
+/// ladder so a 300x450 cover can be squeezed under `COVER_SYNC_CAP_BYTES`.
+const SYNC_QUALITY_STEPS: [u8; 5] = [80, 70, 60, 50, 40];
+
 /// Decode an arbitrary image, resize it to fit within 300x450 while keeping
 /// aspect ratio, pad to exactly 300x450 with a solid white or black canvas
 /// (chosen by mean luminance of the resized image), then re-encode as JPEG.
@@ -41,6 +58,55 @@ const QUALITY_STEPS: [u8; 3] = [COVER_JPEG_QUALITY, 75, 65];
 /// This is CPU-bound; callers running inside an async context should invoke
 /// it from `tokio::task::spawn_blocking`.
 pub fn resize_to_jpeg_thumbnail(input: &[u8]) -> Result<Vec<u8>, String> {
+    let padded = decode_orient_pad(input)?;
+    let (w, h) = padded.dimensions();
+
+    let mut best: Option<Vec<u8>> = None;
+    for quality in QUALITY_STEPS {
+        let buf = encode_jpeg(&padded, w, h, quality)?;
+
+        let fits_cap = buf.len() <= COVER_SIZE_CAP_BYTES;
+        let is_smaller = best.as_ref().is_none_or(|b| buf.len() < b.len());
+
+        if fits_cap {
+            return Ok(buf);
+        }
+        if is_smaller {
+            best = Some(buf);
+        }
+    }
+
+    best.ok_or_else(|| "no encode attempt succeeded".to_string())
+}
+
+/// Re-encode `input` as a 300x450 JPEG that fits within `COVER_SYNC_CAP_BYTES`,
+/// for transport over an account-sync lane (ADR-046).
+///
+/// Returns the highest-quality step that fits the cap as `Ok(Some(bytes))`,
+/// `Ok(None)` when even the lowest step is still too large (the caller skips
+/// this cover — the peer keeps a placeholder rather than receiving an oversized
+/// lane the hub would reject), or `Err` when the input cannot be decoded.
+///
+/// Shares the decode/orient/pad pipeline with `resize_to_jpeg_thumbnail`, so a
+/// synced cover is the same deterministic 300x450 thumbnail every peer renders.
+/// CPU-bound; callers in an async context should run it on a blocking thread.
+pub fn resize_to_jpeg_thumbnail_for_sync(input: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let padded = decode_orient_pad(input)?;
+    let (w, h) = padded.dimensions();
+
+    for quality in SYNC_QUALITY_STEPS {
+        let buf = encode_jpeg(&padded, w, h, quality)?;
+        if buf.len() <= COVER_SYNC_CAP_BYTES {
+            return Ok(Some(buf));
+        }
+    }
+    Ok(None)
+}
+
+/// Decode an arbitrary image, bake in its EXIF orientation, resize to fit within
+/// 300x450, and pad to exactly 300x450. The single chokepoint both encoders
+/// share so serve-side and sync-side covers come from identical pixels.
+fn decode_orient_pad(input: &[u8]) -> Result<RgbImage, String> {
     if input.len() > COVER_MAX_INPUT_BYTES {
         return Err(format!(
             "input too large: {} bytes (max {})",
@@ -65,29 +131,17 @@ pub fn resize_to_jpeg_thumbnail(input: &[u8]) -> Result<Vec<u8>, String> {
 
     let thumb = img.thumbnail(COVER_MAX_WIDTH, COVER_MAX_HEIGHT);
     let resized = thumb.to_rgb8();
-    let padded = pad_to_target(&resized, COVER_MAX_WIDTH, COVER_MAX_HEIGHT);
-    let (w, h) = padded.dimensions();
+    Ok(pad_to_target(&resized, COVER_MAX_WIDTH, COVER_MAX_HEIGHT))
+}
 
-    let mut best: Option<Vec<u8>> = None;
-    for quality in QUALITY_STEPS {
-        let mut buf: Vec<u8> = Vec::new();
-        let mut encoder = JpegEncoder::new_with_quality(&mut buf, quality);
-        encoder
-            .encode(padded.as_raw(), w, h, image::ExtendedColorType::Rgb8)
-            .map_err(|e| format!("encode q={quality}: {e}"))?;
-
-        let fits_cap = buf.len() <= COVER_SIZE_CAP_BYTES;
-        let is_smaller = best.as_ref().is_none_or(|b| buf.len() < b.len());
-
-        if fits_cap {
-            return Ok(buf);
-        }
-        if is_smaller {
-            best = Some(buf);
-        }
-    }
-
-    best.ok_or_else(|| "no encode attempt succeeded".to_string())
+/// Encode a padded RGB cover as JPEG at `quality`.
+fn encode_jpeg(padded: &RgbImage, w: u32, h: u32, quality: u8) -> Result<Vec<u8>, String> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut encoder = JpegEncoder::new_with_quality(&mut buf, quality);
+    encoder
+        .encode(padded.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+        .map_err(|e| format!("encode q={quality}: {e}"))?;
+    Ok(buf)
 }
 
 /// Pads `src` onto a `target_w` x `target_h` canvas, centred. The pad colour
@@ -339,6 +393,50 @@ mod tests {
         let oversized = vec![0u8; COVER_MAX_INPUT_BYTES + 1];
         let err = resize_to_jpeg_thumbnail(&oversized).unwrap_err();
         assert!(err.contains("too large"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn sync_reencode_fits_cap_and_is_a_valid_thumbnail() {
+        let src = cover_like_image(600, 900);
+        let jpeg_in = encode_jpeg_quality(&src, 95);
+
+        let out = resize_to_jpeg_thumbnail_for_sync(&jpeg_in)
+            .unwrap()
+            .expect("a typical cover must fit the sync cap");
+        assert!(
+            out.len() <= COVER_SYNC_CAP_BYTES,
+            "sync output {} bytes exceeds cap {}",
+            out.len(),
+            COVER_SYNC_CAP_BYTES,
+        );
+        let decoded = image::load_from_memory(&out).unwrap();
+        assert_eq!(decoded.width(), COVER_MAX_WIDTH);
+        assert_eq!(decoded.height(), COVER_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn sync_reencode_never_returns_oversized_bytes() {
+        // High-frequency noise is the JPEG worst case. The function must either
+        // fit the cap or return None — never hand back an oversized buffer that
+        // the hub would reject for the whole push.
+        let mut img = RgbImage::new(300, 450);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let n = (x
+                .wrapping_mul(2654435761)
+                .wrapping_add(y.wrapping_mul(40503))) as u8;
+            *p = image::Rgb([n, n.wrapping_mul(3), n.wrapping_mul(7)]);
+        }
+        let png = encode_png(&DynamicImage::ImageRgb8(img));
+
+        match resize_to_jpeg_thumbnail_for_sync(&png).unwrap() {
+            Some(out) => assert!(out.len() <= COVER_SYNC_CAP_BYTES),
+            None => {} // could not be squeezed under the cap: caller skips it
+        }
+    }
+
+    #[test]
+    fn sync_reencode_rejects_invalid_image_bytes() {
+        assert!(resize_to_jpeg_thumbnail_for_sync(b"not an image").is_err());
     }
 
     #[test]

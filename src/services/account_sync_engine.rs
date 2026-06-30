@@ -40,6 +40,13 @@ const PULL_PAGE_LIMIT: u32 = 200;
 /// Hub per-push lane cap (`AccountSyncController::MAX_LANES_PER_PUSH`).
 const MAX_LANES_PER_PUSH: usize = 500;
 
+/// Lane entity type carrying a custom cover's image bytes (ADR-046). cr-sqlite
+/// replicates rows, not files, so a hand-photographed cover's bytes ride their
+/// own lane alongside the `"book"` row lane: same opaque-id derivation, same
+/// sealing, same anti-replay floor, but the payload is the JPEG and the receiver
+/// writes a file instead of merging a changeset.
+pub const COVER_ENTITY_TYPE: &str = "cover";
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -120,6 +127,19 @@ pub struct SyncContext {
 pub struct SyncStats {
     pub applied: usize,
     pub pushed: usize,
+}
+
+/// One custom cover's bytes to publish this cycle (ADR-046, producer side).
+#[derive(Debug, Clone)]
+pub struct OutboundCover {
+    /// The book the cover belongs to (the lane's entity uuid).
+    pub book_uuid: String,
+    /// The cover image bytes, already re-encoded to fit a lane blob.
+    pub bytes: Vec<u8>,
+    /// Freshness clock for this cover lane (the file's mtime in seconds). It
+    /// advances when the user replaces the photo, so the receiver's anti-replay
+    /// floor rewrites the file only on a real change, not on every cycle.
+    pub hlc: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +281,53 @@ pub trait SyncStateStore: Send + Sync {
     ) -> std::result::Result<(), SyncError>;
 }
 
+/// Produces this device's custom covers to push (ADR-046). cr-sqlite replicates
+/// the `books` row (including the normalized `cover_url`) but not the cover file
+/// itself, so the bytes come from here. The production impl reads the local
+/// `covers/` directory; the row-only sync entrypoints use [`NoopCovers`].
+#[async_trait]
+pub trait CoverSource: Send + Sync {
+    async fn pending_covers(&self) -> std::result::Result<Vec<OutboundCover>, SyncError>;
+}
+
+/// Persists a custom cover received from another device (ADR-046). The bytes are
+/// written under the book's uuid so the existing resolver finds them once the
+/// already-replicated `cover_url` row lands. The production impl writes the local
+/// `covers/` directory; the row-only sync entrypoints use [`NoopCovers`].
+#[async_trait]
+pub trait CoverSink: Send + Sync {
+    async fn write_cover(
+        &self,
+        book_uuid: &str,
+        bytes: &[u8],
+        hlc: i64,
+    ) -> std::result::Result<(), SyncError>;
+}
+
+/// A cover source/sink that produces and persists nothing. Used by the row-only
+/// entrypoints (`sync_once`, `refresh_then_sync`) and by tests/engines that do
+/// not transport cover bytes.
+pub struct NoopCovers;
+
+#[async_trait]
+impl CoverSource for NoopCovers {
+    async fn pending_covers(&self) -> std::result::Result<Vec<OutboundCover>, SyncError> {
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+impl CoverSink for NoopCovers {
+    async fn write_cover(
+        &self,
+        _book_uuid: &str,
+        _bytes: &[u8],
+        _hlc: i64,
+    ) -> std::result::Result<(), SyncError> {
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sealed blob framing (the encrypted plaintext)
 // ---------------------------------------------------------------------------
@@ -276,7 +343,10 @@ struct LaneBlob {
     u: String,
     /// deleted (tombstone) flag.
     d: bool,
-    /// opaque changeset bytes.
+    /// opaque payload: a cr-sqlite changeset for a row, or the image bytes for a
+    /// cover. Encoded as a msgpack `bin` (not an int array) so a large cover does
+    /// not inflate ~1.5x — the difference between fitting the hub blob cap and not.
+    #[serde(with = "serde_bytes")]
     c: Vec<u8>,
     /// sender merge clock (HLC). Monotonic per lane; the receiver rejects a blob
     /// whose `h` does not advance past the last applied one (anti-rollback, H5).
@@ -292,6 +362,41 @@ fn decode_opaque_id(b64url: &str) -> std::result::Result<[u8; 32], SyncError> {
         .map_err(|_| SyncError::Encoding("opaque_id is not 32 bytes".to_string()))
 }
 
+/// Frame, seal, and encode one entity (a row change or a cover) into a push lane.
+/// Shared by the row-change and cover legs of the push so both seal identically.
+#[allow(clippy::too_many_arguments)]
+fn seal_lane(
+    bundle: &AccountKeyBundle,
+    account_aad: &[u8],
+    device_id: &[u8],
+    entity_type: String,
+    entity_uuid: String,
+    deleted: bool,
+    payload: Vec<u8>,
+    hlc: i64,
+) -> std::result::Result<LanePush, SyncError> {
+    let oid = bundle.opaque_id(&entity_type, &entity_uuid);
+    let frame = LaneBlob {
+        t: entity_type,
+        u: entity_uuid,
+        d: deleted,
+        c: payload,
+        h: hlc,
+    };
+    let plaintext = Zeroizing::new(
+        rmp_serde::to_vec(&frame).map_err(|e| SyncError::Encoding(format!("frame encode: {e}")))?,
+    );
+    let blob = bundle
+        .seal_entity(account_aad, &oid, device_id, &plaintext)
+        .map_err(|e| SyncError::Crypto(e.to_string()))?;
+    Ok(LanePush {
+        opaque_id: encode_b64url(&oid),
+        deleted,
+        size_bucket: blob.len() as i64,
+        blob: Some(encode_blob_standard(&blob)),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // The pipeline
 // ---------------------------------------------------------------------------
@@ -301,12 +406,42 @@ fn decode_opaque_id(b64url: &str) -> std::result::Result<[u8; 32], SyncError> {
 /// Idempotent across cycles via the persisted cursors: pull resumes from the hub
 /// `change_seq` watermark, push resends only entities changed after the local
 /// `db_version` watermark. Safe to call repeatedly (markDirty / periodic / on-resume).
+///
+/// Row-only: custom cover bytes are not transported. Use
+/// [`refresh_then_sync_with_covers`] (or [`sync_once_with_covers`]) to also carry
+/// covers (ADR-046).
 pub async fn sync_once(
     transport: &dyn LaneTransport,
     engine: &dyn MergeEngine,
     bundle: &AccountKeyBundle,
     state: &dyn SyncStateStore,
     ctx: &SyncContext,
+) -> std::result::Result<SyncStats, SyncError> {
+    sync_once_with_covers(
+        transport,
+        engine,
+        bundle,
+        state,
+        ctx,
+        &NoopCovers,
+        &NoopCovers,
+    )
+    .await
+}
+
+/// [`sync_once`] that also pulls/pushes custom cover bytes through the given
+/// cover seams (ADR-046). A pulled lane of type [`COVER_ENTITY_TYPE`] is written
+/// via `cover_sink` instead of merged into the engine; `cover_source`'s covers
+/// are sealed and pushed alongside the engine's row changes.
+#[allow(clippy::too_many_arguments)]
+pub async fn sync_once_with_covers(
+    transport: &dyn LaneTransport,
+    engine: &dyn MergeEngine,
+    bundle: &AccountKeyBundle,
+    state: &dyn SyncStateStore,
+    ctx: &SyncContext,
+    cover_source: &dyn CoverSource,
+    cover_sink: &dyn CoverSink,
 ) -> std::result::Result<SyncStats, SyncError> {
     let mut stats = SyncStats::default();
     let account_aad = ctx.account_id.as_bytes();
@@ -363,25 +498,34 @@ pub async fn sync_once(
             if frame.h <= last_hlc {
                 continue;
             }
-            let entity = EntityRef {
-                entity_type: frame.t,
-                entity_uuid: frame.u,
-            };
-            engine
-                .apply(InboundChange {
-                    entity: entity.clone(),
-                    deleted: frame.d,
-                    changeset: frame.c,
-                })
-                .await
-                .map_err(|e| SyncError::Merge(e.0))?;
-            // If this change deleted a parent entity, cascade the orphan children
-            // it left behind (the database no longer enforces foreign keys since
-            // the replicated tables were rebuilt without them, ADR-044).
-            engine
-                .repair_after_apply(&entity.entity_type, &entity.entity_uuid)
-                .await
-                .map_err(|e| SyncError::Merge(e.0))?;
+            if frame.t == COVER_ENTITY_TYPE {
+                // A custom cover lane (ADR-046): the payload is the image bytes,
+                // not a changeset. Write the file under the book uuid; the
+                // already-replicated cover_url row points the resolver at it. The
+                // HLC floor below makes this idempotent — the file is written once
+                // per content change, not on every cycle.
+                cover_sink.write_cover(&frame.u, &frame.c, frame.h).await?;
+            } else {
+                let entity = EntityRef {
+                    entity_type: frame.t,
+                    entity_uuid: frame.u,
+                };
+                engine
+                    .apply(InboundChange {
+                        entity: entity.clone(),
+                        deleted: frame.d,
+                        changeset: frame.c,
+                    })
+                    .await
+                    .map_err(|e| SyncError::Merge(e.0))?;
+                // If this change deleted a parent entity, cascade the orphan children
+                // it left behind (the database no longer enforces foreign keys since
+                // the replicated tables were rebuilt without them, ADR-044).
+                engine
+                    .repair_after_apply(&entity.entity_type, &entity.entity_uuid)
+                    .await
+                    .map_err(|e| SyncError::Merge(e.0))?;
+            }
             // Raise the per-lane anti-rollback floor only after a successful apply.
             state
                 .set_lane_hlc(&ctx.account_id, &lane.opaque_id, &lane.device_id, frame.h)
@@ -410,31 +554,41 @@ pub async fn sync_once(
         .await
         .map_err(|e| SyncError::Merge(e.0))?;
 
-    if !changes.is_empty() {
-        let mut lanes = Vec::with_capacity(changes.len());
-        for change in changes {
-            let oid = bundle.opaque_id(&change.entity.entity_type, &change.entity.entity_uuid);
-            let frame = LaneBlob {
-                t: change.entity.entity_type,
-                u: change.entity.entity_uuid,
-                d: change.deleted,
-                c: change.changeset,
-                h: change.hlc,
-            };
-            let plaintext = Zeroizing::new(
-                rmp_serde::to_vec(&frame)
-                    .map_err(|e| SyncError::Encoding(format!("frame encode: {e}")))?,
-            );
-            let blob = bundle
-                .seal_entity(account_aad, &oid, ctx.device_id.as_bytes(), &plaintext)
-                .map_err(|e| SyncError::Crypto(e.to_string()))?;
-            lanes.push(LanePush {
-                opaque_id: encode_b64url(&oid),
-                deleted: change.deleted,
-                size_bucket: blob.len() as i64,
-                blob: Some(encode_blob_standard(&blob)),
-            });
-        }
+    let device_id_bytes = ctx.device_id.as_bytes();
+    let mut lanes = Vec::with_capacity(changes.len());
+    for change in changes {
+        lanes.push(seal_lane(
+            bundle,
+            account_aad,
+            device_id_bytes,
+            change.entity.entity_type,
+            change.entity.entity_uuid,
+            change.deleted,
+            change.changeset,
+            change.hlc,
+        )?);
+    }
+
+    // Custom cover bytes (ADR-046). cr-sqlite carries the cover_url row but not the
+    // file, so the bytes ride their own "cover" lanes here. v1 re-pushes every local
+    // cover each cycle (overwrite-in-place on the hub, idempotent on the receiver via
+    // the HLC floor); a local dedup table to push only changed covers is a follow-up
+    // that belongs with the automatic-sync-trigger work, not with manual sync today.
+    // The source has already re-encoded each cover to fit a lane blob.
+    for cover in cover_source.pending_covers().await? {
+        lanes.push(seal_lane(
+            bundle,
+            account_aad,
+            device_id_bytes,
+            COVER_ENTITY_TYPE.to_string(),
+            cover.book_uuid,
+            false,
+            cover.bytes,
+            cover.hlc,
+        )?);
+    }
+
+    if !lanes.is_empty() {
         stats.pushed = lanes.len();
         // The hub caps each push at MAX_LANES_PER_PUSH; a first sync of an existing
         // library easily exceeds it, so push in batches.
@@ -520,6 +674,33 @@ pub async fn refresh_then_sync(
     account_id: &str,
     device_id: &str,
 ) -> std::result::Result<SyncStats, SyncError> {
+    refresh_then_sync_with_covers(
+        transport,
+        engine,
+        bundle,
+        state,
+        account_id,
+        device_id,
+        &NoopCovers,
+        &NoopCovers,
+    )
+    .await
+}
+
+/// [`refresh_then_sync`] that also transports custom cover bytes through the given
+/// cover seams (ADR-046). This is the entrypoint the account FFI uses on the real
+/// build so a hand-photographed cover reaches the user's other devices.
+#[allow(clippy::too_many_arguments)]
+pub async fn refresh_then_sync_with_covers(
+    transport: &dyn LaneTransport,
+    engine: &dyn MergeEngine,
+    bundle: &AccountKeyBundle,
+    state: &dyn SyncStateStore,
+    account_id: &str,
+    device_id: &str,
+    cover_source: &dyn CoverSource,
+    cover_sink: &dyn CoverSink,
+) -> std::result::Result<SyncStats, SyncError> {
     let authorized_devices =
         refresh_authorized_devices(transport, state, account_id, &bundle.verifying_key()).await?;
     // H3 hardening: once this device has adopted a signed registry it must never
@@ -536,7 +717,16 @@ pub async fn refresh_then_sync(
         device_id: device_id.to_string(),
         authorized_devices,
     };
-    sync_once(transport, engine, bundle, state, &ctx).await
+    sync_once_with_covers(
+        transport,
+        engine,
+        bundle,
+        state,
+        &ctx,
+        cover_source,
+        cover_sink,
+    )
+    .await
 }
 
 /// Enroll `new_device` into the account's signed registry: fetch the current registry,
@@ -1081,6 +1271,136 @@ mod tests {
             registry_seq: 1,
             devices,
         }
+    }
+
+    /// A cover source/sink that hands out a preset list and records what it is
+    /// asked to write. Lets one test push covers from device A and capture what
+    /// device B persists (ADR-046).
+    #[derive(Default)]
+    struct CollectingCovers {
+        to_push: Mutex<Vec<OutboundCover>>,
+        written: Mutex<Vec<(String, Vec<u8>, i64)>>,
+    }
+
+    #[async_trait]
+    impl CoverSource for CollectingCovers {
+        async fn pending_covers(&self) -> std::result::Result<Vec<OutboundCover>, SyncError> {
+            Ok(self.to_push.lock().unwrap().clone())
+        }
+    }
+
+    #[async_trait]
+    impl CoverSink for CollectingCovers {
+        async fn write_cover(
+            &self,
+            book_uuid: &str,
+            bytes: &[u8],
+            hlc: i64,
+        ) -> std::result::Result<(), SyncError> {
+            self.written
+                .lock()
+                .unwrap()
+                .push((book_uuid.to_string(), bytes.to_vec(), hlc));
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cover_pushed_by_one_device_is_written_by_another() {
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        let eng_a = FakeEngine::new("devA");
+        let eng_b = FakeEngine::new("devB");
+        let state_a = MemState::default();
+        let state_b = MemState::default();
+
+        let a_covers = CollectingCovers::default();
+        a_covers.to_push.lock().unwrap().push(OutboundCover {
+            book_uuid: "book-1".to_string(),
+            bytes: b"the-jpeg-bytes".to_vec(),
+            hlc: 100,
+        });
+        let b_covers = CollectingCovers::default();
+
+        // A pushes its cover lane (no row edits needed for this test).
+        sync_once_with_covers(
+            &*hub,
+            &eng_a,
+            &bundle,
+            &state_a,
+            &ctx("devA"),
+            &a_covers,
+            &NoopCovers,
+        )
+        .await
+        .unwrap();
+
+        // B pulls: the cover lane goes to B's sink, never into B's merge engine.
+        sync_once_with_covers(
+            &*hub,
+            &eng_b,
+            &bundle,
+            &state_b,
+            &ctx("devB"),
+            &NoopCovers,
+            &b_covers,
+        )
+        .await
+        .unwrap();
+
+        let written = b_covers.written.lock().unwrap();
+        assert_eq!(written.len(), 1, "B should have written exactly one cover");
+        assert_eq!(written[0].0, "book-1");
+        assert_eq!(written[0].1, b"the-jpeg-bytes");
+        assert_eq!(written[0].2, 100);
+        drop(written);
+        // The cover did not leak into the row-merge engine.
+        assert!(
+            eng_b.snapshot().is_empty(),
+            "cover bytes must not become a merged entity row"
+        );
+
+        // A second sync is idempotent: the pull cursor has advanced, so B does not
+        // rewrite the cover.
+        sync_once_with_covers(
+            &*hub,
+            &eng_b,
+            &bundle,
+            &state_b,
+            &ctx("devB"),
+            &NoopCovers,
+            &b_covers,
+        )
+        .await
+        .unwrap();
+        assert_eq!(b_covers.written.lock().unwrap().len(), 1, "no rewrite");
+    }
+
+    #[test]
+    fn a_capped_cover_seals_within_the_hub_blob_limit() {
+        // The hub rejects a lane blob whose base64 length exceeds 64 KiB
+        // (AccountSyncController::MAX_BLOB_SIZE). A cover re-encoded to
+        // COVER_SYNC_CAP_BYTES, framed and sealed, must stay under it — this is the
+        // end-to-end budget that COVER_SYNC_CAP_BYTES is derived from (ADR-046).
+        const MAX_BLOB_SIZE: usize = 64 * 1024;
+        let bundle = AccountKeyBundle::generate();
+        let bytes = vec![0xABu8; crate::utils::cover_image::COVER_SYNC_CAP_BYTES];
+        let lane = seal_lane(
+            &bundle,
+            b"acct-1",
+            b"a-full-length-device-id-base64url-padding-padding",
+            COVER_ENTITY_TYPE.to_string(),
+            "0190f5a2-1234-7abc-8def-0123456789ab".to_string(),
+            false,
+            bytes,
+            1_900_000_000,
+        )
+        .unwrap();
+        let b64_len = lane.blob.as_ref().unwrap().len();
+        assert!(
+            b64_len <= MAX_BLOB_SIZE,
+            "sealed cover base64 is {b64_len} bytes, over the hub cap {MAX_BLOB_SIZE}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

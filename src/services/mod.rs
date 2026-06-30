@@ -14,6 +14,8 @@ pub mod catalog_events;
 pub mod catalog_notification;
 pub mod collection_service;
 pub mod contact_service;
+#[cfg(feature = "account_sync")]
+pub mod cover_sync;
 #[cfg(any(feature = "crsqlite", feature = "crsqlite-static"))]
 pub mod crsqlite_engine;
 pub mod crypto_service;
