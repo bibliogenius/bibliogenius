@@ -501,10 +501,14 @@ pub async fn refresh_authorized_devices(
 ///
 /// Centralizes the "always refresh authorized devices before `sync_once`"
 /// invariant (ADR-043 H3) in a single place, so no caller can sync against a
-/// stale registry. Note: if the hub serves no registry the refresh yields
-/// `None` and `sync_once` then accepts all lanes (H3 disabled, see
-/// [`SyncContext::authorized_devices`]); a future change should decide whether a `None`
-/// from an already-enrolled device must mean "deny" rather than "accept all".
+/// stale registry. An enrolled device (one that has already adopted a signed
+/// registry, `registry_seq > 0`) that gets `None` back from the refresh REFUSES
+/// the cycle with [`SyncError::Registry`] instead of falling back to "accept all
+/// lanes": otherwise a hostile or buggy hub could disable device authorization by
+/// simply withholding the registry. The `None`-accepts-all fallback survives only
+/// for a device that has never adopted a registry (true first bootstrap), where no
+/// authorization baseline exists yet.
+///
 /// This is the seam the account FFI entrypoint
 /// (`account_sync_now_ffi`) and the future periodic/on-resume triggers call;
 /// the production merge `engine` is supplied by the caller (future work).
@@ -518,6 +522,15 @@ pub async fn refresh_then_sync(
 ) -> std::result::Result<SyncStats, SyncError> {
     let authorized_devices =
         refresh_authorized_devices(transport, state, account_id, &bundle.verifying_key()).await?;
+    // H3 hardening: once this device has adopted a signed registry it must never
+    // sync against an absent one. A hub that withholds the registry would otherwise
+    // re-enable the "accept all lanes" fallback and smuggle in revoked/unauthorized
+    // lanes; refuse the cycle instead.
+    if authorized_devices.is_none() && state.registry_seq(account_id).await? > 0 {
+        return Err(SyncError::Registry(
+            "hub served no device registry for an enrolled account".to_string(),
+        ));
+    }
     let ctx = SyncContext {
         account_id: account_id.to_string(),
         device_id: device_id.to_string(),
@@ -1595,6 +1608,24 @@ mod tests {
             .unwrap();
         assert_eq!(stats.applied, 1);
         assert!(eng_a.snapshot().iter().any(|(u, _, _)| u == "book-1"));
+    }
+
+    #[tokio::test]
+    async fn refresh_then_sync_denies_an_enrolled_device_when_hub_has_no_registry() {
+        // A device that has already adopted a signed registry (registry_seq > 0) must
+        // refuse to sync if the hub now serves no registry, rather than silently
+        // falling back to "accept all lanes" (which would let a hostile hub disable
+        // the H3 device-authorization filter).
+        let bundle = AccountKeyBundle::generate();
+        let hub = MemHub::default(); // no registry published
+        let state = MemState::default();
+        state.set_registry_seq("acct-1", 1).await.unwrap();
+
+        let eng = FakeEngine::new("devA");
+        let err = refresh_then_sync(&hub, &eng, &bundle, &state, "acct-1", "devA")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SyncError::Registry(_)));
     }
 
     // Production-stack variant: the SAME sync_once pipeline, driven by the REAL cr-sqlite engine over

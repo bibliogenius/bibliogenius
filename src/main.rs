@@ -257,13 +257,12 @@ async fn main() {
     );
 
     // On account-sync builds the pool is a single cr-sqlite connection that must run
-    // `crsql_finalize()` before it is closed. Serve until Ctrl-C, then finalize.
+    // `crsql_finalize()` before it is closed. Serve until a shutdown signal, then
+    // finalize.
     #[cfg(feature = "account_sync")]
     {
         serve
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
+            .with_graceful_shutdown(shutdown_signal())
             .await
             .expect("Failed to start server");
         if let Err(e) = rust_lib_app::infrastructure::crsqlite_crr::finalize(state.db()).await {
@@ -273,4 +272,38 @@ async fn main() {
 
     #[cfg(not(feature = "account_sync"))]
     serve.await.expect("Failed to start server");
+}
+
+/// Resolve when the process receives a shutdown signal: Ctrl-C (SIGINT) or, on
+/// Unix, SIGTERM (the signal `docker stop` / systemd send). Used to drive the
+/// account-sync graceful shutdown so `crsql_finalize` runs on the normal stop path,
+/// not only on an interactive Ctrl-C.
+#[cfg(feature = "account_sync")]
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            // If the handler cannot be installed, never resolve on this arm: Ctrl-C
+            // still triggers shutdown.
+            Err(e) => {
+                tracing::warn!("Failed to install SIGTERM handler: {}", e);
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
