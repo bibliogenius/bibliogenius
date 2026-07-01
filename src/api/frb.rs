@@ -1134,21 +1134,67 @@ pub async fn account_refresh_devices_ffi() -> Result<String, String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    let devices: Vec<serde_json::Value> = registry
-        .map(|reg| {
-            reg.devices
-                .iter()
-                .map(|d| {
-                    serde_json::json!({
-                        "device_id": d.device_id,
-                        "name": d.name,
-                        "is_self": d.device_id == session.device_id,
-                    })
-                })
-                .collect()
+    Ok(account_devices_json(
+        registry
+            .as_ref()
+            .map(|r| r.devices.as_slice())
+            .unwrap_or(&[]),
+        &session.device_id,
+    ))
+}
+
+/// Serialize an authorized-device list for the UI, tagging the current device with
+/// `is_self` (the UI hides the "remove" action on it — self-removal goes through
+/// `account_logout_ffi` instead). Shared by the refresh and remove FFIs.
+fn account_devices_json(
+    devices: &[crate::crypto::device_registry::DeviceEntry],
+    self_device_id: &str,
+) -> String {
+    let list: Vec<serde_json::Value> = devices
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "device_id": d.device_id,
+                "name": d.name,
+                "is_self": d.device_id == self_device_id,
+            })
         })
-        .unwrap_or_default();
-    Ok(serde_json::json!({ "devices": devices }).to_string())
+        .collect();
+    serde_json::json!({ "devices": list }).to_string()
+}
+
+/// Remove another device from the account's signed registry (soft revocation): shrink
+/// the registry, bump its seq, re-sign, and publish, so every other device stops
+/// applying the removed device's lanes (H3). Returns the refreshed device list JSON.
+///
+/// Refuses to remove THIS device (`device_id == session.device_id`): dropping the current
+/// device from its own registry would strip its lanes while leaving it signed in — a
+/// footgun. Leaving the account on this device is `account_logout_ffi` instead.
+///
+/// This is a soft, not cryptographic, removal — the removed device keeps the trousseau
+/// and can still read current content or re-add itself; a hard lockout needs key rotation
+/// (deferred, ADR-042 section 13.5).
+pub async fn account_remove_device_ffi(device_id: String) -> Result<String, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let mut guard = ACCOUNT_SESSION.lock().await;
+    let session = ensure_account_session(&mut guard).await?;
+
+    if device_id == session.device_id {
+        return Err("cannot remove the current device; use sign out instead".to_string());
+    }
+
+    let state = crate::services::account_sync_engine::DbSyncStateStore::new(db.clone());
+    let updated = crate::services::account_sync_engine::remove_device(
+        &session.client,
+        &state,
+        &session.bundle,
+        &session.account_id,
+        &device_id,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(account_devices_json(&updated.devices, &session.device_id))
 }
 
 /// Trigger a sync cycle for this account. The entrypoint the

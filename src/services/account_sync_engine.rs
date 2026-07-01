@@ -782,6 +782,42 @@ pub async fn enroll_device(
     Ok(updated)
 }
 
+/// Remove `device_id` from the account's signed registry: fetch the current registry,
+/// adopt it (so we always shrink the latest signed version, never a stale one), drop the
+/// device, bump the signed `registry_seq`, re-sign with the account key, and publish.
+/// Persists the new seq and returns the updated registry.
+///
+/// After a peer adopts the republished registry, the removed device's `device_id` is no
+/// longer authorized, so H3 filters its lanes and it can no longer write into the shared
+/// library. This is a **soft** removal — the removed device keeps the trousseau and can
+/// still read current content or re-sign itself back in; a hard lockout needs account key
+/// rotation (deferred, ADR-042 section 13.5). Authorization ("who may remove") is enforced
+/// by the caller, not here (the FFI refuses removing the current device). Returns
+/// [`SyncError::Registry`] if the hub has no registry yet (nothing to remove from).
+pub async fn remove_device(
+    transport: &dyn LaneTransport,
+    state: &dyn SyncStateStore,
+    bundle: &AccountKeyBundle,
+    account_id: &str,
+    device_id: &str,
+) -> std::result::Result<DeviceRegistry, SyncError> {
+    let current = fetch_and_adopt(transport, state, account_id, &bundle.verifying_key())
+        .await?
+        .ok_or_else(|| SyncError::Registry("no registry to remove from".to_string()))?;
+
+    let updated = current.without_device(device_id);
+    let signed = updated
+        .sign(&bundle.signing_key())
+        .map_err(|e| SyncError::Crypto(e.to_string()))?;
+    transport
+        .publish_registry(&encode_blob_standard(&signed))
+        .await?;
+    state
+        .set_registry_seq(account_id, updated.registry_seq as i64)
+        .await?;
+    Ok(updated)
+}
+
 // ---------------------------------------------------------------------------
 // SQLite-backed sync state (migration 080)
 // ---------------------------------------------------------------------------
@@ -1983,6 +2019,79 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SyncError::Registry(_)));
+    }
+
+    #[tokio::test]
+    async fn remove_republishes_signed_registry_without_the_device() {
+        let bundle = AccountKeyBundle::generate();
+        let hub = MemHub::default();
+        let state = MemState::default();
+        seed_registry(&hub, &registry_for(&["devA", "devB"]), &bundle).await; // seq 1
+
+        let updated = remove_device(&hub, &state, &bundle, "acct-1", "devB")
+            .await
+            .unwrap();
+        assert_eq!(updated.registry_seq, 2);
+        assert!(updated.is_authorized("devA"));
+        assert!(!updated.is_authorized("devB"));
+        assert_eq!(state.registry_seq("acct-1").await.unwrap(), 2);
+
+        // The republished blob on the hub verifies and no longer carries devB.
+        let resp = hub.fetch_registry().await.unwrap();
+        let blob = decode_blob_standard(&resp.blob.unwrap()).unwrap();
+        let published = DeviceRegistry::verify(&blob, &bundle.verifying_key()).unwrap();
+        assert!(!published.is_authorized("devB"));
+        assert_eq!(published.registry_seq, 2);
+    }
+
+    #[tokio::test]
+    async fn remove_without_existing_registry_errors() {
+        let bundle = AccountKeyBundle::generate();
+        let hub = MemHub::default(); // no registry published
+        let state = MemState::default();
+        let err = remove_device(&hub, &state, &bundle, "acct-1", "devB")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SyncError::Registry(_)));
+    }
+
+    #[tokio::test]
+    async fn removed_device_lanes_are_filtered_after_republish() {
+        // devA + devX are both authorized; devX pushes a lane. devA then removes devX
+        // and republishes the registry. A peer (devB) that refreshes must adopt the
+        // shrunk registry and drop devX's lane via H3 — the end-to-end effect of removal.
+        let bundle = AccountKeyBundle::generate();
+        let hub = MemHub::default();
+        let state_a = MemState::default();
+        seed_registry(&hub, &registry_for(&["devA", "devX"]), &bundle).await; // seq 1
+
+        let eng_x = FakeEngine::new("devX");
+        let state_x = MemState::default();
+        eng_x.edit("book-x", "from the removed device", false);
+        sync_once(&hub, &eng_x, &bundle, &state_x, &ctx("devX"))
+            .await
+            .unwrap();
+
+        // devA removes devX (republishes seq 2 without devX).
+        remove_device(&hub, &state_a, &bundle, "acct-1", "devX")
+            .await
+            .unwrap();
+
+        // devB refreshes the registry inside the cycle → devX is no longer authorized.
+        let eng_b = FakeEngine::new("devB");
+        let state_b = MemState::default();
+        let stats = refresh_then_sync(&hub, &eng_b, &bundle, &state_b, "acct-1", "devB")
+            .await
+            .unwrap();
+        assert_eq!(
+            stats.applied, 0,
+            "the removed device's lane must be filtered after republish (H3)"
+        );
+        assert!(
+            !eng_b.snapshot().iter().any(|(u, _, _)| u == "book-x"),
+            "book-x from the removed device must not be applied"
+        );
+        assert_eq!(state_b.registry_seq("acct-1").await.unwrap(), 2);
     }
 
     #[tokio::test]

@@ -74,6 +74,39 @@ impl DeviceRegistry {
         }
     }
 
+    /// Return a new registry with `device_id` removed and `registry_seq` bumped by one —
+    /// the form an authorized device signs and publishes to remove another device from
+    /// the account. Because the seq advances, every honest peer adopts it as newer and
+    /// stops applying the removed device's lanes (the H3 filter), so the device can no
+    /// longer write into the shared library. Removing a `device_id` that is absent is a
+    /// no-op on the set but still bumps the seq (idempotent). The result is unsigned;
+    /// call [`Self::sign`].
+    ///
+    /// This is a **soft** removal, not a cryptographic lockout: the removed device still
+    /// holds the full trousseau (including the account signing key), so it can still
+    /// *read* content encrypted under the current keys and could re-sign a higher-seq
+    /// registry re-adding itself. `adopt`'s anti-rollback stops a malicious *hub* from
+    /// replaying an old registry, not a *device holder*. Closing that gap requires
+    /// account key rotation (a separate concern; see ADR-042 section 13.5).
+    ///
+    /// The primitive is deliberately **policy-free** (no self / last-device / "who may
+    /// remove" guard) so a future authorization model can restrict the caller without
+    /// changing this method — the same `without_device` primitive serves both models.
+    /// Those guards live at the call sites (the FFI refuses removing the current device).
+    pub fn without_device(&self, device_id: &str) -> DeviceRegistry {
+        let devices: Vec<DeviceEntry> = self
+            .devices
+            .iter()
+            .filter(|d| d.device_id != device_id)
+            .cloned()
+            .collect();
+        DeviceRegistry {
+            account_id: self.account_id.clone(),
+            registry_seq: self.registry_seq + 1,
+            devices,
+        }
+    }
+
     /// Serialize and sign with the account key. Returns the opaque blob to publish.
     pub fn sign(&self, signing_key: &SigningKey) -> Result<Vec<u8>, CryptoError> {
         let payload =
@@ -236,6 +269,29 @@ mod tests {
         assert_eq!(updated.devices.len(), 2, "devA must not be duplicated");
         assert_eq!(updated.device("devA").unwrap().name, "renamed");
         assert_eq!(updated.registry_seq, 4);
+    }
+
+    #[test]
+    fn without_device_removes_entry_and_bumps_seq() {
+        let reg = registry(); // seq 3, devA + devB
+        let reduced = reg.without_device("devA");
+        assert_eq!(reduced.registry_seq, 4);
+        assert!(!reduced.is_authorized("devA"));
+        assert!(reduced.is_authorized("devB"));
+        assert_eq!(reduced.devices.len(), 1);
+        // The source registry is untouched (returns a new value).
+        assert_eq!(reg.devices.len(), 2);
+    }
+
+    #[test]
+    fn without_device_absent_id_is_a_seq_bump_noop() {
+        let reg = registry(); // seq 3, devA + devB
+        let reduced = reg.without_device("devX");
+        // Removing an unknown device leaves the set but still advances the seq, so the
+        // publish is never seen as a rollback and stays idempotent.
+        assert_eq!(reduced.registry_seq, 4);
+        assert_eq!(reduced.devices.len(), 2);
+        assert!(reduced.is_authorized("devA") && reduced.is_authorized("devB"));
     }
 
     #[test]
