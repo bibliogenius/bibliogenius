@@ -32,9 +32,11 @@ fn main() {
         // iOS device (arm64). Simulator (arch aarch64, os ios, abi "sim") would need a
         // separate archive; add a CARGO_CFG_TARGET_ABI == "sim" branch when that is wired.
         ("aarch64", "ios") => "crsqlite-aarch64-apple-ios.a",
-        // Android arm64-v8a (the common device ABI + the Apple-Silicon emulator).
-        // Other ABIs (armv7, x86_64) would need their own archives + arms.
+        // Android ABIs. An appbundle ships arm64-v8a + armeabi-v7a + x86_64 by
+        // default, so all three are vendored (Rust reports armv7 as arch "arm").
         ("aarch64", "android") => "crsqlite-aarch64-linux-android.a",
+        ("arm", "android") => "crsqlite-armv7-linux-androideabi.a",
+        ("x86_64", "android") => "crsqlite-x86_64-linux-android.a",
         _ => panic!(
             "crsqlite-static: no vendored cr-sqlite static archive for target \
              {arch}-{os}; build it at the pinned tag per vendor/crsqlite/README.md \

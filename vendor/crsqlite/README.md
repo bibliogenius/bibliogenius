@@ -46,7 +46,7 @@ see ADR-044 sections 2-3.
 
 ## Vendor a STATIC archive for a mobile target (iOS / Android)
 
-Use `./vendor-static.sh <ios|android>` — it builds cr-sqlite for the target AND
+Use `./vendor-static.sh <target>` — it builds cr-sqlite for the target/ABI AND
 applies the mandatory symbol-localization **relink**, then updates `CHECKSUMS.txt`.
 Do NOT skip the relink: `crsql_bundle` is built with `-Zbuild-std` +
 `#![feature(lang_items)]`, so it defines its own `rust_eh_personality` / allocator
@@ -60,13 +60,16 @@ strands internal cross-object refs and crashes at load with
 ```sh
 # from a v0.16.3 checkout (see above); pass its core/ dir if not at ../../../_ressources/cr-sqlite/core
 ./vendor-static.sh ios
-./vendor-static.sh android
+./vendor-static.sh android          # arm64-v8a (alias: android-arm64)
+./vendor-static.sh android-armv7    # armeabi-v7a
+./vendor-static.sh android-x86_64   # x86_64
 ```
 
 Prereqs: Rust **nightly + rust-src** (`-Zbuild-std`; override via `RUSTUP_TOOLCHAIN`);
 iOS needs a full **Xcode** (iPhoneOS SDK) + the `aarch64-apple-ios` target; Android
 needs the **NDK** (`ANDROID_NDK_HOME` or auto-detected) + **`cargo-ndk`** + the
-`aarch64-linux-android` target. macOS/host static is not yet scripted here.
+matching rust target (`aarch64-linux-android` / `armv7-linux-androideabi` /
+`x86_64-linux-android`). macOS/host static is not yet scripted here.
 
 ⚠️ **Android API level = app minSdk.** The Android archive is compiled at
 `ANDROID_API` (default **24** = `flutter.minSdkVersion`). Building at a HIGHER API
@@ -75,7 +78,8 @@ failure on Android below that level. If the app bumps `minSdk`, bump `ANDROID_AP
 (or set it: `ANDROID_API=26 ./vendor-static.sh android`) and re-vendor. (iOS is
 unaffected: the archive targets a very low `LC_VERSION_MIN_IPHONEOS`.)
 
-⚠️ **Ship coverage:** only `aarch64` archives are vendored. An Android appbundle
-builds `arm64-v8a` **+ `armeabi-v7a` + `x86_64`** by default — `build.rs` will
-`panic!` on those ABIs until they are built (add the targets to this script) or
-`abiFilters` is restricted to `arm64-v8a`.
+⚠️ **Ship coverage:** an Android appbundle builds `arm64-v8a` + `armeabi-v7a` +
+`x86_64` by default, and all three are now vendored + wired in `build.rs`. Re-vendor
+**all three** (plus iOS) on a cr-sqlite version bump — `build.rs` `panic!`s on any
+target ABI whose archive/checksum is missing. If you ever restrict the shipped ABIs
+via `abiFilters`, only those need re-vendoring.

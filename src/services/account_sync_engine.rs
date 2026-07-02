@@ -1420,12 +1420,15 @@ mod tests {
         .await
         .unwrap();
 
-        let written = b_covers.written.lock().unwrap();
-        assert_eq!(written.len(), 1, "B should have written exactly one cover");
-        assert_eq!(written[0].0, "book-1");
-        assert_eq!(written[0].1, b"the-jpeg-bytes");
-        assert_eq!(written[0].2, 100);
-        drop(written);
+        // Scope the guard so it is released before the next await below
+        // (clippy `await_holding_lock` does not credit an explicit `drop`).
+        {
+            let written = b_covers.written.lock().unwrap();
+            assert_eq!(written.len(), 1, "B should have written exactly one cover");
+            assert_eq!(written[0].0, "book-1");
+            assert_eq!(written[0].1, b"the-jpeg-bytes");
+            assert_eq!(written[0].2, 100);
+        }
         // The cover did not leak into the row-merge engine.
         assert!(
             eng_b.snapshot().is_empty(),

@@ -428,9 +428,9 @@ mod tests {
         }
         let png = encode_png(&DynamicImage::ImageRgb8(img));
 
-        match resize_to_jpeg_thumbnail_for_sync(&png).unwrap() {
-            Some(out) => assert!(out.len() <= COVER_SYNC_CAP_BYTES),
-            None => {} // could not be squeezed under the cap: caller skips it
+        // None = could not be squeezed under the cap; the caller then skips it.
+        if let Some(out) = resize_to_jpeg_thumbnail_for_sync(&png).unwrap() {
+            assert!(out.len() <= COVER_SYNC_CAP_BYTES);
         }
     }
 
