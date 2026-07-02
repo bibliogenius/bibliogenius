@@ -181,6 +181,39 @@ pub enum PushCatalogOutcome {
     SkippedRemote,
 }
 
+/// Max age (days) of the last confirmed network push before the local hash
+/// fast path (ADR-027) is bypassed so the hub's cached-catalog TTL gets
+/// refreshed.
+///
+/// The hub prunes `cached_catalogs` rows 7 days after the last push it
+/// received (both 200 and 304 bump that TTL). The Flutter keep-alive triggers
+/// a sync at most every 4 days and also refreshes its own timer on a
+/// `SkippedLocal` outcome, so the worst-case gap between two real pushes is
+/// just under (this window + 4 days). Two days keeps that below the 7-day
+/// hub TTL with a day of margin.
+const CATALOG_LOCAL_SKIP_MAX_AGE_DAYS: i64 = 2;
+
+/// True when the last confirmed network push is recent enough that the hub's
+/// cached-catalog TTL does not need a refresh yet, i.e. the local hash fast
+/// path may skip the HTTP round-trip.
+///
+/// A missing or unparseable timestamp counts as stale so configs predating
+/// the `last_catalog_pushed_at` column (migration 086) re-push once and
+/// establish the baseline.
+fn hub_catalog_recently_pushed(
+    last_pushed_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(raw) = last_pushed_at else {
+        return false;
+    };
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) else {
+        return false;
+    };
+    now.signed_duration_since(parsed.with_timezone(&chrono::Utc))
+        < chrono::Duration::days(CATALOG_LOCAL_SKIP_MAX_AGE_DAYS)
+}
+
 /// Compute a deterministic SHA-256 of the canonical catalog payload.
 ///
 /// Returns a 64-char lowercase hex digest (unquoted) suitable for the
@@ -266,6 +299,12 @@ pub struct DirectoryConfig {
     /// pushed to (or confirmed by) the hub. Used to skip redundant
     /// uploads (ADR-027). None until the first successful push.
     pub last_catalog_hash: Option<String>,
+    /// RFC3339 instant of the last catalog push that actually reached the
+    /// hub (HTTP 200 or 304). The ADR-027 fast path only skips the network
+    /// while this is fresh, so the hub's cached-catalog TTL keeps getting
+    /// bumped even when the catalog never changes locally. None until the
+    /// first confirmed push (and reset together with the hash on recovery).
+    pub last_catalog_pushed_at: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +351,7 @@ impl HubDirectoryService {
         let result = db
             .query_one(Statement::from_string(
                 backend,
-                "SELECT node_id, write_token, is_listed, requires_approval, accept_from, allow_borrowing, recovery_code, last_catalog_hash
+                "SELECT node_id, write_token, is_listed, requires_approval, accept_from, allow_borrowing, recovery_code, last_catalog_hash, last_catalog_pushed_at
                  FROM hub_directory_config WHERE id = 1"
                     .to_owned(),
             ))
@@ -331,6 +370,7 @@ impl HubDirectoryService {
             allow_borrowing: row.try_get::<i32>("", "allow_borrowing").unwrap_or(1) != 0,
             recovery_code: row.try_get::<String>("", "recovery_code").ok(),
             last_catalog_hash: row.try_get::<String>("", "last_catalog_hash").ok(),
+            last_catalog_pushed_at: row.try_get::<String>("", "last_catalog_pushed_at").ok(),
         }))
     }
 
@@ -371,30 +411,33 @@ impl HubDirectoryService {
         Ok(())
     }
 
-    /// Persist the hash of the last catalog push so the next sync can
-    /// skip the HTTP round-trip when the catalog is unchanged.
+    /// Persist the state of the last catalog push confirmed by the hub: the
+    /// payload hash (so the next identical sync can skip the HTTP round-trip,
+    /// ADR-027) and the instant of confirmation (200 or 304). That timestamp
+    /// bounds the fast path: once it goes stale the next sync re-pushes so
+    /// the hub's cached-catalog TTL is refreshed.
     ///
-    /// Passing `None` resets the hash, which forces the next sync to
-    /// re-push unconditionally (used after recovery where the hub's
-    /// cached catalog may have been lost).
-    pub(crate) async fn update_last_catalog_hash(
+    /// Passing `None` resets both, which forces the next sync to re-push
+    /// unconditionally (used after recovery where the hub's cached catalog
+    /// may have been lost).
+    pub(crate) async fn record_catalog_push_state(
         db: &DatabaseConnection,
         hash: Option<&str>,
     ) -> Result<(), HubDirectoryError> {
-        let backend = db.get_database_backend();
-        let value = match hash {
-            Some(h) => format!("'{}'", h.replace('\'', "''")),
-            None => "NULL".to_string(),
-        };
-        db.execute(Statement::from_string(
-            backend,
-            format!(
-                "UPDATE hub_directory_config
-                 SET last_catalog_hash = {value},
-                     updated_at = '{now}'
-                 WHERE id = 1",
-                now = chrono::Utc::now().to_rfc3339()
-            ),
+        let now = chrono::Utc::now().to_rfc3339();
+        let pushed_at: Option<String> = hash.map(|_| now.clone());
+        db.execute(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "UPDATE hub_directory_config
+             SET last_catalog_hash = ?,
+                 last_catalog_pushed_at = ?,
+                 updated_at = ?
+             WHERE id = 1",
+            [
+                hash.map(str::to_string).into(),
+                pushed_at.into(),
+                now.into(),
+            ],
         ))
         .await?;
         Ok(())
@@ -638,6 +681,13 @@ impl HubDirectoryService {
         } else {
             existing.as_ref().and_then(|c| c.last_catalog_hash.clone())
         };
+        let last_catalog_pushed_at = if recovered.is_some() {
+            None
+        } else {
+            existing
+                .as_ref()
+                .and_then(|c| c.last_catalog_pushed_at.clone())
+        };
 
         let config = DirectoryConfig {
             node_id: params.node_id,
@@ -648,6 +698,7 @@ impl HubDirectoryService {
             allow_borrowing: params.allow_borrowing,
             recovery_code,
             last_catalog_hash,
+            last_catalog_pushed_at,
         };
 
         Self::save_config(db, &config).await?;
@@ -737,6 +788,7 @@ impl HubDirectoryService {
             allow_borrowing: true,
             recovery_code: None,
             last_catalog_hash: None,
+            last_catalog_pushed_at: None,
         });
 
         // On recovery the hub's cached catalog may have been dropped or
@@ -751,13 +803,15 @@ impl HubDirectoryService {
             allow_borrowing: existing.allow_borrowing,
             recovery_code: profile.recovery_code,
             last_catalog_hash: None,
+            last_catalog_pushed_at: None,
         };
 
         Self::save_config(db, &config).await?;
         // save_config preserves existing columns that aren't in its SET list;
-        // last_catalog_hash is one of them. Force a reset here so the next
-        // sync re-pushes (hub's CachedCatalog may have been lost/expired).
-        Self::update_last_catalog_hash(db, None).await?;
+        // the catalog push state (hash + pushed_at) is among them. Force a
+        // reset here so the next sync re-pushes (hub's CachedCatalog may
+        // have been lost/expired).
+        Self::record_catalog_push_state(db, None).await?;
         tracing::info!("Hub: profile recovered via recovery code");
         Ok(config)
     }
@@ -806,12 +860,27 @@ impl HubDirectoryService {
         let catalog_hash = compute_catalog_hash(&isbn_payload, &catalog_payload, book_count);
 
         // Fast path: same hash as last successful push → no round-trip.
+        // Only allowed while the hub confirmed a push recently: the hub
+        // prunes cached catalogs on a TTL, and skipping here forever (a
+        // catalog that never changes locally) would let that TTL lapse and
+        // leave the directory fallback empty for peers that cannot reach us
+        // live. Once stale, fall through to a real push; the hub answers
+        // 304 and bumps its TTL, so the keep-alive stays cheap.
         if cfg.last_catalog_hash.as_deref() == Some(catalog_hash.as_str()) {
-            tracing::debug!(
+            if hub_catalog_recently_pushed(
+                cfg.last_catalog_pushed_at.as_deref(),
+                chrono::Utc::now(),
+            ) {
+                tracing::debug!(
+                    target: "hub_directory",
+                    "push_catalog: skipped (local hash match)"
+                );
+                return Ok(PushCatalogOutcome::SkippedLocal);
+            }
+            tracing::info!(
                 target: "hub_directory",
-                "push_catalog: skipped (local hash match)"
+                "push_catalog: hash unchanged but hub TTL refresh due, pushing"
             );
-            return Ok(PushCatalogOutcome::SkippedLocal);
         }
 
         let response = self
@@ -832,7 +901,7 @@ impl HubDirectoryService {
         // 304 Not Modified: hub's stored catalog already matches this hash.
         // Persist it locally so subsequent pushes can short-circuit.
         if status == 304 {
-            Self::update_last_catalog_hash(db, Some(&catalog_hash)).await?;
+            Self::record_catalog_push_state(db, Some(&catalog_hash)).await?;
             tracing::debug!(
                 target: "hub_directory",
                 "push_catalog: skipped (hub returned 304)"
@@ -846,7 +915,7 @@ impl HubDirectoryService {
         }
 
         // 2xx success: persist the hash so the next identical push skips.
-        Self::update_last_catalog_hash(db, Some(&catalog_hash)).await?;
+        Self::record_catalog_push_state(db, Some(&catalog_hash)).await?;
         Ok(PushCatalogOutcome::Pushed)
     }
 
@@ -1700,6 +1769,108 @@ mod catalog_hash_tests {
             PushCatalogOutcome::SkippedLocal,
             PushCatalogOutcome::SkippedRemote,
         );
+    }
+
+    #[test]
+    fn local_skip_allowed_only_after_recent_network_push() {
+        let now = chrono::Utc::now();
+        let fresh = (now - chrono::Duration::hours(1)).to_rfc3339();
+        assert!(hub_catalog_recently_pushed(Some(&fresh), now));
+
+        // Older than the window: the hub's cached-catalog TTL needs a
+        // refresh, so the fast path must yield to a real push.
+        let stale = (now
+            - chrono::Duration::days(CATALOG_LOCAL_SKIP_MAX_AGE_DAYS)
+            - chrono::Duration::seconds(1))
+        .to_rfc3339();
+        assert!(!hub_catalog_recently_pushed(Some(&stale), now));
+    }
+
+    #[test]
+    fn local_skip_denied_without_push_baseline() {
+        let now = chrono::Utc::now();
+        // Legacy configs (column added by migration 086) and post-recovery
+        // resets have no timestamp: both must re-push once to establish it.
+        assert!(!hub_catalog_recently_pushed(None, now));
+        assert!(!hub_catalog_recently_pushed(Some("not-a-timestamp"), now));
+    }
+}
+
+#[cfg(test)]
+mod catalog_push_state_tests {
+    //! Locks the persistence contract of `record_catalog_push_state`:
+    //! a confirmed push stores hash + RFC3339 timestamp, a reset clears both.
+
+    use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
+
+    use super::*;
+
+    /// In-memory DB with the `hub_directory_config` schema as produced by
+    /// the base CREATE TABLE plus migrations 055 (allow_borrowing),
+    /// 064 (recovery_code), 068 (last_catalog_hash) and
+    /// 086 (last_catalog_pushed_at), seeded with the singleton row.
+    async fn db_with_config() -> DatabaseConnection {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE hub_directory_config (
+                id                     INTEGER PRIMARY KEY DEFAULT 1,
+                node_id                TEXT NOT NULL,
+                write_token            TEXT NOT NULL,
+                is_listed              INTEGER NOT NULL DEFAULT 0,
+                requires_approval      INTEGER NOT NULL DEFAULT 1,
+                accept_from            TEXT NOT NULL DEFAULT 'everyone',
+                allow_borrowing        INTEGER NOT NULL DEFAULT 1,
+                recovery_code          TEXT,
+                last_catalog_hash      TEXT,
+                last_catalog_pushed_at TEXT,
+                created_at             TEXT NOT NULL,
+                updated_at             TEXT NOT NULL
+            )",
+        )
+        .await
+        .unwrap();
+        db.execute_unprepared(
+            "INSERT INTO hub_directory_config (id, node_id, write_token, created_at, updated_at)
+             VALUES (1, 'test-node', 'test-token', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .await
+        .unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn confirmed_push_records_hash_and_rfc3339_timestamp() {
+        let db = db_with_config().await;
+
+        HubDirectoryService::record_catalog_push_state(&db, Some("abc123"))
+            .await
+            .unwrap();
+
+        let cfg = HubDirectoryService::get_config(&db).await.unwrap().unwrap();
+        assert_eq!(cfg.last_catalog_hash.as_deref(), Some("abc123"));
+        let pushed_at = cfg.last_catalog_pushed_at.expect("timestamp recorded");
+        assert!(chrono::DateTime::parse_from_rfc3339(&pushed_at).is_ok());
+        // A just-recorded push must satisfy the fast-path freshness check.
+        assert!(hub_catalog_recently_pushed(
+            Some(&pushed_at),
+            chrono::Utc::now(),
+        ));
+    }
+
+    #[tokio::test]
+    async fn reset_clears_hash_and_timestamp() {
+        let db = db_with_config().await;
+        HubDirectoryService::record_catalog_push_state(&db, Some("abc123"))
+            .await
+            .unwrap();
+
+        HubDirectoryService::record_catalog_push_state(&db, None)
+            .await
+            .unwrap();
+
+        let cfg = HubDirectoryService::get_config(&db).await.unwrap().unwrap();
+        assert_eq!(cfg.last_catalog_hash, None);
+        assert_eq!(cfg.last_catalog_pushed_at, None);
     }
 }
 

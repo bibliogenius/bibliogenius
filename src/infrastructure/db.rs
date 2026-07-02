@@ -2280,6 +2280,22 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 086: RFC3339 instant of the last catalog push confirmed by
+    // the hub (200 or 304). The ADR-027 local hash fast path used to skip
+    // the HTTP round-trip forever when the catalog never changed, so the
+    // hub's cached-catalog TTL (7 days) was never refreshed and the
+    // directory fallback went permanently empty for unchanged libraries.
+    // push_catalog now bypasses the fast path once this timestamp goes
+    // stale, letting the hub bump its TTL via a cheap 304. NULL (legacy
+    // installs) counts as stale, so the first sync after this migration
+    // re-pushes once and establishes the baseline.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE hub_directory_config ADD COLUMN last_catalog_pushed_at TEXT".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
 
