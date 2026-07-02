@@ -10,3 +10,12 @@ cargo:
   debug:
     extra_flags:
       - "--no-default-features"
+  # Profile = iOS on-device dogfood (`flutter run --profile`): enable the account-sync
+  # data leg on the STATIC cr-sqlite path (iOS forbids dlopen). Kept OFF of release
+  # (ship stays clean) and debug (macOS dev uses the dynamic `crsqlite` path). Revert
+  # with `git restore cargokit.yaml` after the dogfood.
+  profile:
+    extra_flags:
+      - "--no-default-features"
+      - "--features"
+      - "account_sync,crsqlite-static"

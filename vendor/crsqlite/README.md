@@ -43,3 +43,39 @@ build at the pinned tag), and re-checksum on any version bump.
 This dynamic `.dylib` is the **dev/test path only**. The shipped app links cr-sqlite
 **statically** and registers it in-process (iOS forbids runtime extension loading) —
 see ADR-044 sections 2-3.
+
+## Vendor a STATIC archive for a mobile target (iOS / Android)
+
+Use `./vendor-static.sh <ios|android>` — it builds cr-sqlite for the target AND
+applies the mandatory symbol-localization **relink**, then updates `CHECKSUMS.txt`.
+Do NOT skip the relink: `crsql_bundle` is built with `-Zbuild-std` +
+`#![feature(lang_items)]`, so it defines its own `rust_eh_personality` / allocator
+shims. Linked next to the app's std they collide (`duplicate symbol
+'_rust_eh_personality'`). The script re-exports **only** `sqlite3_crsqlite_init`
+and localizes the rest. It merges the objects into one FIRST (Mach-O `ld -r`,
+ELF `ld.lld -r`) before localizing — localizing a multi-object archive directly
+strands internal cross-object refs and crashes at load with
+`cannot locate symbol "crsql_changesModule"`.
+
+```sh
+# from a v0.16.3 checkout (see above); pass its core/ dir if not at ../../../_ressources/cr-sqlite/core
+./vendor-static.sh ios
+./vendor-static.sh android
+```
+
+Prereqs: Rust **nightly + rust-src** (`-Zbuild-std`; override via `RUSTUP_TOOLCHAIN`);
+iOS needs a full **Xcode** (iPhoneOS SDK) + the `aarch64-apple-ios` target; Android
+needs the **NDK** (`ANDROID_NDK_HOME` or auto-detected) + **`cargo-ndk`** + the
+`aarch64-linux-android` target. macOS/host static is not yet scripted here.
+
+⚠️ **Android API level = app minSdk.** The Android archive is compiled at
+`ANDROID_API` (default **24** = `flutter.minSdkVersion`). Building at a HIGHER API
+than the app's minSdk links libc symbols missing on older devices → `dlopen`
+failure on Android below that level. If the app bumps `minSdk`, bump `ANDROID_API`
+(or set it: `ANDROID_API=26 ./vendor-static.sh android`) and re-vendor. (iOS is
+unaffected: the archive targets a very low `LC_VERSION_MIN_IPHONEOS`.)
+
+⚠️ **Ship coverage:** only `aarch64` archives are vendored. An Android appbundle
+builds `arm64-v8a` **+ `armeabi-v7a` + `x86_64`** by default — `build.rs` will
+`panic!` on those ABIs until they are built (add the targets to this script) or
+`abiFilters` is restricted to `arm64-v8a`.

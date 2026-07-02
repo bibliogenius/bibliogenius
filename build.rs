@@ -29,6 +29,12 @@ fn main() {
     // pointer rather than silently linking the wrong artifact.
     let archive = match (arch.as_str(), os.as_str()) {
         ("aarch64", "macos") => "crsqlite-aarch64-apple-darwin.a",
+        // iOS device (arm64). Simulator (arch aarch64, os ios, abi "sim") would need a
+        // separate archive; add a CARGO_CFG_TARGET_ABI == "sim" branch when that is wired.
+        ("aarch64", "ios") => "crsqlite-aarch64-apple-ios.a",
+        // Android arm64-v8a (the common device ABI + the Apple-Silicon emulator).
+        // Other ABIs (armv7, x86_64) would need their own archives + arms.
+        ("aarch64", "android") => "crsqlite-aarch64-linux-android.a",
         _ => panic!(
             "crsqlite-static: no vendored cr-sqlite static archive for target \
              {arch}-{os}; build it at the pinned tag per vendor/crsqlite/README.md \
