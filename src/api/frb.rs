@@ -5649,6 +5649,21 @@ async fn upsert_directory_catalog_cache(
         .await
         .unwrap_or_default();
 
+    // Guard: an empty incoming catalog with a non-empty cache would wipe
+    // every cached row in the prune pass below. The hub can legitimately
+    // serve an empty catalog (a peer re-pushing right after a reinstall,
+    // before importing its books), but this cache is the only offline
+    // fallback for the library, so the destructive sync is skipped. Mirrors
+    // the LAN guard in upsert_peer_books_cache.
+    if entries.is_empty() && !existing.is_empty() {
+        tracing::warn!(
+            "upsert_directory_catalog_cache: node_id={} - incoming catalog empty but {} cached entries exist, skipping destructive prune",
+            node_id,
+            existing.len(),
+        );
+        return Vec::new();
+    }
+
     // Index the cache by canonical ISBN key: valid ISBNs compare in their
     // ISBN-13 form (the same edition circulates as ISBN-10 on one side and
     // ISBN-13 on the other, so raw-string comparison would duplicate the
@@ -7208,5 +7223,22 @@ mod upsert_directory_catalog_cache_tests {
         .await;
 
         assert_eq!(cached_rows(&db).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_catalog_does_not_wipe_existing_cache() {
+        let db = test_db().await;
+        seed_row(&db, ISBN13, "Cached title", None).await;
+
+        let result = upsert_directory_catalog_cache(&db, NODE, &[]).await;
+
+        assert!(result.is_empty());
+        let rows = cached_rows(&db).await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "an empty incoming catalog must not prune cached rows"
+        );
+        assert_eq!(rows[0].title, "Cached title");
     }
 }

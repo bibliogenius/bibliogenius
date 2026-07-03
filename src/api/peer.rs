@@ -6982,9 +6982,15 @@ pub async fn cleanup_stale_peer_books(State(db): State<DatabaseConnection>) -> i
     let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
     let cutoff_str = cutoff.to_rfc3339();
 
-    // Delete stale peer_books entries
+    // Delete stale peer_books entries. Directory catalog rows (peer_id = 0
+    // sentinel) are exempt: they mirror a catalog the owner deliberately
+    // published to the hub (no privacy concern), they are the only offline
+    // fallback once the hub no longer serves that catalog, and they have
+    // their own lifecycle (refreshed and pruned by the directory upsert,
+    // purged on peer deletion per ADR-024).
     let books_deleted = peer_book::Entity::delete_many()
         .filter(peer_book::Column::SyncedAt.lt(&cutoff_str))
+        .filter(peer_book::Column::PeerId.ne(0))
         .exec(&db)
         .await
         .map(|r| r.rows_affected)
@@ -8833,5 +8839,108 @@ mod stale_invite_flag_tests {
             "refresh must clear stale-invite flag"
         );
         assert!(reloaded.relay_gate_allows_send());
+    }
+}
+
+#[cfg(test)]
+mod cleanup_stale_peer_books_tests {
+    //! The 30-day peer_books TTL is a privacy measure for LAN-synced peer
+    //! data. Directory catalog rows (peer_id = 0 sentinel) have their own
+    //! lifecycle (refreshed and pruned by the directory upsert, purged on
+    //! peer deletion per ADR-024) and are the only offline fallback once the
+    //! hub no longer serves a catalog, so the TTL must not delete them.
+    use super::*;
+    use crate::db;
+    use crate::models::peer_book;
+    use sea_orm::Set;
+
+    async fn setup_db() -> DatabaseConnection {
+        db::init_db("sqlite::memory:").await.expect("init db")
+    }
+
+    async fn insert_peer(db: &DatabaseConnection) -> i32 {
+        let now = chrono::Utc::now().to_rfc3339();
+        let p = peer::ActiveModel {
+            name: Set("test-peer".to_string()),
+            url: Set("http://test-peer.local:8080".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        peer::Entity::insert(p)
+            .exec(db)
+            .await
+            .expect("insert peer")
+            .last_insert_id
+    }
+
+    /// Seeds a peer_books row directly. Directory sentinel rows (peer_id = 0)
+    /// have no matching peers row, so the insert runs with FK enforcement off
+    /// on a dedicated connection, mirroring the production directory insert.
+    async fn seed_row(
+        db: &DatabaseConnection,
+        peer_id: i32,
+        node_id: Option<&str>,
+        synced_at: &str,
+    ) {
+        let mut conn = db.get_sqlite_connection_pool().acquire().await.unwrap();
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO peer_books \
+             (peer_id, remote_book_id, title, isbn, author, cover_url, \
+              summary, synced_at, node_id, first_seen_at, added_at, notified_at) \
+             VALUES (?, '0', 'Title', '9780306406157', NULL, NULL, NULL, ?, ?, ?, NULL, NULL)",
+        )
+        .bind(peer_id)
+        .bind(synced_at)
+        .bind(node_id)
+        .bind(synced_at)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+
+    async fn rows_by_peer_id(db: &DatabaseConnection, peer_id: i32) -> usize {
+        peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .all(db)
+            .await
+            .unwrap()
+            .len()
+    }
+
+    #[tokio::test]
+    async fn ttl_spares_directory_rows_and_fresh_lan_rows() {
+        let db = setup_db().await;
+        let peer_id = insert_peer(&db).await;
+        let stale = (chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339();
+        let fresh = chrono::Utc::now().to_rfc3339();
+
+        // Stale directory sentinel row: must survive the TTL.
+        seed_row(&db, 0, Some("node-under-test"), &stale).await;
+        // Stale LAN row: the TTL's actual target.
+        seed_row(&db, peer_id, None, &stale).await;
+        // Fresh LAN row: inside the TTL window.
+        seed_row(&db, peer_id, None, &fresh).await;
+
+        let _ = cleanup_stale_peer_books(State(db.clone())).await;
+
+        assert_eq!(
+            rows_by_peer_id(&db, 0).await,
+            1,
+            "directory catalog cache (peer_id = 0) must be exempt from the TTL"
+        );
+        assert_eq!(
+            rows_by_peer_id(&db, peer_id).await,
+            1,
+            "stale LAN row must be deleted, fresh LAN row kept"
+        );
     }
 }
