@@ -5602,6 +5602,30 @@ pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalog
     }
 }
 
+/// Additive merge of an incoming directory-catalog entry over the cached row.
+/// An empty/None incoming field never erases cached knowledge: the hub
+/// legitimately serves degraded (ISBN-only) entries when the owner runs an
+/// older build (see `get_catalog`'s fallback), while a real metadata change
+/// always carries a non-empty value. Erasing would be sticky — cache-only
+/// loads would keep showing blank teasers even after the hub recovers.
+fn merge_directory_entry(
+    cached: &crate::models::peer_book::Model,
+    entry: &CatalogEntry,
+) -> CatalogEntry {
+    CatalogEntry {
+        isbn: entry.isbn.clone(),
+        book_id: entry.book_id.clone(),
+        title: if entry.title.is_empty() {
+            cached.title.clone()
+        } else {
+            entry.title.clone()
+        },
+        author: entry.author.clone().or_else(|| cached.author.clone()),
+        cover_url: entry.cover_url.clone().or_else(|| cached.cover_url.clone()),
+        added_at: entry.added_at.clone().or_else(|| cached.added_at.clone()),
+    }
+}
+
 /// Upserts directory catalog entries into peer_books cache (peer_id = 0 sentinel).
 /// Returns entries enriched with the authoritative `added_at` from the owner
 /// (carried on every CatalogEntry). `first_seen_at` is still populated for
@@ -5649,22 +5673,24 @@ async fn upsert_directory_catalog_cache(
         fresh_isbns.insert(entry.isbn.clone());
 
         if let Some(existing_entry) = existing_map.get(&entry.isbn) {
-            // UPDATE: refresh metadata + owner-side added_at. `first_seen_at`
-            // stays untouched for any legacy reader that still consults it.
+            // UPDATE: additive refresh (see `merge_directory_entry`) + owner-side
+            // added_at. `first_seen_at` stays untouched for any legacy reader
+            // that still consults it.
+            let merged = merge_directory_entry(existing_entry, entry);
             let mut active: peer_book::ActiveModel = existing_entry.clone().into();
-            active.title = Set(entry.title.clone());
-            active.author = Set(entry.author.clone());
-            active.cover_url = Set(entry.cover_url.clone());
-            active.added_at = Set(entry.added_at.clone());
+            active.title = Set(merged.title.clone());
+            active.author = Set(merged.author.clone());
+            active.cover_url = Set(merged.cover_url.clone());
+            active.added_at = Set(merged.added_at.clone());
             active.synced_at = Set(now.clone());
             let _ = active.update(db).await;
 
             result.push(FrbCatalogEntry {
-                isbn: entry.isbn.clone(),
-                title: entry.title.clone(),
-                author: entry.author.clone(),
-                cover_url: entry.cover_url.clone(),
-                added_at: entry.added_at.clone(),
+                isbn: merged.isbn,
+                title: merged.title,
+                author: merged.author,
+                cover_url: merged.cover_url,
+                added_at: merged.added_at,
             });
         } else {
             // INSERT: collect for a single FK-isolated batch after the loop
@@ -6877,4 +6903,86 @@ pub async fn latest_user_data_change_at_ffi() -> Result<Option<String>, String> 
     crate::api::backup::latest_user_data_change_at(db_conn)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod merge_directory_entry_tests {
+    use super::{CatalogEntry, merge_directory_entry};
+    use crate::models::peer_book;
+
+    fn cached_row() -> peer_book::Model {
+        peer_book::Model {
+            id: 1,
+            peer_id: 0,
+            remote_book_id: "42".to_string(),
+            title: "La Peste".to_string(),
+            isbn: Some("9782020086929".to_string()),
+            author: Some("Albert Camus".to_string()),
+            cover_url: Some("https://hub/covers/n/42.jpg".to_string()),
+            summary: None,
+            synced_at: "2026-06-01T00:00:00Z".to_string(),
+            node_id: Some("node-eve".to_string()),
+            first_seen_at: None,
+            notified_at: None,
+            added_at: Some("2026-05-01T00:00:00Z".to_string()),
+            owned: true,
+            available_copies: None,
+        }
+    }
+
+    fn isbn_only_entry() -> CatalogEntry {
+        CatalogEntry {
+            isbn: "9782020086929".to_string(),
+            book_id: None,
+            title: String::new(),
+            author: None,
+            cover_url: None,
+            added_at: None,
+        }
+    }
+
+    #[test]
+    fn degraded_entry_preserves_cached_metadata() {
+        let merged = merge_directory_entry(&cached_row(), &isbn_only_entry());
+        assert_eq!(merged.title, "La Peste");
+        assert_eq!(merged.author.as_deref(), Some("Albert Camus"));
+        assert_eq!(
+            merged.cover_url.as_deref(),
+            Some("https://hub/covers/n/42.jpg")
+        );
+        assert_eq!(merged.added_at.as_deref(), Some("2026-05-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn fresh_metadata_still_overwrites_the_cache() {
+        let entry = CatalogEntry {
+            isbn: "9782020086929".to_string(),
+            book_id: Some("0197f2a4".to_string()),
+            title: "La Peste (nouvelle éd.)".to_string(),
+            author: Some("A. Camus".to_string()),
+            cover_url: Some("https://hub/covers/n/uuid.jpg".to_string()),
+            added_at: Some("2026-07-01T00:00:00Z".to_string()),
+        };
+        let merged = merge_directory_entry(&cached_row(), &entry);
+        assert_eq!(merged.title, "La Peste (nouvelle éd.)");
+        assert_eq!(merged.author.as_deref(), Some("A. Camus"));
+        assert_eq!(
+            merged.cover_url.as_deref(),
+            Some("https://hub/covers/n/uuid.jpg")
+        );
+        assert_eq!(merged.added_at.as_deref(), Some("2026-07-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn blank_cache_takes_whatever_the_entry_has() {
+        let mut cached = cached_row();
+        cached.title = String::new();
+        cached.author = None;
+        cached.cover_url = None;
+        cached.added_at = None;
+        let merged = merge_directory_entry(&cached, &isbn_only_entry());
+        assert_eq!(merged.title, "");
+        assert_eq!(merged.author, None);
+        assert_eq!(merged.cover_url, None);
+    }
 }

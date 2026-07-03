@@ -150,6 +150,14 @@ pub struct HubCatalog {
 /// files. Kept Optional so the type still deserializes catalogs produced
 /// by older clients (pre-ADR-033) that omitted the field.
 ///
+/// On the wire the field is WRITTEN as `book_uuid`, not `book_id`: pre-uuid
+/// builds declare `book_id: Option<i32>` and fail their whole catalog decode
+/// on a string value, blanking this library for every not-yet-updated
+/// follower. They ignore the unknown `book_uuid` key instead (missing
+/// `book_id` → None), so both generations keep reading current catalogs.
+/// Reading accepts both spellings (`alias`) because catalogs pushed by older
+/// clients stay cached hub-side.
+///
 /// `added_at` carries the owner's `books.created_at` so every follower agrees
 /// on whether an entry is recent (replaces the per-viewer `peer_books.first_seen_at`
 /// heuristic, which was noisy because it flagged every entry as "new" on first
@@ -157,7 +165,13 @@ pub struct HubCatalog {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CatalogEntry {
     pub isbn: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "book_uuid",
+        alias = "book_id",
+        deserialize_with = "deserialize_book_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub book_id: Option<String>,
     pub title: String,
     pub author: Option<String>,
@@ -165,6 +179,66 @@ pub struct CatalogEntry {
     pub cover_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_at: Option<String>,
+}
+
+/// Deserialize `book_id` from either a JSON string (current builds: the book
+/// uuid) or a JSON number (pre-uuid builds: the integer row id). Catalogs from
+/// both generations coexist on the hub, and without this tolerance a single
+/// numeric `book_id` used to fail the whole enriched payload, downgrading the
+/// library to a title-less ISBN-only catalog for every follower.
+fn deserialize_book_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNumber {
+        String(String),
+        Number(i64),
+    }
+    Ok(
+        Option::<StringOrNumber>::deserialize(deserializer)?.map(|v| match v {
+            StringOrNumber::String(s) => s,
+            StringOrNumber::Number(n) => n.to_string(),
+        }),
+    )
+}
+
+/// Decode the enriched `catalog_payload` entry by entry. A malformed entry
+/// (unexpected field type, missing `title`, …) degrades to an ISBN-only entry
+/// instead of failing the whole catalog: an all-or-nothing decode turned one
+/// incompatible entry into a fully title-less library for every follower.
+/// Entries with no recoverable ISBN are dropped. Errors only when the payload
+/// itself is not a JSON array.
+fn parse_catalog_entries(payload: &str) -> Result<Vec<CatalogEntry>, serde_json::Error> {
+    let values: Vec<serde_json::Value> = serde_json::from_str(payload)?;
+    Ok(values
+        .into_iter()
+        .filter_map(
+            |value| match serde_json::from_value::<CatalogEntry>(value.clone()) {
+                Ok(entry) => Some(entry),
+                Err(e) => {
+                    let isbn = match value.get("isbn") {
+                        Some(serde_json::Value::String(s)) if !s.is_empty() => s.clone(),
+                        Some(serde_json::Value::Number(n)) => n.to_string(),
+                        _ => {
+                            tracing::warn!("directory catalog entry dropped (no usable isbn): {e}");
+                            return None;
+                        }
+                    };
+                    tracing::warn!("directory catalog entry {isbn} degraded to ISBN-only: {e}");
+                    Some(CatalogEntry {
+                        isbn,
+                        book_id: None,
+                        title: String::new(),
+                        author: None,
+                        cover_url: None,
+                        added_at: None,
+                    })
+                }
+            },
+        )
+        .collect())
 }
 
 /// Result of `push_catalog`: whether the catalog was actually sent or the
@@ -1139,10 +1213,16 @@ impl HubDirectoryService {
             .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
 
         // Prefer enriched catalog_payload if present
-        if let Some(ref cp) = catalog.catalog_payload
-            && let Ok(entries) = serde_json::from_str::<Vec<CatalogEntry>>(cp)
-        {
-            return Ok(entries);
+        if let Some(ref cp) = catalog.catalog_payload {
+            match parse_catalog_entries(cp) {
+                Ok(entries) => return Ok(entries),
+                Err(e) => {
+                    tracing::warn!(
+                        "enriched catalog payload for {node_id} unreadable ({e}); \
+                         falling back to the ISBN-only payload"
+                    );
+                }
+            }
         }
 
         // Fallback: legacy ISBN-only list
@@ -1931,5 +2011,86 @@ mod register_body_tests {
         };
         let body = HubDirectoryService::build_register_body(&params);
         assert!(body.get("location_country").is_none());
+    }
+}
+
+#[cfg(test)]
+mod catalog_parse_tests {
+    use super::parse_catalog_entries;
+
+    #[test]
+    fn numeric_book_id_from_pre_uuid_builds_decodes() {
+        let payload = r#"[
+            {"isbn":"9782020086929","book_id":42,"title":"La Peste","author":"Camus"},
+            {"isbn":"2221001885","book_id":"0197f2a4","title":"Dolto","author":null}
+        ]"#;
+        let entries = parse_catalog_entries(payload).expect("array parses");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].book_id.as_deref(), Some("42"));
+        assert_eq!(entries[0].title, "La Peste");
+        assert_eq!(entries[1].book_id.as_deref(), Some("0197f2a4"));
+    }
+
+    #[test]
+    fn malformed_entry_degrades_alone_not_the_whole_catalog() {
+        // First entry has a null title (undecodable), second is healthy. The
+        // old all-or-nothing decode blanked BOTH; now only the broken one
+        // degrades to ISBN-only.
+        let payload = r#"[
+            {"isbn":"2221001885","title":null},
+            {"isbn":"9782020086929","title":"La Peste","author":"Camus"}
+        ]"#;
+        let entries = parse_catalog_entries(payload).expect("array parses");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].isbn, "2221001885");
+        assert_eq!(entries[0].title, "");
+        assert_eq!(entries[1].title, "La Peste");
+    }
+
+    #[test]
+    fn numeric_isbn_is_recovered_on_degraded_entries() {
+        let payload = r#"[{"isbn":2221001885,"title":"X"}]"#;
+        let entries = parse_catalog_entries(payload).expect("array parses");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].isbn, "2221001885");
+        assert_eq!(entries[0].title, "");
+    }
+
+    #[test]
+    fn entry_without_recoverable_isbn_is_dropped() {
+        let payload =
+            r#"[{"title":null},{"isbn":"9782020086929","title":"La Peste","author":null}]"#;
+        let entries = parse_catalog_entries(payload).expect("array parses");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "La Peste");
+    }
+
+    #[test]
+    fn non_array_payload_errors() {
+        assert!(parse_catalog_entries("{\"oops\":1}").is_err());
+        assert!(parse_catalog_entries("not json").is_err());
+    }
+
+    #[test]
+    fn book_uuid_wire_name_is_read_and_written() {
+        // Current builds write `book_uuid` (old readers ignore the unknown
+        // key instead of failing on a string `book_id`) and read both names.
+        let payload = r#"[{
+            "isbn":"9782020086929",
+            "book_uuid":"0197f2a4-1111-7222-8333-444455556666",
+            "title":"La Peste","author":null
+        }]"#;
+        let entries = parse_catalog_entries(payload).expect("array parses");
+        assert_eq!(
+            entries[0].book_id.as_deref(),
+            Some("0197f2a4-1111-7222-8333-444455556666")
+        );
+
+        let json = serde_json::to_string(&entries[0]).expect("serializes");
+        assert!(json.contains("\"book_uuid\""), "writes book_uuid: {json}");
+        assert!(
+            !json.contains("\"book_id\""),
+            "never writes book_id: {json}"
+        );
     }
 }
