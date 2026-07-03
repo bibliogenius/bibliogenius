@@ -5649,10 +5649,58 @@ async fn upsert_directory_catalog_cache(
         .await
         .unwrap_or_default();
 
-    let existing_map: std::collections::HashMap<String, peer_book::Model> = existing
-        .into_iter()
-        .filter_map(|e| e.isbn.clone().map(|isbn| (isbn, e)))
-        .collect();
+    // Index the cache by canonical ISBN key: valid ISBNs compare in their
+    // ISBN-13 form (the same edition circulates as ISBN-10 on one side and
+    // ISBN-13 on the other, so raw-string comparison would duplicate the
+    // entry, miss the metadata update, and let the prune pass delete the row
+    // stored under the other form), while unparseable values (empty or
+    // malformed) keep their raw form unchanged and only ever match
+    // themselves. The historical raw-form matching could cache the same book
+    // twice, once per ISBN form; such duplicates collapse onto one key here: the shadowed
+    // row's knowledge is folded additively into the kept row and the shadowed
+    // row is deleted. The in-memory fold is never lost because every kept row
+    // is persisted afterwards, either by the UPDATE branch (book still in the
+    // catalog) or by the prune pass (book gone). Unparseable keys keep the
+    // historical last-wins overwrite without deleting: two ISBN-less rows are
+    // different books, folding them would destroy one.
+    let mut existing_map: std::collections::HashMap<String, peer_book::Model> =
+        std::collections::HashMap::new();
+    let mut shadowed_duplicate_ids: Vec<i32> = Vec::new();
+    for row in existing {
+        let Some(raw_isbn) = row.isbn.clone() else {
+            continue;
+        };
+        let canonical = crate::utils::isbn::to_isbn13(&raw_isbn);
+        let key = canonical.clone().unwrap_or_else(|| raw_isbn.clone());
+        match existing_map.entry(key) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(row);
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if canonical.is_some() {
+                    let kept = slot.get_mut();
+                    if kept.title.is_empty() {
+                        kept.title = row.title.clone();
+                    }
+                    if kept.author.is_none() {
+                        kept.author = row.author.clone();
+                    }
+                    if kept.cover_url.is_none() {
+                        kept.cover_url = row.cover_url.clone();
+                    }
+                    if kept.added_at.is_none() {
+                        kept.added_at = row.added_at.clone();
+                    }
+                    shadowed_duplicate_ids.push(row.id);
+                } else {
+                    slot.insert(row);
+                }
+            }
+        }
+    }
+    for id in shadowed_duplicate_ids {
+        let _ = peer_book::Entity::delete_by_id(id).exec(db).await;
+    }
 
     let mut fresh_isbns = std::collections::HashSet::new();
     let mut result = Vec::with_capacity(entries.len());
@@ -5670,9 +5718,18 @@ async fn upsert_directory_catalog_cache(
     )> = Vec::new();
 
     for entry in entries {
-        fresh_isbns.insert(entry.isbn.clone());
+        let canonical = crate::utils::isbn::to_isbn13(&entry.isbn);
+        let entry_is_valid_isbn = canonical.is_some();
+        let entry_key = canonical.unwrap_or_else(|| entry.isbn.clone());
+        // A catalog listing the same book under both ISBN forms would
+        // re-create the duplicate the fold above just cleaned, so only its
+        // first occurrence is processed. Unparseable keys are exempt: two
+        // ISBN-less entries are different books, not duplicates.
+        if !fresh_isbns.insert(entry_key.clone()) && entry_is_valid_isbn {
+            continue;
+        }
 
-        if let Some(existing_entry) = existing_map.get(&entry.isbn) {
+        if let Some(existing_entry) = existing_map.get(&entry_key) {
             // UPDATE: additive refresh (see `merge_directory_entry`) + owner-side
             // added_at. `first_seen_at` stays untouched for any legacy reader
             // that still consults it.
@@ -5764,9 +5821,12 @@ async fn upsert_directory_catalog_cache(
         }
     }
 
-    // Delete entries no longer in the catalog
-    for (isbn, entry) in &existing_map {
-        if !fresh_isbns.contains(isbn) {
+    // Delete entries no longer in the catalog. Both sides compare in the
+    // canonical key form (`existing_map` keys and `fresh_isbns` alike):
+    // pruning on raw forms would delete a row still in the catalog but cached
+    // under the other ISBN form.
+    for (isbn_key, entry) in &existing_map {
+        if !fresh_isbns.contains(isbn_key) {
             let _ = peer_book::Entity::delete_by_id(entry.id).exec(db).await;
         }
     }
@@ -6984,5 +7044,169 @@ mod merge_directory_entry_tests {
         assert_eq!(merged.title, "");
         assert_eq!(merged.author, None);
         assert_eq!(merged.cover_url, None);
+    }
+}
+
+#[cfg(test)]
+mod upsert_directory_catalog_cache_tests {
+    //! The cache↔catalog match is keyed on the canonical ISBN-13 form: the
+    //! same edition circulates as ISBN-10 on one side and ISBN-13 on the
+    //! other, and a raw-string comparison would duplicate the row, miss the
+    //! metadata update, and let the prune pass delete the matching row stored
+    //! under the other form.
+    use super::{CatalogEntry, upsert_directory_catalog_cache};
+    use crate::models::peer_book;
+    use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+
+    const NODE: &str = "node-under-test";
+    // Same edition in both forms (canonical pair from the Wikipedia ISBN article).
+    const ISBN10: &str = "0306406152";
+    const ISBN13: &str = "9780306406157";
+
+    async fn test_db() -> DatabaseConnection {
+        crate::infrastructure::db::init_db("sqlite::memory:")
+            .await
+            .expect("init db")
+    }
+
+    fn entry(isbn: &str, title: &str) -> CatalogEntry {
+        CatalogEntry {
+            isbn: isbn.to_string(),
+            book_id: None,
+            title: title.to_string(),
+            author: None,
+            cover_url: None,
+            added_at: None,
+        }
+    }
+
+    async fn cached_rows(db: &DatabaseConnection) -> Vec<peer_book::Model> {
+        peer_book::Entity::find()
+            .filter(peer_book::Column::NodeId.eq(NODE))
+            .filter(peer_book::Column::PeerId.eq(0))
+            .all(db)
+            .await
+            .unwrap()
+    }
+
+    /// Seed a sentinel cache row directly (bypassing the upsert) so tests can
+    /// reproduce legacy states the fixed upsert can no longer create, e.g. the
+    /// same book cached once per ISBN form. Mirrors the production insert
+    /// (FK off on a dedicated connection, restored before release).
+    async fn seed_row(db: &DatabaseConnection, isbn: &str, title: &str, cover: Option<&str>) {
+        let mut conn = db.get_sqlite_connection_pool().acquire().await.unwrap();
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO peer_books \
+             (peer_id, remote_book_id, title, isbn, author, cover_url, \
+              summary, synced_at, node_id, first_seen_at, added_at, notified_at) \
+             VALUES (0, 0, ?, ?, NULL, ?, NULL, '2026-01-01T00:00:00Z', ?, \
+                     '2026-01-01T00:00:00Z', NULL, '2026-01-01T00:00:00Z')",
+        )
+        .bind(title)
+        .bind(isbn)
+        .bind(cover)
+        .bind(NODE)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn isbn13_entry_updates_row_cached_as_isbn10() {
+        let db = test_db().await;
+        seed_row(&db, ISBN10, "Old title", None).await;
+
+        let result = upsert_directory_catalog_cache(&db, NODE, &[entry(ISBN13, "New title")]).await;
+
+        let rows = cached_rows(&db).await;
+        assert_eq!(rows.len(), 1, "must match, not duplicate or prune");
+        assert_eq!(rows[0].title, "New title");
+        // The stored form is never rewritten; only the comparison is canonical.
+        assert_eq!(rows[0].isbn.as_deref(), Some(ISBN10));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn isbn10_entry_updates_row_cached_as_isbn13() {
+        let db = test_db().await;
+        seed_row(&db, ISBN13, "Old title", None).await;
+
+        upsert_directory_catalog_cache(&db, NODE, &[entry(ISBN10, "New title")]).await;
+
+        let rows = cached_rows(&db).await;
+        assert_eq!(rows.len(), 1, "must match, not duplicate or prune");
+        assert_eq!(rows[0].title, "New title");
+        assert_eq!(rows[0].isbn.as_deref(), Some(ISBN13));
+    }
+
+    #[tokio::test]
+    async fn prune_spares_the_row_matched_under_the_other_form() {
+        let db = test_db().await;
+        seed_row(&db, ISBN10, "Kept", None).await;
+        seed_row(&db, "9782264024848", "Gone", None).await;
+
+        // The catalog now serves the kept book in its ISBN-13 form only: the
+        // other book is pruned, the kept one survives the form change.
+        upsert_directory_catalog_cache(&db, NODE, &[entry(ISBN13, "Kept")]).await;
+
+        let rows = cached_rows(&db).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Kept");
+        assert_eq!(rows[0].isbn.as_deref(), Some(ISBN10));
+    }
+
+    #[tokio::test]
+    async fn invalid_and_empty_isbns_compare_raw_without_collision() {
+        let db = test_db().await;
+        let entries = [entry("not-an-isbn", "Invalid"), entry("", "No ISBN")];
+
+        upsert_directory_catalog_cache(&db, NODE, &entries).await;
+        assert_eq!(cached_rows(&db).await.len(), 2);
+
+        // Same raw values again: stable (matched raw), no prune, no dup.
+        upsert_directory_catalog_cache(&db, NODE, &entries).await;
+        let rows = cached_rows(&db).await;
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn legacy_duplicate_rows_fold_into_one() {
+        let db = test_db().await;
+        // Legacy state created by the old raw-form matching: the same book
+        // cached once per ISBN form, with knowledge split across the rows.
+        seed_row(&db, ISBN10, "Dup", None).await;
+        seed_row(&db, ISBN13, "Dup", Some("https://hub/covers/n/1.jpg")).await;
+
+        upsert_directory_catalog_cache(&db, NODE, &[entry(ISBN13, "Dup")]).await;
+
+        let rows = cached_rows(&db).await;
+        assert_eq!(rows.len(), 1, "shadowed duplicate must be deleted");
+        // The fold is additive: the surviving row keeps the duplicate's cover.
+        assert_eq!(
+            rows[0].cover_url.as_deref(),
+            Some("https://hub/covers/n/1.jpg")
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_listing_both_forms_creates_a_single_row() {
+        let db = test_db().await;
+
+        upsert_directory_catalog_cache(
+            &db,
+            NODE,
+            &[entry(ISBN10, "Same book"), entry(ISBN13, "Same book")],
+        )
+        .await;
+
+        assert_eq!(cached_rows(&db).await.len(), 1);
     }
 }
