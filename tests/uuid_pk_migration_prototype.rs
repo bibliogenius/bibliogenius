@@ -73,6 +73,18 @@ async fn count(db: &DatabaseConnection, table: &str) -> i64 {
     row.try_get::<i64>("", "c").expect("count value")
 }
 
+async fn count_where(db: &DatabaseConnection, table: &str, cond: &str) -> i64 {
+    let row = db
+        .query_one(Statement::from_string(
+            db.get_database_backend(),
+            format!("SELECT COUNT(*) AS c FROM \"{table}\" WHERE {cond}"),
+        ))
+        .await
+        .expect("count query")
+        .expect("count row");
+    row.try_get::<i64>("", "c").expect("count value")
+}
+
 async fn capture_counts(db: &DatabaseConnection) -> Vec<(String, i64)> {
     let mut v = Vec::new();
     for table in PLAN_TABLES {
@@ -299,6 +311,28 @@ async fn real_library_copy_migrates_with_invariants_preserved() {
         .await
         .expect("open the real library copy");
 
+    // A real phone library carries hub-directory cache rows keyed by the
+    // `peer_books.peer_id = 0` sentinel (no matching `peers` row, written in a
+    // dedicated FK-off window — see `upsert_directory_catalog_cache`). They are
+    // FK-violating by design and predate the flip, so the migration's integrity
+    // gate must NOT abort on them (aborting bricked startup on every device
+    // with a populated directory cache). Seed some in case the source copy has
+    // an empty cache, and assert below that they survive the flip.
+    db.execute_unprepared("PRAGMA foreign_keys = OFF")
+        .await
+        .expect("disable FK enforcement for the sentinel seed");
+    db.execute_unprepared(
+        "INSERT INTO peer_books (peer_id, remote_book_id, title, synced_at, owned) VALUES \
+         (0, 900001, 'Directory sentinel A', datetime('now'), 1), \
+         (0, 900002, 'Directory sentinel B', datetime('now'), 1), \
+         (0, 900003, 'Directory sentinel C', datetime('now'), 1)",
+    )
+    .await
+    .expect("seed peer_id = 0 sentinel rows in the directory cache");
+    db.execute_unprepared("PRAGMA foreign_keys = ON")
+        .await
+        .expect("re-enable FK enforcement after the sentinel seed");
+
     // Count rows on the ORIGINAL (old integer-id) schema, before any migration.
     let before = capture_counts(&db).await;
 
@@ -310,6 +344,18 @@ async fn real_library_copy_migrates_with_invariants_preserved() {
 
     assert_counts_preserved(&db, &before).await;
     assert_no_orphans(&db).await;
+
+    // The by-design sentinel rows crossed the flip untouched.
+    let sentinels = count_where(
+        &db,
+        "peer_books",
+        "peer_id = 0 AND remote_book_id >= 900001",
+    )
+    .await;
+    assert_eq!(
+        sentinels, 3,
+        "peer_id = 0 directory-cache sentinel rows must survive the uuid-PK flip"
+    );
 
     let total: i64 = before.iter().map(|(_, n)| n).sum();
     eprintln!(

@@ -2872,6 +2872,30 @@ fn uuid_apply_cover_rename(covers_dir: &std::path::Path, old: &str, new: &str) {
     }
 }
 
+/// One `PRAGMA foreign_key_check` violation: (child table, child rowid — NULL
+/// for WITHOUT ROWID tables, referenced parent table, fk index). Snapshotted
+/// before and after the uuid rebuild so the integrity gate can single out the
+/// violations the rebuild itself introduced.
+async fn fk_check_snapshot(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<std::collections::HashSet<(String, Option<i64>, String, i64)>, DbErr> {
+    let rows = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<String, _>(0),
+                r.get::<Option<i64>, _>(1),
+                r.get::<String, _>(2),
+                r.get::<i64, _>(3),
+            )
+        })
+        .collect())
+}
+
 /// The transactional body of `migrate_uuid_pk`. Wraps `uuid_rebuild_inner` in a
 /// transaction so a failure (e.g. a `foreign_key_check` violation) rolls back the
 /// whole rebuild, leaving the integer `id` in place for a safe retry next launch.
@@ -2879,11 +2903,14 @@ async fn run_uuid_rebuild(
     conn: &mut sqlx::SqliteConnection,
     specs: &[UuidRebuildSpec],
 ) -> Result<Vec<(String, String)>, DbErr> {
+    // Snapshot the violations that already exist BEFORE the rebuild, so the
+    // integrity gate at the end only aborts on ones the rebuild introduced.
+    let preexisting = fk_check_snapshot(conn).await?;
     sqlx::query("BEGIN")
         .execute(&mut *conn)
         .await
         .map_err(map_sqlx)?;
-    match uuid_rebuild_inner(conn, specs).await {
+    match uuid_rebuild_inner(conn, specs, &preexisting).await {
         Ok(cover_renames) => {
             sqlx::query("COMMIT")
                 .execute(&mut *conn)
@@ -2905,6 +2932,7 @@ async fn run_uuid_rebuild(
 async fn uuid_rebuild_inner(
     conn: &mut sqlx::SqliteConnection,
     specs: &[UuidRebuildSpec],
+    preexisting_fk_violations: &std::collections::HashSet<(String, Option<i64>, String, i64)>,
 ) -> Result<Vec<(String, String)>, DbErr> {
     // Phase 1: capture indexes + build every `_new` from intact originals.
     let mut indexes: Vec<String> = Vec::new();
@@ -2976,15 +3004,29 @@ async fn uuid_rebuild_inner(
         }
     }
 
-    // Integrity gate: no remaining FK is violated by the rebuilt schema.
-    let violations = sqlx::query("PRAGMA foreign_key_check")
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(map_sqlx)?;
-    if !violations.is_empty() {
+    // Integrity gate: the rebuild must not introduce any NEW foreign-key
+    // violation. Compared against the pre-rebuild snapshot rather than
+    // asserting an empty report, because a real library legitimately carries
+    // FK-violating rows that predate the flip: the hub-directory cache keeps
+    // `peer_books.peer_id = 0` sentinel rows (written in a dedicated FK-off
+    // window, see `upsert_directory_catalog_cache`), plus possible orphans
+    // from the era of the FK-off cascade bug. Those involve only non-rebuilt
+    // tables and are the pre-flip status quo, not a rebuild failure — aborting
+    // on them made init fail on every launch for any device with a populated
+    // directory cache.
+    let post = fk_check_snapshot(conn).await?;
+    let mut introduced: Vec<_> = post.difference(preexisting_fk_violations).collect();
+    if !introduced.is_empty() {
+        introduced.sort();
+        let sample = introduced
+            .iter()
+            .take(5)
+            .map(|(child, _, parent, _)| format!("{child} -> {parent}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(DbErr::Custom(format!(
-            "uuid_pk migration aborted: foreign_key_check reported {} violation(s)",
-            violations.len()
+            "uuid_pk migration aborted: rebuild introduced {} foreign-key violation(s) (e.g. {sample})",
+            introduced.len()
         )));
     }
     Ok(cover_renames)
