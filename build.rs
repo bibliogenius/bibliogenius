@@ -41,6 +41,10 @@ fn main() {
         ("aarch64", "android") => "crsqlite-aarch64-linux-android.a",
         ("arm", "android") => "crsqlite-armv7-linux-androideabi.a",
         ("x86_64", "android") => "crsqlite-x86_64-linux-android.a",
+        // Linux AppImage (built in the Ubuntu 22.04 toolchain container; the
+        // archive is produced by `vendor-static.sh linux-x86_64` in that same
+        // image so the glibc floor matches).
+        ("x86_64", "linux") => "crsqlite-x86_64-unknown-linux-gnu.a",
         _ => panic!(
             "crsqlite-static: no vendored cr-sqlite static archive for target \
              {arch}-{os}; build it at the pinned tag per vendor/crsqlite/README.md \

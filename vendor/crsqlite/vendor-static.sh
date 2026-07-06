@@ -23,11 +23,16 @@
 #            android-x86_64                             (x86_64-linux-android)
 #            darwin | darwin-arm64                      (aarch64-apple-darwin)
 #            darwin-x86_64                              (x86_64-apple-darwin)
+#            linux | linux-x86_64                       (x86_64-unknown-linux-gnu)
 #   An Android appbundle ships arm64-v8a + armeabi-v7a + x86_64, so all three
 #   Android ABIs must be vendored for a full ship (else build.rs panics on the
 #   missing ones). iOS ships arm64 only. macOS Release is UNIVERSAL (no explicit
 #   ARCHS in the Xcode project => arm64 + x86_64, and the Fastfile mac lane
 #   cargo-builds both backend targets), so BOTH darwin archives must be vendored.
+#   The linux target serves the AppImage (`make build-linux`); on a macOS host
+#   the script re-execs itself inside the same Docker toolchain image the
+#   AppImage build uses (build it first: `make build-linux` at the repo root, or
+#   the `docker buildx build` line of that target).
 #
 # PREREQS (see README.md):
 #   - Rust nightly + rust-src component (for -Zbuild-std). Override the toolchain
@@ -62,12 +67,30 @@ case "$TARGET" in
   ios)             KIND=ios;     TRIPLE=aarch64-apple-ios ;;
   darwin|darwin-arm64) KIND=darwin; TRIPLE=aarch64-apple-darwin; MACH_ARCH=arm64 ;;
   darwin-x86_64)   KIND=darwin;  TRIPLE=x86_64-apple-darwin;     MACH_ARCH=x86_64 ;;
+  linux|linux-x86_64) KIND=linux; TRIPLE=x86_64-unknown-linux-gnu ;;
   android|android-arm64)  TRIPLE=aarch64-linux-android;   CLANG_PREFIX=aarch64-linux-android ;;
   android-armv7)   TRIPLE=armv7-linux-androideabi;        CLANG_PREFIX=armv7a-linux-androideabi ;;
   android-x86_64)  TRIPLE=x86_64-linux-android;           CLANG_PREFIX=x86_64-linux-android ;;
   *) echo "error: unknown target '$TARGET'" >&2
-     echo "       expected: ios | android[-arm64] | android-armv7 | android-x86_64 | darwin[-arm64] | darwin-x86_64" >&2; exit 1 ;;
+     echo "       expected: ios | android[-arm64] | android-armv7 | android-x86_64 | darwin[-arm64] | darwin-x86_64 | linux[-x86_64]" >&2; exit 1 ;;
 esac
+
+# The linux archive must be built with the SAME toolchain image as the AppImage
+# (Ubuntu 22.04 glibc floor). On a non-Linux host, re-exec this script inside
+# that image; everything below then runs as the in-container Linux branch.
+if [ "$KIND" = linux ] && [ "$(uname -s)" != "Linux" ]; then
+  IMAGE="${LINUX_BUILD_IMAGE:-bibliogenius-linux-build:22.04}"
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || {
+    echo "error: Docker image $IMAGE not found; build it first (see 'make build-linux')" >&2
+    exit 1
+  }
+  CRSQLITE_REPO="$(cd "$CORE/.." && pwd)"
+  exec docker run --rm --platform linux/amd64 \
+    -v "$VENDOR:/vendor" \
+    -v "$CRSQLITE_REPO:/crsqlite" \
+    --entrypoint /bin/bash \
+    "$IMAGE" /vendor/vendor-static.sh "$TARGET" /crsqlite/core
+fi
 ARCHIVE="crsqlite-$TRIPLE.a"
 
 echo ">> building cr-sqlite static for $TRIPLE (this recompiles std via -Zbuild-std)"
@@ -87,6 +110,23 @@ elif [ "$KIND" = darwin ]; then
   # without it clang stamps the current SDK and `ld -r` warns on every object.
   ( cd "$CORE" && RUSTUP_TOOLCHAIN="$NIGHTLY" MACOSX_DEPLOYMENT_TARGET="$MACOS_MIN" \
       make CI_MAYBE_TARGET="$TRIPLE" static )
+elif [ "$KIND" = linux ]; then
+  # Native build inside the AppImage toolchain container (glibc floor comes from
+  # the image, Ubuntu 22.04). CI_GCC holds the COMPILER NAME (the Makefile does
+  # `CC:=$(CI_GCC)`), and defining it also skips the C_TARGET flag — needed
+  # because gcc does not take clang's `--target=`, and a native build needs no
+  # cross flag anyway. The pinned nightly is not baked into the image; install
+  # it on the fly (minimal profile, no rust-src: this path skips -Zbuild-std).
+  rustup toolchain list | grep -q "$NIGHTLY" \
+    || rustup toolchain install "$NIGHTLY" --profile minimal
+  # Best-effort bitcode reduction for the crate's own objects. NOT sufficient on
+  # its own: the PREBUILT std rlibs ship with embedded LLVM-17 `.llvmbc` that
+  # these flags cannot touch, which Ubuntu 22.04's binutils (LLVM-14 plugin)
+  # abort on — the operative fix is the `.llvmbc` section strip in the ELF
+  # relink below.
+  ( cd "$CORE" && RUSTUP_TOOLCHAIN="$NIGHTLY" \
+      CARGO_PROFILE_RELEASE_LTO=off RUSTFLAGS="-Cembed-bitcode=no" \
+      make CI_MAYBE_TARGET="$TRIPLE" CI_GCC=gcc static )
 else
   # Android needs two things the Makefile's `static` target does NOT set up on a
   # macOS host: (1) the target C compiler / archiver env for build-std's `unwind`
@@ -150,14 +190,28 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
     fi
     xcrun ar -rcs "$WORK/out.a" merged.o
   else
-    # ELF: merge first (ld.lld -r), THEN localize with objcopy (localizing a
+    # ELF: merge first (ld -r), THEN localize with objcopy (localizing a
     # multi-object archive directly would strand internal cross-object refs).
-    NDK="${ANDROID_NDK_HOME:-$(ls -d "$HOME"/Library/Android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)}"
-    BIN="$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
-    "$BIN/llvm-ar" x "$BUILT"
-    "$BIN/ld.lld" -r ./*.o -o merged.o
-    "$BIN/llvm-objcopy" --keep-global-symbol=sqlite3_crsqlite_init merged.o out_obj.o
-    "$BIN/llvm-ar" rcs "$WORK/out.a" out_obj.o
+    # Android relinks with the NDK llvm tools; linux runs inside the toolchain
+    # container where the system GNU binutils do the same job.
+    if [ "$KIND" = linux ]; then
+      AR=ar; LD=ld; OBJCOPY=objcopy
+    else
+      NDK="${ANDROID_NDK_HOME:-$(ls -d "$HOME"/Library/Android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)}"
+      BIN="$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+      AR="$BIN/llvm-ar"; LD="$BIN/ld.lld"; OBJCOPY="$BIN/llvm-objcopy"
+    fi
+    "$AR" x "$BUILT"
+    "$LD" -r ./*.o -o merged.o
+    # Also strip the embedded LLVM bitcode sections: the nightly's rust objects
+    # carry LLVM-17 `.llvmbc`/`.llvmcmd` next to the machine code, and any GNU
+    # binutils step that probes them with an older plugin (Ubuntu 22.04 `ar s`
+    # indexing, or the final app link) aborts with "LLVM ERROR: Invalid
+    # encoding". The machine code is all we ship; the bitcode is dead weight.
+    "$OBJCOPY" --keep-global-symbol=sqlite3_crsqlite_init \
+      --remove-section='.llvmbc' --remove-section='.llvmcmd' \
+      merged.o out_obj.o
+    "$AR" rcs "$WORK/out.a" out_obj.o
   fi )
 
 # Validate the relink invariant BEFORE replacing the vendored archive: exactly
@@ -178,7 +232,12 @@ fi
 cp "$WORK/out.a" "$VENDOR/$ARCHIVE"
 
 echo ">> updating CHECKSUMS.txt"
-NEW="$(shasum -a 256 "$VENDOR/$ARCHIVE" | awk '{print $1}')"
+# shasum is the macOS spelling; the linux toolchain container has sha256sum.
+if command -v shasum >/dev/null 2>&1; then
+  NEW="$(shasum -a 256 "$VENDOR/$ARCHIVE" | awk '{print $1}')"
+else
+  NEW="$(sha256sum "$VENDOR/$ARCHIVE" | awk '{print $1}')"
+fi
 CS="$VENDOR/CHECKSUMS.txt"
 touch "$CS"
 grep -v " $ARCHIVE\$" "$CS" > "$CS.tmp" || true
