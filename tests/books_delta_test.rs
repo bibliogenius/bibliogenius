@@ -191,6 +191,55 @@ async fn delta_omits_private_book_for_peer() {
 }
 
 #[tokio::test]
+async fn delta_omits_non_owned_book_for_peer() {
+    let db = setup().await;
+    let (_owned_id, _) = create_book_with_log(&db, "Owned", false).await;
+    // Wishlist entry: not private, but not owned either. The full-catalog
+    // path (owned_only=true) and the directory publication both hide
+    // non-owned books from peers; the delta path must do the same.
+    let now = chrono::Utc::now().to_rfc3339();
+    let wish = rust_lib_app::models::book::ActiveModel {
+        title: Set("Wishlist only".to_owned()),
+        owned: Set(false),
+        private: Set(false),
+        reading_status: Set("wanting".to_owned()),
+        created_at: Set(now.clone()),
+        updated_at: Set(now.clone()),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    operation_log::Entity::insert(operation_log::ActiveModel {
+        entity_type: Set("book".to_owned()),
+        entity_id: Set(wish.id.clone()),
+        operation: Set("INSERT".to_owned()),
+        payload: Set(None),
+        source: Set("local".to_owned()),
+        status: Set("applied".to_owned()),
+        created_at: Set(now),
+        ..Default::default()
+    })
+    .exec(&db)
+    .await
+    .unwrap();
+    let app = build_app(db);
+
+    let (status, body) = get_json(&app, "/api/books?since=0").await;
+    assert_eq!(status, StatusCode::OK);
+    let ops = body["operations"].as_array().unwrap();
+    // Same omission rule as private books: no upsert, no delete tombstone.
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0]["op"], "upsert");
+    assert_eq!(ops[0]["book"]["title"], "Owned");
+    let serialized = serde_json::to_string(&body).unwrap();
+    assert!(
+        !serialized.contains(wish.id.as_str()),
+        "non-owned book id must not leak in any form"
+    );
+}
+
+#[tokio::test]
 async fn delta_redacts_cataloguing_notes_for_peer() {
     let db = setup().await;
     let now = chrono::Utc::now().to_rfc3339();

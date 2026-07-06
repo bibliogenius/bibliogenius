@@ -239,8 +239,8 @@ pub enum BookDeltaOutcome {
 }
 
 /// Build a book delta window honouring the same privacy pipeline as the
-/// full-catalog endpoint: drops `private=true` books for non-owner callers
-/// and applies `redact_for_peer` on survivors.
+/// full-catalog endpoint: drops `private=true` and non-owned books for
+/// non-owner callers and applies `redact_for_peer` on survivors.
 ///
 /// `since = None` means "from the oldest retained operation_log row" (first
 /// sync). `limit` caps the raw-row scan and is clamped to
@@ -296,6 +296,14 @@ pub async fn build_book_delta_response(
                     if book.private.unwrap_or(false) {
                         // Per ADR-028 D6: omit operations whose current state
                         // is private rather than leak the id via a tombstone.
+                        continue;
+                    }
+                    if !book.owned.unwrap_or(true) {
+                        // Non-owned books (wishlist entries, borrowed copies)
+                        // are never shared with peers: the full-catalog path
+                        // (owned_only=true) and the directory publication both
+                        // filter them, so the delta path must not leak them
+                        // either. Same omission rule as private (ADR-028 D6).
                         continue;
                     }
                     book.redact_for_peer();
