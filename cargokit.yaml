@@ -2,18 +2,22 @@
 # This file configures how Cargokit builds the Rust library for mobile platforms
 
 cargo:
-  # For release builds, disable default features to avoid compiling the desktop binary
+  # Release builds disable default features (no desktop binary) and ship the
+  # account-sync data leg on the STATIC cr-sqlite path (iOS forbids dlopen;
+  # static linking is the cross-platform shipping mechanism). CRR-ification
+  # stays a runtime opt-in gated on account enrollment, so users without an
+  # account keep a plain SQLite database.
   release:
     extra_flags:
       - "--no-default-features"
+      - "--features"
+      - "account_sync,crsqlite-static"
   # Debug builds also need no-default-features for iOS/Android
   debug:
     extra_flags:
       - "--no-default-features"
-  # Profile = iOS on-device dogfood (`flutter run --profile`): enable the account-sync
-  # data leg on the STATIC cr-sqlite path (iOS forbids dlopen). Kept OFF of release
-  # (ship stays clean) and debug (macOS dev uses the dynamic `crsqlite` path). Revert
-  # with `git restore cargokit.yaml` after the dogfood.
+  # Profile = iOS on-device dogfood (`flutter run --profile`), same features
+  # as release so profile runs exercise the shipped configuration.
   profile:
     extra_flags:
       - "--no-default-features"
