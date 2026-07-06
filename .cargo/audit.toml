@@ -1,0 +1,22 @@
+# cargo-audit triage. Each ignore documents why the advisory does not apply to
+# the shipped binaries. Re-evaluate on every dependency bump.
+
+[advisories]
+ignore = [
+    # rkyv: lockfile-only, never compiled (not reachable with either the default
+    # or the release feature set; `cargo tree -i rkyv` prints nothing).
+    "RUSTSEC-2026-0001",
+    # rsa: lockfile-only, pulled by sqlx-mysql which this crate never enables
+    # (`cargo tree -i rsa` prints nothing with our feature sets).
+    "RUSTSEC-2023-0071",
+    # rustls-webpki (x3): reachable only through sqlx-core's rustls feature; all
+    # sqlx connections are local SQLite, no TLS handshake ever happens. Goes
+    # away with the sqlx 0.8 / SeaORM 1.x migration.
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    # sqlx 0.7: binary-protocol casts on 4 GiB+ payloads, unreachable on a local
+    # SQLite database. The fix requires sqlx 0.8, i.e. the SeaORM 0.12 -> 1.x
+    # migration: planned as a dedicated post-release task, not a pre-ship change.
+    "RUSTSEC-2024-0363",
+]

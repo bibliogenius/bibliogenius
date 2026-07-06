@@ -110,7 +110,7 @@ pub async fn fetch_by_isbn(isbn: &str) -> Result<SudocBook, String> {
 
 fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
     let mut reader = Reader::from_str(xml);
-    reader.trim_text(true);
+    reader.config_mut().trim_text(true);
 
     let mut title = String::new();
     let mut publisher = None;
@@ -167,7 +167,7 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
                 }
             }
             Ok(Event::Text(e)) => {
-                let text = e.unescape().unwrap_or_default().to_string();
+                let text = super::xml_text_content(&e);
 
                 match (current_tag.as_str(), current_code.as_str()) {
                     ("200", "a") => title = text,

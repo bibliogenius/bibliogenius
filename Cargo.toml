@@ -83,7 +83,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "native-tls-vendored",
 ] }
-quick-xml = { version = "0.31", features = ["serialize"] }
+quick-xml = { version = "0.41", features = ["serialize"] }
 uuid = { version = "1.4", features = ["v4", "v7", "fast-rng", "macro-diagnostics"] }
 # ISBN-10 ↔ ISBN-13 conversion (same crate already used by librius)
 isbn2 = "0.4.0"

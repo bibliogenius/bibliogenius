@@ -501,7 +501,7 @@ fn parse_bnf_sru_record(
     use quick_xml::reader::Reader;
 
     let mut reader = Reader::from_str(xml);
-    reader.trim_text(true);
+    reader.config_mut().trim_text(true);
 
     let mut builder = BnfBookBuilder::default();
     let mut buf = Vec::new();
@@ -541,7 +541,7 @@ fn parse_bnf_sru_record(
                 }
             }
             Ok(Event::Text(e)) => {
-                let text = e.unescape().unwrap_or_default().to_string();
+                let text = super::xml_text_content(&e);
 
                 if in_controlfield
                     && controlfield_tag == "003"
@@ -696,7 +696,7 @@ pub async fn search_bnf_sru(
     // Parse multiple MARC records
     let mut books = Vec::new();
     let mut reader = Reader::from_str(&xml);
-    reader.trim_text(true);
+    reader.config_mut().trim_text(true);
 
     let mut current_book = BnfBookBuilder::default();
     let mut buf = Vec::new();
@@ -739,7 +739,7 @@ pub async fn search_bnf_sru(
                 }
             }
             Ok(Event::Text(e)) => {
-                let text = e.unescape().unwrap_or_default().to_string();
+                let text = super::xml_text_content(&e);
 
                 if in_controlfield
                     && controlfield_tag == "003"
