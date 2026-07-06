@@ -21,9 +21,13 @@
 #            android | android-arm64                    (aarch64-linux-android)
 #            android-armv7                              (armv7-linux-androideabi)
 #            android-x86_64                             (x86_64-linux-android)
+#            darwin | darwin-arm64                      (aarch64-apple-darwin)
+#            darwin-x86_64                              (x86_64-apple-darwin)
 #   An Android appbundle ships arm64-v8a + armeabi-v7a + x86_64, so all three
 #   Android ABIs must be vendored for a full ship (else build.rs panics on the
-#   missing ones). iOS ships arm64 only.
+#   missing ones). iOS ships arm64 only. macOS Release is UNIVERSAL (no explicit
+#   ARCHS in the Xcode project => arm64 + x86_64, and the Fastfile mac lane
+#   cargo-builds both backend targets), so BOTH darwin archives must be vendored.
 #
 # PREREQS (see README.md):
 #   - Rust nightly + rust-src component (for -Zbuild-std). Override the toolchain
@@ -41,6 +45,10 @@ TARGET="${1:?usage: vendor-static.sh <ios|android|android-arm64|android-armv7|an
 VENDOR="$(cd "$(dirname "$0")" && pwd)"
 CORE="${2:-$VENDOR/../../../_ressources/cr-sqlite/core}"
 NIGHTLY="${RUSTUP_TOOLCHAIN:-nightly-2023-10-05}"
+# macOS min-version stamp for the darwin targets (compile env AND `ld -r
+# -platform_version`). Must match the app build's MACOSX_DEPLOYMENT_TARGET
+# exported in the cargokit podspec script phase.
+MACOS_MIN="${MACOS_MIN:-11.0}"
 
 [ -d "$CORE" ] || { echo "error: cr-sqlite core dir not found: $CORE" >&2
   echo "       clone it (see README.md) and pass its core/ dir as arg 2." >&2; exit 1; }
@@ -52,11 +60,13 @@ KIND=android
 CLANG_PREFIX=""
 case "$TARGET" in
   ios)             KIND=ios;     TRIPLE=aarch64-apple-ios ;;
+  darwin|darwin-arm64) KIND=darwin; TRIPLE=aarch64-apple-darwin; MACH_ARCH=arm64 ;;
+  darwin-x86_64)   KIND=darwin;  TRIPLE=x86_64-apple-darwin;     MACH_ARCH=x86_64 ;;
   android|android-arm64)  TRIPLE=aarch64-linux-android;   CLANG_PREFIX=aarch64-linux-android ;;
   android-armv7)   TRIPLE=armv7-linux-androideabi;        CLANG_PREFIX=armv7a-linux-androideabi ;;
   android-x86_64)  TRIPLE=x86_64-linux-android;           CLANG_PREFIX=x86_64-linux-android ;;
   *) echo "error: unknown target '$TARGET'" >&2
-     echo "       expected: ios | android[-arm64] | android-armv7 | android-x86_64" >&2; exit 1 ;;
+     echo "       expected: ios | android[-arm64] | android-armv7 | android-x86_64 | darwin[-arm64] | darwin-x86_64" >&2; exit 1 ;;
 esac
 ARCHIVE="crsqlite-$TRIPLE.a"
 
@@ -66,6 +76,17 @@ echo ">> building cr-sqlite static for $TRIPLE (this recompiles std via -Zbuild-
 if [ "$KIND" = ios ]; then
   # C amalgamation cross-compiles fine via the Makefile's --target/-isysroot.
   ( cd "$CORE" && RUSTUP_TOOLCHAIN="$NIGHTLY" IOS_TARGET="$TRIPLE" make static )
+elif [ "$KIND" = darwin ]; then
+  # macOS build (native arm64 or x86_64 cross from an arm Mac): drive the triple
+  # with a make-var override of CI_MAYBE_TARGET — that sets `cargo --target` and
+  # the triple-suffixed dist name, and clang takes `--target=<triple>` natively
+  # with the default macOS SDK (no sysroot juggling). No -Zbuild-std here: the
+  # prebuilt std for the target must be installed on the toolchain
+  # (`rustup target add $TRIPLE --toolchain $NIGHTLY`). MACOSX_DEPLOYMENT_TARGET
+  # pins the objects' minos to the app's (cargokit exports the same value);
+  # without it clang stamps the current SDK and `ld -r` warns on every object.
+  ( cd "$CORE" && RUSTUP_TOOLCHAIN="$NIGHTLY" MACOSX_DEPLOYMENT_TARGET="$MACOS_MIN" \
+      make CI_MAYBE_TARGET="$TRIPLE" static )
 else
   # Android needs two things the Makefile's `static` target does NOT set up on a
   # macOS host: (1) the target C compiler / archiver env for build-std's `unwind`
@@ -107,10 +128,26 @@ BUILT="$CORE/dist/$ARCHIVE"
 echo ">> relinking: export ONLY sqlite3_crsqlite_init, localize everything else"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 ( cd "$WORK"
-  if [ "$KIND" = ios ]; then
+  if [ "$KIND" = ios ] || [ "$KIND" = darwin ]; then
     # Mach-O: a single partial link that re-exports only the entry point.
+    ARCH="${MACH_ARCH:-arm64}"
     printf '_sqlite3_crsqlite_init\n' > exports.txt
-    xcrun ld -r -arch arm64 -x "$BUILT" -exported_symbols_list exports.txt -o merged.o
+    if [ "$KIND" = darwin ]; then
+      # Two macOS-specific twists vs the iOS line below: (1) the plain-C objects
+      # built with `--target=<triple>` carry no LC_BUILD_VERSION, so `ld -r`
+      # cannot infer the platform and demands `-platform_version` (11.0 matches
+      # the app build's MACOSX_DEPLOYMENT_TARGET, exported in the cargokit
+      # podspec script phase); (2) `ld -r` loads an ARCHIVE lazily — with no
+      # root reference it pulls members arbitrarily and can DROP the entry
+      # point (observed: `_sqlite3_crsqlite_init` absent from merged.o) — so
+      # extract the objects and link them explicitly.
+      ar -x "$BUILT"
+      xcrun ld -r -arch "$ARCH" \
+        -platform_version macos "$MACOS_MIN" "$(xcrun --sdk macosx --show-sdk-version)" \
+        -x ./*.o -exported_symbols_list exports.txt -o merged.o
+    else
+      xcrun ld -r -arch "$ARCH" -x "$BUILT" -exported_symbols_list exports.txt -o merged.o
+    fi
     xcrun ar -rcs "$WORK/out.a" merged.o
   else
     # ELF: merge first (ld.lld -r), THEN localize with objcopy (localizing a
@@ -122,6 +159,21 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
     "$BIN/llvm-objcopy" --keep-global-symbol=sqlite3_crsqlite_init merged.o out_obj.o
     "$BIN/llvm-ar" rcs "$WORK/out.a" out_obj.o
   fi )
+
+# Validate the relink invariant BEFORE replacing the vendored archive: exactly
+# one defined global symbol, and it is the extension entry point. This is not
+# theoretical: `ld -r` fed the archive directly once lazy-loaded members and
+# silently DROPPED `sqlite3_crsqlite_init` (exit 0, unusable artifact).
+echo ">> validating relinked archive (single exported global = entry point)"
+if ! nm "$WORK/out.a" 2>/dev/null | grep -Eq ' T _?sqlite3_crsqlite_init$'; then
+  echo "error: relinked archive lost the entry point sqlite3_crsqlite_init" >&2
+  exit 1
+fi
+GLOBALS="$(nm -g "$WORK/out.a" 2>/dev/null | grep -cE '^[0-9a-f]+ [TSDW] ' || true)"
+if [ "$GLOBALS" != 1 ]; then
+  echo "error: relinked archive exports $GLOBALS defined globals (expected exactly 1)" >&2
+  exit 1
+fi
 
 cp "$WORK/out.a" "$VENDOR/$ARCHIVE"
 

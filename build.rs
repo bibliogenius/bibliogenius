@@ -28,7 +28,11 @@ fn main() {
     // are wired here; any other target fails loudly with the build recipe
     // pointer rather than silently linking the wrong artifact.
     let archive = match (arch.as_str(), os.as_str()) {
+        // macOS Release builds are UNIVERSAL (arm64 + x86_64): cargokit compiles
+        // one slice per arch and the Fastfile mac lane cargo-builds both backend
+        // targets, so BOTH darwin archives must stay vendored.
         ("aarch64", "macos") => "crsqlite-aarch64-apple-darwin.a",
+        ("x86_64", "macos") => "crsqlite-x86_64-apple-darwin.a",
         // iOS device (arm64). Simulator (arch aarch64, os ios, abi "sim") would need a
         // separate archive; add a CARGO_CFG_TARGET_ABI == "sim" branch when that is wired.
         ("aarch64", "ios") => "crsqlite-aarch64-apple-ios.a",
