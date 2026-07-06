@@ -2569,11 +2569,15 @@ async fn upsert_peer_books_cache(
         }
     }
 
-    // 4. Check un-notified books against wishlist + emit "new_books" notification.
-    // Uses notified_at IS NULL instead of tracking inserts in memory, so that
-    // notification dedup survives notification pruning (TTL/cap).
+    // 4. Check un-notified books against wishlist + emit "wishlist_match"
+    // notification. Uses notified_at IS NULL instead of tracking inserts in
+    // memory, so that notification dedup survives notification pruning (TTL/cap).
+    // Only books the peer actually owns qualify: a non-owned entry (the peer's
+    // own wishlist, or a copy the peer borrowed) is not borrowable, so it stays
+    // un-notified and becomes eligible if the peer acquires it later.
     let unnotified = peer_book::Entity::find()
         .filter(peer_book::Column::PeerId.eq(peer_id))
+        .filter(peer_book::Column::Owned.eq(true))
         .filter(peer_book::Column::NotifiedAt.is_null())
         .all(db)
         .await
@@ -8499,6 +8503,84 @@ mod added_at_tests {
             row.added_at.as_deref(),
             Some("2026-04-15T09:30:00+00:00"),
             "owner's added_at must be persisted on first insert",
+        );
+    }
+
+    /// wishlist_match must fire only for books the peer actually OWNS.
+    /// An entry the peer merely wishes for (owned=false, e.g. delivered by
+    /// the delta path, which does not filter non-owned books) is not
+    /// borrowable and must not notify. Once the peer acquires the book
+    /// (owned flips to true on a later sync), the notification must fire.
+    #[tokio::test]
+    async fn upsert_peer_books_cache_wishlist_match_requires_owned() {
+        let db = setup().await;
+        let peer_id = insert_peer(&db).await;
+
+        // Local wishlist entry with a matching ISBN
+        let now = chrono::Utc::now().to_rfc3339();
+        crate::models::book::ActiveModel {
+            title: Set("La Condition humaine".to_string()),
+            isbn: Set(Some("9782070360208".to_string())),
+            reading_status: Set("wanting".to_string()),
+            owned: Set(false),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        let wishlist_matches = |db: DatabaseConnection| async move {
+            crate::models::notification::Entity::find()
+                .filter(crate::models::notification::Column::EventType.eq("wishlist_match"))
+                .all(&db)
+                .await
+                .unwrap()
+        };
+
+        // The peer's sync delivers the same ISBN, but the peer only wishes it too
+        let books = vec![crate::models::Book {
+            id: Some("20".to_string()),
+            title: "La Condition humaine".to_string(),
+            isbn: Some("9782070360208".to_string()),
+            owned: Some(false),
+            ..Default::default()
+        }];
+        upsert_peer_books_cache(&db, peer_id, None, books, true).await;
+
+        assert!(
+            wishlist_matches(db.clone()).await.is_empty(),
+            "a book in the peer's own wishlist (owned=false) must not trigger wishlist_match",
+        );
+
+        // The non-owned row must stay un-notified so a later acquisition can fire
+        let row = peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .filter(peer_book::Column::RemoteBookId.eq("20"))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            row.notified_at.is_none(),
+            "non-owned entries must stay un-notified until the peer acquires the book",
+        );
+
+        // The peer acquires the book: the next sync flips owned to true
+        let books = vec![crate::models::Book {
+            id: Some("20".to_string()),
+            title: "La Condition humaine".to_string(),
+            isbn: Some("9782070360208".to_string()),
+            owned: Some(true),
+            ..Default::default()
+        }];
+        upsert_peer_books_cache(&db, peer_id, None, books, true).await;
+
+        assert_eq!(
+            wishlist_matches(db.clone()).await.len(),
+            1,
+            "wishlist_match must fire once the peer actually owns the book",
         );
     }
 }

@@ -5846,12 +5846,15 @@ async fn upsert_directory_catalog_cache(
         }
     }
 
-    // Check un-notified entries for wishlist matches + emit "new_books" notification.
-    // Uses notified_at IS NULL instead of tracking inserts in memory, so that
-    // notification dedup survives notification pruning (TTL/cap).
+    // Check un-notified entries for wishlist matches + emit "wishlist_match"
+    // notification. Uses notified_at IS NULL instead of tracking inserts in
+    // memory, so that notification dedup survives notification pruning (TTL/cap).
+    // Only owned entries qualify (same rule as the peer-sync pass): a non-owned
+    // entry is not borrowable and must not trigger a wishlist match.
     let unnotified = peer_book::Entity::find()
         .filter(peer_book::Column::NodeId.eq(node_id))
         .filter(peer_book::Column::PeerId.eq(0))
+        .filter(peer_book::Column::Owned.eq(true))
         .filter(peer_book::Column::NotifiedAt.is_null())
         .all(db)
         .await
