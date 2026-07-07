@@ -44,7 +44,7 @@ This dynamic `.dylib` is the **dev/test path only**. The shipped app links cr-sq
 **statically** and registers it in-process (iOS forbids runtime extension loading) —
 see ADR-044 sections 2-3.
 
-## Vendor a STATIC archive for a mobile target (iOS / Android)
+## Vendor a STATIC archive (iOS / Android / macOS / Linux)
 
 Use `./vendor-static.sh <target>` — it builds cr-sqlite for the target/ABI AND
 applies the mandatory symbol-localization **relink**, then updates `CHECKSUMS.txt`.
@@ -63,13 +63,26 @@ strands internal cross-object refs and crashes at load with
 ./vendor-static.sh android          # arm64-v8a (alias: android-arm64)
 ./vendor-static.sh android-armv7    # armeabi-v7a
 ./vendor-static.sh android-x86_64   # x86_64
+./vendor-static.sh darwin           # aarch64-apple-darwin (alias: darwin-arm64)
+./vendor-static.sh darwin-x86_64    # x86_64-apple-darwin (Intel slice of the universal app)
+./vendor-static.sh linux            # x86_64-unknown-linux-gnu (AppImage; alias: linux-x86_64)
 ```
 
 Prereqs: Rust **nightly + rust-src** (`-Zbuild-std`; override via `RUSTUP_TOOLCHAIN`);
 iOS needs a full **Xcode** (iPhoneOS SDK) + the `aarch64-apple-ios` target; Android
 needs the **NDK** (`ANDROID_NDK_HOME` or auto-detected) + **`cargo-ndk`** + the
 matching rust target (`aarch64-linux-android` / `armv7-linux-androideabi` /
-`x86_64-linux-android`). macOS/host static is not yet scripted here.
+`x86_64-linux-android`). The darwin targets skip `-Zbuild-std` but need the rust
+target on the nightly (`rustup target add x86_64-apple-darwin --toolchain <nightly>`
+for the Intel slice). The linux target needs **Docker** and the AppImage toolchain
+image (`bibliogenius-linux-build:22.04`, see `make build-linux`): the script re-execs
+itself inside it so the archive shares the AppImage's glibc floor.
+
+⚠️ **macOS Release ships BOTH darwin archives**: the app builds universal
+(arm64 + x86_64) and the Fastfile mac lane cargo-builds both backend targets. And
+the darwin archives MUST be the relinked single-object form — the pre-relink arm64
+archive (loose bitcode-bearing objects) broke the app's **fat LTO** link with
+`failed to get bitcode from object file for LTO (Can't find section __bitcode)`.
 
 ⚠️ **Android API level = app minSdk.** The Android archive is compiled at
 `ANDROID_API` (default **24** = `flutter.minSdkVersion`). Building at a HIGHER API

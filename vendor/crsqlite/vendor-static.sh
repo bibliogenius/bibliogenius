@@ -219,7 +219,13 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 # theoretical: `ld -r` fed the archive directly once lazy-loaded members and
 # silently DROPPED `sqlite3_crsqlite_init` (exit 0, unusable artifact).
 echo ">> validating relinked archive (single exported global = entry point)"
-if ! nm "$WORK/out.a" 2>/dev/null | grep -Eq ' T _?sqlite3_crsqlite_init$'; then
+# `grep -c` (not -q): -q exits at first match and SIGPIPEs the still-writing nm,
+# which `set -o pipefail` then reports as a pipeline failure DESPITE the match —
+# whether it bites depends on how much output follows the match, so it passes
+# or fails per-archive. -c consumes all input; `|| true` absorbs its no-match
+# exit code.
+ENTRY="$(nm "$WORK/out.a" 2>/dev/null | grep -cE ' T _?sqlite3_crsqlite_init$' || true)"
+if [ "$ENTRY" -lt 1 ]; then
   echo "error: relinked archive lost the entry point sqlite3_crsqlite_init" >&2
   exit 1
 fi
