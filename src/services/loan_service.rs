@@ -320,6 +320,38 @@ pub async fn count_closed_outgoing_requests(db: &DatabaseConnection) -> Result<i
     Ok(count as i64)
 }
 
+/// Mark an outgoing P2P borrow request as failed after a delivery error.
+///
+/// The row is inserted with status "pending" BEFORE the send attempt; leaving
+/// it pending on failure makes the Sent tab claim a delivery that never
+/// happened and blocks re-requesting the same book (the duplicate guard
+/// counts pending rows). "failed" rows are visible as such in the UI, do not
+/// block a retry, and are purged by `delete_closed_outgoing_requests`.
+///
+/// Best-effort: delivery failure reporting must never mask the original
+/// error, so DB errors are logged and swallowed.
+pub async fn mark_outgoing_request_failed(db: &DatabaseConnection, outgoing_id: &str) {
+    let result = P2pOutgoingRequest::update_many()
+        .col_expr(
+            p2p_outgoing_request::Column::Status,
+            sea_orm::prelude::Expr::value("failed"),
+        )
+        .col_expr(
+            p2p_outgoing_request::Column::UpdatedAt,
+            sea_orm::prelude::Expr::value(chrono::Utc::now().to_rfc3339()),
+        )
+        .filter(p2p_outgoing_request::Column::Id.eq(outgoing_id))
+        .exec(db)
+        .await;
+    match result {
+        Ok(_) => tracing::info!("Outgoing request {} marked as failed", outgoing_id),
+        Err(e) => tracing::warn!(
+            "Failed to mark outgoing request {} as failed: {e}",
+            outgoing_id
+        ),
+    }
+}
+
 /// Delete all closed outgoing P2P requests (not pending)
 pub async fn delete_closed_outgoing_requests(db: &DatabaseConnection) -> Result<u64, ServiceError> {
     let result = P2pOutgoingRequest::delete_many()

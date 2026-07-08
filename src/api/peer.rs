@@ -936,7 +936,7 @@ pub(crate) async fn try_send_e2ee(
 /// relay response await loop. Useful when the caller can tolerate missing a
 /// slow peer in exchange for faster UI feedback (e.g. leaderboard refresh
 /// where a 90s wait would freeze the refresh spinner).
-pub(crate) async fn try_send_e2ee_with_timeout(
+pub async fn try_send_e2ee_with_timeout(
     state: &crate::infrastructure::AppState,
     peer: &peer::Model,
     message_type: &str,
@@ -1037,12 +1037,21 @@ pub(crate) async fn try_send_e2ee_with_timeout(
             );
             Ok(Some(response))
         }
-        Err(crate::services::e2ee_transport::E2eeTransportError::Network(ref net_err)) => {
-            // Mark peer as unreachable so subsequent calls skip direct
+        Err(ref direct_err)
+            if matches!(
+                direct_err,
+                crate::services::e2ee_transport::E2eeTransportError::Network(_)
+            ) || direct_err.is_wrong_server_response() =>
+        {
+            let net_err = direct_err.to_string();
+            // Mark peer as unreachable so subsequent calls skip direct.
+            // Wrong-server responses (404/405/501: another service squats the
+            // peer's host:port) count as unreachable too: the envelope never
+            // reached a peer, so the relay fallback is duplicate-safe.
             if !skip_direct {
                 state.mark_peer_direct_failed(peer.id);
             }
-            // Network error - peer unreachable. Try relay fallback.
+            // Peer unreachable in direct. Try relay fallback.
             // ADR-012: All message types can now be relayed. Request-response messages
             // attach reply_to fields so responses come back via our mailbox.
             // ADR-032: Skip relay entirely when the peer's write_token has been
@@ -5382,6 +5391,7 @@ pub async fn request_book(
             // E2EE transport error - both direct and relay failed.
             // Do NOT fall back to plaintext to avoid duplicate requests.
             tracing::warn!("E2EE send failed (no plaintext fallback): {}", e);
+            crate::services::loan_service::mark_outgoing_request_failed(db, &outgoing_id).await;
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({ "error": "Failed to deliver request to peer" })),
@@ -5392,6 +5402,7 @@ pub async fn request_book(
 
     // Legacy plaintext path (only reached if E2EE returned Ok(None))
     if let Err(e) = validate_url(&peer.url) {
+        crate::services::loan_service::mark_outgoing_request_failed(db, &outgoing_id).await;
         return (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": format!("Cannot reach peer: {}", e) })),
@@ -5462,6 +5473,7 @@ pub async fn request_book(
                     )
                         .into_response();
                 }
+                crate::services::loan_service::mark_outgoing_request_failed(db, &outgoing_id).await;
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(json!({ "error": "Peer rejected request" })),
@@ -5469,11 +5481,14 @@ pub async fn request_book(
                     .into_response()
             }
         }
-        Err(_) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": "Failed to contact peer" })),
-        )
-            .into_response(),
+        Err(_) => {
+            crate::services::loan_service::mark_outgoing_request_failed(db, &outgoing_id).await;
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "Failed to contact peer" })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -5735,6 +5750,7 @@ pub async fn request_book_by_url(
     // SSRF validation: only needed here for direct HTTP to peer URL.
     // Relay-only peers (relay://) never reach this point because E2EE handles them.
     if let Err(e) = validate_url(&peer.url) {
+        crate::services::loan_service::mark_outgoing_request_failed(db, &outgoing_id).await;
         return (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": format!("Cannot reach peer: {}", e) })),
@@ -5806,6 +5822,7 @@ pub async fn request_book_by_url(
                     )
                         .into_response();
                 }
+                crate::services::loan_service::mark_outgoing_request_failed(db, &outgoing_id).await;
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(json!({ "error": "Peer rejected request" })),
@@ -5813,11 +5830,14 @@ pub async fn request_book_by_url(
                     .into_response()
             }
         }
-        Err(_) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": "Failed to contact peer" })),
-        )
-            .into_response(),
+        Err(_) => {
+            crate::services::loan_service::mark_outgoing_request_failed(db, &outgoing_id).await;
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "Failed to contact peer" })),
+            )
+                .into_response()
+        }
     }
 }
 

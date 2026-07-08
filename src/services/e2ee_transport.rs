@@ -38,6 +38,20 @@ impl std::fmt::Display for E2eeTransportError {
     }
 }
 
+impl E2eeTransportError {
+    /// `true` when a direct send got an HTTP response that a real BiblioGenius
+    /// peer can never produce for `POST /api/e2ee/message`: 404/405/501 mean
+    /// the route or method is unknown to whatever answered. That happens when
+    /// another service squats the peer's host:port (dev HTTP server, reverse
+    /// proxy, captive portal) while the app is closed. The envelope was NOT
+    /// processed by a peer, so a relay fallback is safe: no duplicate-delivery
+    /// risk, unlike other 4xx/5xx codes the real endpoint returns after
+    /// receiving the envelope (replay rejection, decrypt failure, ...).
+    pub fn is_wrong_server_response(&self) -> bool {
+        matches!(self, Self::PeerError(404 | 405 | 501, _))
+    }
+}
+
 /// reqwest's `Display` only prints "error sending request for url (X)" and
 /// hides the actual cause. Walk the source chain and tag the kind so logs
 /// distinguish a timeout from a connection reset/refused — the difference
@@ -185,5 +199,35 @@ impl DirectTransport {
     /// Access the underlying crypto service (for sealing responses).
     pub fn crypto_service(&self) -> &Arc<CryptoService<SqliteNonceStore>> {
         &self.crypto_service
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrong_server_statuses_are_fallback_eligible() {
+        for status in [404u16, 405, 501] {
+            assert!(
+                E2eeTransportError::PeerError(status, String::new()).is_wrong_server_response(),
+                "{status} must be treated as a squatted port"
+            );
+        }
+    }
+
+    #[test]
+    fn real_peer_errors_are_not_fallback_eligible() {
+        // Codes the real /api/e2ee/message endpoint can return after having
+        // processed the envelope: relaying those could duplicate delivery.
+        for status in [400u16, 401, 403, 409, 500, 502, 503] {
+            assert!(
+                !E2eeTransportError::PeerError(status, String::new()).is_wrong_server_response(),
+                "{status} may come from a real peer, no relay fallback"
+            );
+        }
+        assert!(!E2eeTransportError::Crypto("x".into()).is_wrong_server_response());
+        assert!(!E2eeTransportError::Network("x".into()).is_wrong_server_response());
+        assert!(!E2eeTransportError::PeerInviteStale.is_wrong_server_response());
     }
 }
