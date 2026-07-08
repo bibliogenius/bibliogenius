@@ -90,8 +90,22 @@ pub async fn init_db_account_sync(database_url: &str) -> Result<DatabaseConnecti
         .map_err(conn_err)?;
     let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
 
-    run_migrations(&db).await?;
-    crate::infrastructure::crsqlite_crr::setup_crrs(&db).await?;
+    // Migrations or CRR setup can fail (e.g. a half-applied schema). If they do,
+    // release the cr-sqlite pool cleanly before returning: dropping a connection
+    // that touched a CRR without `crsql_finalize()` aborts inside sqlx's close path
+    // ("unable to close due to unfinalized statements"), which surfaces as an FFI
+    // panic instead of a recoverable error. Finalize + close best-effort so the
+    // caller gets the real `DbErr`.
+    if let Err(e) = async {
+        run_migrations(&db).await?;
+        crate::infrastructure::crsqlite_crr::setup_crrs(&db).await
+    }
+    .await
+    {
+        let _ = crate::infrastructure::crsqlite_crr::finalize(&db).await;
+        let _ = db.close().await;
+        return Err(e);
+    }
 
     Ok(db)
 }
