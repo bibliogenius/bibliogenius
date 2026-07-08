@@ -1,4 +1,4 @@
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, Statement};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, Statement, TransactionTrait};
 use sqlx::Row as _;
 
 use crate::utils::default_library_name::compute_default_library_name_seed;
@@ -9,7 +9,7 @@ use crate::utils::default_library_name::compute_default_library_name_seed;
 /// can decide whether to migrate the archived DB forward or refuse a
 /// future-version archive. **Bump this constant whenever a new migration
 /// is appended to `run_migrations`.**
-pub const SCHEMA_VERSION: u32 = 81;
+pub const SCHEMA_VERSION: u32 = 82;
 
 pub async fn init_db(database_url: &str) -> Result<DatabaseConnection, DbErr> {
     let db = Database::connect(database_url).await?;
@@ -2011,6 +2011,10 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // run so progress survives a kill/restart and a run can resume from its
     // cursor. `metadata_fill_journal` records every field this feature wrote so
     // a fill can be undone safely (revert only if the value is still ours).
+    //
+    // `cursor_book_id` / `book_id` are TEXT: they hold `books.uuid` values since
+    // the uuid-PK rebuild. Databases that got the original INTEGER shape are
+    // retyped by migration 087 below.
     for stmt in [
         r#"CREATE TABLE IF NOT EXISTS metadata_fill_run (
             batch_id TEXT PRIMARY KEY,
@@ -2020,7 +2024,7 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             filled INTEGER NOT NULL DEFAULT 0,
             skipped INTEGER NOT NULL DEFAULT 0,
             errored INTEGER NOT NULL DEFAULT 0,
-            cursor_book_id INTEGER NOT NULL DEFAULT 0,
+            cursor_book_id TEXT NOT NULL DEFAULT '',
             current_title TEXT,
             started_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -2028,7 +2032,7 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         r#"CREATE TABLE IF NOT EXISTS metadata_fill_journal (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             batch_id TEXT NOT NULL,
-            book_id INTEGER NOT NULL,
+            book_id TEXT NOT NULL,
             field TEXT NOT NULL,
             value_set TEXT NOT NULL,
             created_at TEXT NOT NULL,
@@ -2296,6 +2300,16 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 087: retype the metadata gap-fill book-id columns to TEXT.
+    // Migration 077 originally created `metadata_fill_run.cursor_book_id` and
+    // `metadata_fill_journal.book_id` as INTEGER (pre-uuid book ids), and the
+    // uuid-PK rebuild could not catch them: neither column declares a foreign
+    // key into `books`, so the fan-out drift guard never saw these tables.
+    // Legacy rows still hold integer values, which break every `String` decode
+    // in the repository (start / progress / recent history all fail). See
+    // `migrate_metadata_fill_text_ids` for the mechanics.
+    migrate_metadata_fill_text_ids(db).await?;
+
     Ok(())
 }
 
@@ -2336,6 +2350,128 @@ async fn table_has_column(
         }
     }
     Ok(false)
+}
+
+/// Declared type of `table`.`column` (via `PRAGMA table_info`), or `None` if
+/// the table or column does not exist. Same identifier-trust caveat as
+/// `table_has_column`: `table` MUST be a hard-coded name.
+async fn table_column_decl_type(
+    db: &DatabaseConnection,
+    table: &str,
+    column: &str,
+) -> Result<Option<String>, DbErr> {
+    let rows = db
+        .query_all(Statement::from_string(
+            db.get_database_backend(),
+            format!("PRAGMA table_info(\"{table}\")"),
+        ))
+        .await?;
+    for r in &rows {
+        if let Ok(name) = r.try_get::<String>("", "name")
+            && name == column
+        {
+            return Ok(Some(r.try_get::<String>("", "type").unwrap_or_default()));
+        }
+    }
+    Ok(None)
+}
+
+/// Migration 087: rebuild the two metadata gap-fill tables so their book-id
+/// columns are TEXT (they hold `books.uuid` values since the uuid-PK rebuild).
+///
+/// An in-place `UPDATE ... CAST` cannot fix this: INTEGER column affinity
+/// coerces numeric-looking text right back to integers, so the fix has to be
+/// SQLite's table-redefinition procedure. Nothing references these tables (no
+/// FK in either direction), so no foreign-key pragma dance is needed.
+///
+/// Legacy values are cast to text and kept as inert history: the integer to
+/// uuid mapping was dropped with the old `books.id`, so pre-rebuild journal
+/// entries can no longer resolve to a book, and undo for them degrades to a
+/// no-op by design. A legacy `cursor_book_id` like '0' sorts before every
+/// uuid, so an interrupted legacy run simply resumes from the start, which is
+/// harmless (fills are None-only).
+///
+/// Idempotent: gated on the declared column type still being INTEGER, and the
+/// whole rebuild runs in a single transaction (SQLite DDL is transactional).
+/// A kill mid-rebuild rolls back on the next open, so the gate still sees the
+/// INTEGER shape and re-runs cleanly; a bare statement sequence would strand a
+/// `_new` table and fail every subsequent boot on "table already exists".
+async fn migrate_metadata_fill_text_ids(db: &DatabaseConnection) -> Result<(), DbErr> {
+    let run_is_integer = table_column_decl_type(db, "metadata_fill_run", "cursor_book_id")
+        .await?
+        .is_some_and(|t| t.eq_ignore_ascii_case("INTEGER"));
+    let journal_is_integer = table_column_decl_type(db, "metadata_fill_journal", "book_id")
+        .await?
+        .is_some_and(|t| t.eq_ignore_ascii_case("INTEGER"));
+    if !run_is_integer && !journal_is_integer {
+        return Ok(());
+    }
+
+    let txn = db.begin().await?;
+    if run_is_integer {
+        for stmt in [
+            r#"CREATE TABLE metadata_fill_run_new (
+                batch_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                total INTEGER NOT NULL DEFAULT 0,
+                done INTEGER NOT NULL DEFAULT 0,
+                filled INTEGER NOT NULL DEFAULT 0,
+                skipped INTEGER NOT NULL DEFAULT 0,
+                errored INTEGER NOT NULL DEFAULT 0,
+                cursor_book_id TEXT NOT NULL DEFAULT '',
+                current_title TEXT,
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"#,
+            "INSERT INTO metadata_fill_run_new \
+             (batch_id, status, total, done, filled, skipped, errored, cursor_book_id, \
+              current_title, started_at, updated_at) \
+             SELECT batch_id, status, total, done, filled, skipped, errored, \
+                    CAST(cursor_book_id AS TEXT), current_title, started_at, updated_at \
+             FROM metadata_fill_run",
+            "DROP TABLE metadata_fill_run",
+            "ALTER TABLE metadata_fill_run_new RENAME TO metadata_fill_run",
+        ] {
+            txn.execute(Statement::from_string(
+                txn.get_database_backend(),
+                stmt.to_owned(),
+            ))
+            .await?;
+        }
+    }
+
+    if journal_is_integer {
+        for stmt in [
+            r#"CREATE TABLE metadata_fill_journal_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                book_id TEXT NOT NULL,
+                field TEXT NOT NULL,
+                value_set TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                undone_at TEXT
+            )"#,
+            "INSERT INTO metadata_fill_journal_new \
+             (id, batch_id, book_id, field, value_set, created_at, undone_at) \
+             SELECT id, batch_id, CAST(book_id AS TEXT), field, value_set, created_at, undone_at \
+             FROM metadata_fill_journal",
+            "DROP TABLE metadata_fill_journal",
+            "ALTER TABLE metadata_fill_journal_new RENAME TO metadata_fill_journal",
+            // The indexes were dropped with the old table; recreate them.
+            "CREATE INDEX IF NOT EXISTS idx_mfj_batch ON metadata_fill_journal(batch_id)",
+            "CREATE INDEX IF NOT EXISTS idx_mfj_active ON metadata_fill_journal(undone_at, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_mfj_book ON metadata_fill_journal(book_id)",
+        ] {
+            txn.execute(Statement::from_string(
+                txn.get_database_backend(),
+                stmt.to_owned(),
+            ))
+            .await?;
+        }
+    }
+    txn.commit().await?;
+
+    Ok(())
 }
 
 // =========================================================================
@@ -3615,6 +3751,149 @@ mod tests {
             ))
             .await;
         assert!(dup.is_err(), "duplicate uuid must violate the unique index");
+    }
+
+    // --- Migration 087: metadata gap-fill book ids become TEXT ---
+
+    // A fresh install must create the gap-fill tables with TEXT book-id
+    // columns straight away (migration 077's DDL), leaving migration 087 a
+    // no-op there.
+    #[tokio::test]
+    async fn metadata_fill_book_id_columns_are_text_on_a_fresh_install() {
+        let db = init_db("sqlite::memory:").await.expect("init db");
+        for (table, column) in [
+            ("metadata_fill_run", "cursor_book_id"),
+            ("metadata_fill_journal", "book_id"),
+        ] {
+            let decl = table_column_decl_type(&db, table, column)
+                .await
+                .expect("decl type")
+                .expect("column exists");
+            assert!(
+                decl.eq_ignore_ascii_case("TEXT"),
+                "{table}.{column} must be TEXT, got {decl}"
+            );
+        }
+    }
+
+    // A database that got the original INTEGER shape (migration 077 pre-uuid)
+    // with legacy integer rows must be rebuilt: TEXT declared types, values
+    // readable as strings (the exact decode the repository does), journal
+    // indexes recreated, and a second run must be a no-op.
+    #[tokio::test]
+    async fn metadata_fill_text_id_migration_retypes_legacy_integer_rows() {
+        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
+        opt.max_connections(1).min_connections(1);
+        let db = Database::connect(opt).await.expect("connect");
+        let backend = db.get_database_backend();
+        for stmt in [
+            // The pre-087 shape, verbatim from the original migration 077.
+            "CREATE TABLE metadata_fill_run (
+                batch_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                total INTEGER NOT NULL DEFAULT 0,
+                done INTEGER NOT NULL DEFAULT 0,
+                filled INTEGER NOT NULL DEFAULT 0,
+                skipped INTEGER NOT NULL DEFAULT 0,
+                errored INTEGER NOT NULL DEFAULT 0,
+                cursor_book_id INTEGER NOT NULL DEFAULT 0,
+                current_title TEXT,
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            "CREATE TABLE metadata_fill_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                book_id INTEGER NOT NULL,
+                field TEXT NOT NULL,
+                value_set TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                undone_at TEXT
+            )",
+            "INSERT INTO metadata_fill_run \
+             (batch_id, status, total, done, filled, skipped, errored, cursor_book_id, \
+              started_at, updated_at) \
+             VALUES ('b1', 'completed', 10, 10, 4, 6, 0, 42, '2026-01-01', '2026-01-01')",
+            "INSERT INTO metadata_fill_journal (batch_id, book_id, field, value_set, created_at) \
+             VALUES ('b1', 42, 'summary', 'Filled summary', '2026-01-01')",
+        ] {
+            db.execute(Statement::from_string(backend, stmt.to_owned()))
+                .await
+                .expect("seed legacy shape");
+        }
+
+        migrate_metadata_fill_text_ids(&db).await.expect("migrate");
+
+        // Both columns are now declared TEXT and the legacy integers decode as
+        // strings, which is exactly the read the repository performs.
+        let run = db
+            .query_one(Statement::from_string(
+                backend,
+                "SELECT * FROM metadata_fill_run".to_owned(),
+            ))
+            .await
+            .expect("select run")
+            .expect("run row");
+        assert_eq!(
+            run.try_get::<String>("", "cursor_book_id")
+                .expect("cursor decodes as String"),
+            "42"
+        );
+        let journal = db
+            .query_one(Statement::from_string(
+                backend,
+                "SELECT * FROM metadata_fill_journal".to_owned(),
+            ))
+            .await
+            .expect("select journal")
+            .expect("journal row");
+        assert_eq!(
+            journal
+                .try_get::<String>("", "book_id")
+                .expect("book_id decodes as String"),
+            "42"
+        );
+
+        // A uuid written into the retyped column stays TEXT (no affinity trap).
+        db.execute(Statement::from_string(
+            backend,
+            "INSERT INTO metadata_fill_journal (batch_id, book_id, field, value_set, created_at) \
+             VALUES ('b2', '0197a1b2-0000-7000-8000-000000000000', 'publisher', 'P', '2026-01-02')"
+                .to_owned(),
+        ))
+        .await
+        .expect("insert uuid-keyed journal row");
+
+        // The journal indexes were recreated with the rebuilt table.
+        let indexes = db
+            .query_all(Statement::from_string(
+                backend,
+                "PRAGMA index_list(metadata_fill_journal)".to_owned(),
+            ))
+            .await
+            .expect("index_list");
+        for expected in ["idx_mfj_batch", "idx_mfj_active", "idx_mfj_book"] {
+            assert!(
+                indexes.iter().any(|r| {
+                    r.try_get::<String>("", "name")
+                        .map(|n| n == expected)
+                        .unwrap_or(false)
+                }),
+                "index {expected} must exist after the rebuild"
+            );
+        }
+
+        // Idempotent: a second run sees TEXT columns and leaves the data alone.
+        migrate_metadata_fill_text_ids(&db).await.expect("re-run");
+        let count = db
+            .query_one(Statement::from_string(
+                backend,
+                "SELECT COUNT(*) AS cnt FROM metadata_fill_journal".to_owned(),
+            ))
+            .await
+            .expect("count")
+            .expect("count row");
+        assert_eq!(count.try_get::<i64>("", "cnt").expect("cnt"), 2);
     }
 
     #[test]
