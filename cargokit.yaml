@@ -12,10 +12,17 @@ cargo:
       - "--no-default-features"
       - "--features"
       - "account_sync,crsqlite-static"
-  # Debug builds also need no-default-features for iOS/Android
+  # Debug builds: same feature set as release, so day-to-day `flutter run`
+  # shares the CRR-promoted database with shipped builds (once an account is
+  # enrolled, a process without cr-sqlite cannot write through the crsql_*
+  # triggers, and post-enrollment dogfooding needs debug to keep writing).
+  # NOTE: the iOS Simulator has no vendored static archive (see build.rs);
+  # debug on a real device, or vendor the sim archive before simulator work.
   debug:
     extra_flags:
       - "--no-default-features"
+      - "--features"
+      - "account_sync,crsqlite-static"
   # Profile = iOS on-device dogfood (`flutter run --profile`), same features
   # as release so profile runs exercise the shipped configuration.
   profile:
