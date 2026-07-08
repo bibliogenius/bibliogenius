@@ -1539,24 +1539,94 @@ fn calculate_relevance(
     score
 }
 
+/// Compute the platform-specific location of the bundled backend binary relative
+/// to the Flutter host executable.
+///
+/// The MCP endpoint is served from the Rust backend embedded in the Flutter app
+/// (loaded as a dylib via FFI), so `current_exe()` points at the Flutter host
+/// binary, not at the standalone backend that an AI assistant must spawn. On every
+/// desktop platform the backend ships next to that host executable:
+///
+/// - macOS:   `BiblioGenius.app/Contents/MacOS/<host>` -> `../Resources/backend/bibliogenius`
+/// - Windows: `<app>\<host>.exe` -> `<app>\backend\bibliogenius.exe`
+/// - Linux:   `<bundle>/<host>` -> `<bundle>/backend/bibliogenius`
+///
+/// Pure (no filesystem access) so it can be unit-tested with synthetic paths.
+fn bundled_backend_candidate(current_exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let exe_dir = current_exe.parent()?;
+    #[cfg(target_os = "macos")]
+    {
+        // exe_dir = .../Contents/MacOS ; backend lives under .../Contents/Resources/backend
+        let contents = exe_dir.parent()?;
+        Some(
+            contents
+                .join("Resources")
+                .join("backend")
+                .join("bibliogenius"),
+        )
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Some(exe_dir.join("backend").join("bibliogenius.exe"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        // Linux (and any other unix desktop): backend sits in a sibling backend/ dir.
+        Some(exe_dir.join("backend").join("bibliogenius"))
+    }
+}
+
+/// Standard install locations checked in debug builds only. A `flutter run` debug
+/// bundle does not embed the backend, so we fall back to the installed release app
+/// (which does) instead of emitting a broken path. These are conventional system
+/// locations, never a personal/checkout-specific path.
+#[cfg(all(debug_assertions, target_os = "macos"))]
+fn installed_backend_candidates() -> Vec<std::path::PathBuf> {
+    let mut candidates = vec![std::path::PathBuf::from(
+        "/Applications/bibliogenius.app/Contents/Resources/backend/bibliogenius",
+    )];
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(std::path::PathBuf::from(format!(
+            "{home}/Applications/bibliogenius.app/Contents/Resources/backend/bibliogenius"
+        )));
+    }
+    candidates
+}
+
+/// Resolve the backend binary path to advertise in the MCP configuration.
+///
+/// Prefers the backend bundled next to the running host executable; in debug
+/// builds (whose bundle has no backend) it falls back to the installed release
+/// app; as a last resort it returns the host executable path itself, which is
+/// honest about the location for the user to adjust rather than a stale hardcode.
+fn resolve_backend_binary_path() -> String {
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return "/path/to/bibliogenius".to_string(),
+    };
+
+    if let Some(bundled) = bundled_backend_candidate(&current_exe)
+        && bundled.exists()
+    {
+        return bundled.to_string_lossy().to_string();
+    }
+
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    {
+        for candidate in installed_backend_candidates() {
+            if candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    current_exe.to_string_lossy().to_string()
+}
+
 /// MCP Configuration endpoint for AI Assistant integrations (Claude Desktop, Cursor, Continue, etc.)
 /// Returns a ready-to-use JSON configuration with dynamic paths
 pub async fn mcp_config() -> impl IntoResponse {
-    // Get the current executable path
-    // In development (Flutter Debug), current_exe points to the App Bundle.
-    // We check the standard development location first using an absolute path
-    // to avoid Sandbox issues with $HOME.
-    let dev_path = std::path::PathBuf::from(
-        "/Users/federico/Sites/bibliotech/bibliogenius/target/debug/bibliogenius",
-    );
-
-    let binary_path = if dev_path.exists() {
-        dev_path.to_string_lossy().to_string()
-    } else {
-        std::env::current_exe()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/path/to/bibliogenius".to_string())
-    };
+    let binary_path = resolve_backend_binary_path();
 
     // Get the database URL from environment
     // Default to Application Support directory (same as Flutter app)
@@ -1620,4 +1690,61 @@ pub async fn mcp_config() -> impl IntoResponse {
         ],
         "instructions": "Paste this configuration into your AI assistant's MCP configuration file (e.g., claude_desktop_config.json for Claude Desktop)."
     }))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundled_backend_resolves_next_to_macos_host_binary() {
+        let host = Path::new("/Applications/bibliogenius.app/Contents/MacOS/bibliogenius");
+        let backend = bundled_backend_candidate(host).expect("candidate on macOS");
+        assert_eq!(
+            backend,
+            PathBuf::from("/Applications/bibliogenius.app/Contents/Resources/backend/bibliogenius")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn bundled_backend_resolves_in_sibling_dir_on_windows() {
+        let host = Path::new(r"C:\Program Files\BiblioGenius\bibliogenius.exe");
+        let backend = bundled_backend_candidate(host).expect("candidate on Windows");
+        assert_eq!(
+            backend,
+            PathBuf::from(r"C:\Program Files\BiblioGenius\backend\bibliogenius.exe")
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn bundled_backend_resolves_in_sibling_dir_on_linux() {
+        let host = Path::new("/opt/bibliogenius/app");
+        let backend = bundled_backend_candidate(host).expect("candidate on Linux");
+        assert_eq!(
+            backend,
+            PathBuf::from("/opt/bibliogenius/backend/bibliogenius")
+        );
+    }
+
+    #[test]
+    fn bundled_backend_candidate_carries_no_hardcoded_checkout_path() {
+        // Regression guard: the resolved binary must be derived from the running
+        // executable, never a developer-specific checkout path baked into the code.
+        let host = Path::new("/some/install/location/host-binary");
+        let backend = bundled_backend_candidate(host).expect("candidate");
+        let rendered = backend.to_string_lossy();
+        assert!(!rendered.is_empty(), "resolved path must not be empty");
+        assert!(
+            !rendered.contains("/Users/"),
+            "resolved path must not hardcode a personal directory: {rendered}"
+        );
+        assert!(
+            !rendered.contains("target/debug"),
+            "resolved path must not point at a dev debug build: {rendered}"
+        );
+    }
 }
