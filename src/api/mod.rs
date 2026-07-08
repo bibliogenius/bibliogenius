@@ -33,7 +33,10 @@ pub mod tag;
 pub mod user;
 pub mod view_counter;
 
-#[cfg(feature = "mcp")]
+// The `mcp` module is always compiled: the loopback `/api/mcp/rpc` endpoint must
+// be served by every build (notably the FFI framework, which is built without the
+// `mcp` feature) so the standalone `--mcp` helper can proxy to the running app.
+// Only the stdio server entry point inside the module is gated by `feature = "mcp"`.
 pub mod mcp;
 
 use axum::{
@@ -317,6 +320,9 @@ fn build_routes() -> Router<AppState> {
             get(integrations::search_unified),
         )
         .route("/integrations/mcp-config", get(integrations::mcp_config))
+        // Internal loopback-only endpoint: lets the standalone `--mcp` helper proxy
+        // JSON-RPC to this running app (which already holds an initialized database).
+        .route("/mcp/rpc", post(mcp::rpc_endpoint))
         // Gamification
         .route("/user/status", get(gamification::get_user_status))
         .route(

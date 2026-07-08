@@ -70,6 +70,25 @@ fn get_port_file_path(profile: &str) -> PathBuf {
     }
 }
 
+/// Open the database best-effort for MCP mode, matching the build's feature set.
+/// Returns `None` (with a warning) when the database cannot be opened, so the MCP
+/// helper can still run in proxy-only mode against the running app.
+#[cfg(feature = "mcp")]
+async fn init_db_optional(database_url: &str) -> Option<sea_orm::DatabaseConnection> {
+    #[cfg(feature = "account_sync")]
+    let result = db::init_db_account_sync(database_url).await;
+    #[cfg(not(feature = "account_sync"))]
+    let result = db::init_db(database_url).await;
+
+    match result {
+        Ok(db) => Some(db),
+        Err(e) => {
+            tracing::warn!("MCP: local database unavailable ({e}); proxy-only mode");
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize tracing
@@ -98,6 +117,20 @@ async fn main() {
 
     let config = config::Config::from_env();
 
+    // [MCP] Short-circuit before the hard database init. MCP mode must tolerate an
+    // unreadable database (platform sandbox, CRR promotion, or a build without the
+    // matching cr-sqlite features): the helper can still proxy to the running app
+    // over loopback HTTP, so the database is opened best-effort and passed as Option.
+    #[cfg(feature = "mcp")]
+    {
+        if std::env::args().any(|arg| arg == "--mcp") {
+            tracing::info!("Starting in MCP Mode (Stdio)...");
+            let db = init_db_optional(&config.database_url).await;
+            api::mcp::start_server(db).await;
+            return;
+        }
+    }
+
     // Initialize database. Account-sync builds open a single cr-sqlite connection
     // with the replicated tables promoted to CRRs; default builds use a plain pool.
     #[cfg(feature = "account_sync")]
@@ -119,16 +152,6 @@ async fn main() {
             _ => {
                 tracing::info!("Demo data seeded successfully.");
             }
-        }
-    }
-
-    // [MCP] Start MCP Server if --mcp flag is present
-    #[cfg(feature = "mcp")]
-    {
-        if std::env::args().any(|arg| arg == "--mcp") {
-            tracing::info!("Starting in MCP Mode (Stdio)...");
-            api::mcp::start_server(db).await;
-            return;
         }
     }
 

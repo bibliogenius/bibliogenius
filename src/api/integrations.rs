@@ -1628,40 +1628,46 @@ fn resolve_backend_binary_path() -> String {
 pub async fn mcp_config() -> impl IntoResponse {
     let binary_path = resolve_backend_binary_path();
 
-    // Get the database URL from environment
-    // Default to Application Support directory (same as Flutter app)
+    // Get the database URL from environment. The running FFI app sets DATABASE_URL
+    // to the exact path it uses, so this normally reflects reality. The per-platform
+    // fallbacks below only apply when the variable is absent.
+    //
+    // Use the single-colon `sqlite:<abs-path>` form (matching the app's own db_url in
+    // frb.rs), NOT `sqlite://<path>`: the double-slash form is parsed as a URI with an
+    // authority and breaks on the space in "Application Support", silently opening a
+    // different (empty) database.
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
         #[cfg(target_os = "macos")]
         {
             if let Ok(home) = std::env::var("HOME") {
                 // macOS: Flutter uses getApplicationSupportDirectory() → ~/Library/Application Support/
-                format!("sqlite://{}/Library/Application Support/com.bibliogenius.app/bibliogenius.db?mode=rwc", home)
+                format!("sqlite:{}/Library/Application Support/com.bibliogenius.app/bibliogenius.db?mode=rwc", home)
             } else {
-                "sqlite:///path/to/bibliogenius.db?mode=rwc".to_string()
+                "sqlite:/path/to/bibliogenius.db?mode=rwc".to_string()
             }
         }
         #[cfg(target_os = "windows")]
         {
             if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
-                format!("sqlite://{}/BiblioGenius/bibliogenius.db?mode=rwc", appdata)
+                format!("sqlite:{}/BiblioGenius/bibliogenius.db?mode=rwc", appdata)
             } else {
-                "sqlite:///path/to/bibliogenius.db?mode=rwc".to_string()
+                "sqlite:/path/to/bibliogenius.db?mode=rwc".to_string()
             }
         }
         #[cfg(target_os = "linux")]
         {
             if let Ok(home) = std::env::var("HOME") {
                 format!(
-                    "sqlite://{}/.local/share/bibliogenius/bibliogenius.db?mode=rwc",
+                    "sqlite:{}/.local/share/bibliogenius/bibliogenius.db?mode=rwc",
                     home
                 )
             } else {
-                "sqlite:///path/to/bibliogenius.db?mode=rwc".to_string()
+                "sqlite:/path/to/bibliogenius.db?mode=rwc".to_string()
             }
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
-            "sqlite:///path/to/bibliogenius.db?mode=rwc".to_string()
+            "sqlite:/path/to/bibliogenius.db?mode=rwc".to_string()
         }
     });
 
