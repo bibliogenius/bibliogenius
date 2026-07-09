@@ -92,6 +92,94 @@ where
     }
 }
 
+/// Extractor that admits only a non-browser caller speaking from loopback.
+///
+/// A loopback source is not proof of a trusted caller: the user's own browser also
+/// speaks from 127.0.0.1, and the shared CORS layer replies
+/// `Access-Control-Allow-Origin: *`, so a visited page could `fetch()` the endpoint
+/// and read the answer. Browsers attach `Origin` to exactly these requests; native
+/// clients (the MCP helper, the Flutter app over Dio) never do. Rejecting it also
+/// blocks DNS rebinding, where the attacker's page is same-origin with the loopback
+/// server.
+///
+/// Guard any loopback endpoint that returns owner data or secrets with this rather
+/// than with [`LoopbackOnly`] alone.
+pub struct LoopbackNoBrowser;
+
+#[async_trait]
+impl<S> FromRequestParts<S> for LoopbackNoBrowser
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        LoopbackOnly::from_request_parts(parts, state).await?;
+
+        if parts.headers.contains_key("origin") {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "This endpoint is not callable from a browser" })),
+            ));
+        }
+
+        Ok(LoopbackNoBrowser)
+    }
+}
+
+/// Extractor guarding the MCP endpoint, which serves the OWNER view of the
+/// library (private books, loans, statistics).
+///
+/// Three conditions, all fail-closed:
+///
+/// 1. **Loopback source.** Keeps LAN peers out; they reach this same 0.0.0.0
+///    listener for catalogue traffic.
+/// 2. **No `Origin` header.** See [`LoopbackNoBrowser`].
+/// 3. **Bearer token.** The shared secret from the copied assistant configuration,
+///    compared in constant time. This is the condition that holds when the other
+///    two are subverted.
+pub struct McpAuth;
+
+#[async_trait]
+impl<S> FromRequestParts<S> for McpAuth
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        LoopbackNoBrowser::from_request_parts(parts, state).await?;
+
+        // No token configured means no way to authenticate: reject, never admit.
+        let expected = crate::infrastructure::mcp_token::expected_token().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "MCP token unavailable" })),
+        ))?;
+
+        let presented = parts
+            .headers
+            .get("Authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .ok_or((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Missing MCP token" })),
+            ))?;
+
+        if crate::infrastructure::mcp_token::constant_time_eq(
+            presented.as_bytes(),
+            expected.as_bytes(),
+        ) {
+            Ok(McpAuth)
+        } else {
+            Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Invalid MCP token" })),
+            ))
+        }
+    }
+}
+
 pub fn hash_password(password: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();

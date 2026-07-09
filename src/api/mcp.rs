@@ -1,4 +1,4 @@
-use crate::infrastructure::auth::LoopbackOnly;
+use crate::infrastructure::auth::McpAuth;
 use crate::models::{author, book, book_authors};
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use sea_orm::{
@@ -19,7 +19,7 @@ const MCP_PORT_SCAN_START: u16 = 8000;
 const MCP_PORT_SCAN_COUNT: u16 = 10;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct JsonRpcRequest {
+pub struct JsonRpcRequest {
     jsonrpc: String,
     method: String,
     params: Option<Value>,
@@ -27,7 +27,7 @@ pub(crate) struct JsonRpcRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct JsonRpcResponse {
+pub struct JsonRpcResponse {
     jsonrpc: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<Value>,
@@ -85,20 +85,29 @@ async fn discover_running_app() -> Option<String> {
 
 /// Forward a raw JSON-RPC line to the running app's internal MCP endpoint.
 /// Returns `Ok(None)` for notifications (the app replies 204 No Content), or an
-/// `Err` when the app is unreachable so the caller can fall back to direct access.
+/// `Err` when the app is unreachable or rejects the token.
 #[cfg(feature = "mcp")]
 async fn proxy_to_app(
     client: &reqwest::Client,
     base: &str,
+    token: &str,
     raw_line: &str,
 ) -> Result<Option<JsonRpcResponse>, String> {
     let resp = client
         .post(format!("{}/api/mcp/rpc", base))
         .header("content-type", "application/json")
+        .bearer_auth(token)
         .body(raw_line.to_string())
         .send()
         .await
         .map_err(|e| e.to_string())?;
+
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(
+            "the app rejected the MCP token: re-copy the configuration from BiblioGenius settings"
+                .to_string(),
+        );
+    }
 
     if resp.status() == reqwest::StatusCode::NO_CONTENT {
         return Ok(None);
@@ -126,14 +135,72 @@ fn error_response(id: Option<Value>, message: impl Into<String>) -> JsonRpcRespo
     }
 }
 
+fn success_response(id: Option<Value>, result: Value) -> JsonRpcResponse {
+    JsonRpcResponse {
+        jsonrpc: "2.0".to_string(),
+        result: Some(result),
+        error: None,
+        id,
+    }
+}
+
+/// The `initialize` result. Echoes the client's protocol version for compatibility.
+fn initialize_result(params: Option<&Value>) -> Value {
+    let client_protocol_version = params
+        .and_then(|p| p.get("protocolVersion"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("2024-11-05");
+
+    tracing::info!(
+        "MCP client connected with protocol version: {}",
+        client_protocol_version
+    );
+
+    serde_json::json!({
+        "protocolVersion": client_protocol_version,
+        "capabilities": { "tools": {} },
+        "serverInfo": {
+            "name": "bibliogenius-mcp",
+            "version": "0.1.0"
+        }
+    })
+}
+
+/// The `tools/list` result: the tool vocabulary exposed to AI assistants.
+fn tools_list_result() -> Value {
+    serde_json::json!({
+        "tools": [
+            {
+                "name": "search_books",
+                "description": "Search for books in the library by title or author",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query (matches title or author name)" }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "get_statistics",
+                "description": "Get library statistics (count of books, readiness status)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        ]
+    })
+}
+
 /// Internal HTTP endpoint that lets the standalone `--mcp` helper proxy JSON-RPC
 /// to this running app, which already holds the correctly-initialized database.
 ///
-/// Loopback-only on purpose: the MCP helper always runs on the same machine, and
-/// the private library must never be queryable by LAN peers that can otherwise
-/// reach this shared (0.0.0.0-bound) router.
-pub(crate) async fn rpc_endpoint(
-    _guard: LoopbackOnly,
+/// Guarded by [`McpAuth`]: loopback source, no browser `Origin`, and a valid token.
+/// The private library must never be queryable by LAN peers that reach this shared
+/// (0.0.0.0-bound) router, nor by a web page running in the user's own browser.
+pub async fn rpc_endpoint(
+    _guard: McpAuth,
     State(db): State<DatabaseConnection>,
     Json(req): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
@@ -146,27 +213,31 @@ pub(crate) async fn rpc_endpoint(
 
 /// Run the stdio MCP server spawned by an AI assistant (Claude Desktop, etc.).
 ///
-/// Requests are served by whichever backend works, in priority order:
-///  1. Proxy to the running BiblioGenius app over loopback HTTP (Option C). This
-///     is preferred because the app already holds a correctly-initialized database
-///     regardless of platform sandboxing or cr-sqlite build features.
-///  2. Fall back to the locally-opened database (`db`, when available) so the tools
-///     still work when the app is not running (needs a readable, feature-compatible
-///     database — e.g. a non-sandboxed desktop build).
+/// The helper is a pure transport shim: it NEVER opens the database. Every request
+/// that needs data is proxied to the running app over loopback HTTP, because the app
+/// already holds a correctly-initialized database (right path, right cr-sqlite
+/// features, no sandbox restriction). A second process on the same SQLite file was a
+/// standing source of corruption-adjacent bugs, so that path is gone entirely: with
+/// the app closed, the helper answers with a clear error and touches nothing.
 ///
-/// `db` is `None` when the local database could not be opened (sandbox / CRR /
-/// missing features); in that case only the proxy path is available.
+/// Claude Desktop cannot speak HTTP to a local MCP server (its configuration schema
+/// admits only `command`/`args`/`env`, and custom connectors are dialled from
+/// Anthropic's servers, which cannot reach loopback), so this stdio helper stays.
 #[cfg(feature = "mcp")]
-pub async fn start_server(db: Option<DatabaseConnection>) {
+pub async fn start_server() {
     tracing::info!("Starting Manual MCP Server (Async JSON-RPC over Stdio)...");
 
-    let upstream = discover_running_app().await;
+    let token = std::env::var(crate::infrastructure::mcp_token::TOKEN_ENV_VAR).ok();
+    if token.is_none() {
+        tracing::warn!(
+            "MCP: no token in the environment; re-copy the configuration from BiblioGenius settings"
+        );
+    }
+
+    let mut upstream = discover_running_app().await;
     match &upstream {
         Some(base) => tracing::info!("MCP: proxying requests to running app at {}", base),
-        None if db.is_some() => tracing::info!("MCP: app not detected, using local database"),
-        None => tracing::warn!(
-            "MCP: app not detected and no local database available; tool calls will error"
-        ),
+        None => tracing::info!("MCP: app not detected yet, will retry on the first tool call"),
     }
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -194,8 +265,15 @@ pub async fn start_server(db: Option<DatabaseConnection>) {
                         // Notifications (no id) should not receive a response
                         let is_notification = req.id.is_none();
 
-                        let response =
-                            dispatch(req, input, is_notification, &upstream, &http, &db).await;
+                        let response = dispatch(
+                            req,
+                            input,
+                            is_notification,
+                            &mut upstream,
+                            &http,
+                            token.as_deref(),
+                        )
+                        .await;
 
                         if let Some(response) = response {
                             let output = serde_json::to_string(&response).unwrap();
@@ -226,39 +304,80 @@ pub async fn start_server(db: Option<DatabaseConnection>) {
     }
 }
 
-/// Route a single request through the proxy path first, then the local database.
+/// Route a single request to the running app, rediscovering it when needed.
+///
+/// Handshake methods (`initialize`, `tools/list`) are answered locally: they are
+/// static and carry no library data, so the assistant can connect and list the tools
+/// even before the app is open. Only data-bearing calls need the app, and those fail
+/// with an actionable message when it is closed.
 #[cfg(feature = "mcp")]
 async fn dispatch(
     req: JsonRpcRequest,
     raw_line: &str,
     is_notification: bool,
-    upstream: &Option<String>,
+    upstream: &mut Option<String>,
     http: &Option<reqwest::Client>,
-    db: &Option<DatabaseConnection>,
+    token: Option<&str>,
 ) -> Option<JsonRpcResponse> {
+    if is_notification {
+        tracing::debug!("Received notification: {}", req.method);
+        return None;
+    }
+
     let id = req.id.clone();
 
-    // 1. Proxy to the running app when one was discovered.
-    if let (Some(base), Some(client)) = (upstream, http) {
-        match proxy_to_app(client, base, raw_line).await {
-            Ok(result) => return result,
-            Err(e) => tracing::warn!("MCP: proxy to app failed ({}), trying local database", e),
-        }
+    if let Some(result) = handshake_result(&req) {
+        return Some(success_response(id, result));
     }
 
-    // 2. Fall back to the locally-opened database.
-    if let Some(db) = db {
-        return handle_request(req, db, is_notification).await;
-    }
+    let Some(client) = http else {
+        return Some(error_response(
+            id,
+            "MCP helper could not build an HTTP client.",
+        ));
+    };
+    let Some(token) = token else {
+        return Some(error_response(
+            id,
+            "MCP token missing: re-copy the configuration from BiblioGenius settings.",
+        ));
+    };
 
-    // 3. Neither path is available.
-    if is_notification {
-        None
-    } else {
-        Some(error_response(
+    // The app may have been started after the assistant spawned this helper, so a
+    // missing upstream is retried rather than remembered as a permanent failure.
+    if upstream.is_none() {
+        *upstream = discover_running_app().await;
+    }
+    let Some(base) = upstream.clone() else {
+        return Some(error_response(
             id,
             "BiblioGenius is not reachable: open the app so MCP can read your library.",
-        ))
+        ));
+    };
+
+    match proxy_to_app(client, &base, token, raw_line).await {
+        Ok(result) => result,
+        Err(e) => {
+            // Drop the stale base so the next call rediscovers a restarted (or
+            // port-drifted) app instead of retrying a dead address forever.
+            *upstream = None;
+            tracing::warn!("MCP: proxy to app failed ({})", e);
+            Some(error_response(
+                id,
+                format!("BiblioGenius is not reachable: {}", e),
+            ))
+        }
+    }
+}
+
+/// Answer the two static handshake methods without touching any data source.
+/// Returns `None` for every other method.
+#[cfg(feature = "mcp")]
+fn handshake_result(req: &JsonRpcRequest) -> Option<Value> {
+    match req.method.as_str() {
+        "initialize" => Some(initialize_result(req.params.as_ref())),
+        "tools/list" => Some(tools_list_result()),
+        _ => None,
     }
 }
 
@@ -275,57 +394,8 @@ pub(crate) async fn handle_request(
     }
 
     let result = match req.method.as_str() {
-        "initialize" => {
-            // MCP Initialize response
-            // Extract the client's protocol version and echo it back for compatibility
-            let client_protocol_version = req
-                .params
-                .as_ref()
-                .and_then(|p| p.get("protocolVersion"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("2024-11-05");
-
-            tracing::info!(
-                "MCP client connected with protocol version: {}",
-                client_protocol_version
-            );
-
-            serde_json::json!({
-                "protocolVersion": client_protocol_version,
-                "capabilities": {
-                    "tools": {}
-                },
-                "serverInfo": {
-                    "name": "bibliogenius-mcp",
-                    "version": "0.1.0"
-                }
-            })
-        }
-        "tools/list" => {
-            serde_json::json!({
-                "tools": [
-                    {
-                        "name": "search_books",
-                        "description": "Search for books in the library by title or author",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": { "type": "string", "description": "Search query (matches title or author name)" }
-                            },
-                            "required": ["query"]
-                        }
-                    },
-                    {
-                        "name": "get_statistics",
-                        "description": "Get library statistics (count of books, readiness status)",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {}
-                        }
-                    }
-                ]
-            })
-        }
+        "initialize" => initialize_result(req.params.as_ref()),
+        "tools/list" => tools_list_result(),
         "tools/call" => {
             if let Some(params) = req.params {
                 let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -490,12 +560,7 @@ pub(crate) async fn handle_request(
         }
     };
 
-    Some(JsonRpcResponse {
-        jsonrpc: "2.0".to_string(),
-        result: Some(result),
-        error: None,
-        id: req.id,
-    })
+    Some(success_response(req.id, result))
 }
 
 #[cfg(all(test, feature = "mcp"))]
@@ -525,6 +590,50 @@ mod tests {
         let last = MCP_PORT_SCAN_START + MCP_PORT_SCAN_COUNT - 1;
         assert_eq!(MCP_PORT_SCAN_START, 8000);
         assert_eq!(last, 8009);
+    }
+
+    fn request(method: &str) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: method.to_string(),
+            params: None,
+            id: Some(json!(1)),
+        }
+    }
+
+    #[test]
+    fn handshake_is_answered_without_the_app() {
+        // The helper no longer opens the database, so a closed app must not prevent
+        // the assistant from connecting and listing the tools. Only data-bearing
+        // calls need the app.
+        assert!(handshake_result(&request("initialize")).is_some());
+        let tools = handshake_result(&request("tools/list")).expect("tool list");
+        assert_eq!(tools["tools"].as_array().expect("array").len(), 2);
+        assert!(handshake_result(&request("tools/call")).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_missing_token_fails_cleanly_without_touching_anything() {
+        // A stale configuration (copied before the token existed) must produce an
+        // actionable JSON-RPC error, not a panic and not a database access.
+        let mut upstream = Some("http://127.0.0.1:1".to_string());
+        let http = Some(reqwest::Client::new());
+        let response = dispatch(
+            request("tools/call"),
+            r#"{"jsonrpc":"2.0","method":"tools/call","id":1}"#,
+            false,
+            &mut upstream,
+            &http,
+            None,
+        )
+        .await
+        .expect("an error response, not silence");
+
+        let message = response.error.expect("error").message;
+        assert!(
+            message.contains("re-copy the configuration"),
+            "the message must tell the user what to do: {message}"
+        );
     }
 
     #[test]

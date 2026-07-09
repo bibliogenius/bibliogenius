@@ -10,6 +10,8 @@ use serde_json::json;
 use std::sync::LazyLock;
 use strsim::jaro_winkler;
 
+use crate::infrastructure::auth::LoopbackNoBrowser;
+use crate::infrastructure::mcp_token;
 use crate::models::book;
 use crate::modules::integrations::sudoc;
 use crate::utils::lang::{base_lang, lang_matches_any};
@@ -1624,52 +1626,33 @@ fn resolve_backend_binary_path() -> String {
 }
 
 /// MCP Configuration endpoint for AI Assistant integrations (Claude Desktop, Cursor, Continue, etc.)
-/// Returns a ready-to-use JSON configuration with dynamic paths
-pub async fn mcp_config() -> impl IntoResponse {
+/// Returns a ready-to-use JSON configuration with dynamic paths.
+///
+/// Guarded by [`LoopbackNoBrowser`]: the emitted configuration carries the MCP token,
+/// which grants the owner view of the library. It must never be reachable from the
+/// LAN, which shares this 0.0.0.0-bound router, nor from a web page in the user's own
+/// browser, which also speaks from 127.0.0.1 and would read the reply through the
+/// permissive CORS layer. Guarding the token-bearing endpoint with loopback alone
+/// would hand the secret to any visited site, defeating the token on `/api/mcp/rpc`.
+/// The copy button calls it over 127.0.0.1 from the app, without an `Origin` header.
+///
+/// The helper no longer opens the database, so no `DATABASE_URL` is emitted: the
+/// only environment it needs is the token used to authenticate to the running app.
+pub async fn mcp_config(_guard: LoopbackNoBrowser) -> impl IntoResponse {
     let binary_path = resolve_backend_binary_path();
 
-    // Get the database URL from environment. The running FFI app sets DATABASE_URL
-    // to the exact path it uses, so this normally reflects reality. The per-platform
-    // fallbacks below only apply when the variable is absent.
-    //
-    // Use the single-colon `sqlite:<abs-path>` form (matching the app's own db_url in
-    // frb.rs), NOT `sqlite://<path>`: the double-slash form is parsed as a URI with an
-    // authority and breaks on the space in "Application Support", silently opening a
-    // different (empty) database.
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(home) = std::env::var("HOME") {
-                // macOS: Flutter uses getApplicationSupportDirectory() → ~/Library/Application Support/
-                format!("sqlite:{}/Library/Application Support/com.bibliogenius.app/bibliogenius.db?mode=rwc", home)
-            } else {
-                "sqlite:/path/to/bibliogenius.db?mode=rwc".to_string()
-            }
-        }
-        #[cfg(target_os = "windows")]
-        {
-            if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
-                format!("sqlite:{}/BiblioGenius/bibliogenius.db?mode=rwc", appdata)
-            } else {
-                "sqlite:/path/to/bibliogenius.db?mode=rwc".to_string()
-            }
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(home) = std::env::var("HOME") {
-                format!(
-                    "sqlite:{}/.local/share/bibliogenius/bibliogenius.db?mode=rwc",
-                    home
-                )
-            } else {
-                "sqlite:/path/to/bibliogenius.db?mode=rwc".to_string()
-            }
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-        {
-            "sqlite:/path/to/bibliogenius.db?mode=rwc".to_string()
-        }
-    });
+    // The running FFI app sets DATABASE_URL to the exact path it uses, which is where
+    // the token file lives. Without it there is no token, and the helper would be
+    // rejected by the app: say so rather than emit a configuration that cannot work.
+    let Some(token) = mcp_token::expected_token() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "MCP token unavailable: the library database directory is not writable."
+            })),
+        )
+            .into_response();
+    };
 
     let config = json!({
         "mcpServers": {
@@ -1677,7 +1660,7 @@ pub async fn mcp_config() -> impl IntoResponse {
                 "command": binary_path,
                 "args": ["--mcp"],
                 "env": {
-                    "DATABASE_URL": database_url
+                    mcp_token::TOKEN_ENV_VAR: token
                 }
             }
         }

@@ -19,6 +19,7 @@ pub mod crsqlite_dynamic;
 #[cfg(feature = "crsqlite-static")]
 pub mod crsqlite_static;
 pub mod db;
+pub mod mcp_token;
 pub mod nonce_store;
 pub mod referential_integrity;
 pub mod repositories;
