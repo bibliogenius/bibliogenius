@@ -27,6 +27,7 @@ pub mod identity_service;
 pub mod leaderboard_events;
 pub mod loan_service;
 pub mod lookup_service;
+pub mod mcp_tool_service;
 pub mod mdns;
 pub mod metadata_fill_service;
 pub mod notification_service;

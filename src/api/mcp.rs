@@ -1,9 +1,7 @@
 use crate::infrastructure::auth::McpAuth;
-use crate::models::{author, book, book_authors};
+use crate::services::mcp_tool_service::{self, ToolError};
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QuerySelect,
-};
+use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(feature = "mcp")]
@@ -167,30 +165,11 @@ fn initialize_result(params: Option<&Value>) -> Value {
 }
 
 /// The `tools/list` result: the tool vocabulary exposed to AI assistants.
+///
+/// Defined by the tool contract v1, alongside the implementations, in
+/// `services::mcp_tool_service` (ADR-048). This module only carries it.
 fn tools_list_result() -> Value {
-    serde_json::json!({
-        "tools": [
-            {
-                "name": "search_books",
-                "description": "Search for books in the library by title or author",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "Search query (matches title or author name)" }
-                    },
-                    "required": ["query"]
-                }
-            },
-            {
-                "name": "get_statistics",
-                "description": "Get library statistics (count of books, readiness status)",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {}
-                }
-            }
-        ]
-    })
+    mcp_tool_service::tools_list()
 }
 
 /// Internal HTTP endpoint that lets the standalone `--mcp` helper proxy JSON-RPC
@@ -404,131 +383,19 @@ pub(crate) async fn handle_request(
                     .cloned()
                     .unwrap_or(serde_json::json!({}));
 
-                match name {
-                    "search_books" => {
-                        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-
-                        // 1. Search by title
-                        let books_by_title = book::Entity::find()
-                            .filter(book::Column::Title.contains(query))
-                            .limit(10)
-                            .all(db)
-                            .await
-                            .unwrap_or_default();
-
-                        // 2. Search by author name - find authors matching query
-                        let matching_authors = author::Entity::find()
-                            .filter(author::Column::Name.contains(query))
-                            .all(db)
-                            .await
-                            .unwrap_or_default();
-
-                        // 3. Find books by those authors
-                        let mut books_by_author: Vec<book::Model> = Vec::new();
-                        for auth in &matching_authors {
-                            let author_books = book_authors::Entity::find()
-                                .filter(book_authors::Column::AuthorId.eq(auth.id.as_str()))
-                                .all(db)
-                                .await
-                                .unwrap_or_default();
-
-                            for ba in author_books {
-                                if let Ok(Some(b)) =
-                                    book::Entity::find_by_id(ba.book_id).one(db).await
-                                {
-                                    books_by_author.push(b);
-                                }
-                            }
-                        }
-
-                        // 4. Combine and dedupe results
-                        let mut all_books = books_by_title;
-                        for b in books_by_author {
-                            if !all_books.iter().any(|existing| existing.id == b.id) {
-                                all_books.push(b);
-                            }
-                        }
-
-                        // Limit to 10 results
-                        all_books.truncate(10);
-
-                        // 5. Format output with author names
-                        let mut book_list: Vec<String> = Vec::new();
-                        for b in all_books {
-                            // Fetch authors for this book
-                            let book_author_links = book_authors::Entity::find()
-                                .filter(book_authors::Column::BookId.eq(b.id))
-                                .all(db)
-                                .await
-                                .unwrap_or_default();
-
-                            let mut author_names: Vec<String> = Vec::new();
-                            for ba in book_author_links {
-                                if let Ok(Some(auth)) =
-                                    author::Entity::find_by_id(ba.author_id).one(db).await
-                                {
-                                    author_names.push(auth.name);
-                                }
-                            }
-
-                            let author_str = if author_names.is_empty() {
-                                "Unknown author".to_string()
-                            } else {
-                                author_names.join(", ")
-                            };
-
-                            book_list.push(format!(
-                                "- {} by {} ({}): {}",
-                                b.title,
-                                author_str,
-                                b.publication_year.unwrap_or(0),
-                                b.summary.clone().unwrap_or("No summary".to_string())
-                            ));
-                        }
-
-                        if book_list.is_empty() {
-                            serde_json::json!({
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": format!("No books found matching '{}' in title or author", query)
-                                    }
-                                ]
-                            })
-                        } else {
-                            serde_json::json!({
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": format!("Found {} books matching '{}':\n{}", book_list.len(), query, book_list.join("\n"))
-                                    }
-                                ]
-                            })
-                        }
+                match mcp_tool_service::call_tool(db, name, &args).await {
+                    Ok(payload) => mcp_tool_service::envelope(payload),
+                    // A recoverable mistake reaches the model only inside a
+                    // successful response; most clients never surface a JSON-RPC
+                    // protocol error to it.
+                    Err(ToolError::InvalidArguments(message)) => {
+                        mcp_tool_service::error_envelope(&message)
                     }
-                    "get_statistics" => {
-                        let count = book::Entity::find().count(db).await.unwrap_or(0);
-                        let to_read = book::Entity::find()
-                            .filter(book::Column::ReadingStatus.eq("to_read"))
-                            .count(db)
-                            .await
-                            .unwrap_or(0);
-                        let reading = book::Entity::find()
-                            .filter(book::Column::ReadingStatus.eq("reading"))
-                            .count(db)
-                            .await
-                            .unwrap_or(0);
-
-                        serde_json::json!({
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": format!("Library Statistics:\n- Total Books: {}\n- To Read: {}\n- Currently Reading: {}", count, to_read, reading)
-                                }
-                            ]
-                        })
+                    Err(ToolError::Internal(message)) => {
+                        tracing::warn!("MCP tool '{}' failed: {}", name, message);
+                        mcp_tool_service::error_envelope("the library could not be read")
                     }
-                    _ => {
+                    Err(ToolError::UnknownTool(name)) => {
                         return Some(JsonRpcResponse {
                             jsonrpc: "2.0".to_string(),
                             result: None,
@@ -608,7 +475,11 @@ mod tests {
         // calls need the app.
         assert!(handshake_result(&request("initialize")).is_some());
         let tools = handshake_result(&request("tools/list")).expect("tool list");
-        assert_eq!(tools["tools"].as_array().expect("array").len(), 2);
+        assert_eq!(
+            tools["tools"].as_array().expect("array").len(),
+            6,
+            "the six read-only tools of contract v1"
+        );
         assert!(handshake_result(&request("tools/call")).is_none());
     }
 

@@ -52,6 +52,12 @@ pub struct LoanFilter {
     pub library_id: Option<i32>,
     pub status: Option<String>,
     pub contact_id: Option<i32>,
+    /// Cap the number of returned loans. `None` returns every match, which is
+    /// what the in-app screens rely on; callers that expose the list beyond the
+    /// UI (the MCP tools) must set it, per the pagination policy.
+    pub limit: Option<u64>,
+    /// Rows to skip, applied with `limit`. Ignored when `limit` is `None`.
+    pub offset: Option<u64>,
 }
 
 /// List all loans with related contact and book info
@@ -73,12 +79,17 @@ pub async fn list_loans(
         condition = condition.add(loan::Column::ContactId.eq(contact_id));
     }
 
-    let loans_with_contacts = Loan::find()
+    let mut query = Loan::find()
         .filter(condition)
-        .order_by_desc(loan::Column::LoanDate)
-        .find_also_related(Contact)
-        .all(db)
-        .await?;
+        .order_by_desc(loan::Column::LoanDate);
+
+    // Applied before `find_also_related`: the relation is many-to-one, so it
+    // cannot multiply loan rows and the cap stays exact.
+    if let Some(limit) = filter.limit {
+        query = query.limit(limit).offset(filter.offset.unwrap_or(0));
+    }
+
+    let loans_with_contacts = query.find_also_related(Contact).all(db).await?;
 
     // Collect copy IDs to fetch books
     let copy_ids: Vec<String> = loans_with_contacts

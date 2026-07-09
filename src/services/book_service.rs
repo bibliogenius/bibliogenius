@@ -391,7 +391,7 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
 /// Validates that the reading status is one of the allowed values
 fn validate_reading_status(status: &str) -> Result<(), ServiceError> {
     match status {
-        "to_read" | "reading" | "read" | "wanting" | "abandoned" => Ok(()),
+        s if crate::models::book::READING_STATUSES.contains(&s) => Ok(()),
         _ => Err(ServiceError::InvalidInput(format!(
             "Invalid reading status: '{}'",
             status

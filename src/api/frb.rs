@@ -2432,6 +2432,9 @@ pub async fn get_all_loans(
         library_id,
         status,
         contact_id,
+        // The loans screen shows the full list; pagination is the MCP tools' concern.
+        limit: None,
+        offset: None,
     };
 
     match crate::services::loan_service::list_loans(db, filter).await {

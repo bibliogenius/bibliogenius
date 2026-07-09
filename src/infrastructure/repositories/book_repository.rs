@@ -34,6 +34,48 @@ fn normalize_isbn(isbn: Option<String>) -> Option<String> {
     })
 }
 
+/// `SELECT book_id FROM collection_books WHERE collection_id = ?`, as a subquery.
+///
+/// A subquery rather than a join: a join would multiply book rows by their
+/// membership count, and rather than an `IN (ids)` list, which grows unbounded
+/// with the collection.
+fn books_in_collection(collection_id: &str) -> sea_orm::sea_query::SelectStatement {
+    use sea_orm::sea_query::{Alias, Expr, Query};
+
+    Query::select()
+        .column(Alias::new("book_id"))
+        .from(Alias::new("collection_books"))
+        .and_where(Expr::col(Alias::new("collection_id")).eq(collection_id))
+        .to_owned()
+}
+
+impl SeaOrmBookRepository {
+    /// Resolve a collection reference to its uuid: an exact uuid match first,
+    /// then an exact name match, case-insensitively. Assistants receive uuids
+    /// from `get_book` and names from the user, so both must resolve (ADR-048).
+    async fn resolve_collection_id(&self, reference: &str) -> Result<Option<String>, DomainError> {
+        use crate::models::collection::{Column as CollectionColumn, Entity as CollectionEntity};
+        use sea_orm::sea_query::{Expr, Func};
+
+        if let Some(by_id) = CollectionEntity::find_by_id(reference)
+            .one(&self.db)
+            .await?
+        {
+            return Ok(Some(by_id.id));
+        }
+
+        let by_name = CollectionEntity::find()
+            .filter(
+                Expr::expr(Func::lower(Expr::col(CollectionColumn::Name)))
+                    .eq(reference.to_lowercase()),
+            )
+            .one(&self.db)
+            .await?;
+
+        Ok(by_name.map(|c| c.id))
+    }
+}
+
 #[async_trait]
 impl BookRepository for SeaOrmBookRepository {
     async fn find_all(&self, filter: BookFilter) -> Result<PaginatedBooks, DomainError> {
@@ -77,6 +119,33 @@ impl BookRepository for SeaOrmBookRepository {
             query = query.filter(Column::Private.eq(false));
         }
 
+        // Owner-facing ownership predicate: unlike `owned_only`, it must not
+        // hide the owner's own private books from them.
+        if let Some(owned) = filter.owned {
+            query = query.filter(Column::Owned.eq(owned));
+        }
+
+        if let Some(collection) = &filter.collection
+            && !collection.is_empty()
+        {
+            match self.resolve_collection_id(collection).await? {
+                Some(collection_id) => {
+                    use sea_orm::sea_query::Expr;
+                    query = query.filter(
+                        Expr::col(Column::Id).in_subquery(books_in_collection(&collection_id)),
+                    );
+                }
+                // An unknown collection holds nothing. Returning an empty page
+                // is a truthful answer, and cheaper than a query that cannot match.
+                None => {
+                    return Ok(PaginatedBooks {
+                        books: vec![],
+                        total: 0,
+                    });
+                }
+            }
+        }
+
         // Apply sorting
         match filter.sort.as_deref() {
             Some("title_asc") => query = query.order_by_asc(Column::Title),
@@ -109,6 +178,24 @@ impl BookRepository for SeaOrmBookRepository {
 
     async fn find_by_id(&self, id: &str) -> Result<Option<Book>, DomainError> {
         let book_model = BookEntity::find_by_id(id.to_owned()).one(&self.db).await?;
+
+        match book_model {
+            Some(model) => {
+                let mut dtos = Book::populate_authors(&self.db, vec![model]).await;
+                Ok(dtos.pop())
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn find_by_isbn(&self, isbn: &str) -> Result<Option<Book>, DomainError> {
+        // Oldest wins: `books.isbn` has no UNIQUE constraint, so the ordering is
+        // what makes repeated lookups return the same row.
+        let book_model = BookEntity::find()
+            .filter(Column::Isbn.eq(isbn))
+            .order_by_asc(Column::CreatedAt)
+            .one(&self.db)
+            .await?;
 
         match book_model {
             Some(model) => {

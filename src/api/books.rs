@@ -85,6 +85,10 @@ pub async fn list_books(
         page: filter.page,
         limit: filter.limit,
         owned_only: filter.owned_only,
+        // Owner-facing filters, reached through the MCP tools rather than this
+        // HTTP route, which peers also call.
+        owned: None,
+        collection: None,
     };
 
     // Fetch via repository

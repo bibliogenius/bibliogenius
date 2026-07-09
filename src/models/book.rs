@@ -9,6 +9,23 @@ use crate::utils::cover_url::{self, ResolveScope};
 /// `utils::cover_url::CoverResolveError`.
 pub type CoverRewriteError = cover_url::CoverResolveError;
 
+/// The values `books.reading_status` may hold, and the single declaration of
+/// that vocabulary.
+///
+/// `services::book_service::validate_reading_status` gates writes against this
+/// list, and the MCP `list_books` input schema derives its `enum` from it
+/// (ADR-048), so a value added here reaches both without further edits.
+///
+/// Note that `lent` and `borrowed` are deliberately absent: they describe a
+/// `Copy`, not a reader. `Book::populate_authors` overlays them onto the DTO
+/// for display, but they are never stored in this column.
+///
+/// This is not an exhaustive list of what a *reader* may encounter: the
+/// service-layer gate is bypassed by direct repository writes and by
+/// cr-sqlite account-sync replication, so callers that aggregate over the
+/// column must tolerate values outside it rather than assume completeness.
+pub const READING_STATUSES: [&str; 5] = ["to_read", "reading", "read", "wanting", "abandoned"];
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "books")]
 pub struct Model {
@@ -258,8 +275,10 @@ impl Book {
             .from(Alias::new("book_authors"))
             .inner_join(
                 Alias::new("authors"),
+                // `authors` is one of the UUID-rebuilt entities, so its primary
+                // key column is `uuid`; there is no `authors.id` to join on.
                 Expr::col((Alias::new("book_authors"), Alias::new("author_id")))
-                    .equals((Alias::new("authors"), Alias::new("id"))),
+                    .equals((Alias::new("authors"), Alias::new("uuid"))),
             )
             .and_where(
                 Expr::col((Alias::new("authors"), Alias::new("name"))).like(format!("%{}%", query)),
