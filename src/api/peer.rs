@@ -465,6 +465,26 @@ pub(crate) struct BorrowedCopyParams<'a> {
     pub lender_peer_id: Option<i32>,
 }
 
+/// Resolve the local `peers` row that a plaintext payload claims to come from.
+///
+/// Plaintext endpoints have no authenticated sender, so the only identity on offer
+/// is the `library_uuid` the payload asserts. This is a lookup and never a create:
+/// an unpaired sender must not be able to materialize a `peers` row by posting an
+/// unauthenticated request. Returns `None` when the field is absent (an older
+/// sender) or names a library we never paired with; callers degrade explicitly.
+pub(crate) async fn resolve_peer_by_library_uuid(
+    db: &DatabaseConnection,
+    library_uuid: Option<&str>,
+) -> Option<peer::Model> {
+    let uuid = library_uuid.filter(|u| !u.is_empty())?;
+    peer::Entity::find()
+        .filter(peer::Column::LibraryUuid.eq(uuid))
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+}
+
 /// Result of creating a borrowed copy.
 pub(crate) struct BorrowedCopyResult {
     pub book_id: String,
@@ -847,6 +867,11 @@ pub async fn offer_loan(
         "lender_name": lender_name,
         "due_date": due_date_str,
         "request_id": request_id,
+        // Our stable identity. The plaintext endpoint has no authenticated sender,
+        // so this is what lets the borrower resolve us to their local `peers` row
+        // and notify us when they return the book. The E2EE path ignores it: there
+        // the envelope already authenticates us.
+        "library_uuid": state.identity_service.library_uuid(),
     });
 
     let mut notification_sent = false;
@@ -5137,16 +5162,25 @@ async fn process_borrower_acceptance(
     // update above runs before the book is resolved, and several early returns sit
     // in between, so this is a second, narrow write rather than a reordering.
     // Without it the lender-reclaim path would fall back to resolving by ISBN.
+    // The same row also names the lender: `to_peer_id` is the peer we sent the
+    // borrow request to, so the copy below can carry the back-reference (ADR-034).
+    let mut lender_peer_id = None;
     if let Ok(Some(outgoing)) = p2p_outgoing_request::Entity::find_by_id(outgoing_id)
         .one(db)
         .await
     {
+        lender_peer_id = Some(outgoing.to_peer_id);
         let mut active: p2p_outgoing_request::ActiveModel = outgoing.into();
         active.book_id = Set(Some(book_id.clone()));
         active.updated_at = Set(Utc::now().to_rfc3339());
         if let Err(e) = active.update(db).await {
             tracing::warn!("process_borrower_acceptance: failed to link book_id: {e}");
         }
+    } else {
+        tracing::warn!(
+            "process_borrower_acceptance: outgoing request {outgoing_id} not found; \
+             the borrowed copy carries no lender back-reference"
+        );
     }
 
     // 3. Idempotency: skip if a borrowed temporary copy already exists
@@ -5177,15 +5211,13 @@ async fn process_borrower_acceptance(
     };
     let now = Utc::now().to_rfc3339();
     // ADR-034: typed loan columns only; `notes` freed for user notes.
-    // Deferring lender_peer_id resolution to a follow-up (would need to
-    // join via `p2p_outgoing_request.to_peer_id`).
     let new_copy = copy::ActiveModel {
         book_id: Set(book_id.clone()),
         library_id: Set(lib_id),
         status: Set("borrowed".to_string()),
         is_temporary: Set(true),
         lender_display_name: Set(Some(lender_name.to_string())),
-        lender_peer_id: Set(None),
+        lender_peer_id: Set(lender_peer_id),
         borrow_due_date: Set(Some(due_date.to_string())),
         borrow_source: Set(Some(crate::domain::BorrowSource::Peer.as_str().to_string())),
         acquisition_date: Set(Some(now.clone())),
@@ -7962,6 +7994,42 @@ pub async fn receive_loan_confirmation(
             .into_response();
     }
 
+    // The outgoing request we issued names the lender: `to_peer_id` is the peer we
+    // sent the borrow request to. Resolved before the copy is created so the copy
+    // can carry the back-reference (ADR-034), and reused below for the status
+    // update rather than queried twice.
+    // An empty ISBN must not be used as a search key: `book_isbn` is empty on every
+    // outgoing request for a book that has no ISBN, so `eq("")` would match an
+    // unrelated loan and name its peer as this lender. The guard above already
+    // declines to match on an empty ISBN; this mirrors it.
+    let outgoing = if let Some(ref rr_id) = payload.requester_request_id {
+        p2p_outgoing_request::Entity::find_by_id(rr_id)
+            .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
+            .one(&db)
+            .await
+            .ok()
+            .flatten()
+    } else if let Some(isbn) = payload.isbn.as_deref().filter(|s| !s.is_empty()) {
+        p2p_outgoing_request::Entity::find()
+            .filter(p2p_outgoing_request::Column::BookIsbn.eq(isbn))
+            .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
+            .one(&db)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
+    if outgoing.is_none() {
+        tracing::warn!(
+            "Loan confirmation '{}' from '{}' matches no outgoing request: \
+             the borrowed copy carries no lender back-reference",
+            payload.title,
+            payload.lender_name,
+        );
+    }
+
     // Create borrowed copy via shared helper
     let params = BorrowedCopyParams {
         title: &payload.title,
@@ -7970,10 +8038,7 @@ pub async fn receive_loan_confirmation(
         cover_url: payload.cover_url.as_deref(),
         lender_name: &payload.lender_name,
         due_date: &payload.due_date,
-        // Resolving the local `peers.id` for the lender in this plaintext
-        // path would need a Node-Id lookup and is deferred to a follow-up;
-        // the display name is authoritative for the ADR-034 UX.
-        lender_peer_id: None,
+        lender_peer_id: outgoing.as_ref().map(|o| o.to_peer_id),
     };
 
     let result = match create_borrowed_copy(&db, &params).await {
@@ -7984,33 +8049,16 @@ pub async fn receive_loan_confirmation(
     };
 
     // Update outgoing request with lender_request_id (both for idempotent and new copies)
-    if let Some(ref lender_req_id) = payload.request_id {
-        let outgoing = if let Some(ref rr_id) = payload.requester_request_id {
-            p2p_outgoing_request::Entity::find_by_id(rr_id)
-                .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
-                .one(&db)
-                .await
-                .ok()
-                .flatten()
-        } else {
-            let isbn_filter = payload.isbn.clone().unwrap_or_default();
-            p2p_outgoing_request::Entity::find()
-                .filter(p2p_outgoing_request::Column::BookIsbn.eq(&isbn_filter))
-                .filter(p2p_outgoing_request::Column::Status.is_in(["pending", "accepted"]))
-                .one(&db)
-                .await
-                .ok()
-                .flatten()
-        };
-        if let Some(outgoing) = outgoing {
-            let mut active: p2p_outgoing_request::ActiveModel = outgoing.into();
-            active.lender_request_id = Set(Some(lender_req_id.clone()));
-            active.status = Set("accepted".to_string());
-            active.book_id = Set(Some(result.book_id.clone()));
-            active.updated_at = Set(Utc::now().to_rfc3339());
-            if let Err(e) = active.update(&db).await {
-                tracing::warn!("Failed to update outgoing request: {e}");
-            }
+    if let Some(ref lender_req_id) = payload.request_id
+        && let Some(outgoing) = outgoing
+    {
+        let mut active: p2p_outgoing_request::ActiveModel = outgoing.into();
+        active.lender_request_id = Set(Some(lender_req_id.clone()));
+        active.status = Set("accepted".to_string());
+        active.book_id = Set(Some(result.book_id.clone()));
+        active.updated_at = Set(Utc::now().to_rfc3339());
+        if let Err(e) = active.update(&db).await {
+            tracing::warn!("Failed to update outgoing request: {e}");
         }
     }
 
@@ -8057,6 +8105,10 @@ pub struct LoanOffer {
     pub due_date: String,
     /// Lender's p2p_request ID, needed for the return flow.
     pub request_id: Option<String>,
+    /// Lender's stable library identifier, used to resolve their local `peers`
+    /// row. Absent from offers sent by builds that predate this field, so the
+    /// decoder tolerates its absence rather than rejecting the whole offer.
+    pub library_uuid: Option<String>,
 }
 
 /// POST /api/peers/loans/offer -- Plaintext endpoint for receiving a loan offer.
@@ -8074,6 +8126,11 @@ pub async fn receive_loan_offer(
         payload.lender_name
     );
 
+    // We never issued a request for an offered loan, so there is no outgoing row
+    // to read the lender's identity from: the payload's `library_uuid` is the only
+    // handle on it. An unresolved lender degrades the loan rather than failing it.
+    let lender = resolve_peer_by_library_uuid(&db, payload.library_uuid.as_deref()).await;
+
     let params = BorrowedCopyParams {
         title: &payload.title,
         isbn: payload.isbn.as_deref(),
@@ -8081,10 +8138,7 @@ pub async fn receive_loan_offer(
         cover_url: payload.cover_url.as_deref(),
         lender_name: &payload.lender_name,
         due_date: &payload.due_date,
-        // Loan offer path: we never issued a request, so no outgoing row to
-        // resolve the lender's `peers.id` from. Populating this column is a
-        // follow-up; display name is authoritative today.
-        lender_peer_id: None,
+        lender_peer_id: lender.as_ref().map(|p| p.id),
     };
 
     let result = match create_borrowed_copy(&db, &params).await {
@@ -8096,25 +8150,44 @@ pub async fn receive_loan_offer(
 
     // Create p2p_outgoing_request so return_borrowed_book can notify the lender
     if !result.already_existed {
-        if let Some(ref lender_req_id) = payload.request_id {
-            use crate::models::p2p_outgoing_request;
-            let outgoing_id = uuid::Uuid::new_v4().to_string();
-            let outgoing = p2p_outgoing_request::ActiveModel {
-                id: Set(outgoing_id),
-                to_peer_id: Set(0), // unknown in plaintext path
-                book_isbn: Set(payload.isbn.clone().unwrap_or_default()),
-                book_title: Set(payload.title.clone()),
-                status: Set("accepted".to_string()),
-                lender_request_id: Set(Some(lender_req_id.clone())),
-                book_id: Set(Some(result.book_id.clone())),
-                created_at: Set(Utc::now().to_rfc3339()),
-                updated_at: Set(Utc::now().to_rfc3339()),
-            };
-            if let Err(e) = p2p_outgoing_request::Entity::insert(outgoing)
-                .exec(&db)
-                .await
-            {
-                tracing::warn!("Failed to create p2p_outgoing_request for loan_offer: {e}");
+        match (&lender, &payload.request_id) {
+            (Some(lender), Some(lender_req_id)) => {
+                use crate::models::p2p_outgoing_request;
+                let outgoing_id = uuid::Uuid::new_v4().to_string();
+                let outgoing = p2p_outgoing_request::ActiveModel {
+                    id: Set(outgoing_id),
+                    to_peer_id: Set(lender.id),
+                    book_isbn: Set(payload.isbn.clone().unwrap_or_default()),
+                    book_title: Set(payload.title.clone()),
+                    status: Set("accepted".to_string()),
+                    lender_request_id: Set(Some(lender_req_id.clone())),
+                    book_id: Set(Some(result.book_id.clone())),
+                    created_at: Set(Utc::now().to_rfc3339()),
+                    updated_at: Set(Utc::now().to_rfc3339()),
+                };
+                if let Err(e) = p2p_outgoing_request::Entity::insert(outgoing)
+                    .exec(&db)
+                    .await
+                {
+                    tracing::warn!("Failed to create p2p_outgoing_request for loan_offer: {e}");
+                }
+            }
+            (None, _) => {
+                tracing::warn!(
+                    "Loan offer '{}' from '{}' carries no resolvable library_uuid ({:?}): \
+                     the borrowed copy is created, but returning it cannot notify the lender",
+                    payload.title,
+                    payload.lender_name,
+                    payload.library_uuid,
+                );
+            }
+            (Some(_), None) => {
+                tracing::warn!(
+                    "Loan offer '{}' from '{}' carries no request_id: \
+                     returning it cannot reference the lender's loan",
+                    payload.title,
+                    payload.lender_name,
+                );
             }
         }
 
@@ -9375,6 +9448,323 @@ mod retain_returned_book_tests {
                 .await
                 .expect("count"),
             0
+        );
+    }
+}
+
+/// The plaintext loan-offer endpoint must resolve the lender it is talking to.
+///
+/// `p2p_outgoing_requests.to_peer_id` carries a foreign key to `peers(id)`, whose
+/// autoincrement starts at 1, so the `0` sentinel this handler used to write could
+/// never satisfy it: the INSERT failed on every call that a `foreign_keys` pragma
+/// witnessed, and the return flow found no request to notify the lender through.
+/// These tests run on `init_db`, which enforces the pragma, so the sentinel is a
+/// hard failure rather than a silent one.
+#[cfg(test)]
+mod loan_offer_lender_resolution_tests {
+    use super::*;
+    use crate::db;
+    use crate::models::{copy, p2p_outgoing_request};
+    use sea_orm::{EntityTrait, PaginatorTrait, Set};
+
+    const LENDER_UUID: &str = "6f1d1a4e-0000-4000-8000-000000000001";
+
+    async fn setup_db() -> DatabaseConnection {
+        db::init_db("sqlite::memory:").await.expect("init db")
+    }
+
+    /// A peer we have already paired with, carrying the stable `library_uuid`
+    /// the offer payload identifies itself by.
+    async fn insert_known_lender(db: &DatabaseConnection, library_uuid: Option<&str>) -> i32 {
+        let now = chrono::Utc::now().to_rfc3339();
+        peer::ActiveModel {
+            name: Set("christophe".to_string()),
+            url: Set("http://christophe.local:8000".to_string()),
+            library_uuid: Set(library_uuid.map(|s| s.to_string())),
+            connection_status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert peer")
+        .id
+    }
+
+    fn offer(library_uuid: Option<&str>) -> LoanOffer {
+        LoanOffer {
+            isbn: Some("978-1".to_string()),
+            title: "Le Livre".to_string(),
+            author: Some("Jack London".to_string()),
+            cover_url: None,
+            lender_name: "christophe".to_string(),
+            due_date: "2026-09-01".to_string(),
+            request_id: Some("lender-req-1".to_string()),
+            library_uuid: library_uuid.map(|s| s.to_string()),
+        }
+    }
+
+    fn acceptance_payload() -> serde_json::Value {
+        json!({
+            "title": "Le Livre",
+            "isbn": "978-1",
+            "lender_name": "christophe",
+            "due_date": "2026-09-01",
+        })
+    }
+
+    async fn insert_pending_request(db: &DatabaseConnection, id: &str, to_peer_id: i32) {
+        let now = chrono::Utc::now().to_rfc3339();
+        p2p_outgoing_request::ActiveModel {
+            id: Set(id.to_string()),
+            to_peer_id: Set(to_peer_id),
+            book_isbn: Set("978-1".to_string()),
+            book_title: Set("Le Livre".to_string()),
+            status: Set("pending".to_string()),
+            lender_request_id: Set(None),
+            book_id: Set(None),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+        }
+        .insert(db)
+        .await
+        .expect("insert outgoing request");
+    }
+
+    async fn borrowed_copy(db: &DatabaseConnection) -> copy::Model {
+        copy::Entity::find()
+            .filter(copy::Column::Status.eq("borrowed"))
+            .one(db)
+            .await
+            .expect("query copies")
+            .expect("a borrowed copy exists")
+    }
+
+    /// Acceptance criterion: an offer from a known peer records an outgoing
+    /// request pointing at that peer, and stamps the copy with the same lender.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_offer_from_a_known_peer_records_its_outgoing_request() {
+        let db = setup_db().await;
+        let lender = insert_known_lender(&db, Some(LENDER_UUID)).await;
+
+        let response = receive_loan_offer(State(db.clone()), Json(offer(Some(LENDER_UUID))))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let request = p2p_outgoing_request::Entity::find()
+            .one(&db)
+            .await
+            .expect("query outgoing requests")
+            .expect("the offer records an outgoing request");
+        assert_eq!(
+            request.to_peer_id, lender,
+            "the outgoing request must point at the real lender, not a sentinel"
+        );
+        assert_eq!(request.status, "accepted");
+        assert_eq!(request.lender_request_id.as_deref(), Some("lender-req-1"));
+
+        assert_eq!(
+            borrowed_copy(&db).await.lender_peer_id,
+            Some(lender),
+            "the borrowed copy must carry the lender it came from"
+        );
+    }
+
+    /// Acceptance criterion: returning the book finds the request that notifies
+    /// the lender. `find_accepted_outgoing_request` scopes on the copy's
+    /// `lender_peer_id`, so both columns have to agree for the return to resolve.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn returning_a_plaintext_offered_book_finds_the_lender_to_notify() {
+        let db = setup_db().await;
+        let lender = insert_known_lender(&db, Some(LENDER_UUID)).await;
+
+        let _ = receive_loan_offer(State(db.clone()), Json(offer(Some(LENDER_UUID))))
+            .await
+            .into_response();
+
+        let the_copy = borrowed_copy(&db).await;
+        let request = find_accepted_outgoing_request(&db, &the_copy, "978-1")
+            .await
+            .expect("query")
+            .expect("the return flow finds the request that names the lender");
+        assert_eq!(request.to_peer_id, lender);
+        assert_eq!(request.lender_request_id.as_deref(), Some("lender-req-1"));
+    }
+
+    /// Acceptance criterion: an offer from a sender that carries no identity
+    /// still creates the borrowed copy. It records no outgoing request, because
+    /// there is no peer to point one at, and says so in the log.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_offer_without_peer_identity_still_creates_the_copy() {
+        let db = setup_db().await;
+        insert_known_lender(&db, Some(LENDER_UUID)).await;
+
+        let response = receive_loan_offer(State(db.clone()), Json(offer(None)))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(
+            borrowed_copy(&db).await.lender_peer_id,
+            None,
+            "an unidentified lender leaves the back-reference empty"
+        );
+        assert_eq!(
+            p2p_outgoing_request::Entity::find()
+                .count(&db)
+                .await
+                .expect("count"),
+            0,
+            "no outgoing request may be forged for an unresolvable lender"
+        );
+    }
+
+    /// An offer naming a `library_uuid` we have never paired with resolves to no
+    /// peer. Same degraded path as a sender that omits the field entirely: the
+    /// copy is created, no request is forged against an arbitrary peer row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_offer_from_an_unknown_library_uuid_forges_no_request() {
+        let db = setup_db().await;
+        insert_known_lender(&db, Some(LENDER_UUID)).await;
+
+        let response = receive_loan_offer(
+            State(db.clone()),
+            Json(offer(Some("6f1d1a4e-0000-4000-8000-00000000dead"))),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(borrowed_copy(&db).await.lender_peer_id, None);
+        assert_eq!(
+            p2p_outgoing_request::Entity::find()
+                .count(&db)
+                .await
+                .expect("count"),
+            0
+        );
+    }
+
+    /// A confirmation carrying neither `requester_request_id` nor an ISBN matches no
+    /// outgoing request. The empty string must never be used as a search key: every
+    /// request for a book without an ISBN stores `book_isbn = ""`, so `eq("")` would
+    /// name an unrelated peer as this lender, and `lender_peer_id` scopes the reclaim
+    /// purge. Best-effort acceptance of the copy, never a guessed lender.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_confirmation_without_isbn_or_request_id_names_no_lender() {
+        let db = setup_db().await;
+        let bystander = insert_known_lender(&db, Some(LENDER_UUID)).await;
+
+        // A pending loan of a book that has no ISBN, granted by an unrelated peer.
+        let now = chrono::Utc::now().to_rfc3339();
+        p2p_outgoing_request::ActiveModel {
+            id: Set("unrelated-req".to_string()),
+            to_peer_id: Set(bystander),
+            book_isbn: Set(String::new()),
+            book_title: Set("Un Autre Livre".to_string()),
+            status: Set("pending".to_string()),
+            lender_request_id: Set(None),
+            book_id: Set(None),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+        }
+        .insert(&db)
+        .await
+        .expect("insert unrelated request");
+
+        let payload = LoanConfirmation {
+            isbn: None,
+            title: "Le Livre".to_string(),
+            author: None,
+            cover_url: None,
+            lender_name: "christophe".to_string(),
+            due_date: "2026-09-01".to_string(),
+            request_id: Some("lender-req-1".to_string()),
+            requester_request_id: None,
+        };
+        let response = receive_loan_confirmation(State(db.clone()), Json(payload))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(
+            borrowed_copy(&db).await.lender_peer_id,
+            None,
+            "an empty ISBN must not borrow an unrelated loan's lender"
+        );
+
+        let unrelated = p2p_outgoing_request::Entity::find_by_id("unrelated-req")
+            .one(&db)
+            .await
+            .expect("query")
+            .expect("the unrelated request survives");
+        assert_eq!(
+            unrelated.status, "pending",
+            "the unrelated loan must not be flipped to accepted"
+        );
+        assert_eq!(unrelated.book_id, None);
+    }
+
+    /// The third plaintext writer reads its lender off the outgoing request it
+    /// already loads to link `book_id`, so no payload field identifies the peer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn borrower_acceptance_stamps_the_lender_from_its_outgoing_request() {
+        let db = setup_db().await;
+        let lender = insert_known_lender(&db, Some(LENDER_UUID)).await;
+        insert_pending_request(&db, "out-1", lender).await;
+
+        process_borrower_acceptance(&db, "out-1", &acceptance_payload(), Some("lender-req-1"))
+            .await;
+
+        assert_eq!(
+            borrowed_copy(&db).await.lender_peer_id,
+            Some(lender),
+            "the accepted borrow names its lender through the outgoing request"
+        );
+    }
+
+    /// An acceptance whose outgoing request has vanished still creates the copy,
+    /// with no lender back-reference, and says so in the log.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn borrower_acceptance_without_an_outgoing_request_names_no_lender() {
+        let db = setup_db().await;
+        insert_known_lender(&db, Some(LENDER_UUID)).await;
+
+        process_borrower_acceptance(&db, "missing", &acceptance_payload(), None).await;
+
+        assert_eq!(borrowed_copy(&db).await.lender_peer_id, None);
+    }
+
+    /// The other plaintext writer resolves its lender from the outgoing request
+    /// it already matched on, so no payload field is needed to identify the peer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_loan_confirmation_stamps_the_lender_from_its_outgoing_request() {
+        let db = setup_db().await;
+        let lender = insert_known_lender(&db, Some(LENDER_UUID)).await;
+
+        insert_pending_request(&db, "borrower-req-1", lender).await;
+
+        let payload = LoanConfirmation {
+            isbn: Some("978-1".to_string()),
+            title: "Le Livre".to_string(),
+            author: None,
+            cover_url: None,
+            lender_name: "christophe".to_string(),
+            due_date: "2026-09-01".to_string(),
+            request_id: Some("lender-req-1".to_string()),
+            requester_request_id: Some("borrower-req-1".to_string()),
+        };
+        let response = receive_loan_confirmation(State(db.clone()), Json(payload))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(
+            borrowed_copy(&db).await.lender_peer_id,
+            Some(lender),
+            "the confirmation names its lender through the outgoing request"
         );
     }
 }

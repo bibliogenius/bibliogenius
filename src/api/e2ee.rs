@@ -1060,11 +1060,11 @@ async fn handle_status_update(
         // loan granted by someone else and drive its status (and, on "returned",
         // the copy cleanup below). Only the lender of a loan may move it.
         //
-        // `to_peer_id == 0` is the sentinel written by the plaintext loan-offer
-        // endpoint, whose payload carries no peer identity: the lender is unknown
-        // by construction, so the check cannot run. The value comes from our own
-        // database and is not attacker-controlled.
-        if req.to_peer_id != 0 && req.to_peer_id != sender_peer.id {
+        // Every writer of `p2p_outgoing_requests` now records the lender's real
+        // `peers.id`, including the plaintext loan-offer endpoint, so this check
+        // runs unconditionally. It used to step aside for a `to_peer_id == 0`
+        // sentinel that the foreign key to `peers(id)` never let reach the table.
+        if req.to_peer_id != sender_peer.id {
             tracing::warn!(
                 "E2EE: peer {} sent a status update for a loan granted by peer {}, rejecting",
                 sender_peer.id,
@@ -1075,12 +1075,6 @@ async fn handle_status_update(
                 Json(json!({ "error": "This loan belongs to another peer" })),
             )
                 .into_response();
-        }
-        if req.to_peer_id == 0 {
-            tracing::warn!(
-                "E2EE: status update on a plaintext-offered loan ({loan_id}); \
-                 lender identity unverifiable"
-            );
         }
 
         let book_isbn = req.book_isbn.clone();
@@ -2063,23 +2057,6 @@ mod reclaim_tests {
         .id
     }
 
-    /// A `peers` row with the explicit id 0, so a sentinel outgoing request can
-    /// satisfy the foreign key on `p2p_outgoing_requests.to_peer_id`.
-    async fn insert_sentinel_peer(db: &DatabaseConnection) {
-        let now = chrono::Utc::now().to_rfc3339();
-        peer::ActiveModel {
-            id: Set(0),
-            name: Set("sentinel".to_string()),
-            url: Set("http://sentinel.local:8000".to_string()),
-            created_at: Set(now.clone()),
-            updated_at: Set(now),
-            ..Default::default()
-        }
-        .insert(db)
-        .await
-        .expect("insert sentinel peer");
-    }
-
     async fn insert_outgoing_request(
         db: &DatabaseConnection,
         id: &str,
@@ -2398,36 +2375,6 @@ mod reclaim_tests {
             get_book(&db, &book_id).await.is_some(),
             "the book still survives the reclaim"
         );
-    }
-
-    /// Rows written by the plaintext loan-offer endpoint carry `to_peer_id = 0`: the
-    /// payload has no peer identity, so the lender is unverifiable by construction.
-    /// The sentinel comes from our own database, never from the sender, so the
-    /// ownership check steps aside rather than stranding the copy.
-    ///
-    /// A `peers` row with id 0 is materialized here only to satisfy the foreign key:
-    /// in the wild such a row cannot exist, which means the sentinel is unreachable
-    /// while SQLite enforces `foreign_keys`. The exemption is defence in depth for a
-    /// connection whose pragma has leaked off, not a live code path.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_plaintext_offered_loan_stays_reclaimable() {
-        let db = setup_test_db().await;
-        let lender = insert_lender(&db, "christophe").await;
-        let book_id = insert_read_but_not_owned(&db, "Le Livre", Some("978-1")).await;
-        insert_copy(&db, &book_id, "borrowed", Some(lender)).await;
-        insert_sentinel_peer(&db).await;
-        insert_outgoing_request(&db, "loan-1", 0, "978-1", Some(&book_id)).await;
-
-        let lender_peer = peer::Entity::find_by_id(lender)
-            .one(&db)
-            .await
-            .expect("find")
-            .expect("lender");
-        let response =
-            handle_status_update(&db, &status_update("loan-1", "returned"), &lender_peer).await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(count_copies(&db, &book_id).await, 0);
     }
 
     /// The mirror of the borrower-side check, on the branch that closes a loan the
