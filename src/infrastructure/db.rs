@@ -2324,6 +2324,20 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // `migrate_metadata_fill_text_ids` for the mechanics.
     migrate_metadata_fill_text_ids(db).await?;
 
+    // Migration 088: link an outgoing borrow request to the local book row.
+    // The table only carried `book_isbn`, so the lender-reclaim path had to
+    // resolve the borrowed book by ISBN. An empty ISBN (books lent without
+    // one are stored as `""`) matches an arbitrary row, and a shared ISBN
+    // matches a book the borrower owns. The column is populated when the
+    // borrowed copy is created; rows predating it stay NULL and fall back to
+    // a lender-scoped copy lookup.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE p2p_outgoing_requests ADD COLUMN book_id TEXT".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
 

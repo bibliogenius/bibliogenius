@@ -5133,6 +5133,22 @@ async fn process_borrower_acceptance(
         }
     };
 
+    // 2b. Link the outgoing request to the local book now that it exists. The status
+    // update above runs before the book is resolved, and several early returns sit
+    // in between, so this is a second, narrow write rather than a reordering.
+    // Without it the lender-reclaim path would fall back to resolving by ISBN.
+    if let Ok(Some(outgoing)) = p2p_outgoing_request::Entity::find_by_id(outgoing_id)
+        .one(db)
+        .await
+    {
+        let mut active: p2p_outgoing_request::ActiveModel = outgoing.into();
+        active.book_id = Set(Some(book_id.clone()));
+        active.updated_at = Set(Utc::now().to_rfc3339());
+        if let Err(e) = active.update(db).await {
+            tracing::warn!("process_borrower_acceptance: failed to link book_id: {e}");
+        }
+    }
+
     // 3. Idempotency: skip if a borrowed temporary copy already exists
     let existing_borrowed = copy::Entity::find()
         .filter(copy::Column::BookId.eq(book_id.as_str()))
@@ -5277,6 +5293,9 @@ pub async fn request_book(
         book_title: Set(payload.book_title.clone()),
         status: Set("pending".to_string()),
         lender_request_id: Set(None),
+        // No local book row exists yet: it is created together with the
+        // borrowed copy once the lender confirms the loan.
+        book_id: Set(None),
         created_at: Set(chrono::Utc::now().to_rfc3339()),
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
     };
@@ -5630,6 +5649,9 @@ pub async fn request_book_by_url(
         book_title: Set(payload.book_title.clone()),
         status: Set("pending".to_string()),
         lender_request_id: Set(None),
+        // No local book row exists yet: it is created together with the
+        // borrowed copy once the lender confirms the loan.
+        book_id: Set(None),
         created_at: Set(chrono::Utc::now().to_rfc3339()),
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
     };
@@ -7408,16 +7430,8 @@ pub async fn return_borrowed_book(
         _ => String::new(),
     };
 
-    // 2. Find the outgoing request for this book with status "accepted"
-    let outgoing = if !book_isbn.is_empty() {
-        p2p_outgoing_request::Entity::find()
-            .filter(p2p_outgoing_request::Column::BookIsbn.eq(&book_isbn))
-            .filter(p2p_outgoing_request::Column::Status.eq("accepted"))
-            .one(&db)
-            .await
-    } else {
-        Ok(None)
-    };
+    // 2. Find the outgoing request for this loan
+    let outgoing = find_accepted_outgoing_request(&db, &the_copy, &book_isbn).await;
 
     let outgoing_req = match outgoing {
         Ok(Some(req)) => req,
@@ -7428,7 +7442,7 @@ pub async fn return_borrowed_book(
             );
             // Fallback: delete the local copy + clean up orphaned book
             let _ = copy::Entity::delete_by_id(payload.copy_id).exec(&db).await;
-            cleanup_orphaned_book(&db, the_copy.book_id).await;
+            retain_returned_book(&db, the_copy.book_id).await;
             return (
                 StatusCode::OK,
                 Json(json!({ "message": "Copy deleted (no outgoing request found)" })),
@@ -7438,7 +7452,7 @@ pub async fn return_borrowed_book(
         Err(e) => {
             tracing::error!("DB error finding outgoing request: {}", e);
             let _ = copy::Entity::delete_by_id(payload.copy_id).exec(&db).await;
-            cleanup_orphaned_book(&db, the_copy.book_id).await;
+            retain_returned_book(&db, the_copy.book_id).await;
             return (
                 StatusCode::OK,
                 Json(json!({ "message": "Copy deleted (db error on request lookup)" })),
@@ -7457,7 +7471,7 @@ pub async fn return_borrowed_book(
             tracing::warn!("Peer not found for outgoing request");
             // Still clean up locally
             let _ = copy::Entity::delete_by_id(payload.copy_id).exec(&db).await;
-            cleanup_orphaned_book(&db, the_copy.book_id).await;
+            retain_returned_book(&db, the_copy.book_id).await;
             let mut active: p2p_outgoing_request::ActiveModel = outgoing_req.into();
             active.status = Set("returned".to_string());
             active.updated_at = Set(chrono::Utc::now().to_rfc3339());
@@ -7541,7 +7555,7 @@ pub async fn return_borrowed_book(
     }
 
     // 6. Clean up book if no longer needed
-    cleanup_orphaned_book(&db, the_copy.book_id).await;
+    retain_returned_book(&db, the_copy.book_id).await;
 
     (
         StatusCode::OK,
@@ -7550,32 +7564,85 @@ pub async fn return_borrowed_book(
         .into_response()
 }
 
-/// Delete a book if it has no remaining copies, is not owned, and is not in the wishlist.
-async fn cleanup_orphaned_book(db: &DatabaseConnection, book_id: String) {
+/// Find the accepted outgoing request matching the borrowed copy being returned.
+///
+/// `book_id` identifies the loan, and the lender recorded on the copy narrows it
+/// further: a book row is shared across ISBN-equal borrows, so two accepted
+/// requests can name the same `book_id`. Requests written before that column
+/// existed carry NULL and fall back to the ISBN, narrowed the same way. A bare
+/// ISBN lookup is not enough on its own: a book lent without one is stored as
+/// `""`, and a shared ISBN can name a different loan. Getting this wrong marks the
+/// wrong loan returned and notifies the wrong peer.
+async fn find_accepted_outgoing_request(
+    db: &DatabaseConnection,
+    the_copy: &crate::models::copy::Model,
+    book_isbn: &str,
+) -> Result<Option<crate::models::p2p_outgoing_request::Model>, sea_orm::DbErr> {
+    use crate::models::p2p_outgoing_request;
+
+    /// Restrict a query to the lender the copy was borrowed from, when known.
+    fn scoped_to_lender(
+        query: sea_orm::Select<p2p_outgoing_request::Entity>,
+        lender_peer_id: Option<i32>,
+    ) -> sea_orm::Select<p2p_outgoing_request::Entity> {
+        match lender_peer_id {
+            Some(id) => query.filter(p2p_outgoing_request::Column::ToPeerId.eq(id)),
+            None => query,
+        }
+    }
+
+    let exact = scoped_to_lender(
+        p2p_outgoing_request::Entity::find()
+            .filter(p2p_outgoing_request::Column::BookId.eq(the_copy.book_id.as_str()))
+            .filter(p2p_outgoing_request::Column::Status.eq("accepted")),
+        the_copy.lender_peer_id,
+    )
+    .one(db)
+    .await;
+
+    match exact {
+        Ok(Some(req)) => Ok(Some(req)),
+        Ok(None) if !book_isbn.is_empty() => {
+            scoped_to_lender(
+                p2p_outgoing_request::Entity::find()
+                    .filter(p2p_outgoing_request::Column::BookIsbn.eq(book_isbn))
+                    .filter(p2p_outgoing_request::Column::Status.eq("accepted")),
+                the_copy.lender_peer_id,
+            )
+            .one(db)
+            .await
+        }
+        other => other,
+    }
+}
+
+/// Record that a returned book stays in the library.
+///
+/// Returning a borrowed copy removes the copy, never the book. A book the user
+/// read without owning it is a first-class state (`owned = false` combined with
+/// any `reading_status`), and it carries reading dates, a rating and notes that
+/// the reader entered. Deleting it would destroy that, so removing a book from
+/// the library is left to an explicit user action.
+///
+/// `owned` is left untouched for the same reason: `create_borrowed_copy` reuses
+/// an existing book row matched by ISBN, so a reclaimed loan can hang off a book
+/// the user genuinely owns. Forcing `owned = false` here would un-own it.
+async fn retain_returned_book(db: &DatabaseConnection, book_id: String) {
     use crate::models::{book, copy};
     if let Ok(Some(bk)) = book::Entity::find_by_id(book_id).one(db).await {
         let copy_count = copy::Entity::find()
             .filter(copy::Column::BookId.eq(bk.id.as_str()))
             .count(db)
             .await
-            .unwrap_or(1);
+            .unwrap_or(0);
 
-        let should_delete = !bk.owned && bk.reading_status != "wanting" && copy_count == 0;
-
-        if should_delete {
-            match book::Entity::delete_by_id(bk.id.clone()).exec(db).await {
-                Ok(_) => tracing::info!("Deleted orphaned book {} after loan return", bk.id),
-                Err(e) => tracing::error!("Failed to delete orphaned book {}: {}", bk.id, e),
-            }
-        } else {
-            tracing::info!(
-                "Book {} kept after loan return (owned={}, reading_status='{}', copies={})",
-                bk.id,
-                bk.owned,
-                bk.reading_status,
-                copy_count
-            );
-        }
+        tracing::info!(
+            "Book {} kept after loan return (owned={}, reading_status='{}', copies={})",
+            bk.id,
+            bk.owned,
+            bk.reading_status,
+            copy_count
+        );
     }
 }
 
@@ -7939,6 +8006,7 @@ pub async fn receive_loan_confirmation(
             let mut active: p2p_outgoing_request::ActiveModel = outgoing.into();
             active.lender_request_id = Set(Some(lender_req_id.clone()));
             active.status = Set("accepted".to_string());
+            active.book_id = Set(Some(result.book_id.clone()));
             active.updated_at = Set(Utc::now().to_rfc3339());
             if let Err(e) = active.update(&db).await {
                 tracing::warn!("Failed to update outgoing request: {e}");
@@ -8038,6 +8106,7 @@ pub async fn receive_loan_offer(
                 book_title: Set(payload.title.clone()),
                 status: Set("accepted".to_string()),
                 lender_request_id: Set(Some(lender_req_id.clone())),
+                book_id: Set(Some(result.book_id.clone())),
                 created_at: Set(Utc::now().to_rfc3339()),
                 updated_at: Set(Utc::now().to_rfc3339()),
             };
@@ -9043,6 +9112,269 @@ mod cleanup_stale_peer_books_tests {
             rows_by_peer_id(&db, peer_id).await,
             1,
             "stale LAN row must be deleted, fresh LAN row kept"
+        );
+    }
+}
+
+/// Returning a borrowed copy removes the copy, never the book.
+#[cfg(test)]
+mod retain_returned_book_tests {
+    use super::*;
+    use crate::db;
+    use crate::models::{book, copy};
+    use sea_orm::Set;
+
+    async fn setup() -> DatabaseConnection {
+        db::init_db("sqlite::memory:").await.expect("init db")
+    }
+
+    async fn insert_book(db: &DatabaseConnection, title: &str, isbn: Option<&str>) -> String {
+        let now = chrono::Utc::now().to_rfc3339();
+        book::ActiveModel {
+            title: Set(title.to_string()),
+            isbn: Set(isbn.map(|s| s.to_string())),
+            owned: Set(false),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert book")
+        .id
+    }
+
+    async fn insert_test_peer(db: &DatabaseConnection, name: &str) -> i32 {
+        let now = chrono::Utc::now().to_rfc3339();
+        crate::models::peer::ActiveModel {
+            name: Set(name.to_string()),
+            url: Set(format!("http://{name}.local:8000")),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert peer")
+        .id
+    }
+
+    async fn insert_borrowed_copy(
+        db: &DatabaseConnection,
+        book_id: &str,
+        lender_peer_id: Option<i32>,
+    ) -> copy::Model {
+        let lib_id = crate::utils::library_helpers::resolve_library_id(db)
+            .await
+            .expect("library");
+        let now = chrono::Utc::now().to_rfc3339();
+        copy::ActiveModel {
+            book_id: Set(book_id.to_string()),
+            library_id: Set(lib_id),
+            status: Set("borrowed".to_string()),
+            is_temporary: Set(true),
+            lender_peer_id: Set(lender_peer_id),
+            borrow_source: Set(Some("peer".to_string())),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert copy")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_request(
+        db: &DatabaseConnection,
+        id: &str,
+        to_peer_id: i32,
+        isbn: &str,
+        book_id: Option<&str>,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        crate::models::p2p_outgoing_request::ActiveModel {
+            id: Set(id.to_string()),
+            to_peer_id: Set(to_peer_id),
+            book_isbn: Set(isbn.to_string()),
+            book_title: Set("Le Livre".to_string()),
+            status: Set("accepted".to_string()),
+            lender_request_id: Set(None),
+            book_id: Set(book_id.map(|s| s.to_string())),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+        }
+        .insert(db)
+        .await
+        .expect("insert request");
+    }
+
+    /// Two peers lent books sharing an ISBN. Resolving the loan by ISBN alone picks
+    /// an arbitrary row, which marks the wrong loan returned and notifies the wrong
+    /// lender. `book_id` names it exactly.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_returned_loan_is_resolved_by_book_id_not_by_isbn() {
+        let db = setup().await;
+        let alice = insert_test_peer(&db, "alice").await;
+        let bob = insert_test_peer(&db, "bob").await;
+
+        // Alice's request is inserted first: a bare ISBN lookup would return it.
+        let alice_book = insert_book(&db, "Chez Alice", Some("978-same")).await;
+        insert_request(&db, "loan-alice", alice, "978-same", Some(&alice_book)).await;
+        let bob_book = insert_book(&db, "Chez Bob", Some("978-same")).await;
+        insert_request(&db, "loan-bob", bob, "978-same", Some(&bob_book)).await;
+
+        let bob_copy = insert_borrowed_copy(&db, &bob_book, Some(bob)).await;
+        let found = find_accepted_outgoing_request(&db, &bob_copy, "978-same")
+            .await
+            .expect("query");
+
+        assert_eq!(
+            found.map(|r| r.id),
+            Some("loan-bob".to_string()),
+            "returning Bob's copy must resolve Bob's loan"
+        );
+    }
+
+    /// A book row is shared across ISBN-equal borrows, so two accepted requests can
+    /// carry the same `book_id`. The lender recorded on the copy is what tells them
+    /// apart: without it, returning Bob's copy would close Alice's loan and notify
+    /// her instead.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_loans_of_the_same_book_row_are_told_apart_by_the_lender() {
+        let db = setup().await;
+        let alice = insert_test_peer(&db, "alice").await;
+        let bob = insert_test_peer(&db, "bob").await;
+
+        // One shared book row, two accepted loans. Alice's request is inserted first,
+        // so an unscoped `.one()` would return it.
+        let book_id = insert_book(&db, "Le Livre", Some("978-same")).await;
+        insert_request(&db, "loan-alice", alice, "978-same", Some(&book_id)).await;
+        insert_request(&db, "loan-bob", bob, "978-same", Some(&book_id)).await;
+
+        let bob_copy = insert_borrowed_copy(&db, &book_id, Some(bob)).await;
+        let found = find_accepted_outgoing_request(&db, &bob_copy, "978-same")
+            .await
+            .expect("query");
+
+        assert_eq!(
+            found.map(|r| r.id),
+            Some("loan-bob".to_string()),
+            "returning Bob's copy must close Bob's loan, not Alice's"
+        );
+    }
+
+    /// Rows predating the `book_id` column fall back to the ISBN, narrowed to the
+    /// lender the copy records.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_legacy_request_falls_back_to_the_isbn_scoped_to_the_lender() {
+        let db = setup().await;
+        let alice = insert_test_peer(&db, "alice").await;
+        let bob = insert_test_peer(&db, "bob").await;
+
+        insert_request(&db, "loan-alice", alice, "978-same", None).await;
+        insert_request(&db, "loan-bob", bob, "978-same", None).await;
+
+        let book_id = insert_book(&db, "Le Livre", Some("978-same")).await;
+        let bob_copy = insert_borrowed_copy(&db, &book_id, Some(bob)).await;
+        let found = find_accepted_outgoing_request(&db, &bob_copy, "978-same")
+            .await
+            .expect("query");
+
+        assert_eq!(
+            found.map(|r| r.id),
+            Some("loan-bob".to_string()),
+            "the lender on the copy disambiguates the legacy rows"
+        );
+    }
+
+    /// A book lent without an ISBN used to be unresolvable, so the lender was never
+    /// notified of the return. `book_id` fixes that.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_loan_without_an_isbn_is_still_resolved() {
+        let db = setup().await;
+        let alice = insert_test_peer(&db, "alice").await;
+        let book_id = insert_book(&db, "Sans ISBN", None).await;
+        insert_request(&db, "loan-alice", alice, "", Some(&book_id)).await;
+
+        let the_copy = insert_borrowed_copy(&db, &book_id, Some(alice)).await;
+        let found = find_accepted_outgoing_request(&db, &the_copy, "")
+            .await
+            .expect("query");
+
+        assert_eq!(found.map(|r| r.id), Some("loan-alice".to_string()));
+    }
+
+    /// The nominal losing scenario before this fix: borrow a book from a peer,
+    /// read it, mark it read, give it back. The book used to be deleted along
+    /// with the reading dates, the rating and the notes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn returning_a_read_but_unowned_book_keeps_it() {
+        let db = setup().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        let bk = book::ActiveModel {
+            title: Set("Le Livre".to_string()),
+            owned: Set(false),
+            reading_status: Set("read".to_string()),
+            user_rating: Set(Some(8)),
+            finished_reading_at: Set(Some("2026-07-01".to_string())),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert book");
+
+        // The handler deletes the borrowed copy before calling us.
+        retain_returned_book(&db, bk.id.clone()).await;
+
+        let after = book::Entity::find_by_id(bk.id.as_str())
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("book must survive a loan return");
+        assert!(!after.owned);
+        assert_eq!(after.reading_status, "read");
+        assert_eq!(after.user_rating, Some(8));
+        assert_eq!(after.finished_reading_at.as_deref(), Some("2026-07-01"));
+    }
+
+    /// A wishlist book with no copies is equally retained: nothing about the
+    /// return path may delete a book row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn returning_never_deletes_even_a_bare_book() {
+        let db = setup().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        let bk = book::ActiveModel {
+            title: Set("Nu".to_string()),
+            owned: Set(false),
+            reading_status: Set("to_read".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert book");
+
+        retain_returned_book(&db, bk.id.clone()).await;
+
+        assert!(
+            book::Entity::find_by_id(bk.id.as_str())
+                .one(&db)
+                .await
+                .expect("find")
+                .is_some(),
+            "a to_read, unowned, copy-less book must still be retained"
+        );
+        assert_eq!(
+            copy::Entity::find()
+                .filter(copy::Column::BookId.eq(bk.id.as_str()))
+                .count(&db)
+                .await
+                .expect("count"),
+            0
         );
     }
 }

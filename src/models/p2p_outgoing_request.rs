@@ -11,6 +11,10 @@ pub struct Model {
     pub book_title: String,
     pub status: String,
     pub lender_request_id: Option<String>,
+    /// Local `books.uuid` of the borrowed book, set once the borrowed copy
+    /// exists. NULL on rows created before the request was confirmed, and on
+    /// rows predating this column.
+    pub book_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
