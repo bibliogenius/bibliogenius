@@ -95,6 +95,10 @@ impl From<Model> for super::Book {
             updated_at: None,
             // Owner-only sync state; never meaningful for a peer-cached row.
             hub_cover_upload_failed_at: None,
+            // Possession flags describe our own copies. A peer's book has none,
+            // and the owner's loan state is redacted from what they send us.
+            is_borrowed: None,
+            is_lent: None,
         }
     }
 }

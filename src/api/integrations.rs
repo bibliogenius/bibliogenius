@@ -689,6 +689,9 @@ pub async fn search_unified(
                 added_at: None,
                 updated_at: None,
                 hub_cover_upload_failed_at: None,
+                // A search result is not in the library: it has no copies.
+                is_borrowed: None,
+                is_lent: None,
             };
             results.push(book);
         }
@@ -740,6 +743,9 @@ pub async fn search_unified(
                     added_at: None,
                     updated_at: None,
                     hub_cover_upload_failed_at: None,
+                    // A search result is not in the library: it has no copies.
+                    is_borrowed: None,
+                    is_lent: None,
                 };
                 results.push(book);
             }
@@ -832,6 +838,9 @@ pub async fn search_unified(
                     added_at: None,
                     updated_at: None,
                     hub_cover_upload_failed_at: None,
+                    // A search result is not in the library: it has no copies.
+                    is_borrowed: None,
+                    is_lent: None,
                 };
                 results.push(book);
             }

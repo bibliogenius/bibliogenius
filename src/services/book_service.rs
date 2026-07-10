@@ -142,9 +142,9 @@ pub async fn list_books(
 
     tracing::info!("DB query returned {} books", books_with_authors.len());
 
-    // Batch-fetch lent/borrowed sets for the owner-only reading_status
-    // override below. `available_copies` is populated separately via the
-    // shared `populate_available_copies` helper so HTTP peer-facing paths
+    // Batch-fetch the lent/borrowed sets backing the owner-only `is_lent` and
+    // `is_borrowed` flags below. `available_copies` is populated separately via
+    // the shared `populate_available_copies` helper so HTTP peer-facing paths
     // stay consistent with this FRB path.
     let book_ids: Vec<String> = books_with_authors
         .iter()
@@ -167,7 +167,11 @@ pub async fn list_books(
             if c.status == "loaned" {
                 lent_set.insert(c.book_id.clone());
             }
-            if c.status == "borrowed" && c.is_temporary {
+            // Every borrowed copy counts, whatever its provenance. Scoping this
+            // to `is_temporary` would drop copies borrowed from a contact, which
+            // are stored permanently: their book carried no loan marker at all,
+            // and being unowned it fell out of the default library view.
+            if c.status == "borrowed" {
                 borrowed_set.insert(c.book_id.clone());
             }
         }
@@ -192,14 +196,13 @@ pub async fn list_books(
             );
         }
 
-        // Override reading_status based on copy status:
-        // - Temporary copy borrowed → I borrowed this book from someone
-        // - Own copy borrowed → I lent this book to someone
-        if borrowed_set.contains(book_dto.id.as_deref().unwrap_or("")) {
-            book_dto.reading_status = Some("borrowed".to_string());
-        } else if lent_set.contains(book_dto.id.as_deref().unwrap_or("")) {
-            book_dto.reading_status = Some("lent".to_string());
-        }
+        // Possession, reported alongside the reading status rather than on top
+        // of it. The two axes are independent and cumulative: a book can be lent
+        // out (our copy, at a friend's) while another copy of it sits borrowed on
+        // our shelf. `reading_status` keeps whatever the user chose.
+        let book_id = book_dto.id.as_deref().unwrap_or("");
+        book_dto.is_borrowed = Some(borrowed_set.contains(book_id));
+        book_dto.is_lent = Some(lent_set.contains(book_id));
 
         // In-memory status filter (safety net)
         if let Some(status_filter) = &filter.status
@@ -1799,5 +1802,141 @@ mod tests {
             0,
             "explicit empty author update must clear book_authors so the user-removed authors do not resurrect on re-fetch",
         );
+    }
+
+    // ---- Possession flags: `is_borrowed` / `is_lent` ----
+    //
+    // `reading_status` used to be overwritten with "borrowed"/"lent" in the DTO,
+    // which merged two independent axes and hid the reading value. These pin the
+    // separation down.
+
+    async fn insert_test_book_with_status(
+        db: &DatabaseConnection,
+        title: &str,
+        reading_status: &str,
+    ) -> String {
+        use crate::models::book;
+        use sea_orm::Set;
+        let now = chrono::Utc::now().to_rfc3339();
+        let id = uuid::Uuid::new_v4().to_string();
+        book::Entity::insert(book::ActiveModel {
+            id: Set(id.clone()),
+            title: Set(title.to_owned()),
+            reading_status: Set(reading_status.to_owned()),
+            owned: Set(false),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn only_book(db: &DatabaseConnection, status: Option<&str>) -> Book {
+        let filter = BookFilter {
+            status: status.map(str::to_owned),
+            title: None,
+            tag: None,
+            author: None,
+        };
+        let mut books = list_books(db, filter).await.unwrap();
+        assert_eq!(
+            books.len(),
+            1,
+            "expected exactly one book to survive filters"
+        );
+        books.remove(0)
+    }
+
+    /// A book borrowed from a peer and marked "read" keeps its reading status.
+    /// Under the old overwrite it came back as "borrowed", so the book never
+    /// appeared under the "read" filter until the loan was returned.
+    #[tokio::test]
+    async fn a_borrowed_book_keeps_its_reading_status() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+        let id = insert_test_book_with_status(&db, "Borrowed and read", "read").await;
+        insert_test_copy(&db, &id, "borrowed", true).await;
+
+        let book = only_book(&db, None).await;
+        assert_eq!(book.reading_status.as_deref(), Some("read"));
+        assert_eq!(book.is_borrowed, Some(true));
+        assert_eq!(book.is_lent, Some(false));
+    }
+
+    /// A copy borrowed from a contact is stored with `is_temporary = false`. The
+    /// old `borrowed_set` required `is_temporary`, so such a book carried no loan
+    /// marker at all and, being unowned, dropped out of the default library view.
+    #[tokio::test]
+    async fn a_contact_borrowed_copy_is_flagged_as_borrowed() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+        let id = insert_test_book_with_status(&db, "Borrowed from a friend", "to_read").await;
+        insert_test_copy(&db, &id, "borrowed", false).await;
+
+        let book = only_book(&db, None).await;
+        assert_eq!(book.is_borrowed, Some(true));
+    }
+
+    /// The two axes are independent: our own copy is at a friend's while another
+    /// copy of the same title sits borrowed on our shelf. The old `else if` gave
+    /// "borrowed" precedence and the lend simply vanished from the DTO.
+    #[tokio::test]
+    async fn a_book_lent_and_borrowed_at_once_carries_both_flags() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+        let id = insert_test_book_with_status(&db, "Both ways", "reading").await;
+        insert_test_copy(&db, &id, "loaned", false).await;
+        insert_test_copy(&db, &id, "borrowed", true).await;
+
+        let book = only_book(&db, None).await;
+        assert_eq!(book.is_borrowed, Some(true));
+        assert_eq!(book.is_lent, Some(true));
+        assert_eq!(book.reading_status.as_deref(), Some("reading"));
+    }
+
+    /// A book with no copies is neither borrowed nor lent. `Some(false)` and not
+    /// `None`: the owner path always computes the answer, and Dart reads `null`
+    /// as "not computed", never as "false".
+    #[tokio::test]
+    async fn a_book_without_copies_reports_both_flags_false() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+        insert_test_book_with_status(&db, "On my shelf", "to_read").await;
+
+        let book = only_book(&db, None).await;
+        assert_eq!(book.is_borrowed, Some(false));
+        assert_eq!(book.is_lent, Some(false));
+    }
+
+    /// The server-side status filter must see the real reading status. The DB
+    /// query already selected this row on `reading_status = 'read'`; the old
+    /// in-memory net then compared the overwritten "borrowed" and dropped it.
+    #[tokio::test]
+    async fn the_status_filter_keeps_a_borrowed_book_marked_read() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+        let id = insert_test_book_with_status(&db, "Borrowed and read", "read").await;
+        insert_test_copy(&db, &id, "borrowed", true).await;
+
+        let book = only_book(&db, Some("read")).await;
+        assert_eq!(book.title, "Borrowed and read");
+        assert_eq!(book.is_borrowed, Some(true));
+    }
+
+    /// Possession is personal: a peer browsing our catalogue learns what we hold,
+    /// not that we borrowed it from someone else.
+    #[test]
+    fn redact_for_peer_strips_the_possession_flags() {
+        let mut book = Book {
+            is_borrowed: Some(true),
+            is_lent: Some(true),
+            ..Default::default()
+        };
+        book.redact_for_peer();
+        assert_eq!(book.is_borrowed, None);
+        assert_eq!(book.is_lent, None);
     }
 }

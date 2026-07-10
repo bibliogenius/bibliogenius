@@ -140,6 +140,15 @@ pub struct FrbBook {
     /// NULL when the most recent attempt succeeded or none ever ran. Read by
     /// the owner's UI to surface a warning badge while a retry pends.
     pub hub_cover_upload_failed_at: Option<String>,
+    /// Whether at least one copy of this book is currently borrowed (from a
+    /// peer or a contact), and whether at least one copy the user owns is
+    /// currently lent out. Two independent axes: both can be true at once.
+    ///
+    /// Possession, never reading: `reading_status` keeps its own meaning.
+    /// Derived from the `copies` table on read, never stored. `None` means
+    /// "not computed" (a write path, a search result), never "false".
+    pub is_borrowed: Option<bool>,
+    pub is_lent: Option<bool>,
 }
 
 /// Convert domain Book to FFI-safe FrbBook
@@ -172,6 +181,8 @@ impl From<crate::models::Book> for FrbBook {
             page_count: book.page_count,
             added_at: book.added_at,
             hub_cover_upload_failed_at: book.hub_cover_upload_failed_at,
+            is_borrowed: book.is_borrowed,
+            is_lent: book.is_lent,
         }
     }
 }
@@ -1504,6 +1515,10 @@ impl From<FrbBook> for crate::models::Book {
             // where books are read directly from the Model.
             updated_at: None,
             hub_cover_upload_failed_at: frb_book.hub_cover_upload_failed_at,
+            // Inbound write path: possession is derived from `copies` on read,
+            // never dictated by the client. Whatever Dart sent is discarded.
+            is_borrowed: None,
+            is_lent: None,
         }
     }
 }

@@ -198,6 +198,21 @@ pub struct Book {
     /// visitors never see another library's internal sync state.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub hub_cover_upload_failed_at: Option<String>,
+    /// Whether at least one copy of this book is currently borrowed, from a
+    /// peer or from a contact. Possession, not reading: it says nothing about
+    /// `reading_status`, and a borrowed book can be read, to_read or abandoned
+    /// like any other.
+    ///
+    /// Independent of `is_lent`: the owner may lend their own copy while
+    /// borrowing another of the same title, so both can be true at once. Only
+    /// owner-facing read paths populate it; `None` means "not computed", never
+    /// "false". Redacted for peers: whom we borrow from is nobody's business.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub is_borrowed: Option<bool>,
+    /// Whether at least one copy the user owns is currently lent out.
+    /// See `is_borrowed` for the axis and the `None` semantics.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub is_lent: Option<bool>,
 }
 
 impl From<Model> for Book {
@@ -260,6 +275,10 @@ impl From<Model> for Book {
             // this from `book_local` (see `book_service`); other callers leave
             // it None.
             hub_cover_upload_failed_at: None,
+            // Derived from the `copies` table, not from the book row. Owner-facing
+            // read paths populate them (see `book_service::list_books`).
+            is_borrowed: None,
+            is_lent: None,
         }
     }
 }
@@ -434,6 +453,11 @@ impl Book {
         self.private = None;
         // Internal sync state: peers have no business knowing our retry backlog.
         self.hub_cover_upload_failed_at = None;
+        // Possession state is personal: a visitor learns what we hold, not that
+        // we borrowed it from someone, nor whom we lent it to. `available_copies`
+        // already tells them what they can ask for.
+        self.is_borrowed = None;
+        self.is_lent = None;
     }
 
     /// Appends the canonical `?v={tag}` cache-buster to an already-built

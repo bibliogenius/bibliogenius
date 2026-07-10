@@ -7585,6 +7585,8 @@ impl SseDecode for crate::api::frb::FrbBook {
         let mut var_pageCount = <Option<i32>>::sse_decode(deserializer);
         let mut var_addedAt = <Option<String>>::sse_decode(deserializer);
         let mut var_hubCoverUploadFailedAt = <Option<String>>::sse_decode(deserializer);
+        let mut var_isBorrowed = <Option<bool>>::sse_decode(deserializer);
+        let mut var_isLent = <Option<bool>>::sse_decode(deserializer);
         return crate::api::frb::FrbBook {
             id: var_id,
             title: var_title,
@@ -7610,6 +7612,8 @@ impl SseDecode for crate::api::frb::FrbBook {
             page_count: var_pageCount,
             added_at: var_addedAt,
             hub_cover_upload_failed_at: var_hubCoverUploadFailedAt,
+            is_borrowed: var_isBorrowed,
+            is_lent: var_isLent,
         };
     }
 }
@@ -10008,6 +10012,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbBook {
             self.page_count.into_into_dart().into_dart(),
             self.added_at.into_into_dart().into_dart(),
             self.hub_cover_upload_failed_at.into_into_dart().into_dart(),
+            self.is_borrowed.into_into_dart().into_dart(),
+            self.is_lent.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -11438,6 +11444,8 @@ impl SseEncode for crate::api::frb::FrbBook {
         <Option<i32>>::sse_encode(self.page_count, serializer);
         <Option<String>>::sse_encode(self.added_at, serializer);
         <Option<String>>::sse_encode(self.hub_cover_upload_failed_at, serializer);
+        <Option<bool>>::sse_encode(self.is_borrowed, serializer);
+        <Option<bool>>::sse_encode(self.is_lent, serializer);
     }
 }
 
