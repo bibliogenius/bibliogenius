@@ -7415,6 +7415,33 @@ pub struct ReturnBorrowedBookPayload {
     pub copy_id: String,
 }
 
+/// Outcome of a borrower-initiated return.
+///
+/// The local copy is removed on every path, so HTTP 200 says nothing useful on
+/// its own. `lender_notified` is what the UI must branch on: a return the lender
+/// never hears about leaves the book out on loan on their side, indefinitely,
+/// with no signal anywhere. Reporting that as a success is a lie, and the user
+/// loses the only moment they could have acted on it.
+///
+/// `reason` names the failure so the UI (and a bug report) can tell the cases
+/// apart. It is None exactly when `lender_notified` is true.
+fn return_outcome(lender_notified: bool, reason: Option<&str>) -> axum::response::Response {
+    let message = if lender_notified {
+        "Book returned successfully"
+    } else {
+        "Copy removed locally; the lender was not notified"
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "message": message,
+            "lender_notified": lender_notified,
+            "reason": reason,
+        })),
+    )
+        .into_response()
+}
+
 /// Borrower initiates a return: notifies the lender and cleans up local data.
 pub async fn return_borrowed_book(
     State(state): State<crate::infrastructure::AppState>,
@@ -7464,6 +7491,9 @@ pub async fn return_borrowed_book(
     let outgoing_req = match outgoing {
         Ok(Some(req)) => req,
         Ok(None) => {
+            // Reached on a second synced device: `copies` replicates across the
+            // account, `p2p_outgoing_request` does not, so the request that names
+            // the loan simply is not here. The copy goes, the lender never knows.
             tracing::warn!(
                 "No accepted outgoing request found for ISBN: '{}'. Falling back to local cleanup.",
                 book_isbn
@@ -7471,21 +7501,13 @@ pub async fn return_borrowed_book(
             // Fallback: delete the local copy + clean up orphaned book
             let _ = copy::Entity::delete_by_id(payload.copy_id).exec(&db).await;
             retain_returned_book(&db, the_copy.book_id).await;
-            return (
-                StatusCode::OK,
-                Json(json!({ "message": "Copy deleted (no outgoing request found)" })),
-            )
-                .into_response();
+            return return_outcome(false, Some("no_outgoing_request"));
         }
         Err(e) => {
             tracing::error!("DB error finding outgoing request: {}", e);
             let _ = copy::Entity::delete_by_id(payload.copy_id).exec(&db).await;
             retain_returned_book(&db, the_copy.book_id).await;
-            return (
-                StatusCode::OK,
-                Json(json!({ "message": "Copy deleted (db error on request lookup)" })),
-            )
-                .into_response();
+            return return_outcome(false, Some("request_lookup_failed"));
         }
     };
 
@@ -7504,11 +7526,7 @@ pub async fn return_borrowed_book(
             active.status = Set("returned".to_string());
             active.updated_at = Set(chrono::Utc::now().to_rfc3339());
             let _ = active.update(&db).await;
-            return (
-                StatusCode::OK,
-                Json(json!({ "message": "Returned (peer not found)" })),
-            )
-                .into_response();
+            return return_outcome(false, Some("peer_unknown"));
         }
         Err(e) => {
             return (
@@ -7519,9 +7537,16 @@ pub async fn return_borrowed_book(
         }
     };
 
-    // 3. Notify the lender to mark the loan as returned
+    // 3. Notify the lender to mark the loan as returned.
+    //
+    // Awaited, both on the E2EE path and on the plaintext fallback. The fallback
+    // used to be spawned, so its failure only ever reached the log while the user
+    // was shown a success: the one moment they could have acted on it. The E2EE
+    // attempt above already blocks, so awaiting the fallback adds no wait that was
+    // not already there.
     let lender_request_id = outgoing_req.lender_request_id.clone();
-    if let Some(ref lender_req_id) = lender_request_id {
+    let mut reason: Option<&str> = None;
+    let lender_notified = if let Some(ref lender_req_id) = lender_request_id {
         let return_payload = json!({
             "loan_id": lender_req_id,
             "status": "returned",
@@ -7534,32 +7559,40 @@ pub async fn return_borrowed_book(
                     "E2EE: Return notification sent to {} (encrypted)",
                     peer.name
                 );
+                true
             }
             Err(e) => {
+                // No plaintext retry here, as before: an E2EE channel that errors
+                // is not the same as one that is absent.
                 tracing::warn!("E2EE: Return notification error: {e}");
+                reason = Some("e2ee_send_failed");
+                false
             }
             Ok(None) => {
                 // Plaintext fallback
-                let peer_url = peer.url.clone();
-                let req_id = lender_req_id.clone();
-                tokio::spawn(async move {
-                    let client = get_safe_client();
-                    let url = format!("{}/api/peers/requests/{}", peer_url, req_id);
-                    match client
-                        .put(&url)
-                        .json(&serde_json::json!({ "status": "returned" }))
-                        .timeout(std::time::Duration::from_secs(10))
-                        .send()
-                        .await
-                    {
-                        Ok(res) => {
-                            tracing::info!("Return notification sent to lender: {}", res.status());
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to send return notification to lender: {}", e);
-                        }
+                let url = format!("{}/api/peers/requests/{}", peer.url, lender_req_id);
+                match get_safe_client()
+                    .put(&url)
+                    .json(&serde_json::json!({ "status": "returned" }))
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await
+                {
+                    Ok(res) if res.status().is_success() => {
+                        tracing::info!("Return notification sent to lender: {}", res.status());
+                        true
                     }
-                });
+                    Ok(res) => {
+                        tracing::warn!("Lender refused the return notification: {}", res.status());
+                        reason = Some("lender_refused_notification");
+                        false
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to send return notification to lender: {}", e);
+                        reason = Some("lender_unreachable");
+                        false
+                    }
+                }
             }
         }
     } else {
@@ -7567,7 +7600,9 @@ pub async fn return_borrowed_book(
             "No lender_request_id on outgoing request — cannot notify lender. \
              Lender will need to mark the return manually."
         );
-    }
+        reason = Some("no_lender_request_id");
+        false
+    };
 
     // 4. Update outgoing request status to "returned"
     let mut active: p2p_outgoing_request::ActiveModel = outgoing_req.into();
@@ -7585,11 +7620,7 @@ pub async fn return_borrowed_book(
     // 6. Clean up book if no longer needed
     retain_returned_book(&db, the_copy.book_id).await;
 
-    (
-        StatusCode::OK,
-        Json(json!({ "message": "Book returned successfully" })),
-    )
-        .into_response()
+    return_outcome(lender_notified, reason)
 }
 
 /// Find the accepted outgoing request matching the borrowed copy being returned.
@@ -9641,6 +9672,41 @@ mod loan_offer_lender_resolution_tests {
             borrowed_copy(&db).await.lender_peer_id,
             Some(lender),
             "the borrowed copy must carry the lender it came from"
+        );
+    }
+
+    /// The return endpoint answers 200 whether or not the lender heard about it,
+    /// because the local copy is removed either way. `lender_notified` is the only
+    /// field that tells the two apart, and a silent return leaves the book out on
+    /// loan on the lender's side forever. Lock the contract the UI branches on.
+    #[test]
+    fn a_return_that_notified_nobody_does_not_claim_success() {
+        use axum::body::to_bytes;
+
+        async fn body_of(response: axum::response::Response) -> serde_json::Value {
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        let silent = rt.block_on(body_of(return_outcome(false, Some("no_outgoing_request"))));
+        assert_eq!(silent["lender_notified"], serde_json::json!(false));
+        assert_eq!(silent["reason"], serde_json::json!("no_outgoing_request"));
+        assert!(
+            !silent["message"].as_str().unwrap().contains("successfully"),
+            "a return nobody heard must not read as a success: {}",
+            silent["message"]
+        );
+
+        let notified = rt.block_on(body_of(return_outcome(true, None)));
+        assert_eq!(notified["lender_notified"], serde_json::json!(true));
+        assert_eq!(
+            notified["reason"],
+            serde_json::Value::Null,
+            "reason is None exactly when the lender was notified"
         );
     }
 
