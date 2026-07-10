@@ -476,6 +476,13 @@ async fn apply_copy_create(
     let is_temporary = payload["is_temporary"].as_bool().unwrap_or(false);
 
     // Deduplication: skip if a copy with same (book_id, status, is_temporary) already exists
+    //
+    // This key predates the rule that a book row carries one borrowed copy per lender,
+    // and would collapse two peers' loans of the same book into one. It is left as is
+    // because the replay path is unreachable: `process_next_batch` only replays
+    // operations whose `source != "local"`, and the sole writer of such a row,
+    // `sync::log_remote_operation`, has no production caller. Reviving device-to-device
+    // op replay means keying this on the lender first.
     let existing = copy::Entity::find()
         .filter(copy::Column::BookId.eq(book_id.clone()))
         .filter(copy::Column::Status.eq(status.clone()))

@@ -372,6 +372,129 @@ pub async fn delete_closed_outgoing_requests(db: &DatabaseConnection) -> Result<
     Ok(result.rows_affected)
 }
 
+// ============ RECLAIM: a lender takes their book back ============
+
+/// Resolve the local book row a returned or reclaimed loan refers to.
+///
+/// The outgoing request names the book directly once it has been accepted. Requests
+/// written before that column existed carry only an ISBN, and an ISBN is not an
+/// identity: a shared one names a book the borrower owns, and a loan of a book without
+/// one stores the empty string, which `Isbn.eq("")` matches against any row holding the
+/// same empty string. Both cases would send the purge at the wrong book.
+///
+/// So the ISBN fallback resolves only when exactly one book carries it, and never when
+/// it is empty. Refusing to resolve leaves a stale copy the user can delete; resolving
+/// the wrong book deletes a live loan they cannot get back.
+pub(crate) async fn resolve_returned_book(
+    db: &DatabaseConnection,
+    book_id: Option<&str>,
+    book_isbn: &str,
+) -> Option<crate::models::book::Model> {
+    use crate::models::book;
+
+    if let Some(id) = book_id {
+        return match Book::find_by_id(id).one(db).await {
+            Ok(found) => {
+                if found.is_none() {
+                    tracing::warn!("Reclaim: outgoing request names book {id}, which is gone");
+                }
+                found
+            }
+            Err(e) => {
+                tracing::warn!("Reclaim: cannot load book {id}: {e}");
+                None
+            }
+        };
+    }
+
+    if book_isbn.is_empty() {
+        tracing::warn!("Reclaim: legacy request carries neither book_id nor ISBN, purging nothing");
+        return None;
+    }
+
+    let mut candidates = match Book::find()
+        .filter(book::Column::Isbn.eq(book_isbn))
+        .limit(2)
+        .all(db)
+        .await
+    {
+        Ok(books) => books,
+        Err(e) => {
+            tracing::warn!("Reclaim: cannot resolve book by ISBN '{book_isbn}': {e}");
+            return None;
+        }
+    };
+
+    if candidates.len() > 1 {
+        tracing::warn!(
+            "Reclaim: ISBN '{book_isbn}' names several books, refusing to guess which was lent"
+        );
+        return None;
+    }
+    if candidates.is_empty() {
+        tracing::warn!("Reclaim: ISBN '{book_isbn}' names no local book, purging nothing");
+    }
+    candidates.pop()
+}
+
+/// Delete the copies of `book_id` that `lender_peer_id` lent us, and only those.
+///
+/// Shared by the two reclaim paths, `release_reclaimed_book` (`api/e2ee.rs`, encrypted)
+/// and `update_outgoing_status` (`api/peer.rs`, plaintext). Each used to purge on its own
+/// terms, and a book row now carries one borrowed copy per lender, so an unscoped delete
+/// takes a live loan from a peer who never asked for it back.
+///
+/// A book row is shared across ISBN-equal borrows, so it can also hold a copy borrowed
+/// from a contact, or a permanent copy the user owns. Those never match.
+///
+/// A NULL `lender_peer_id` is a copy written before that column existed, or one offered
+/// in plaintext by a sender we could not resolve. It is swept in only when it is the sole
+/// peer-borrowed copy of the row, the one case where it can only be this very loan.
+/// Sitting next to another peer's copy it may be that peer's loan: leaving it stale is
+/// recoverable, deleting a live loan is not.
+pub(crate) async fn purge_copies_lent_by(
+    db: &DatabaseConnection,
+    book_id: &str,
+    lender_peer_id: i32,
+) {
+    // The census and the delete must select the same rows: the census decides whether a
+    // NULL-lender copy is unambiguous, and the delete acts on that decision. Spelling the
+    // predicate twice is how they drift apart, so it is built once here and reused.
+    let peer_borrowed = Condition::all()
+        .add(copy::Column::BookId.eq(book_id))
+        .add(copy::Column::Status.eq("borrowed"))
+        .add(copy::Column::IsTemporary.eq(true))
+        .add(copy::Column::BorrowSource.eq(crate::domain::BorrowSource::Peer.as_str()));
+
+    let peer_copies = match Copy::find().filter(peer_borrowed.clone()).all(db).await {
+        Ok(copies) => copies,
+        Err(e) => {
+            // Without this census a NULL copy cannot be shown unambiguous, so the purge
+            // would silently spare the very loan it was asked to reclaim. Say so.
+            tracing::warn!("Reclaim: cannot list peer copies of {book_id}, skipping purge: {e}");
+            return;
+        }
+    };
+    let unambiguous_null = peer_copies.len() == 1 && peer_copies[0].lender_peer_id.is_none();
+
+    let mut lent_by_sender = Condition::any().add(copy::Column::LenderPeerId.eq(lender_peer_id));
+    if unambiguous_null {
+        lent_by_sender = lent_by_sender.add(copy::Column::LenderPeerId.is_null());
+    }
+
+    match Copy::delete_many()
+        .filter(peer_borrowed.add(lent_by_sender))
+        .exec(db)
+        .await
+    {
+        Ok(res) => tracing::info!(
+            "Reclaim: purged {} copies of {book_id} lent by peer {lender_peer_id}",
+            res.rows_affected
+        ),
+        Err(e) => tracing::warn!("Reclaim: failed to purge borrowed copies of {book_id}: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::domain::DomainError;

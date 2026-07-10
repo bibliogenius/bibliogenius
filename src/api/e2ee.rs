@@ -929,8 +929,6 @@ async fn release_reclaimed_book(
     book_id: Option<&str>,
     book_isbn: &str,
 ) -> Option<crate::models::book::Model> {
-    use crate::models::copy;
-
     let bk = match book_id {
         Some(id) => crate::models::book::Entity::find_by_id(id)
             .one(db)
@@ -940,30 +938,10 @@ async fn release_reclaimed_book(
         None => resolve_reclaimed_book_by_lender(db, lender_peer_id, book_isbn).await,
     }?;
 
-    // Scope the purge to the copies this lender actually lent. A book row is shared
-    // across ISBN-equal borrows (`create_borrowed_copy` reuses it), so the same row
-    // can carry a copy borrowed from a contact, or a permanent copy of the user's
-    // own. Deleting every "borrowed" copy of the row would take those with it.
-    //
-    // A NULL `lender_peer_id` is a peer copy written before this column was
-    // populated. Only one temporary peer-borrowed copy can exist per book row (the
-    // idempotency guard in `create_borrowed_copy` refuses a second), so a NULL can
-    // only be this very loan.
-    if let Err(e) = copy::Entity::delete_many()
-        .filter(copy::Column::BookId.eq(bk.id.as_str()))
-        .filter(copy::Column::Status.eq("borrowed"))
-        .filter(copy::Column::IsTemporary.eq(true))
-        .filter(copy::Column::BorrowSource.eq(crate::domain::BorrowSource::Peer.as_str()))
-        .filter(
-            Condition::any()
-                .add(copy::Column::LenderPeerId.eq(lender_peer_id))
-                .add(copy::Column::LenderPeerId.is_null()),
-        )
-        .exec(db)
-        .await
-    {
-        tracing::warn!("E2EE: failed to purge borrowed copies of {}: {e}", bk.id);
-    }
+    // Scope the purge to the copies this lender actually lent, through the helper the
+    // plaintext reclaim path shares. Deleting every "borrowed" copy of the row would
+    // take a contact loan, a permanent copy the user owns, or another peer's live loan.
+    crate::services::loan_service::purge_copies_lent_by(db, &bk.id, lender_peer_id).await;
 
     tracing::info!(
         "E2EE: Book {} kept after lender reclaim (owned={}, reading_status='{}')",
@@ -2057,6 +2035,33 @@ mod reclaim_tests {
         .id
     }
 
+    /// A peer-sourced copy that is no longer a live loan: available and permanent.
+    async fn insert_settled_peer_copy(
+        db: &DatabaseConnection,
+        book_id: &str,
+        lender_peer_id: i32,
+    ) -> String {
+        let lib_id = crate::utils::library_helpers::resolve_library_id(db)
+            .await
+            .expect("library");
+        let now = chrono::Utc::now().to_rfc3339();
+        copy::ActiveModel {
+            book_id: Set(book_id.to_string()),
+            library_id: Set(lib_id),
+            status: Set("available".to_string()),
+            is_temporary: Set(false),
+            lender_peer_id: Set(Some(lender_peer_id)),
+            borrow_source: Set(Some("peer".to_string())),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert settled copy")
+        .id
+    }
+
     async fn insert_outgoing_request(
         db: &DatabaseConnection,
         id: &str,
@@ -2316,6 +2321,75 @@ mod reclaim_tests {
         release_reclaimed_book(&db, lender, Some(&book_id), "978-1").await;
 
         assert_eq!(count_copies(&db, &book_id).await, 0, "legacy copy purged");
+    }
+
+    /// Only a *temporary, borrowed* peer copy is reclaimable. A row that is still tagged
+    /// as coming from this peer but is neither borrowed nor temporary is not a live loan,
+    /// and the purge must leave it alone. Pins the `status` and `is_temporary` clauses,
+    /// which `borrow_source` would otherwise mask in the other reclaim tests.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reclaim_spares_a_settled_copy_from_the_same_peer() {
+        let db = setup_test_db().await;
+        let lender = insert_lender(&db, "christophe").await;
+        let book_id = insert_read_but_not_owned(&db, "Le Livre", Some("978-1")).await;
+
+        let live_loan =
+            insert_provenanced_copy(&db, &book_id, true, Some("peer"), Some(lender)).await;
+        let settled = insert_settled_peer_copy(&db, &book_id, lender).await;
+
+        release_reclaimed_book(&db, lender, Some(&book_id), "978-1").await;
+
+        assert!(
+            copy::Entity::find_by_id(live_loan)
+                .one(&db)
+                .await
+                .expect("find")
+                .is_none(),
+            "the live loan is reclaimed"
+        );
+        assert!(
+            copy::Entity::find_by_id(settled)
+                .one(&db)
+                .await
+                .expect("find")
+                .is_some(),
+            "a copy that is neither borrowed nor temporary is not a loan to reclaim"
+        );
+    }
+
+    /// Two peers can lend the same book row once `create_borrowed_copy` keys its
+    /// idempotency guard on the lender. The purge's NULL branch then stops being
+    /// unambiguous: an unidentified copy on a row that also carries a resolved peer
+    /// copy may belong to a different lender, so a reclaim must not take it.
+    ///
+    /// Leaving a stale copy is recoverable; deleting someone else's live loan is not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reclaim_spares_an_unidentified_copy_when_another_peer_copy_exists() {
+        let db = setup_test_db().await;
+        let alice = insert_lender(&db, "alice").await;
+        let book_id = insert_read_but_not_owned(&db, "Le Livre", Some("978-1")).await;
+        let from_alice =
+            insert_provenanced_copy(&db, &book_id, true, Some("peer"), Some(alice)).await;
+        let unidentified = insert_provenanced_copy(&db, &book_id, true, Some("peer"), None).await;
+
+        release_reclaimed_book(&db, alice, Some(&book_id), "978-1").await;
+
+        assert!(
+            copy::Entity::find_by_id(from_alice)
+                .one(&db)
+                .await
+                .expect("find")
+                .is_none(),
+            "Alice reclaims the copy that names her"
+        );
+        assert!(
+            copy::Entity::find_by_id(unidentified)
+                .one(&db)
+                .await
+                .expect("find")
+                .is_some(),
+            "an unidentified copy may be another lender's loan and must survive"
+        );
     }
 
     /// A paired peer must not be able to drive a loan granted by a different peer.
