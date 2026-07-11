@@ -6154,6 +6154,12 @@ pub async fn receive_request(
             let new_peer = peer::ActiveModel {
                 name: Set(payload.from_peer_name),
                 url: Set(payload.from_peer_url),
+                // An unauthenticated POST must never mint a trusted, auto-approving peer.
+                // A first-contact library is created pending: it is auto-approved for
+                // nothing until the owner explicitly accepts it. The column default is
+                // 'accepted', so this must be set, not left to `Default`. See ADR-050.
+                connection_status: Set("pending".to_string()),
+                auto_approve: Set(false),
                 created_at: Set(chrono::Utc::now().to_rfc3339()),
                 updated_at: Set(chrono::Utc::now().to_rfc3339()),
                 ..Default::default()
@@ -6873,10 +6879,13 @@ pub async fn update_request_status(
                 tracing::warn!("E2EE: Status update error (no plaintext fallback): {e}");
             }
             Ok(None) => {
-                // E2EE not available for this peer — fall back to plaintext
+                // E2EE not available for this peer — fall back to plaintext.
+                // Assert our own identity so the borrower's ownership check accepts it:
+                // the borrower resolves this uuid and requires it to name the lender.
                 let peer_url = peer.url.clone();
                 let request_id = borrower_loan_id;
                 let status_to_send = new_status.to_string();
+                let our_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
 
                 tokio::spawn(async move {
                     let client = get_safe_client();
@@ -6892,7 +6901,10 @@ pub async fn update_request_status(
 
                     match client
                         .put(&notify_url)
-                        .json(&serde_json::json!({ "status": status_to_send }))
+                        .json(&serde_json::json!({
+                            "status": status_to_send,
+                            "library_uuid": our_uuid,
+                        }))
                         .send()
                         .await
                     {
@@ -7161,10 +7173,11 @@ pub async fn delete_request(
 }
 
 pub async fn delete_outgoing_request(
-    State(db): State<DatabaseConnection>,
+    State(state): State<crate::infrastructure::AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     use crate::models::p2p_outgoing_request;
+    let db = state.db().clone();
 
     // 1. First, retrieve the request to get the peer info
     let request = match p2p_outgoing_request::Entity::find_by_id(&id).one(&db).await {
@@ -7212,6 +7225,9 @@ pub async fn delete_outgoing_request(
     // 3. Notify the peer about the cancellation (best effort)
     let client = get_safe_client();
     let cancel_url = format!("{}/api/peers/requests/cancel/{}", peer.url, id);
+    // Assert our own identity so the lender's ownership check accepts the cancel:
+    // it resolves this uuid and requires it to name the borrower that made the request.
+    let our_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
 
     tracing::info!(
         "📡 Notifying peer {} of request cancellation: {}",
@@ -7219,7 +7235,12 @@ pub async fn delete_outgoing_request(
         cancel_url
     );
 
-    match client.delete(&cancel_url).send().await {
+    match client
+        .delete(&cancel_url)
+        .json(&json!({ "library_uuid": our_uuid }))
+        .send()
+        .await
+    {
         Ok(res) => {
             if res.status().is_success() {
                 tracing::info!("✅ Peer notified successfully");
@@ -7251,10 +7272,72 @@ pub async fn delete_outgoing_request(
 pub async fn cancel_request(
     State(db): State<DatabaseConnection>,
     Path(id): Path<String>,
+    // Optional so an older sender that posts no body still parses; a missing body then
+    // reads as an anonymous cancel and is refused below.
+    body: Option<Json<serde_json::Value>>,
 ) -> impl IntoResponse {
     use crate::models::p2p_request;
 
     tracing::info!("📨 Received cancellation notification for request: {}", id);
+
+    // Ownership: a cancellation deletes an incoming request, so a guessed id would
+    // otherwise let any host on the LAN drop any pending loan request. Only the borrower
+    // that created the request may cancel it, mirroring the encrypted path's sender check.
+    let request = match p2p_request::Entity::find_by_id(&id).one(&db).await {
+        Ok(Some(req)) => req,
+        // Idempotent: nothing to cancel, and nothing to leak about who asked.
+        Ok(None) => {
+            tracing::warn!("Cancellation target not found: {}", id);
+            return StatusCode::OK.into_response();
+        }
+        Err(e) => {
+            tracing::error!("❌ Failed to load request for cancellation: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let requester = peer::Entity::find_by_id(request.from_peer_id)
+        .one(&db)
+        .await
+        .ok()
+        .flatten();
+    if requester
+        .as_ref()
+        .map(|p| p.key_exchange_done)
+        .unwrap_or(false)
+    {
+        tracing::warn!(
+            "Plaintext cancel for request {} names a key-exchanged peer; refusing",
+            id
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "This request is served over the encrypted channel" })),
+        )
+            .into_response();
+    }
+    let claimed_uuid = body
+        .as_ref()
+        .and_then(|j| j.get("library_uuid"))
+        .and_then(|v| v.as_str());
+    if resolve_peer_by_library_uuid(&db, claimed_uuid)
+        .await
+        .map(|p| p.id)
+        != Some(request.from_peer_id)
+    {
+        tracing::warn!(
+            "Plaintext cancel for request {} carries no matching sender identity; refusing",
+            id
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "Sender does not own this request" })),
+        )
+            .into_response();
+    }
 
     // Delete the incoming request that matches this ID
     match p2p_request::Entity::delete_by_id(&id).exec(&db).await {
@@ -7320,6 +7403,54 @@ pub async fn update_outgoing_status(
                 .into_response();
         }
     };
+
+    // Ownership: this endpoint has no authenticated sender, so a guessed request id
+    // would otherwise let any host on the LAN drive someone else's loan and, on
+    // "returned", purge the borrowed copy. Reconstruct the identity check that
+    // `handle_status_update` (api/e2ee.rs) runs on the encrypted path: only the lender
+    // the request names may move it.
+    let lender = peer::Entity::find_by_id(request.to_peer_id)
+        .one(&db)
+        .await
+        .ok()
+        .flatten();
+    // A lender that completed the key exchange would have used the encrypted,
+    // authenticated channel, the only place a status update is trusted. A plaintext
+    // update naming such a loan cannot be them, so refuse it.
+    if lender
+        .as_ref()
+        .map(|p| p.key_exchange_done)
+        .unwrap_or(false)
+    {
+        tracing::warn!(
+            "Plaintext status update for request {} names a key-exchanged lender; refusing",
+            id
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "This loan is served over the encrypted channel" })),
+        )
+            .into_response();
+    }
+    // For a keyless lender the only identity on offer is the `library_uuid` the payload
+    // asserts. Resolve it (lookup only, never create) and require it to name that lender.
+    // Absent or mismatched means anonymous: refuse rather than trust an unauthenticated POST.
+    let claimed_uuid = payload.get("library_uuid").and_then(|v| v.as_str());
+    if resolve_peer_by_library_uuid(&db, claimed_uuid)
+        .await
+        .map(|p| p.id)
+        != Some(request.to_peer_id)
+    {
+        tracing::warn!(
+            "Plaintext status update for request {} carries no matching sender identity; refusing",
+            id
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "Sender does not own this loan" })),
+        )
+            .into_response();
+    }
 
     // Read what the cleanup below needs before the model is consumed by the update.
     // The request names the lender, the book it was accepted for, and its own title.
@@ -7829,17 +7960,15 @@ pub async fn receive_loan_request(
                 let _ = peer::Entity::delete_by_id(conflict.id).exec(&db).await;
             }
 
-            let conn_status = if is_connection_validation_enabled(&db).await {
-                "pending"
-            } else {
-                "accepted"
-            };
             let new_peer = peer::ActiveModel {
                 name: Set(payload.from_name),
                 url: Set(payload.from_url),
                 library_uuid: Set(payload.library_uuid),
-                auto_approve: Set(conn_status == "accepted"),
-                connection_status: Set(conn_status.to_string()),
+                // Always pending: an unauthenticated inbound request never mints a
+                // trusted, auto-approving peer, regardless of the connection_validation
+                // toggle. We always validate here. See ADR-050.
+                auto_approve: Set(false),
+                connection_status: Set("pending".to_string()),
                 created_at: Set(Utc::now().to_rfc3339()),
                 updated_at: Set(Utc::now().to_rfc3339()),
                 ..Default::default()
@@ -10034,11 +10163,14 @@ mod multi_lender_borrow_tests {
     }
 
     /// Drive the plaintext reclaim endpoint the lender calls over the LAN.
-    async fn mark_returned(db: &DatabaseConnection, request_id: &str) {
+    async fn mark_returned(db: &DatabaseConnection, request_id: &str, sender_uuid: &str) {
+        // The lender now asserts its identity on the plaintext reclaim, and the borrower
+        // requires it to name the loan's lender (ADR-050). These tests exercise the purge
+        // logic, so they route through the gate with the real lender's uuid.
         let response = update_outgoing_status(
             State(db.clone()),
             axum::extract::Path(request_id.to_string()),
-            Json(serde_json::json!({ "status": "returned" })),
+            Json(serde_json::json!({ "status": "returned", "library_uuid": sender_uuid })),
         )
         .await
         .into_response();
@@ -10246,7 +10378,7 @@ mod multi_lender_borrow_tests {
         let response = update_outgoing_status(
             State(db.clone()),
             axum::extract::Path(alice_request.id.clone()),
-            Json(serde_json::json!({ "status": "returned" })),
+            Json(serde_json::json!({ "status": "returned", "library_uuid": ALICE_UUID })),
         )
         .await
         .into_response();
@@ -10417,7 +10549,7 @@ mod multi_lender_borrow_tests {
 
         // A request predating the `book_id` column: only the ISBN identifies the loan.
         insert_legacy_request(&db, "legacy-req", alice, "978-same").await;
-        mark_returned(&db, "legacy-req").await;
+        mark_returned(&db, "legacy-req", ALICE_UUID).await;
 
         assert!(
             copy::Entity::find_by_id(copy_first.clone())
@@ -10447,7 +10579,7 @@ mod multi_lender_borrow_tests {
         let unrelated_copy = insert_peer_copy(&db, &unrelated, Some(alice)).await;
 
         insert_legacy_request(&db, "legacy-req", alice, "").await;
-        mark_returned(&db, "legacy-req").await;
+        mark_returned(&db, "legacy-req", ALICE_UUID).await;
 
         assert!(
             copy::Entity::find_by_id(unrelated_copy)
@@ -10470,7 +10602,7 @@ mod multi_lender_borrow_tests {
         let legacy_copy = insert_peer_copy(&db, &book_id, None).await; // pre-lender_peer_id
 
         insert_legacy_request(&db, "legacy-req", alice, "978-unique").await;
-        mark_returned(&db, "legacy-req").await;
+        mark_returned(&db, "legacy-req", ALICE_UUID).await;
 
         assert!(
             copy::Entity::find_by_id(legacy_copy)
@@ -10532,7 +10664,7 @@ mod multi_lender_borrow_tests {
         let response = update_outgoing_status(
             State(db.clone()),
             axum::extract::Path(alice_request.id.clone()),
-            Json(serde_json::json!({ "status": "returned" })),
+            Json(serde_json::json!({ "status": "returned", "library_uuid": ALICE_UUID })),
         )
         .await
         .into_response();
@@ -10595,5 +10727,324 @@ mod multi_lender_borrow_tests {
         let copies = borrowed_copies(&db).await;
         assert_eq!(copies.len(), 1, "an unidentified lender keeps one copy");
         assert_eq!(copies[0].lender_peer_id, None);
+    }
+
+    // ===== Sender identity on the plaintext P2P endpoints (ADR-050) =====
+    //
+    // The plaintext endpoints have no authenticated sender. Without the ownership check
+    // any host on the LAN could name a request id and drive someone else's loan, purging
+    // a borrowed copy, or delete a pending request. These tests pin the encrypted path's
+    // invariant (`handle_status_update`, api/e2ee.rs) onto the plaintext twins.
+
+    /// A peer that completed the key exchange, so it would only ever be trusted over the
+    /// encrypted channel.
+    async fn insert_peer_with_keys(db: &DatabaseConnection, name: &str, library_uuid: &str) -> i32 {
+        let now = chrono::Utc::now().to_rfc3339();
+        peer::ActiveModel {
+            name: Set(name.to_string()),
+            url: Set(format!("http://{name}.local:8000")),
+            library_uuid: Set(Some(library_uuid.to_string())),
+            connection_status: Set("accepted".to_string()),
+            key_exchange_done: Set(true),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert peer")
+        .id
+    }
+
+    async fn outgoing_status(db: &DatabaseConnection, id: &str) -> String {
+        p2p_outgoing_request::Entity::find_by_id(id)
+            .one(db)
+            .await
+            .expect("find")
+            .expect("request")
+            .status
+    }
+
+    async fn insert_incoming_request(db: &DatabaseConnection, id: &str, from_peer_id: i32) {
+        let now = chrono::Utc::now().to_rfc3339();
+        crate::models::p2p_request::ActiveModel {
+            id: Set(id.to_string()),
+            from_peer_id: Set(from_peer_id),
+            book_isbn: Set("978-x".to_string()),
+            book_title: Set("Le Livre".to_string()),
+            status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            requester_request_id: Set(None),
+        }
+        .insert(db)
+        .await
+        .expect("insert incoming request");
+    }
+
+    async fn incoming_exists(db: &DatabaseConnection, id: &str) -> bool {
+        crate::models::p2p_request::Entity::find_by_id(id)
+            .one(db)
+            .await
+            .expect("find")
+            .is_some()
+    }
+
+    /// No identity in the payload is anonymous: refuse rather than purge on a guessed id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plaintext_status_update_without_identity_is_refused() {
+        let db = setup_db().await;
+        let alice = insert_peer(&db, "alice", ALICE_UUID).await;
+        let book = insert_book_with_isbn(&db, "Le Livre", Some("978-x")).await;
+        let copy_id = insert_peer_copy(&db, &book, Some(alice)).await;
+        insert_legacy_request(&db, "req-1", alice, "978-x").await;
+
+        let response = update_outgoing_status(
+            State(db.clone()),
+            axum::extract::Path("req-1".to_string()),
+            Json(serde_json::json!({ "status": "returned" })),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            copy::Entity::find_by_id(copy_id)
+                .one(&db)
+                .await
+                .expect("find")
+                .is_some(),
+            "an anonymous status update must not purge the borrowed copy"
+        );
+        assert_eq!(outgoing_status(&db, "req-1").await, "accepted");
+    }
+
+    /// A paired peer naming another peer's loan is refused: the payload uuid must resolve
+    /// to the very lender the request names.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plaintext_status_update_from_an_intruder_is_refused() {
+        let db = setup_db().await;
+        let alice = insert_peer(&db, "alice", ALICE_UUID).await;
+        let _bob = insert_peer(&db, "bob", BOB_UUID).await;
+        let book = insert_book_with_isbn(&db, "Le Livre", Some("978-x")).await;
+        let copy_id = insert_peer_copy(&db, &book, Some(alice)).await;
+        insert_legacy_request(&db, "req-1", alice, "978-x").await;
+
+        let response = update_outgoing_status(
+            State(db.clone()),
+            axum::extract::Path("req-1".to_string()),
+            Json(serde_json::json!({ "status": "returned", "library_uuid": BOB_UUID })),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            copy::Entity::find_by_id(copy_id)
+                .one(&db)
+                .await
+                .expect("find")
+                .is_some(),
+            "an intruder must not purge a copy borrowed from another peer"
+        );
+        assert_eq!(outgoing_status(&db, "req-1").await, "accepted");
+    }
+
+    /// A lender that completed the key exchange would use the encrypted channel, so a
+    /// plaintext update naming its loan is refused even when it carries that lender's uuid.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plaintext_status_update_naming_a_key_exchanged_lender_is_refused() {
+        let db = setup_db().await;
+        let alice = insert_peer_with_keys(&db, "alice", ALICE_UUID).await;
+        let book = insert_book_with_isbn(&db, "Le Livre", Some("978-x")).await;
+        let copy_id = insert_peer_copy(&db, &book, Some(alice)).await;
+        insert_legacy_request(&db, "req-1", alice, "978-x").await;
+
+        let response = update_outgoing_status(
+            State(db.clone()),
+            axum::extract::Path("req-1".to_string()),
+            Json(serde_json::json!({ "status": "returned", "library_uuid": ALICE_UUID })),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            copy::Entity::find_by_id(copy_id)
+                .one(&db)
+                .await
+                .expect("find")
+                .is_some(),
+            "a key-exchanged lender is served over E2EE; the plaintext twin must refuse"
+        );
+        assert_eq!(outgoing_status(&db, "req-1").await, "accepted");
+    }
+
+    /// Guard against over-tightening: the keyless lender the request names still closes it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_lender_named_by_the_request_still_closes_the_loan() {
+        let db = setup_db().await;
+        let alice = insert_peer(&db, "alice", ALICE_UUID).await;
+        let book = insert_book_with_isbn(&db, "Le Livre", Some("978-x")).await;
+        let copy_id = insert_peer_copy(&db, &book, Some(alice)).await;
+        insert_legacy_request(&db, "req-1", alice, "978-x").await;
+
+        let response = update_outgoing_status(
+            State(db.clone()),
+            axum::extract::Path("req-1".to_string()),
+            Json(serde_json::json!({ "status": "returned", "library_uuid": ALICE_UUID })),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            copy::Entity::find_by_id(copy_id)
+                .one(&db)
+                .await
+                .expect("find")
+                .is_none(),
+            "the real lender still reclaims its copy"
+        );
+        assert_eq!(outgoing_status(&db, "req-1").await, "returned");
+    }
+
+    /// A cancel with no identity is anonymous: it must not delete the request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plaintext_cancel_without_identity_is_refused() {
+        let db = setup_db().await;
+        let alice = insert_peer(&db, "alice", ALICE_UUID).await;
+        insert_incoming_request(&db, "inc-1", alice).await;
+
+        let response = cancel_request(
+            State(db.clone()),
+            axum::extract::Path("inc-1".to_string()),
+            None,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            incoming_exists(&db, "inc-1").await,
+            "an anonymous cancel must not delete the request"
+        );
+    }
+
+    /// A cancel from a peer other than the request's author is refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plaintext_cancel_from_an_intruder_is_refused() {
+        let db = setup_db().await;
+        let alice = insert_peer(&db, "alice", ALICE_UUID).await;
+        let _bob = insert_peer(&db, "bob", BOB_UUID).await;
+        insert_incoming_request(&db, "inc-1", alice).await;
+
+        let response = cancel_request(
+            State(db.clone()),
+            axum::extract::Path("inc-1".to_string()),
+            Some(Json(serde_json::json!({ "library_uuid": BOB_UUID }))),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            incoming_exists(&db, "inc-1").await,
+            "an intruder must not cancel another peer's request"
+        );
+    }
+
+    /// The borrower that authored the request still cancels its own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_borrower_cancels_its_own_request() {
+        let db = setup_db().await;
+        let alice = insert_peer(&db, "alice", ALICE_UUID).await;
+        insert_incoming_request(&db, "inc-1", alice).await;
+
+        let response = cancel_request(
+            State(db.clone()),
+            axum::extract::Path("inc-1".to_string()),
+            Some(Json(serde_json::json!({ "library_uuid": ALICE_UUID }))),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            !incoming_exists(&db, "inc-1").await,
+            "the author's own cancel still deletes the request"
+        );
+    }
+
+    /// Decision 2: a first-contact library from an unauthenticated POST is created pending,
+    /// never auto-trusted, so the auto-approve-loans option cannot fire for a stranger.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_first_contact_peer_is_created_pending_not_accepted() {
+        let db = setup_db().await;
+        let state = crate::infrastructure::AppState::new(db.clone());
+
+        // The response code is orthogonal here (a stranger asking for a book we do not
+        // own is legitimately auto-rejected); the peer is created either way, and its
+        // status is what governs whether auto-approve-loans can ever fire for it.
+        let _ = receive_request(
+            State(state),
+            Json(IncomingRequest {
+                from_peer_url: "http://stranger.local:8000".to_string(),
+                from_peer_name: "stranger".to_string(),
+                book_isbn: "978-x".to_string(),
+                book_title: "Le Livre".to_string(),
+                requester_request_id: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        let created = peer::Entity::find()
+            .filter(peer::Column::Url.eq("http://stranger.local:8000"))
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("peer created");
+        assert_eq!(
+            created.connection_status, "pending",
+            "a first-contact peer is not auto-trusted"
+        );
+        // `auto_approve == false` is precisely what makes the auto-approve-loans gate
+        // (`is_auto_approve_loans_enabled && connection_status == \"accepted\"`) fail for a
+        // stranger: the option can no longer fire on a first, unauthenticated contact.
+        assert!(
+            !created.auto_approve,
+            "a first-contact peer does not auto-approve loans"
+        );
+    }
+
+    /// The aligned inbound-request handler also creates a pending peer, regardless of the
+    /// connection-validation toggle (off by default here).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_inbound_loan_request_creates_a_pending_peer() {
+        let db = setup_db().await;
+
+        let response = receive_loan_request(
+            State(db.clone()),
+            Json(IncomingLoanRequest {
+                from_name: "stranger".to_string(),
+                from_url: "http://stranger2.local:8000".to_string(),
+                library_uuid: Some("stranger-uuid".to_string()),
+                book_isbn: "978-x".to_string(),
+                book_title: "Le Livre".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let created = peer::Entity::find()
+            .filter(peer::Column::Url.eq("http://stranger2.local:8000"))
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("peer created");
+        assert_eq!(created.connection_status, "pending");
+        assert!(!created.auto_approve);
     }
 }

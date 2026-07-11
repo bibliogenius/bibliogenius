@@ -167,9 +167,10 @@ pub async fn create_loan(
 }
 
 pub async fn return_loan(
-    State(db): State<DatabaseConnection>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let db = state.db().clone();
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     // 1. Find Loan
@@ -285,37 +286,70 @@ pub async fn return_loan(
                     req_active.updated_at = Set(now.clone());
                     let _ = req_active.update(&db).await;
 
-                    // Notify Peer
-                    // We spin off a task or do it here? better await since we want to know if it fails?
-                    // Actually, fire and forget regarding the user response, but log it.
-                    let peer_url = peer.url.clone();
+                    // Notify the borrower that the loan is returned. Encrypted channel
+                    // first; fall back to plaintext only for a peer without keys, and then
+                    // assert our identity so the borrower's ownership check accepts it (it
+                    // resolves this uuid and requires it to name the lender). This path used
+                    // to POST plaintext unconditionally, which both leaked to E2EE peers and,
+                    // now that the borrower authenticates the sender, would be refused.
+                    //
+                    // Spawned and fire-and-forget, as this notification always was: the return
+                    // has already succeeded locally, and `try_send_e2ee` may wait up to the
+                    // relay timeout, which must never block the HTTP response.
+                    let our_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
                     let req_id = request.id.clone();
-
+                    let state = state.clone();
+                    let notify_peer = peer.clone();
                     tokio::spawn(async move {
-                        let client = reqwest::Client::new();
-                        let url = format!("{}/api/peers/requests/status/{}", peer_url, req_id);
-                        tracing::info!("📡 Notifying peer of return: POST {}", url);
-
-                        match client
-                            .put(&url)
-                            .json(&serde_json::json!({
-                                "status": "returned"
-                            }))
-                            .send()
-                            .await
+                        match crate::api::peer::try_send_e2ee(
+                            &state,
+                            &notify_peer,
+                            "status_update",
+                            serde_json::json!({ "loan_id": req_id.clone(), "status": "returned" }),
+                        )
+                        .await
                         {
-                            Ok(res) => {
-                                if res.status().is_success() {
-                                    tracing::info!("✅ Peer notified of return successfully");
-                                } else {
-                                    tracing::error!(
-                                        "⚠️ Peer notification failed: status {}",
-                                        res.status()
-                                    );
-                                }
+                            Ok(Some(_)) => {
+                                tracing::info!("✅ Borrower notified of return (encrypted)");
                             }
                             Err(e) => {
-                                tracing::error!("❌ Failed to notify peer: {}", e);
+                                // An E2EE channel that errors is not one that is absent: do
+                                // not retry in plaintext, to avoid a duplicate notification.
+                                tracing::warn!(
+                                    "Return notification error (no plaintext fallback): {e}"
+                                );
+                            }
+                            Ok(None) => {
+                                let url = format!(
+                                    "{}/api/peers/requests/status/{}",
+                                    notify_peer.url, req_id
+                                );
+                                tracing::info!("📡 Notifying peer of return: PUT {}", url);
+
+                                // SSRF-safe client (bounded timeout, no redirects), matching
+                                // the twin plaintext fallback in `update_request_status`.
+                                match crate::api::peer::get_safe_client()
+                                    .put(&url)
+                                    .json(&serde_json::json!({
+                                        "status": "returned",
+                                        "library_uuid": our_uuid,
+                                    }))
+                                    .send()
+                                    .await
+                                {
+                                    Ok(res) if res.status().is_success() => {
+                                        tracing::info!("✅ Peer notified of return successfully");
+                                    }
+                                    Ok(res) => {
+                                        tracing::warn!(
+                                            "⚠️ Peer notification failed: status {}",
+                                            res.status()
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("❌ Failed to notify peer: {}", e);
+                                    }
+                                }
                             }
                         }
                     });
