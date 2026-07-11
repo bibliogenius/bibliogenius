@@ -752,15 +752,16 @@ async fn test_search_unified_endpoint() {
 
     let app = rust_lib_app::api::api_router(db);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/integrations/search_unified?q=test")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
+    // Owner endpoint: the local client reaches it from loopback, so present a
+    // loopback address to the router-level guard.
+    let mut req = Request::builder()
+        .uri("/integrations/search_unified?q=test")
+        .body(Body::empty())
         .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(req).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -1409,17 +1410,17 @@ async fn test_upsert_cache_uuid_change_different_ids() {
     });
 
     let app = rust_lib_app::api::api_router(db.clone());
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/peers/{}/cache_books", peer_id))
-                .header("Content-Type", "application/json")
-                .body(Body::from(new_books.to_string()))
-                .unwrap(),
-        )
-        .await
+    // Owner endpoint: present a loopback address to the router-level guard.
+    let mut req = Request::builder()
+        .method("POST")
+        .uri(format!("/peers/{}/cache_books", peer_id))
+        .header("Content-Type", "application/json")
+        .body(Body::from(new_books.to_string()))
         .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(req).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -1469,17 +1470,17 @@ async fn test_upsert_cache_uuid_change_overlapping_ids() {
     });
 
     let app = rust_lib_app::api::api_router(db.clone());
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/peers/{}/cache_books", peer_id))
-                .header("Content-Type", "application/json")
-                .body(Body::from(new_books.to_string()))
-                .unwrap(),
-        )
-        .await
+    // Owner endpoint: present a loopback address to the router-level guard.
+    let mut req = Request::builder()
+        .method("POST")
+        .uri(format!("/peers/{}/cache_books", peer_id))
+        .header("Content-Type", "application/json")
+        .body(Body::from(new_books.to_string()))
         .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(req).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -1517,17 +1518,17 @@ async fn test_upsert_cache_empty_incoming_preserves_cache() {
     let empty_books = serde_json::json!({ "books": [] });
 
     let app = rust_lib_app::api::api_router(db.clone());
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/peers/{}/cache_books", peer_id))
-                .header("Content-Type", "application/json")
-                .body(Body::from(empty_books.to_string()))
-                .unwrap(),
-        )
-        .await
+    // Owner endpoint: present a loopback address to the router-level guard.
+    let mut req = Request::builder()
+        .method("POST")
+        .uri(format!("/peers/{}/cache_books", peer_id))
+        .header("Content-Type", "application/json")
+        .body(Body::from(empty_books.to_string()))
         .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(req).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -1601,16 +1602,16 @@ async fn list_requests_never_leaks_local_cover_path() {
     create_test_request(&db, "req-leak-1", peer_id, "222", "test QA", "pending").await;
 
     let app = rust_lib_app::api::api_router(db.clone());
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/peers/requests")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
+    // Owner endpoint: present a loopback address to the router-level guard.
+    let mut req = Request::builder()
+        .method("GET")
+        .uri("/peers/requests")
+        .body(Body::empty())
         .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(req).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1663,16 +1664,16 @@ async fn list_outgoing_requests_never_leaks_local_cover_path() {
         .expect("Failed to create outgoing request");
 
     let app = rust_lib_app::api::api_router(db.clone());
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/peers/requests/outgoing")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
+    // Owner endpoint: present a loopback address to the router-level guard.
+    let mut req = Request::builder()
+        .method("GET")
+        .uri("/peers/requests/outgoing")
+        .body(Body::empty())
         .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(req).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)

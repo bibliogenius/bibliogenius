@@ -71,13 +71,99 @@ pub fn api_router(db: DatabaseConnection) -> Router {
     api_router_with_state(state)
 }
 
-/// Build the route definitions (internal)
+/// Build the route definitions (internal).
+///
+/// The server listens on 0.0.0.0 because LAN peers must reach the catalogue and
+/// the P2P receivers, but that same listener must not serve the owner's private
+/// data or accept writes from a stranger on the network. The router is therefore
+/// split by route AND method (e.g. `GET /books` is peer-facing, `POST /books` is
+/// not) into two halves merged on the one listener:
+///
+///   - [`public_routes`]: an explicit allow-list of peer-facing endpoints, kept
+///     reachable from any host.
+///   - [`owner_routes`]: everything else, gated by [`auth::owner_only_layer`]
+///     (loopback source, no browser `Origin`).
+///
+/// Merging is by path+method: the split paths below appear in both halves with
+/// disjoint methods, and the guard `route_layer` applies only to the owner half.
 fn build_routes() -> Router<AppState> {
+    public_routes().merge(owner_routes().route_layer(axum::middleware::from_fn(
+        crate::infrastructure::auth::owner_only_layer,
+    )))
+}
+
+/// Peer-facing endpoints: reachable from any host on the LAN or via the relay.
+///
+/// This is an allow-list, not a prefix rule: most `/peers/*` routes are local
+/// orchestrators that *call* peers and live in [`owner_routes`]. Only the routes
+/// a remote device actually constructs and calls belong here. Read endpoints
+/// that a peer reaches (`GET /books`, `GET /books/:id`) already redact personal
+/// fields and hide private rows for unauthenticated callers.
+fn public_routes() -> Router<AppState> {
+    Router::new()
+        // Liveness (no data)
+        .route("/health", get(health::health_check))
+        // Catalogue reads (redacted for unauthenticated callers)
+        .route("/books", get(books::list_books))
+        .route("/books/:id", get(books::get_book))
+        .route("/books/:id/cover", get(books::get_book_cover))
+        // Handshake / identity exchange
+        .route("/config", get(setup::get_config))
+        // Public leaderboard stats
+        .route(
+            "/gamification/public-stats",
+            get(gamification::get_public_stats),
+        )
+        .route(
+            "/public-stats-bundle",
+            get(public_stats::get_public_stats_bundle),
+        )
+        // Peer receivers a remote device posts to
+        .route("/peers/incoming", post(peer::receive_connection_request))
+        .route(
+            "/peers/notify-disconnect",
+            post(peer::receive_disconnect_notification),
+        )
+        .route("/peers/verify-disconnect", post(peer::verify_disconnect))
+        .route("/peers/search", post(peer::search_local))
+        .route("/peers/request", post(peer::receive_request))
+        .route("/peers/loans/offer", post(peer::receive_loan_offer))
+        .route(
+            "/peers/loans/confirm",
+            post(peer::receive_loan_confirmation),
+        )
+        // Loan-status notifications from the other party (ownership-checked in the
+        // handler per ADR-050); the borrower/lender must be able to reach them.
+        .route(
+            "/peers/requests/status/:id",
+            put(peer::update_outgoing_status),
+        )
+        .route(
+            "/peers/requests/cancel/:id",
+            axum::routing::delete(peer::cancel_request),
+        )
+        .route("/peers/requests/:id", put(peer::update_request_status))
+        // E2EE encrypted peer transport (single sealed entry point)
+        .route("/e2ee/message", post(e2ee::receive_encrypted_message))
+        // Relay mailbox (any instance can serve as a relay for peers)
+        .route("/relay/mailbox", post(relay::create_mailbox))
+        .route(
+            "/relay/mailbox/:uuid/messages",
+            post(relay::deposit_message).get(relay::collect_messages),
+        )
+        .route(
+            "/relay/mailbox/:uuid/messages/:id",
+            axum::routing::delete(relay::ack_message),
+        )
+}
+
+/// Owner-only endpoints: private data and writes, plus the local orchestrators
+/// that drive peer traffic. Served exclusively to the local native client behind
+/// [`auth::owner_only_layer`] (loopback + no browser `Origin`).
+fn owner_routes() -> Router<AppState> {
     Router::new()
         // Admin
         .route("/admin/shutdown", post(admin::shutdown))
-        // Health check
-        .route("/health", get(health::health_check))
         // Auth
         .route("/auth/login", post(auth::login))
         .route("/auth/login-mfa", post(auth::login_mfa))
@@ -91,19 +177,15 @@ fn build_routes() -> Router<AppState> {
         // Library config
         .route("/library/config", get(library::get_config))
         .route("/library/config", post(library::update_config))
-        // Books
-        .route("/books", get(books::list_books))
+        // Books (writes; the read side lives in `public_routes`)
         .route("/books/search", get(search::search_books))
         .route("/books/tags", get(books::list_tags))
         .route("/chat", post(chat::chat_handler))
         .route("/books", post(books::create_book))
         .route(
             "/books/:id",
-            get(books::get_book)
-                .put(books::update_book)
-                .delete(books::delete_book),
+            put(books::update_book).delete(books::delete_book),
         )
-        .route("/books/:id/cover", get(books::get_book_cover))
         .route("/books/reorder", axum::routing::patch(books::reorder_books))
         .route(
             "/books/:id/collections",
@@ -142,7 +224,7 @@ fn build_routes() -> Router<AppState> {
         .route("/tags/tree", get(tag::list_tags_tree))
         .route("/tags/:id", get(tag::get_tag))
         .route("/tags/:id", axum::routing::delete(tag::delete_tag))
-        // Peers
+        // Peer management and orchestration (local UI; several call peers outbound)
         .route("/peers", get(peer::list_peers))
         .route("/peers/:id", axum::routing::delete(peer::delete_peer)) // Delete peer
         .route("/peers/:id/status", put(peer::update_peer_status)) // Accept/reject peer
@@ -151,19 +233,11 @@ fn build_routes() -> Router<AppState> {
             "/peers/:id/display-name",
             axum::routing::patch(peer::update_peer_display_name),
         )
-        .route(
-            "/peers/notify-disconnect",
-            post(peer::receive_disconnect_notification),
-        )
-        .route("/peers/verify-disconnect", post(peer::verify_disconnect))
         .route("/peers/connect", post(peer::connect))
         .route(
             "/peers/auto_approve_all",
             post(peer::auto_approve_all_peers),
         )
-        .route("/peers/incoming", post(peer::receive_connection_request)) // Receive incoming connection
-        .route("/peers/push", post(peer::push_operations))
-        .route("/peers/pull", get(peer::pull_operations))
         .route("/peers/:id/sync", post(peer::sync_peer)) // Sync remote books by ID
         .route("/peers/sync_by_url", post(peer::sync_peer_by_url)) // Sync by URL (solves Hub ID mismatch)
         .route("/peers/:id/cache_books", post(peer::cache_books_by_id)) // Save pre-fetched books to cache
@@ -178,20 +252,12 @@ fn build_routes() -> Router<AppState> {
             post(peer::cleanup_stale_peer_books),
         ) // TTL cleanup for privacy
         .route("/peers/cover-proxy", get(peer::cover_proxy))
-        .route("/peers/search", post(peer::search_local))
-        .route("/peers/proxy_search", post(peer::proxy_search))
+        .route("/peers/proxy_search", post(peer::proxy_search)) // Local fan-out; calls peers' /peers/search
         .route("/peers/return_book", post(peer::return_borrowed_book)) // Borrower-initiated return
         .route("/peers/request_by_url", post(peer::request_book_by_url)) // Send request by URL
         .route("/peers/:id/offer-loan", post(peer::offer_loan)) // Lender-initiated loan to peer
         .route("/peers/:id/request", post(peer::request_book)) // Send request
-        .route("/peers/request", post(peer::receive_request)) // Receive request
         .route("/peers/requests", get(peer::list_requests)) // List incoming requests
-        .route("/peers/requests/incoming", post(peer::receive_loan_request)) // Receive incoming P2P loan request
-        .route(
-            "/peers/loans/confirm",
-            post(peer::receive_loan_confirmation),
-        ) // Receive loan confirmation from lender
-        .route("/peers/loans/offer", post(peer::receive_loan_offer)) // Receive lender-initiated loan offer
         .route(
             "/peers/requests/outgoing",
             get(peer::list_outgoing_requests).post(peer::create_outgoing_request),
@@ -212,20 +278,20 @@ fn build_routes() -> Router<AppState> {
             "/peers/requests/clear",
             axum::routing::delete(peer::clear_incoming_requests),
         ) // Clear non-pending incoming requests
-        .route("/peers/requests/:id", put(peer::update_request_status)) // Update status
         .route(
             "/peers/requests/:id",
             axum::routing::delete(peer::delete_request),
-        ) // Delete request
-        .route(
-            "/peers/requests/cancel/:id",
-            axum::routing::delete(peer::cancel_request),
-        ) // Receive cancellation notification from peer
-        .route(
-            "/peers/requests/status/:id",
-            put(peer::update_outgoing_status),
-        ) // Receive status update notification from lender
-        // Local Discovery (mDNS)
+        ) // Delete request (local; the peer-facing PUT lives in public_routes)
+        // Dead plaintext receivers from a shelved device-to-device sync feature:
+        // no caller constructs these URLs (in either the Rust core or the Flutter
+        // client). `pull_operations` would dump the whole operation_log and
+        // `push_operations` would ingest oplog rows unauthenticated, so they are
+        // guarded rather than left reachable on the LAN. `receive_loan_request`
+        // is superseded by the peer-facing `POST /peers/request` (`receive_request`).
+        .route("/peers/push", post(peer::push_operations))
+        .route("/peers/pull", get(peer::pull_operations))
+        .route("/peers/requests/incoming", post(peer::receive_loan_request))
+        // Local Discovery (mDNS) - local control only
         .route("/discovery/local", get(discovery::list_local_peers))
         .route("/discovery/status", get(discovery::mdns_status))
         .route("/discovery/toggle", post(discovery::toggle_mdns))
@@ -258,7 +324,7 @@ fn build_routes() -> Router<AppState> {
                 .delete(contact::delete_contact),
         )
         .route("/profile", put(profile::update_profile))
-        // P2P routes
+        // Loans
         .route("/loans", get(loan::list_loans).post(loan::create_loan))
         .route("/loans/:id/return", put(loan::return_loan))
         .route(
@@ -297,14 +363,9 @@ fn build_routes() -> Router<AppState> {
         )
         // Data Import/Export
         .route("/import/file", axum::routing::post(data::import_file))
-        // Setup & Config
+        // Setup and Config (GET /config is peer-facing and lives in public_routes)
         .route("/setup", axum::routing::post(setup::setup))
         .route("/reset", axum::routing::post(setup::reset_app))
-        .route("/config", get(setup::get_config))
-        .route(
-            "/public-stats-bundle",
-            get(public_stats::get_public_stats_bundle),
-        )
         .route("/identity/init", post(setup::init_identity))
         // Integrations (Professional)
         .route(
@@ -323,12 +384,8 @@ fn build_routes() -> Router<AppState> {
         // Internal loopback-only endpoint: lets the standalone `--mcp` helper proxy
         // JSON-RPC to this running app (which already holds an initialized database).
         .route("/mcp/rpc", post(mcp::rpc_endpoint))
-        // Gamification
+        // Gamification (public-stats is peer-facing and lives in public_routes)
         .route("/user/status", get(gamification::get_user_status))
-        .route(
-            "/gamification/public-stats",
-            get(gamification::get_public_stats),
-        )
         .route(
             "/gamification/leaderboard",
             get(gamification::get_leaderboard),
@@ -347,13 +404,13 @@ fn build_routes() -> Router<AppState> {
         .merge(crate::modules::hangman::routes())
         // Operation Log Viewer (self-contained module)
         .merge(crate::modules::operation_log_viewer::routes())
-        // Peer relay setup
+        // Peer relay setup (local configuration)
         .route("/peers/relay/setup", post(peer::setup_relay))
         .route(
             "/peers/relay/config",
             get(peer::get_relay_config_endpoint).delete(peer::delete_relay_config_endpoint),
         )
-        // Peer relay library sync (ADR-012)
+        // Peer relay library sync (ADR-012) - local orchestrators
         .route(
             "/peers/relay/library_request",
             post(peer::relay_library_request),
@@ -362,20 +419,9 @@ fn build_routes() -> Router<AppState> {
             "/peers/relay/await_response",
             post(peer::await_relay_response),
         )
-        // Relay hub endpoints (any instance can serve as a relay)
+        // Relay control (local trigger/status; the mailbox itself is peer-facing)
         .route("/relay/poll_now", post(relay::poll_now))
         .route("/relay/status", get(relay::relay_status))
-        .route("/relay/mailbox", post(relay::create_mailbox))
-        .route(
-            "/relay/mailbox/:uuid/messages",
-            post(relay::deposit_message).get(relay::collect_messages),
-        )
-        .route(
-            "/relay/mailbox/:uuid/messages/:id",
-            axum::routing::delete(relay::ack_message),
-        )
-        // E2EE encrypted peer messages
-        .route("/e2ee/message", post(e2ee::receive_encrypted_message))
         // View stats
         .route("/stats/views", get(view_counter::get_view_stats_handler))
         // Export/Import

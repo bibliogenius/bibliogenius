@@ -180,6 +180,28 @@ where
     }
 }
 
+/// Router-level guard applied to the owner half of the API.
+///
+/// The embedded server listens on 0.0.0.0 so LAN peers can reach the catalogue
+/// and the P2P receivers, but the owner surface (contacts, loans, copies,
+/// collections, peer management, import/export, ...) must never be served to
+/// another host on the network. Applied once as a `route_layer` on the owner
+/// sub-router rather than per handler, so the boundary lives in a single place
+/// and a newly added owner route inherits it by construction.
+///
+/// It reuses [`LoopbackNoBrowser`]: the request must originate from loopback and
+/// carry no browser `Origin`. That admits the local native client (loopback, no
+/// `Origin`) and turns away both the LAN and a page in the user's own browser.
+pub async fn owner_only_layer(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
+    let (mut parts, body) = request.into_parts();
+    LoopbackNoBrowser::from_request_parts(&mut parts, &()).await?;
+    let request = axum::extract::Request::from_parts(parts, body);
+    Ok(next.run(request).await)
+}
+
 pub fn hash_password(password: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
