@@ -10,8 +10,8 @@
 use rust_lib_app::db;
 use rust_lib_app::domain::{BorrowSource, CopyRepository, CreateCopyInput};
 use rust_lib_app::infrastructure::repositories::SeaOrmCopyRepository;
-use rust_lib_app::models::{book, library, user};
-use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, Set, Statement};
+use rust_lib_app::models::{Book, book, library, user};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, EntityTrait, Set, Statement};
 
 async fn setup_db() -> DatabaseConnection {
     db::init_db("sqlite::memory:").await.expect("init db")
@@ -320,6 +320,47 @@ async fn find_borrowed_ignores_a_copy_that_is_not_borrowed() {
 
     let borrowed = repo.find_borrowed().await.unwrap();
     assert_eq!(borrowed.total, 0, "only `status = 'borrowed'` copies count");
+}
+
+// -------- populate_authors overlay criterion --------
+//
+// `Book::populate_authors` overlays `borrowed`/`lent` onto the DTO's
+// `reading_status`, and the MCP assistant reads that overlaid field to answer
+// "what have I borrowed?" (mcp_tool_service, contract section 3.5). Like
+// `find_borrowed` and `book_service::list_books`, the overlay must decide
+// "borrowed" on `status` alone. A copy borrowed from a contact is stored with
+// `is_temporary = false` (ADR-034), so scoping the overlay on `is_temporary`
+// silently hid every contact loan from the assistant.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn populate_authors_marks_a_contact_borrow_as_borrowed() {
+    let db = setup_db().await;
+    let (lib_id, book_id) = seed_user_library_book(&db).await;
+    let repo = SeaOrmCopyRepository::new(db.clone());
+
+    // The shape `book_details_screen` writes: permanent copy, contact source.
+    insert_copy(
+        &repo,
+        &book_id,
+        lib_id,
+        "borrowed",
+        false,
+        Some(BorrowSource::Contact),
+    )
+    .await;
+
+    let model = book::Entity::find_by_id(book_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("seeded book exists");
+    let dtos = Book::populate_authors(&db, vec![model]).await;
+
+    assert_eq!(
+        dtos[0].reading_status.as_deref(),
+        Some("borrowed"),
+        "a copy borrowed from a contact must surface as borrowed to the MCP assistant"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

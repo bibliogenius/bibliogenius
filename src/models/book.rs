@@ -578,7 +578,11 @@ impl Book {
                 if c.status == "loaned" {
                     lent_set.insert(c.book_id.clone());
                 }
-                if c.status == "borrowed" && c.is_temporary {
+                // `status == "borrowed"` alone, matching `find_borrowed` and
+                // `book_service::list_books`: a copy borrowed from a contact is
+                // stored `is_temporary = false` (ADR-034), and scoping this
+                // overlay on `is_temporary` hid it from the MCP assistant.
+                if c.status == "borrowed" {
                     borrowed_set.insert(c.book_id.clone());
                 }
             }
