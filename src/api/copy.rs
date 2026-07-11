@@ -157,7 +157,8 @@ pub async fn get_book_copies(
     }
 }
 
-/// Get borrowed copies (is_temporary=true) with book details
+/// Get borrowed copies (status='borrowed', borrowed from a peer or a contact)
+/// with book details
 /// Returns "loans" key for Flutter compatibility
 pub async fn get_borrowed_copies(State(state): State<AppState>) -> impl IntoResponse {
     match state.copy_repo.find_borrowed().await {

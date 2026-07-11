@@ -110,7 +110,8 @@ pub trait CopyRepository: Send + Sync {
     /// Find copies for a specific book
     async fn find_by_book_id(&self, book_id: &str) -> Result<PaginatedCopies, DomainError>;
 
-    /// Find borrowed copies (is_temporary=true) with book details
+    /// Find borrowed copies (status='borrowed', whatever their provenance) with
+    /// book details
     async fn find_borrowed(&self) -> Result<PaginatedCopies, DomainError>;
 
     /// Create a new copy

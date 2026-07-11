@@ -87,9 +87,15 @@ impl CopyRepository for SeaOrmCopyRepository {
         Ok(PaginatedCopies { copies, total })
     }
 
+    /// Selects on `status` alone, like `book_service::list_books` does for the
+    /// library view. `is_temporary` describes how a copy is held, not whether it
+    /// is on loan to us: a copy borrowed from a contact is stored permanently
+    /// (`is_temporary = false`, `borrow_source = 'contact'`), so filtering on the
+    /// flag kept it out of the borrowed list and out of the dashboard counter
+    /// while the library view showed it as borrowed.
     async fn find_borrowed(&self) -> Result<PaginatedCopies, DomainError> {
         let copies_with_books = CopyEntity::find()
-            .filter(Column::IsTemporary.eq(true))
+            .filter(Column::Status.eq("borrowed"))
             .find_also_related(BookEntity)
             .all(&self.db)
             .await?;

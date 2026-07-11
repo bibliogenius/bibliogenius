@@ -218,6 +218,110 @@ async fn repository_create_stores_typed_loan_columns() {
     assert_eq!(source.as_deref(), Some("contact"));
 }
 
+// -------- find_borrowed criterion --------
+//
+// The borrowed list and the dashboard counter read `find_borrowed`, while the
+// library view reads `book_service::list_books`. Both answer the same question,
+// "is this copy borrowed", so both must answer it on `status` alone. Scoping
+// `find_borrowed` on `is_temporary` hid every copy borrowed from a contact,
+// which is stored with `is_temporary = false` (ADR-034).
+
+async fn insert_copy(
+    repo: &SeaOrmCopyRepository,
+    book_id: &str,
+    library_id: i32,
+    status: &str,
+    is_temporary: bool,
+    borrow_source: Option<BorrowSource>,
+) -> String {
+    repo.create(CreateCopyInput {
+        book_id: book_id.to_string(),
+        library_id,
+        status: status.to_string(),
+        is_temporary,
+        borrow_source: borrow_source.map(|s| s.as_str().to_string()),
+        ..Default::default()
+    })
+    .await
+    .unwrap()
+    .id
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn find_borrowed_lists_a_copy_borrowed_from_a_contact() {
+    let db = setup_db().await;
+    let (lib_id, book_id) = seed_user_library_book(&db).await;
+    let repo = SeaOrmCopyRepository::new(db.clone());
+
+    // The shape `book_details_screen` writes: permanent copy row, contact source.
+    let copy_id = insert_copy(
+        &repo,
+        &book_id,
+        lib_id,
+        "borrowed",
+        false,
+        Some(BorrowSource::Contact),
+    )
+    .await;
+
+    let borrowed = repo.find_borrowed().await.unwrap();
+    assert_eq!(
+        borrowed.total, 1,
+        "a book borrowed from a contact belongs in the borrowed list"
+    );
+    assert_eq!(borrowed.copies[0].id.as_deref(), Some(copy_id.as_str()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn find_borrowed_lists_every_provenance() {
+    let db = setup_db().await;
+    let (lib_id, book_id) = seed_user_library_book(&db).await;
+    let repo = SeaOrmCopyRepository::new(db.clone());
+
+    // The three shapes a borrowed copy can take in the wild: contact loan
+    // (ADR-034), peer loan, and a legacy row written before `borrow_source`.
+    insert_copy(
+        &repo,
+        &book_id,
+        lib_id,
+        "borrowed",
+        false,
+        Some(BorrowSource::Contact),
+    )
+    .await;
+    insert_copy(
+        &repo,
+        &book_id,
+        lib_id,
+        "borrowed",
+        true,
+        Some(BorrowSource::Peer),
+    )
+    .await;
+    insert_copy(&repo, &book_id, lib_id, "borrowed", true, None).await;
+
+    let borrowed = repo.find_borrowed().await.unwrap();
+    assert_eq!(
+        borrowed.total, 3,
+        "provenance does not decide whether a copy is borrowed, status does"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn find_borrowed_ignores_a_copy_that_is_not_borrowed() {
+    let db = setup_db().await;
+    let (lib_id, book_id) = seed_user_library_book(&db).await;
+    let repo = SeaOrmCopyRepository::new(db.clone());
+
+    insert_copy(&repo, &book_id, lib_id, "available", false, None).await;
+    // A copy still flagged temporary but back on the shelf is not a loan.
+    insert_copy(&repo, &book_id, lib_id, "available", true, None).await;
+
+    let borrowed = repo.find_borrowed().await.unwrap();
+    assert_eq!(borrowed.total, 0, "only `status = 'borrowed'` copies count");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn borrow_source_enum_roundtrip() {
     assert_eq!(BorrowSource::Peer.as_str(), "peer");
