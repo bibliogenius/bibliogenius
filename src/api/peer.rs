@@ -463,6 +463,16 @@ pub(crate) struct BorrowedCopyParams<'a> {
     /// local peer row corresponds to the lender. Stored on the new
     /// `copies.lender_peer_id` column (ADR-034).
     pub lender_peer_id: Option<i32>,
+    /// The lender's stable library identifier (`peers.library_uuid`), stored on
+    /// the copy so a SECOND synced device can resolve the lender on return
+    /// (ADR-049). A loan offer knows this even when the peer is not paired
+    /// locally, so callers pass it directly; when absent, `create_borrowed_copy`
+    /// falls back to the peer row named by `lender_peer_id`.
+    pub lender_library_uuid: Option<&'a str>,
+    /// The loan's id at the lender (`p2p_outgoing_request.lender_request_id`),
+    /// copied onto the copy so the return notification survives on a device that
+    /// never held the outgoing request (ADR-049).
+    pub lender_request_id: Option<&'a str>,
 }
 
 /// Resolve the local `peers` row that a plaintext payload claims to come from.
@@ -621,7 +631,25 @@ pub(crate) async fn create_borrowed_copy(
         }
     };
 
-    // 2. Idempotency: skip if this lender already lent us a copy of this book
+    // ADR-049: the lender identity to stamp on the copy, resolved once for both
+    // the create and the idempotent-replay paths below. Prefer the value the caller
+    // supplies (a loan offer knows it even when the peer is not paired locally);
+    // otherwise read it from the local peer row named by `lender_peer_id`.
+    let lender_library_uuid = match params.lender_library_uuid.filter(|u| !u.is_empty()) {
+        Some(u) => Some(u.to_string()),
+        None => match params.lender_peer_id {
+            Some(pid) => crate::models::peer::Entity::find_by_id(pid)
+                .one(db)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|p| p.library_uuid),
+            None => None,
+        },
+    };
+    let lender_request_id = params.lender_request_id.map(|s| s.to_string());
+
+    // 2. Idempotency: skip if this lender already lent us a copy of this book.
     if let Some(existing) = find_peer_borrowed_copy(db, &book_id, params.lender_peer_id).await {
         tracing::info!(
             "Borrowed copy already exists (id={}) for book_id={} from lender {:?}, skipping",
@@ -629,6 +657,29 @@ pub(crate) async fn create_borrowed_copy(
             book_id,
             params.lender_peer_id
         );
+        // Backfill the ADR-049 identity onto a copy created before these columns
+        // carried a value (a pre-089 borrow, or an earlier confirmation without the
+        // ids). Fill only NULL fields, never overwrite, and best-effort so a replay
+        // never fails the borrow. The lender is the same — `find_peer_borrowed_copy`
+        // is scoped by `lender_peer_id` — so the values cannot conflict.
+        let fill_uuid = existing.lender_library_uuid.is_none() && lender_library_uuid.is_some();
+        let fill_req = existing.lender_request_id.is_none() && lender_request_id.is_some();
+        if fill_uuid || fill_req {
+            let mut active: copy::ActiveModel = existing.clone().into();
+            if fill_uuid {
+                active.lender_library_uuid = Set(lender_library_uuid.clone());
+            }
+            if fill_req {
+                active.lender_request_id = Set(lender_request_id.clone());
+            }
+            active.updated_at = Set(Utc::now().to_rfc3339());
+            if let Err(e) = active.update(db).await {
+                tracing::warn!(
+                    "Failed to backfill lender identity on existing copy {}: {e}",
+                    existing.id
+                );
+            }
+        }
         return Ok(BorrowedCopyResult {
             book_id,
             copy_id: existing.id,
@@ -657,6 +708,10 @@ pub(crate) async fn create_borrowed_copy(
         is_temporary: Set(true),
         lender_display_name: Set(Some(params.lender_name.to_string())),
         lender_peer_id: Set(params.lender_peer_id),
+        // ADR-049: the stable lender identity and the loan's id at the lender,
+        // both needed to notify the lender from any of the borrower's devices.
+        lender_library_uuid: Set(lender_library_uuid),
+        lender_request_id: Set(lender_request_id),
         borrow_due_date: Set(Some(params.due_date.to_string())),
         borrow_source: Set(Some(crate::domain::BorrowSource::Peer.as_str().to_string())),
         acquisition_date: Set(Some(now.clone())),
@@ -8229,6 +8284,10 @@ pub async fn receive_loan_confirmation(
         lender_name: &payload.lender_name,
         due_date: &payload.due_date,
         lender_peer_id: outgoing.as_ref().map(|o| o.to_peer_id),
+        // No library_uuid in a confirmation payload; `create_borrowed_copy`
+        // resolves it from the peer row named by `lender_peer_id` (ADR-049).
+        lender_library_uuid: None,
+        lender_request_id: payload.request_id.as_deref(),
     };
 
     let result = match create_borrowed_copy(&db, &params).await {
@@ -8329,6 +8388,11 @@ pub async fn receive_loan_offer(
         lender_name: &payload.lender_name,
         due_date: &payload.due_date,
         lender_peer_id: lender.as_ref().map(|p| p.id),
+        // An offer carries the lender's library_uuid even when the peer is not
+        // paired locally, so record it directly: it is what lets a second synced
+        // device notify the lender on return (ADR-049).
+        lender_library_uuid: payload.library_uuid.as_deref(),
+        lender_request_id: payload.request_id.as_deref(),
     };
 
     let result = match create_borrowed_copy(&db, &params).await {
@@ -11046,5 +11110,144 @@ mod multi_lender_borrow_tests {
             .expect("peer created");
         assert_eq!(created.connection_status, "pending");
         assert!(!created.auto_approve);
+    }
+}
+
+/// ADR-049: `create_borrowed_copy` records the lender's stable identity and the
+/// loan id on the copy at borrow time, so a return from any of the borrower's
+/// synced devices can notify the lender.
+#[cfg(test)]
+mod create_borrowed_copy_lender_identity_tests {
+    use super::*;
+    use crate::db;
+    use crate::models::{copy, peer};
+    use sea_orm::Set;
+
+    async fn setup() -> DatabaseConnection {
+        db::init_db("sqlite::memory:").await.expect("init db")
+    }
+
+    async fn insert_peer_with_uuid(db: &DatabaseConnection, uuid: &str) -> i32 {
+        let now = chrono::Utc::now().to_rfc3339();
+        let p = peer::ActiveModel {
+            name: Set("Bob".to_string()),
+            url: Set("http://bob.local:8080".to_string()),
+            library_uuid: Set(Some(uuid.to_string())),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        peer::Entity::insert(p)
+            .exec(db)
+            .await
+            .unwrap()
+            .last_insert_id
+    }
+
+    async fn fetch_copy(db: &DatabaseConnection, copy_id: &str) -> copy::Model {
+        copy::Entity::find_by_id(copy_id.to_string())
+            .one(db)
+            .await
+            .unwrap()
+            .expect("copy exists")
+    }
+
+    // A peer loan resolves the lender's stable identity from the paired peer row
+    // when the caller does not supply it, and records the loan id.
+    #[tokio::test]
+    async fn peer_loan_records_lender_uuid_from_the_peer_and_the_request_id() {
+        let db = setup().await;
+        let peer_id = insert_peer_with_uuid(&db, "lib-bob").await;
+
+        let params = BorrowedCopyParams {
+            title: "Dune",
+            isbn: Some("978-1"),
+            author: None,
+            cover_url: None,
+            lender_name: "Bob",
+            due_date: "2026-08-01",
+            lender_peer_id: Some(peer_id),
+            lender_library_uuid: None, // not supplied: resolve from the peer row
+            lender_request_id: Some("req-42"),
+        };
+        let result = create_borrowed_copy(&db, &params).await.expect("create");
+        let copy = fetch_copy(&db, &result.copy_id).await;
+
+        assert_eq!(copy.lender_library_uuid.as_deref(), Some("lib-bob"));
+        assert_eq!(copy.lender_request_id.as_deref(), Some("req-42"));
+    }
+
+    // The core ADR-049 win: an offer from a peer NOT paired locally still stores
+    // the library_uuid the payload carried, so a second synced device that DOES
+    // know the peer can complete the return notification.
+    #[tokio::test]
+    async fn offer_from_an_unpaired_peer_still_stores_the_supplied_library_uuid() {
+        let db = setup().await;
+
+        let params = BorrowedCopyParams {
+            title: "Neuromancer",
+            isbn: Some("978-2"),
+            author: None,
+            cover_url: None,
+            lender_name: "Carol",
+            due_date: "2026-08-01",
+            lender_peer_id: None, // peer unknown on this device
+            lender_library_uuid: Some("lib-carol"),
+            lender_request_id: Some("req-7"),
+        };
+        let result = create_borrowed_copy(&db, &params).await.expect("create");
+        let copy = fetch_copy(&db, &result.copy_id).await;
+
+        assert_eq!(copy.lender_peer_id, None);
+        assert_eq!(copy.lender_library_uuid.as_deref(), Some("lib-carol"));
+        assert_eq!(copy.lender_request_id.as_deref(), Some("req-7"));
+    }
+
+    // A second confirmation of the same loan (idempotent replay) backfills the
+    // identity fields that were NULL on the first pass, without overwriting what is
+    // already set. Covers a copy borrowed before a confirmation carried the ids.
+    #[tokio::test]
+    async fn idempotent_replay_backfills_only_the_null_lender_fields() {
+        let db = setup().await;
+        let peer_id = insert_peer_with_uuid(&db, "lib-bob").await;
+
+        let base = BorrowedCopyParams {
+            title: "Dune",
+            isbn: Some("978-1"),
+            author: None,
+            cover_url: None,
+            lender_name: "Bob",
+            due_date: "2026-08-01",
+            lender_peer_id: Some(peer_id),
+            lender_library_uuid: None,
+            lender_request_id: None, // first pass: no loan id yet
+        };
+        let first = create_borrowed_copy(&db, &base).await.expect("create");
+        assert!(!first.already_existed);
+        // uuid resolved from the peer; request id still absent.
+        let copy = fetch_copy(&db, &first.copy_id).await;
+        assert_eq!(copy.lender_library_uuid.as_deref(), Some("lib-bob"));
+        assert_eq!(copy.lender_request_id, None);
+
+        // Second pass for the same lender + book: the loan id now arrives.
+        let replay = BorrowedCopyParams {
+            lender_request_id: Some("req-42"),
+            ..base
+        };
+        let second = create_borrowed_copy(&db, &replay).await.expect("replay");
+        assert!(second.already_existed);
+        assert_eq!(second.copy_id, first.copy_id, "same copy, no duplicate");
+
+        let copy = fetch_copy(&db, &first.copy_id).await;
+        assert_eq!(
+            copy.lender_request_id.as_deref(),
+            Some("req-42"),
+            "backfilled"
+        );
+        assert_eq!(
+            copy.lender_library_uuid.as_deref(),
+            Some("lib-bob"),
+            "existing value untouched"
+        );
     }
 }

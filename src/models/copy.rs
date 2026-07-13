@@ -46,6 +46,16 @@ pub struct Model {
     /// contact loan). Stored as TEXT; see `BorrowSource` for the typed
     /// representation used across the code. NULL for non-borrowed copies.
     pub borrow_source: Option<String>,
+    /// The lender's stable library identifier (`peers.library_uuid`), carried on
+    /// the copy so a SECOND synced device — which replicates `copies` but not
+    /// `peers` — can still resolve the lender when the book is returned (ADR-049,
+    /// migration 089). NULL for owned/contact copies, and for peer loans whose
+    /// lender never announced a uuid.
+    pub lender_library_uuid: Option<String>,
+    /// The loan's id at the lender (`p2p_outgoing_request.lender_request_id`),
+    /// copied here at borrow time so the return notification survives on a device
+    /// that never held the outgoing request (ADR-049). NULL for non-peer copies.
+    pub lender_request_id: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

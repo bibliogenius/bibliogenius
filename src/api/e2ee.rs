@@ -632,6 +632,10 @@ async fn handle_loan_confirmation(
         // authenticated: record it. The lender-reclaim path relies on this
         // column to identify the borrowed copy without trusting the ISBN.
         lender_peer_id: Some(sender_peer.id),
+        // ADR-049: carry the authenticated lender's stable identity and the loan's
+        // id at the lender, so a second synced device can notify them on return.
+        lender_library_uuid: sender_peer.library_uuid.as_deref(),
+        lender_request_id,
     };
 
     let result = match super::peer::create_borrowed_copy(db, &params).await {
@@ -758,6 +762,9 @@ async fn handle_loan_offer(
         due_date,
         // Authenticated sender, same as the confirmation path.
         lender_peer_id: Some(sender_peer.id),
+        // ADR-049: same stable-identity capture as the confirmation path.
+        lender_library_uuid: sender_peer.library_uuid.as_deref(),
+        lender_request_id,
     };
 
     let result = match super::peer::create_borrowed_copy(db, &params).await {

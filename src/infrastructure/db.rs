@@ -2338,6 +2338,99 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 089: carry a stable, replication-safe lender identity on the
+    // borrowed copy so a book returned from a SECOND synced device can still
+    // notify the lender (ADR-049). `copies` replicates across a user's devices as
+    // a cr-sqlite CRR; `peers`, `p2p_outgoing_requests`, and `crypto_keys` do
+    // not, so a second device cannot resolve the loan and today silently deletes
+    // the copy. Two columns travel with the copy instead. This is the project's
+    // first schema change to a CRR table, so it goes through cr-sqlite's alter
+    // protocol; see `migrate_copy_lender_identity`.
+    migrate_copy_lender_identity(db).await?;
+
+    Ok(())
+}
+
+/// Migration 089: add `lender_library_uuid` and `lender_request_id` to `copies`
+/// (ADR-049), evolving the table safely whether or not it is a live cr-sqlite CRR.
+///
+/// On an enrolled device `copies` is already a CRR when this runs: `init_db_account_sync`
+/// opens the pool with cr-sqlite loaded (the `copies__crsql_clock` companion table
+/// exists) and runs migrations before `setup_crrs`. A bare `ALTER TABLE` on a CRR
+/// freezes its insert/update triggers at the old column count, so the next write
+/// fails (`expected N values, got N-2`) and every subsequent write to the table
+/// breaks. cr-sqlite's `crsql_begin_alter` / `crsql_commit_alter` protocol drops
+/// and rebuilds that machinery around the DDL, preserving the clock rows and
+/// `db_version` (validated in `tests/copy_lender_identity_migration.rs`). Off the
+/// sync path there is no clock table and the `crsql_*` functions are not even
+/// registered, so a plain `ALTER` is both correct and required.
+///
+/// Idempotent: gated on the first column being absent, so a re-run (every boot on
+/// an enrolled device) is a no-op. The stable identity is backfilled from the
+/// local peer row where one resolves; `lender_request_id` has no local source and
+/// is populated at borrow time going forward.
+async fn migrate_copy_lender_identity(db: &DatabaseConnection) -> Result<(), DbErr> {
+    let backend = db.get_database_backend();
+
+    // Both columns are added together, so one being present means 089 already ran.
+    if table_has_column(db, "copies", "lender_library_uuid").await? {
+        return Ok(());
+    }
+
+    // Is `copies` a live CRR? A plain `sqlite_master` read, feature-independent:
+    // the clock companion table exists only after `setup_crrs`.
+    let is_crr = table_exists(db, "copies__crsql_clock").await?;
+
+    if is_crr {
+        db.execute(Statement::from_string(
+            backend,
+            "SELECT crsql_begin_alter('copies')".to_owned(),
+        ))
+        .await?;
+    }
+
+    // The DDL. Column names are fixed literals. When `is_crr`, these run inside the
+    // `alter_crr` savepoint opened by `crsql_begin_alter`.
+    db.execute(Statement::from_string(
+        backend,
+        "ALTER TABLE copies ADD COLUMN lender_library_uuid TEXT".to_owned(),
+    ))
+    .await?;
+    db.execute(Statement::from_string(
+        backend,
+        "ALTER TABLE copies ADD COLUMN lender_request_id TEXT".to_owned(),
+    ))
+    .await?;
+
+    if is_crr {
+        db.execute(Statement::from_string(
+            backend,
+            "SELECT crsql_commit_alter('copies')".to_owned(),
+        ))
+        .await?;
+    }
+
+    // Best-effort backfill of the stable identity from the local peer row, keyed on
+    // the existing `lender_peer_id` (ADR-034). Only rows whose peer actually carries
+    // a `library_uuid` are written, so peers that never announced one stay NULL (a
+    // normal state, not an error) and no needless CRR change is emitted. When this
+    // runs on a device that lacks the peer, the value stays NULL here and arrives
+    // later by CRR replication from the device that does.
+    db.execute(Statement::from_string(
+        backend,
+        "UPDATE copies \
+         SET lender_library_uuid = ( \
+             SELECT p.library_uuid FROM peers p WHERE p.id = copies.lender_peer_id \
+         ) \
+         WHERE lender_peer_id IS NOT NULL \
+           AND lender_library_uuid IS NULL \
+           AND ( \
+             SELECT p.library_uuid FROM peers p WHERE p.id = copies.lender_peer_id \
+           ) IS NOT NULL"
+            .to_owned(),
+    ))
+    .await?;
+
     Ok(())
 }
 
