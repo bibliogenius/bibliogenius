@@ -259,6 +259,7 @@ mod tests {
             collection_id: Set(collection_id.to_owned()),
             book_id: Set(book_id.to_owned()),
             added_at: Set(chrono::Utc::now().to_rfc3339()),
+            volume_number: Set(None),
         }
         .insert(db)
         .await

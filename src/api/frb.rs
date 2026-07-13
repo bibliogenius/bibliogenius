@@ -6185,6 +6185,12 @@ pub struct FrbCollectionBook {
     pub added_at: String,
     pub is_owned: bool,
     pub digital_formats: Option<Vec<String>>,
+    /// Personal reading status of the book (`to_read`, `reading`, `read`,
+    /// `wanting`, `abandoned`). Drives the "unread = dimmed" frise rendering.
+    pub reading_status: Option<String>,
+    /// Reading-order position within a series-typed collection. `None` for
+    /// unnumbered members (rendered after the numbered ones).
+    pub volume_number: Option<i32>,
 }
 
 impl From<crate::domain::collection_repository::CollectionBook> for FrbCollectionBook {
@@ -6199,6 +6205,8 @@ impl From<crate::domain::collection_repository::CollectionBook> for FrbCollectio
             added_at: cb.added_at,
             is_owned: cb.is_owned,
             digital_formats: cb.digital_formats,
+            reading_status: cb.reading_status,
+            volume_number: cb.volume_number,
         }
     }
 }
@@ -6334,6 +6342,39 @@ pub async fn remove_book_from_collection(
     let db = db().ok_or("Database not initialized")?;
     let repo = collection_repo!(db);
     repo.remove_book(&collection_id, &book_id)
+        .await
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Marks a collection as a series (`source = 'series'`) or reverts it to a plain
+/// manual collection. A series collection drives the reading-order frise on the
+/// book-detail screen; membership and volume numbers are set with
+/// `add_book_to_collection` + `set_book_volume_number`.
+pub async fn mark_collection_as_series(
+    collection_id: String,
+    is_series: bool,
+) -> Result<(), String> {
+    use crate::domain::collection_repository::CollectionRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = collection_repo!(db);
+    let source = if is_series { "series" } else { "manual" };
+    repo.set_source(&collection_id, source)
+        .await
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Sets (or clears, with `None`) a book's reading-order position within a
+/// collection. No-op if the book is not a member. Used by the collection-detail
+/// screen when numbering the volumes of a series.
+pub async fn set_book_volume_number(
+    collection_id: String,
+    book_id: String,
+    volume_number: Option<i32>,
+) -> Result<(), String> {
+    use crate::domain::collection_repository::CollectionRepository;
+    let db = db().ok_or("Database not initialized")?;
+    let repo = collection_repo!(db);
+    repo.set_book_volume(&collection_id, &book_id, volume_number)
         .await
         .map_err(|e| format!("{e:?}"))
 }

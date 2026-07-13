@@ -29,6 +29,13 @@ pub struct CollectionBook {
     pub added_at: String,
     pub is_owned: bool,
     pub digital_formats: Option<Vec<String>>,
+    /// The book's personal reading status (`to_read`, `reading`, `read`,
+    /// `wanting`, `abandoned`). Drives the "unread = dimmed" rendering of the
+    /// series frise.
+    pub reading_status: Option<String>,
+    /// Reading-order position within a series-typed collection. NULL for
+    /// unnumbered members (rendered after the numbered ones).
+    pub volume_number: Option<i32>,
 }
 
 /// Input for creating a collection
@@ -54,8 +61,22 @@ pub trait CollectionRepository: Send + Sync {
     /// Delete a collection by ID
     async fn delete(&self, id: &str) -> Result<(), DomainError>;
 
-    /// Get all books in a collection
+    /// Set (or clear, with `None`) a collection's `source`. Used to flip a
+    /// plain collection to a series (`source = 'series'`) and back.
+    async fn set_source(&self, id: &str, source: &str) -> Result<(), DomainError>;
+
+    /// Get all books in a collection, ordered by `volume_number` (numbered
+    /// volumes first, ascending; unnumbered last, then by `added_at`).
     async fn get_books(&self, collection_id: &str) -> Result<Vec<CollectionBook>, DomainError>;
+
+    /// Set (or clear, with `None`) the reading-order position of a book within
+    /// a collection. No-op if the book is not in the collection.
+    async fn set_book_volume(
+        &self,
+        collection_id: &str,
+        book_id: &str,
+        volume_number: Option<i32>,
+    ) -> Result<(), DomainError>;
 
     /// Add a book to a collection
     async fn add_book(&self, collection_id: &str, book_id: &str) -> Result<(), DomainError>;

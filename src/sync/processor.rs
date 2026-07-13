@@ -1015,6 +1015,7 @@ async fn apply_collection_book_insert(
         collection_id: Set(collection_id),
         book_id: Set(book_id),
         added_at: Set(chrono::Utc::now().to_rfc3339()),
+        volume_number: Set(None),
     };
     let _ = collection_book::Entity::insert(entry).exec(db).await;
     Ok(())

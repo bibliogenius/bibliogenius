@@ -205,6 +205,10 @@ fn owner_routes() -> Router<AppState> {
             get(collections::deletion_preview),
         )
         .route(
+            "/collections/:id/series",
+            axum::routing::put(collections::mark_collection_as_series),
+        )
+        .route(
             "/collections/:id/books",
             get(collections::get_collection_books).post(collections::import_collection),
         )
@@ -212,6 +216,10 @@ fn owner_routes() -> Router<AppState> {
             "/collections/:collection_id/books/:book_id",
             axum::routing::delete(collections::remove_book_from_collection)
                 .post(collections::add_book_to_collection),
+        )
+        .route(
+            "/collections/:collection_id/books/:book_id/volume",
+            axum::routing::put(collections::set_book_volume_number),
         )
         // Authors
         .route("/authors", get(author::list_authors))

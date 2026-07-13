@@ -9,6 +9,10 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub book_id: String,
     pub added_at: String,
+    /// Reading-order position within a series-typed collection (`source =
+    /// 'series'`). NULL means unnumbered; the frise renders those last. Ignored
+    /// for plain (`manual`) collections. Added by migration 090.
+    pub volume_number: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

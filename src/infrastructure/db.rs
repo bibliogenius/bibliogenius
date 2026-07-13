@@ -2348,6 +2348,67 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // protocol; see `migrate_copy_lender_identity`.
     migrate_copy_lender_identity(db).await?;
 
+    // Migration 090: per-volume ordering for series-typed collections. A book's
+    // membership in a series is modelled as a `collection_books` row (source
+    // `series` on the parent collection); this column carries the reading order.
+    // `collection_books` replicates across a user's devices as a cr-sqlite CRR,
+    // so the column is added through cr-sqlite's alter protocol on an enrolled
+    // device (a bare `ALTER` freezes the CRR triggers at the old column count and
+    // breaks every subsequent write); off the sync path a plain `ALTER` is used.
+    // Existing rows stay NULL (unnumbered), which the frise renders last. See
+    // `migrate_collection_book_volume_number`.
+    migrate_collection_book_volume_number(db).await?;
+
+    Ok(())
+}
+
+/// Migration 090: add the nullable `volume_number` column to `collection_books`,
+/// evolving the table safely whether or not it is a live cr-sqlite CRR.
+///
+/// `collection_books` is in `crsqlite_crr::CRR_TABLES`, so on an enrolled device
+/// it is already promoted to a CRR when this runs (the `collection_books__crsql_clock`
+/// companion table exists). A bare `ALTER TABLE` on a CRR freezes its insert/update
+/// triggers at the old column count, breaking the next write; cr-sqlite's
+/// `crsql_begin_alter` / `crsql_commit_alter` protocol rebuilds that machinery
+/// around the DDL and preserves the clock rows. Off the sync path the `crsql_*`
+/// functions are not registered, so a plain `ALTER` is both correct and required.
+///
+/// Idempotent: gated on the column being absent, so a re-run (every boot on an
+/// enrolled device) is a no-op. The column is nullable with no backfill: a NULL
+/// `volume_number` means "unnumbered", ordered after the numbered volumes.
+async fn migrate_collection_book_volume_number(db: &DatabaseConnection) -> Result<(), DbErr> {
+    let backend = db.get_database_backend();
+
+    if table_has_column(db, "collection_books", "volume_number").await? {
+        return Ok(());
+    }
+
+    // Is `collection_books` a live CRR? The clock companion table exists only
+    // after `setup_crrs`; a plain `sqlite_master` read, feature-independent.
+    let is_crr = table_exists(db, "collection_books__crsql_clock").await?;
+
+    if is_crr {
+        db.execute(Statement::from_string(
+            backend,
+            "SELECT crsql_begin_alter('collection_books')".to_owned(),
+        ))
+        .await?;
+    }
+
+    db.execute(Statement::from_string(
+        backend,
+        "ALTER TABLE collection_books ADD COLUMN volume_number INTEGER".to_owned(),
+    ))
+    .await?;
+
+    if is_crr {
+        db.execute(Statement::from_string(
+            backend,
+            "SELECT crsql_commit_alter('collection_books')".to_owned(),
+        ))
+        .await?;
+    }
+
     Ok(())
 }
 

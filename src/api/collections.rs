@@ -257,6 +257,85 @@ pub async fn update_book_collections(
 }
 
 #[derive(Deserialize)]
+pub struct MarkSeriesRequest {
+    pub is_series: bool,
+}
+
+/// Mark a collection as a series (`source = 'series'`) or revert it to `manual`.
+pub async fn mark_collection_as_series(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<MarkSeriesRequest>,
+) -> impl IntoResponse {
+    let source = if payload.is_series {
+        "series"
+    } else {
+        "manual"
+    };
+    match state.collection_repo.set_source(&id, source).await {
+        Ok(()) => {
+            let _ = crate::sync::log_operation_with_str_id(
+                state.db(),
+                "collection",
+                &id,
+                "UPDATE",
+                None,
+            )
+            .await;
+            StatusCode::OK.into_response()
+        }
+        Err(crate::domain::DomainError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Collection not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SetVolumeRequest {
+    pub volume_number: Option<i32>,
+}
+
+/// Set (or clear) a book's reading-order position within a collection.
+pub async fn set_book_volume_number(
+    State(state): State<AppState>,
+    Path((collection_id, book_id)): Path<(String, String)>,
+    Json(payload): Json<SetVolumeRequest>,
+) -> impl IntoResponse {
+    match state
+        .collection_repo
+        .set_book_volume(&collection_id, &book_id, payload.volume_number)
+        .await
+    {
+        Ok(()) => {
+            let _ = crate::sync::log_operation_with_str_id(
+                state.db(),
+                "collection_book",
+                &collection_id,
+                "UPDATE",
+                Some(serde_json::json!({
+                    "book_id": book_id,
+                    "volume_number": payload.volume_number,
+                })),
+            )
+            .await;
+            StatusCode::OK.into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
 pub struct ImportQuery {
     pub owned: Option<bool>,
 }

@@ -1096,6 +1096,7 @@ mod tests {
             collection_id: Set(collection_id.clone()),
             book_id: Set(book_id),
             added_at: Set("2026-01-01T00:00:00Z".to_string()),
+            volume_number: Set(None),
         }
         .insert(&db)
         .await
