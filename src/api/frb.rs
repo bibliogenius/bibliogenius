@@ -805,7 +805,9 @@ pub async fn metadata_fill_undo_book_by_uuid(
 /// the trousseau (A1). Rehydrated from the encrypted `account_session` row on first use
 /// after launch via [`ensure_account_session`].
 struct AccountSession {
-    bundle: crate::crypto::account_keys::AccountKeyBundle,
+    /// Shared with the client so it can re-login on its own when the hub expires the
+    /// session token (`enable_auto_reauth`), without a second copy of the trousseau in RAM.
+    bundle: std::sync::Arc<crate::crypto::account_keys::AccountKeyBundle>,
     client: crate::services::account_sync_client::AccountSyncClient,
     account_id: String,
     device_id: String,
@@ -871,11 +873,15 @@ async fn enrollment_restart_required(_db: &DatabaseConnection) -> bool {
 /// since this takes ownership of the metadata fields.
 async fn store_account_session(
     bundle: crate::crypto::account_keys::AccountKeyBundle,
-    client: crate::services::account_sync_client::AccountSyncClient,
+    mut client: crate::services::account_sync_client::AccountSyncClient,
     account_id: String,
     device_id: String,
     email: String,
 ) {
+    let bundle = std::sync::Arc::new(bundle);
+    // The hub expires the session token 30 minutes after login and never slides the TTL,
+    // while this process can stay up for days: let the client mint itself a new one.
+    client.enable_auto_reauth(email.clone(), std::sync::Arc::clone(&bundle));
     *ACCOUNT_SESSION.lock().await = Some(AccountSession {
         bundle,
         client,
@@ -934,8 +940,13 @@ async fn ensure_account_session<'a>(
             .login(&persisted.email, &persisted.bundle)
             .await
             .map_err(|e| e.to_string())?;
+        let bundle = std::sync::Arc::new(persisted.bundle);
+        // The token minted just above dies after 30 minutes (the hub's session TTL) and
+        // this session object outlives it: arm the client's own renewal, or every call
+        // past that mark 401s until the app restarts.
+        client.enable_auto_reauth(persisted.email.clone(), std::sync::Arc::clone(&bundle));
         **guard = Some(AccountSession {
-            bundle: persisted.bundle,
+            bundle,
             client,
             account_id: persisted.account_id,
             device_id: persisted.device_id,
@@ -1229,10 +1240,21 @@ pub fn account_sync_capable_ffi() -> bool {
     cfg!(feature = "account_sync")
 }
 
+/// Log a failed sync cycle on its way out to the caller.
+///
+/// Auto-sync runs unattended every 15 minutes, so a cycle that only reports to its caller
+/// fails invisibly: the log must show the failures, not just the `data sync complete` lines.
+fn log_sync_failure(e: impl std::fmt::Display) -> String {
+    tracing::warn!(error = %e, "account_sync_now: sync cycle failed");
+    e.to_string()
+}
+
 pub async fn account_sync_now_ffi() -> Result<String, String> {
     let db = db().ok_or("Database not initialized")?;
     let mut guard = ACCOUNT_SESSION.lock().await;
-    let session = ensure_account_session(&mut guard).await?;
+    let session = ensure_account_session(&mut guard)
+        .await
+        .map_err(log_sync_failure)?;
 
     let state = crate::services::account_sync_engine::DbSyncStateStore::new(db.clone());
 
@@ -1275,7 +1297,7 @@ pub async fn account_sync_now_ffi() -> Result<String, String> {
                 &cover_sink,
             )
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(log_sync_failure)?;
             // Record the covers we pushed in the local dedup state, now that the
             // whole cycle succeeded (ADR-046): the next sync skips them while their
             // file mtime is unchanged, so periodic auto-sync does not re-encode and
@@ -1297,7 +1319,7 @@ pub async fn account_sync_now_ffi() -> Result<String, String> {
                 &session.device_id,
             )
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(log_sync_failure)?
         };
         tracing::info!(
             applied = stats.applied,
@@ -1323,7 +1345,7 @@ pub async fn account_sync_now_ffi() -> Result<String, String> {
             &session.bundle.verifying_key(),
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(log_sync_failure)?;
         let device_count = registry.map(|r| r.devices.len()).unwrap_or(0);
 
         // No cr-sqlite merge engine in this binary: skip the data leg honestly rather

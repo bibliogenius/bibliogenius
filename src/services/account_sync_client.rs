@@ -29,6 +29,8 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
+use std::sync::{Arc, RwLock};
+use zeroize::Zeroizing;
 
 use crate::crypto::account_keys::AccountKeyBundle;
 
@@ -256,11 +258,31 @@ fn build_keybundle_mac(auth_verifier_hash: &str, challenge_b64url: &str) -> Stri
 // Client
 // ---------------------------------------------------------------------------
 
+/// Credentials kept so the client can mint itself a fresh session token.
+///
+/// The hub caps a session at 30 minutes (`AccountAuthService::SESSION_TOKEN_TTL_SECONDS`)
+/// and does not slide the TTL on use, while a desktop process stays alive for days.
+/// Without this the token minted at launch simply ages out and every later call 401s
+/// until the app is restarted.
+struct ReauthCredentials {
+    email: String,
+    /// Shared with the caller's session rather than cloned: the trousseau is secret
+    /// material (A1) and must exist once in RAM, zeroized on the last drop.
+    bundle: Arc<AccountKeyBundle>,
+}
+
 pub struct AccountSyncClient {
     http: Client,
     base_url: String,
     /// Opaque bearer session token, zeroized on drop (A1: tokens are secrets).
-    token: Option<SecretString>,
+    /// Behind a lock because the bearer-protected calls take `&self` (the `LaneTransport`
+    /// seam is a shared-reference trait) yet must be able to replace an expired token.
+    token: RwLock<Option<SecretString>>,
+    /// Set by [`AccountSyncClient::enable_auto_reauth`]; `None` disables renewal, which
+    /// is the right default for the one-shot signup/enrollment flows.
+    reauth: Option<ReauthCredentials>,
+    /// Serializes renewals so a burst of concurrent 401s mints one token, not one each.
+    renew_lock: tokio::sync::Mutex<()>,
 }
 
 impl AccountSyncClient {
@@ -280,30 +302,51 @@ impl AccountSyncClient {
         Self {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            token: None,
+            token: RwLock::new(None),
+            reauth: None,
+            renew_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Arm automatic session renewal for a signed-in account: when the hub expires the
+    /// session token mid-run, the next protected call re-logs in from `bundle` and
+    /// replays itself instead of surfacing a 401 (see [`ReauthCredentials`]).
+    pub fn enable_auto_reauth(&mut self, email: impl Into<String>, bundle: Arc<AccountKeyBundle>) {
+        self.reauth = Some(ReauthCredentials {
+            email: email.into(),
+            bundle,
+        });
     }
 
     /// Whether a session token is currently held.
     pub fn is_authenticated(&self) -> bool {
-        self.token.is_some()
+        self.token
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     /// Drop the session token locally (does not revoke server-side).
-    pub fn clear_session(&mut self) {
-        self.token = None;
+    pub fn clear_session(&self) {
+        *self.token.write().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Copy the session token out of the lock, so no guard is held across an await point.
+    /// `Zeroizing` because this copy is the token in the clear (A1: tokens are secrets).
+    fn current_token(&self) -> Option<Zeroizing<String>> {
+        self.token
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|t| Zeroizing::new(t.expose_secret().to_string()))
+    }
+
+    fn set_token(&self, token: String) {
+        *self.token.write().unwrap_or_else(|e| e.into_inner()) = Some(SecretString::new(token));
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)
-    }
-
-    fn bearer(&self, req: RequestBuilder) -> Result<RequestBuilder> {
-        let token = self
-            .token
-            .as_ref()
-            .ok_or(AccountSyncError::NotAuthenticated)?;
-        Ok(req.bearer_auth(token.expose_secret()))
     }
 
     // --- account lifecycle / auth ---
@@ -341,6 +384,12 @@ impl AccountSyncClient {
     /// Full login: fetch a challenge, sign it with the bundle, exchange for a token.
     /// On success the session token is stored for subsequent protected calls.
     pub async fn login(&mut self, email: &str, bundle: &AccountKeyBundle) -> Result<LoginOutcome> {
+        self.authenticate(email, bundle).await
+    }
+
+    /// The login round-trip itself, shared by the explicit [`AccountSyncClient::login`] and
+    /// by the automatic renewal a 401 triggers (hence `&self`).
+    async fn authenticate(&self, email: &str, bundle: &AccountKeyBundle) -> Result<LoginOutcome> {
         let challenge = self.request_challenge(email, PURPOSE_LOGIN).await?;
         let signature = build_login_signature(bundle, &challenge)?;
         let resp: LoginResponse =
@@ -352,11 +401,30 @@ impl AccountSyncClient {
                 }),
             ))
             .await?;
-        self.token = Some(SecretString::new(resp.token));
+        self.set_token(resp.token);
         Ok(LoginOutcome {
             account_id: resp.account_id,
             descriptor: resp.descriptor,
         })
+    }
+
+    /// Mint a fresh session token from the stored trousseau after the hub rejected
+    /// `expired`. Returns `false` when auto-reauth is not armed, so the caller surfaces
+    /// the original 401 rather than a misleading error.
+    ///
+    /// Serialized on `renew_lock`: concurrent callers that lose the race find the token
+    /// another task already installed and skip the round-trip.
+    async fn renew_session(&self, expired: &str) -> Result<bool> {
+        let Some(creds) = self.reauth.as_ref() else {
+            return Ok(false);
+        };
+        let _guard = self.renew_lock.lock().await;
+        if matches!(self.current_token(), Some(current) if current.as_str() != expired) {
+            return Ok(true);
+        }
+        tracing::info!("account hub session expired; re-authenticating");
+        self.authenticate(&creds.email, &creds.bundle).await?;
+        Ok(true)
     }
 
     /// Download wrapped key copies (path A bootstrap / recovery). `auth_verifier_hash`
@@ -387,57 +455,90 @@ impl AccountSyncClient {
     /// `POST /push` — blind overwrite-in-place of this device's lanes.
     pub async fn push(&self, device_id: &str, lanes: &[LanePush]) -> Result<PushResponse> {
         let body = PushRequest { device_id, lanes };
-        let req = self.bearer(self.http.post(self.url("/api/account/push")).json(&body))?;
-        self.send_json(req).await
+        self.send_authed(|| self.http.post(self.url("/api/account/push")).json(&body))
+            .await
     }
 
     /// `GET /pull` — delta of OTHER devices' lanes after `cursor`. Pass this device's
     /// id so the hub excludes its own lanes; `cursor = 0` is a full bootstrap.
     pub async fn pull(&self, device_id: &str, cursor: i64, limit: u32) -> Result<PullResponse> {
-        let req = self.bearer(self.http.get(self.url("/api/account/pull")).query(&[
-            ("cursor", cursor.to_string()),
-            ("limit", limit.to_string()),
-            ("device_id", device_id.to_string()),
-        ]))?;
-        self.send_json(req).await
+        self.send_authed(|| {
+            self.http.get(self.url("/api/account/pull")).query(&[
+                ("cursor", cursor.to_string()),
+                ("limit", limit.to_string()),
+                ("device_id", device_id.to_string()),
+            ])
+        })
+        .await
     }
 
     /// `GET /registry` — the opaque signed device registry.
     pub async fn get_registry(&self) -> Result<RegistryResponse> {
-        let req = self.bearer(self.http.get(self.url("/api/account/registry")))?;
-        self.send_json(req).await
+        self.send_authed(|| self.http.get(self.url("/api/account/registry")))
+            .await
     }
 
     /// `POST /registry` — publish a new signed registry (standard base64 blob).
     pub async fn post_registry(&self, blob_b64: &str) -> Result<i64> {
-        let req = self.bearer(
-            self.http
-                .post(self.url("/api/account/registry"))
-                .json(&serde_json::json!({ "blob": blob_b64 })),
-        )?;
-        let resp: RegistrySeqResponse = self.send_json(req).await?;
+        let resp: RegistrySeqResponse = self
+            .send_authed(|| {
+                self.http
+                    .post(self.url("/api/account/registry"))
+                    .json(&serde_json::json!({ "blob": blob_b64 }))
+            })
+            .await?;
         Ok(resp.registry_seq)
     }
 
     /// `DELETE /lanes?device_id=` — client-driven orphan-lane GC. Returns rows deleted.
     pub async fn delete_lanes(&self, device_id: &str) -> Result<i64> {
-        let req = self.bearer(
-            self.http
-                .delete(self.url("/api/account/lanes"))
-                .query(&[("device_id", device_id)]),
-        )?;
-        let resp: DeletedResponse = self.send_json(req).await?;
+        let resp: DeletedResponse = self
+            .send_authed(|| {
+                self.http
+                    .delete(self.url("/api/account/lanes"))
+                    .query(&[("device_id", device_id)])
+            })
+            .await?;
         Ok(resp.deleted)
     }
 
     /// `DELETE /api/account` — RGPD purge of the whole account.
     pub async fn delete_account(&self) -> Result<()> {
-        let req = self.bearer(self.http.delete(self.url("/api/account")))?;
-        let _: serde_json::Value = self.send_json(req).await?;
+        let _: serde_json::Value = self
+            .send_authed(|| self.http.delete(self.url("/api/account")))
+            .await?;
         Ok(())
     }
 
-    // --- transport helper ---
+    // --- transport helpers ---
+
+    /// Send a bearer-protected request, renewing an expired session once and replaying it.
+    ///
+    /// `build` rebuilds the request rather than taking one, because a `RequestBuilder` is
+    /// consumed on send and the retry needs a second, identical one carrying the new token.
+    /// A 401 that we cannot renew away (no credentials armed, or the re-login itself
+    /// fails) is surfaced to the caller.
+    async fn send_authed<T, F>(&self, build: F) -> Result<T>
+    where
+        T: DeserializeOwned,
+        F: Fn() -> RequestBuilder,
+    {
+        let token = self
+            .current_token()
+            .ok_or(AccountSyncError::NotAuthenticated)?;
+        match self.send_json(build().bearer_auth(token.as_str())).await {
+            Err(AccountSyncError::Hub(401, body)) => {
+                if !self.renew_session(&token).await? {
+                    return Err(AccountSyncError::Hub(401, body));
+                }
+                let token = self
+                    .current_token()
+                    .ok_or(AccountSyncError::NotAuthenticated)?;
+                self.send_json(build().bearer_auth(token.as_str())).await
+            }
+            other => other,
+        }
+    }
 
     /// Send a request, map non-2xx to `Hub(status, body)`, and deserialize the body.
     async fn send_json<T: DeserializeOwned>(&self, req: RequestBuilder) -> Result<T> {
@@ -655,8 +756,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut client = AccountSyncClient::with_base_url(server.uri());
-        client.token = Some(SecretString::new("t".to_string()));
+        let client = AccountSyncClient::with_base_url(server.uri());
+        client.set_token("t".to_string());
         let resp = client.pull("dev-self", 7, 200).await.unwrap();
         assert_eq!(resp.next_cursor, 9);
         assert_eq!(resp.lanes.len(), 1);
@@ -668,6 +769,100 @@ mod tests {
         let client = AccountSyncClient::with_base_url("http://127.0.0.1:1");
         let err = client.push("dev", &[]).await.unwrap_err();
         assert!(matches!(err, AccountSyncError::NotAuthenticated));
+    }
+
+    /// Mount the challenge + login pair a renewal needs, issuing `token`. `expected_logins`
+    /// is verified when the mock server drops.
+    async fn mount_login(server: &MockServer, token: &str, expected_logins: u64) {
+        Mock::given(method("POST"))
+            .and(path("/api/account/challenge"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "challenge": URL_SAFE_NO_PAD.encode([7u8; 32]),
+                "expires_at": "2026-01-01T00:00:00Z",
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/account/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": token,
+                "account_id": "acct-1",
+                "descriptor": {
+                    "account_salt": "c2FsdA",
+                    "kdf_params": {"algo":"argon2id","version":19,"m":65536,"t":3,"p":1},
+                    "schema_version": 1,
+                    "auth_method": "passphrase",
+                    "aead_alg": "AES-256-GCM",
+                    "account_auth_pk": "cGs",
+                    "descriptor_sig": "c2ln",
+                },
+            })))
+            .expect(expected_logins)
+            .mount(server)
+            .await;
+    }
+
+    /// A hub session expires after 30 minutes and the hub does not slide the TTL, so a
+    /// long-lived process (a desktop app left open) eventually pushes with a dead token.
+    /// The client must re-login and replay the call instead of surfacing the 401.
+    #[tokio::test]
+    async fn expired_session_is_renewed_and_the_call_retried() {
+        let server = MockServer::start().await;
+        mount_login(&server, "fresh", 1).await;
+        // The hub rejects the aged-out token...
+        Mock::given(method("POST"))
+            .and(path("/api/account/push"))
+            .and(wiremock::matchers::header("authorization", "Bearer stale"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"error":"Unauthorized"})),
+            )
+            .mount(&server)
+            .await;
+        // ...and accepts the one minted by the renewal.
+        Mock::given(method("POST"))
+            .and(path("/api/account/push"))
+            .and(wiremock::matchers::header("authorization", "Bearer fresh"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"accepted": 1, "high_change_seq": 42})),
+            )
+            .mount(&server)
+            .await;
+
+        let mut client = AccountSyncClient::with_base_url(server.uri());
+        client.enable_auto_reauth("a@b.co", Arc::new(AccountKeyBundle::generate()));
+        client.set_token("stale".to_string());
+
+        let resp = client.push("dev-1", &[]).await.unwrap();
+        assert_eq!(resp.high_change_seq, 42);
+        // The renewed token is the one kept for subsequent calls.
+        assert_eq!(client.current_token().unwrap().as_str(), "fresh");
+    }
+
+    /// Without credentials armed (the one-shot signup/enrollment clients) there is nothing
+    /// to renew with: the 401 must reach the caller rather than be retried blindly.
+    #[tokio::test]
+    async fn expired_session_without_auto_reauth_surfaces_the_401() {
+        let server = MockServer::start().await;
+        mount_login(&server, "fresh", 0).await;
+        Mock::given(method("POST"))
+            .and(path("/api/account/push"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"error":"Unauthorized"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = AccountSyncClient::with_base_url(server.uri());
+        client.set_token("stale".to_string());
+
+        match client.push("dev-1", &[]).await.unwrap_err() {
+            AccountSyncError::Hub(code, _) => assert_eq!(code, 401),
+            other => panic!("expected Hub 401, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -708,8 +903,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut client = AccountSyncClient::with_base_url(server.uri());
-        client.token = Some(SecretString::new("t".to_string()));
+        let client = AccountSyncClient::with_base_url(server.uri());
+        client.set_token("t".to_string());
         let got = client.get_registry().await.unwrap();
         assert_eq!(got.registry_seq, 5);
         assert_eq!(got.blob.as_deref(), Some("cmVn"));
