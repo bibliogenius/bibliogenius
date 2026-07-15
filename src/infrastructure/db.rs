@@ -71,9 +71,10 @@ pub async fn init_db_account_sync(database_url: &str) -> Result<DatabaseConnecti
 
     let opts = SqliteConnectOptions::from_str(database_url).map_err(conn_err)?;
 
-    // Dynamic dev build: load the vendored extension per connection. cr-sqlite's
-    // entry point is non-standard, so it must be named explicitly. Not needed on the
-    // static build, where the auto-extension above already applies to every connection.
+    // Dynamic build (macOS dev/test, Windows ship): load the extension per
+    // connection. cr-sqlite's entry point is non-standard, so it must be named
+    // explicitly. Not needed on the static build, where the auto-extension above
+    // already applies to every connection.
     #[cfg(all(feature = "crsqlite", not(feature = "crsqlite-static")))]
     let opts = opts.extension_with_entrypoint(
         crate::infrastructure::crsqlite_dynamic::vendored_extension_path(),

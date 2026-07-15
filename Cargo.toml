@@ -24,7 +24,9 @@ desktop = []
 mcp = []
 # The real cr-sqlite merge engine over the sqlx + SeaORM
 # stack. Off by default so the normal build/CI needs no native cr-sqlite extension.
-# This is the DYNAMIC dev/test path: it loads `crsqlite.dylib` at runtime.
+# This is the DYNAMIC path: it loads the cr-sqlite extension at runtime. Used for
+# macOS dev/test (`vendor/crsqlite/crsqlite.dylib`) AND the Windows ship
+# (`crsqlite.dll` next to the exe; see `infrastructure/crsqlite_dynamic.rs`).
 crsqlite = []
 # Shipping path: statically link the vendored cr-sqlite archive (build.rs) and
 # register it in-process via `sqlite3_auto_extension`. iOS forbids runtime

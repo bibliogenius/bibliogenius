@@ -44,6 +44,13 @@ This dynamic `.dylib` is the **dev/test path only**. The shipped app links cr-sq
 **statically** and registers it in-process (iOS forbids runtime extension loading) —
 see ADR-044 sections 2-3.
 
+**Exception: Windows ships the DYNAMIC path.** The symbol-localization relink below
+is Unix-only (ld -r + objcopy, no proven COFF/MSVC equivalent), and Windows allows
+runtime extension loading. The Windows CI workflow (`bibliogenius-app`,
+`release-windows.yml`) downloads the official `crsqlite-win-x86_64.zip` v0.16.3
+artifact (SHA-256 pinned in the workflow) and ships `crsqlite.dll` next to each
+executable; resolution lives in `src/infrastructure/crsqlite_dynamic.rs`.
+
 ## Vendor a STATIC archive (iOS / Android / macOS / Linux)
 
 Use `./vendor-static.sh <target>` — it builds cr-sqlite for the target/ABI AND
