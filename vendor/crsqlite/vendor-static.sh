@@ -116,17 +116,29 @@ elif [ "$KIND" = linux ]; then
   # `CC:=$(CI_GCC)`), and defining it also skips the C_TARGET flag — needed
   # because gcc does not take clang's `--target=`, and a native build needs no
   # cross flag anyway. The pinned nightly is not baked into the image; install
-  # it on the fly (minimal profile, no rust-src: this path skips -Zbuild-std).
+  # it on the fly, WITH rust-src (required by -Zbuild-std below).
   rustup toolchain list | grep -q "$NIGHTLY" \
     || rustup toolchain install "$NIGHTLY" --profile minimal
-  # Best-effort bitcode reduction for the crate's own objects. NOT sufficient on
-  # its own: the PREBUILT std rlibs ship with embedded LLVM-17 `.llvmbc` that
-  # these flags cannot touch, which Ubuntu 22.04's binutils (LLVM-14 plugin)
-  # abort on — the operative fix is the `.llvmbc` section strip in the ELF
-  # relink below.
+  rustup component add rust-src --toolchain "$NIGHTLY"
+  # -Zbuild-std (as on the iOS/Android/Windows targets, which set it inside the
+  # cr-sqlite Makefile; here it is a make-var override since the Makefile has no
+  # linux branch). Rebuilding std from source is what keeps this archive
+  # linkable: the PREBUILT std rlibs emit a `DW.ref.rust_eh_personality` COMDAT
+  # group, which the relink below then LOCALIZES. At the app link, lld discards
+  # that duplicate group (our own std defines it too) and then cannot redirect
+  # out_obj.o's .eh_frame relocation, since a *local* symbol in a discarded
+  # section has no surviving definition to point at:
+  #   rust-lld: relocation refers to a symbol in a discarded section:
+  #             DW.ref.rust_eh_personality
+  # A build-std archive carries no such group at all (verified: the Android one
+  # has none), so nothing is discarded and nothing dangles. Do not drop this
+  # flag to save build time.
+  # -Cembed-bitcode=no also drops the LLVM-17 `.llvmbc` that Ubuntu 22.04's
+  # binutils (LLVM-14 plugin) abort on; the `.llvmbc` strip in the ELF relink
+  # below stays as a belt-and-braces guard.
   ( cd "$CORE" && RUSTUP_TOOLCHAIN="$NIGHTLY" \
       CARGO_PROFILE_RELEASE_LTO=off RUSTFLAGS="-Cembed-bitcode=no" \
-      make CI_MAYBE_TARGET="$TRIPLE" CI_GCC=gcc static )
+      make CI_MAYBE_TARGET="$TRIPLE" CI_GCC=gcc rs_build_flags=-Zbuild-std static )
 else
   # Android needs two things the Makefile's `static` target does NOT set up on a
   # macOS host: (1) the target C compiler / archiver env for build-std's `unwind`
