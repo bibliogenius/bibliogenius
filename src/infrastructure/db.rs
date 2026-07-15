@@ -2360,6 +2360,62 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // `migrate_collection_book_volume_number`.
     migrate_collection_book_volume_number(db).await?;
 
+    // Migration 091: repair pre-existing `collection_books.added_at` values that
+    // are empty or non-ISO. The column is `TEXT NOT NULL DEFAULT ''` on a
+    // replicated CRR (the CRR-ready rebuild synthesized the empty-string
+    // default), so an insert that omits it, a row synced from a peer holding a
+    // legacy value, or one restored from an old backup can carry an unparseable
+    // date. Such a value made the Flutter Collections tab crash on
+    // `DateTime.parse`; the reader was hardened (the permanent guard, since the
+    // schema default can still mint `''` between boots), and this cleans the
+    // stored data at each boot. A plain CRR-safe `UPDATE` (not DDL, so no alter
+    // protocol), backfilled from the parent collection's `created_at`. See
+    // `migrate_collection_book_added_at`.
+    migrate_collection_book_added_at(db).await?;
+
+    Ok(())
+}
+
+/// Migration 091: repair `collection_books.added_at` values that are empty or not
+/// ISO-8601.
+///
+/// The column is `TEXT NOT NULL DEFAULT ''` on a cr-sqlite CRR (the CRR-ready
+/// rebuild synthesized the empty-string default), so an insert that omits the
+/// column, a row replicated from a peer holding a legacy bad value, or one
+/// restored from an old backup can carry an unparseable `added_at`. The Flutter
+/// reader degrades such a value to null instead of crashing the Collections tab
+/// and remains the permanent guard (the schema default can still produce `''`
+/// between boots); this repairs the stored rows at each boot, backfilling to the
+/// parent collection's `created_at` (a good approximation of when the book
+/// joined) and falling back to the Unix epoch when that date is itself
+/// unparseable.
+///
+/// SQLite's `datetime()` returns NULL for an empty or non-ISO input and a
+/// non-NULL string for every RFC3339 form chrono emits (including the
+/// nanosecond-precision offset/`Z` forms), so `datetime(added_at) IS NULL`
+/// selects exactly the broken rows with no false positive on valid data.
+///
+/// This is a plain `UPDATE`, not DDL, so it needs no `crsql_begin_alter`
+/// protocol: on an enrolled device it flows through the CRR's update triggers
+/// like any write and replicates the repair to peers. Idempotent: after the
+/// first run no row matches the predicate, so every subsequent boot is a no-op.
+async fn migrate_collection_book_added_at(db: &DatabaseConnection) -> Result<(), DbErr> {
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        r#"
+        UPDATE collection_books
+        SET added_at = COALESCE(
+            (SELECT c.created_at FROM collections c
+             WHERE c.id = collection_books.collection_id
+               AND datetime(c.created_at) IS NOT NULL),
+            '1970-01-01T00:00:00+00:00'
+        )
+        WHERE added_at IS NULL OR datetime(added_at) IS NULL
+        "#
+        .to_owned(),
+    ))
+    .await?;
+
     Ok(())
 }
 
