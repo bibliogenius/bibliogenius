@@ -326,11 +326,6 @@ impl AccountSyncClient {
             .is_some()
     }
 
-    /// Drop the session token locally (does not revoke server-side).
-    pub fn clear_session(&self) {
-        *self.token.write().unwrap_or_else(|e| e.into_inner()) = None;
-    }
-
     /// Copy the session token out of the lock, so no guard is held across an await point.
     /// `Zeroizing` because this copy is the token in the clear (A1: tokens are secrets).
     fn current_token(&self) -> Option<Zeroizing<String>> {
