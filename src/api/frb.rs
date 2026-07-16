@@ -5036,8 +5036,8 @@ pub async fn operation_log_entity_types() -> Result<Vec<String>, String> {
 // =============================================================================
 
 use crate::services::hub_directory_service::{
-    CatalogEntry, DirectoryConfig, HubBorrowRequest, HubDirectoryService, HubFollow, HubProfile,
-    RegisterParams,
+    CatalogEntry, DirectoryConfig, HubBorrowRequest, HubDirectoryError, HubDirectoryService,
+    HubFollow, HubProfile, RegisterParams,
 };
 
 static HUB_DIRECTORY_SVC: OnceLock<HubDirectoryService> = OnceLock::new();
@@ -5588,10 +5588,45 @@ pub async fn hub_directory_get_profile(node_id: String) -> Result<FrbHubProfile,
         .map_err(|e| e.to_string())
 }
 
+/// Detailed outcome of a hub catalog fetch, so the UI can distinguish an
+/// empty catalog from a denied, expired, or unreachable one instead of
+/// rendering every failure as "no books".
+pub struct FrbHubCatalogResult {
+    pub entries: Vec<FrbCatalogEntry>,
+    /// "hub" when entries come from a live hub response, "cache" when the
+    /// hub fetch failed and entries are the local offline cache.
+    pub source: String,
+    /// Machine-readable failure reason, set only when `source == "cache"`:
+    /// - "follow_required": the library gates its catalog behind an
+    ///   approved follow (hub 403 with code)
+    /// - "catalog_unavailable": access is fine but the hub holds no
+    ///   catalog (expired TTL or never pushed)
+    /// - "not_found": no hub profile for this node id
+    /// - "http_<status>": other hub error without a machine code
+    /// - "network": transport failure or local config issue
+    pub error_code: Option<String>,
+}
+
+/// Maps a hub directory error to the machine-readable codes documented on
+/// [FrbHubCatalogResult::error_code]. Prefers the `code` field the hub
+/// attaches to error bodies; falls back to the HTTP status for older hubs.
+fn hub_catalog_error_code(e: &HubDirectoryError) -> String {
+    match e {
+        HubDirectoryError::Hub(status, body) => serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string))
+            .unwrap_or_else(|| format!("http_{status}")),
+        _ => "network".to_string(),
+    }
+}
+
 /// Gets the catalog of a library (public or approved follow).
 /// Fetches from hub, upserts into local cache, and returns entries with added_at.
-/// If the hub fetch fails, returns the cached entries (offline-first).
-pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalogEntry>, String> {
+/// If the hub fetch fails, returns the cached entries (offline-first) along
+/// with an honest error code describing why the hub could not serve.
+pub async fn hub_directory_get_catalog_detailed(
+    node_id: String,
+) -> Result<FrbHubCatalogResult, String> {
     use crate::models::peer_book;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -5608,12 +5643,18 @@ pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalog
             );
             // Upsert into local cache and return with owner-side added_at
             let result = upsert_directory_catalog_cache(db, &node_id, &entries).await;
-            Ok(result)
+            Ok(FrbHubCatalogResult {
+                entries: result,
+                source: "hub".to_string(),
+                error_code: None,
+            })
         }
         Err(ref e) => {
+            let error_code = hub_catalog_error_code(e);
             tracing::warn!(
-                "hub_directory_get_catalog: hub fetch failed ({}), using cache",
-                e
+                "hub_directory_get_catalog: hub fetch failed ({}, code={}), using cache",
+                e,
+                error_code
             );
             // Offline fallback: return cached entries
             let cached = peer_book::Entity::find()
@@ -5623,22 +5664,67 @@ pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalog
                 .await
                 .unwrap_or_default();
 
-            Ok(cached
-                .into_iter()
-                .filter_map(|pb| {
-                    pb.isbn.map(|isbn| FrbCatalogEntry {
-                        isbn,
-                        title: pb.title,
-                        author: pb.author,
-                        cover_url: pb.cover_url,
-                        // Offline: trust the last `added_at` we received from the
-                        // owner. Legacy cached rows (pre-added_at push) have None
-                        // here, which correctly suppresses the "NEW" badge.
-                        added_at: pb.added_at,
+            Ok(FrbHubCatalogResult {
+                entries: cached
+                    .into_iter()
+                    .filter_map(|pb| {
+                        pb.isbn.map(|isbn| FrbCatalogEntry {
+                            isbn,
+                            title: pb.title,
+                            author: pb.author,
+                            cover_url: pb.cover_url,
+                            // Offline: trust the last `added_at` we received from the
+                            // owner. Legacy cached rows (pre-added_at push) have None
+                            // here, which correctly suppresses the "NEW" badge.
+                            added_at: pb.added_at,
+                        })
                     })
-                })
-                .collect())
+                    .collect(),
+                source: "cache".to_string(),
+                error_code: Some(error_code),
+            })
         }
+    }
+}
+
+/// Compatibility wrapper around [hub_directory_get_catalog_detailed] for
+/// callers that only need the entries (directory browsing screens).
+pub async fn hub_directory_get_catalog(node_id: String) -> Result<Vec<FrbCatalogEntry>, String> {
+    hub_directory_get_catalog_detailed(node_id)
+        .await
+        .map(|r| r.entries)
+}
+
+#[cfg(test)]
+mod hub_catalog_error_code_tests {
+    use super::*;
+
+    #[test]
+    fn prefers_machine_code_from_hub_body() {
+        let e = HubDirectoryError::Hub(
+            403,
+            r#"{"error":"Access requires an active follow relationship.","code":"follow_required"}"#
+                .to_string(),
+        );
+        assert_eq!(hub_catalog_error_code(&e), "follow_required");
+    }
+
+    #[test]
+    fn falls_back_to_http_status_for_older_hubs() {
+        let e = HubDirectoryError::Hub(403, r#"{"error":"Catalog not available."}"#.to_string());
+        assert_eq!(hub_catalog_error_code(&e), "http_403");
+    }
+
+    #[test]
+    fn tolerates_non_json_bodies() {
+        let e = HubDirectoryError::Hub(502, "Bad Gateway".to_string());
+        assert_eq!(hub_catalog_error_code(&e), "http_502");
+    }
+
+    #[test]
+    fn maps_transport_failures_to_network() {
+        let e = HubDirectoryError::Network("connection refused".to_string());
+        assert_eq!(hub_catalog_error_code(&e), "network");
     }
 }
 
