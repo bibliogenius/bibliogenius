@@ -146,7 +146,7 @@ fn s2_read_token_never_in_outbound_payloads() {
 /// This is a structural test: the function source must contain key verification logic.
 #[test]
 fn s3_hub_refresh_verifies_x25519_key() {
-    let source = include_str!("../src/api/peer.rs");
+    let source = include_str!("../src/api/peer/messaging.rs");
 
     // The refresh_via_hub function must contain x25519 key verification
     assert!(

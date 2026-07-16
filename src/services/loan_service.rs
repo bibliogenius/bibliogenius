@@ -440,7 +440,7 @@ pub(crate) async fn resolve_returned_book(
 /// Delete the copies of `book_id` that `lender_peer_id` lent us, and only those.
 ///
 /// Shared by the two reclaim paths, `release_reclaimed_book` (`api/e2ee.rs`, encrypted)
-/// and `update_outgoing_status` (`api/peer.rs`, plaintext). Each used to purge on its own
+/// and `update_outgoing_status` (`api/peer/requests_outgoing.rs`, plaintext). Each used to purge on its own
 /// terms, and a book row now carries one borrowed copy per lender, so an unscoped delete
 /// takes a live loan from a peer who never asked for it back.
 ///

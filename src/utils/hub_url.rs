@@ -1,7 +1,7 @@
 //! Hub URL comparison helpers.
 //!
 //! Two sites in the codebase wipe `hub_directory_config` when the hub URL
-//! changes (`api/peer.rs::apply_relay_setup` and `api/frb.rs::init_backend`).
+//! changes (`api/peer/relay_config.rs::apply_relay_setup` and `api/frb.rs::init_backend`).
 //! Both must agree on what "changed" means, otherwise a trailing slash
 //! alone would burn the stored `write_token` + `recovery_code` and lock
 //! the client into a 401 loop.

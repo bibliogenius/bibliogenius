@@ -9,7 +9,7 @@
 //!
 //! The Rust side is now centralised here. `models::Book` exposes thin
 //! wrappers so the API contract with callers (api/books.rs,
-//! api/e2ee.rs, api/peer.rs, api/frb.rs) is unchanged.
+//! api/e2ee.rs, api/peer/, api/frb.rs) is unchanged.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
