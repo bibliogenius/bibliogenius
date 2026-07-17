@@ -8,8 +8,8 @@
 //!   badge disappears without requiring a manual action).
 //!
 //! This protects the coupling between the upload loop in
-//! `api/frb.rs::hub_directory_sync_catalog` and the bookkeeping helpers:
-//! `frb.rs` now delegates to `process_local_cover_upload`, so if a future
+//! `api/frb/hub_catalog.rs::hub_directory_sync_catalog` and the bookkeeping helpers:
+//! `hub_catalog.rs` now delegates to `process_local_cover_upload`, so if a future
 //! refactor drops the mark/clear calls the end-to-end flow breaks here.
 
 use std::io::{Cursor, Write};

@@ -479,7 +479,7 @@ mod hub_catalog_cache_tests {
     async fn setup_cache_db() -> DatabaseConnection {
         let db = db::init_db("sqlite::memory:").await.expect("init db");
         // Directory cache uses peer_id = 0 sentinel (no matching peer row), same
-        // workaround as upsert_directory_catalog_cache in frb.rs.
+        // workaround as upsert_directory_catalog_cache in api/frb/hub_catalog.rs.
         db.execute(Statement::from_string(
             db.get_database_backend(),
             "PRAGMA foreign_keys = OFF".to_owned(),

@@ -1,7 +1,7 @@
 //! HTTP API for the bulk metadata gap-fill feature (ADR-041).
 //!
 //! Thin Axum handlers that delegate to `services::metadata_fill_service`. The
-//! same service backs the FFI surface in `api/frb.rs` (Rule F3: both channels).
+//! same service backs the FFI surface in `api/frb/metadata_fill.rs` (Rule F3: both channels).
 
 use axum::{
     Json,

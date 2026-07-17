@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// Loopback ports probed to find a running BiblioGenius app, mirroring the app's
-/// own bind range (`start_server` in frb.rs tries `port..port + 10`).
+/// own bind range (`start_server` in api/frb/server_control.rs tries `port..port + 10`).
 #[cfg(feature = "mcp")]
 const MCP_PORT_SCAN_START: u16 = 8000;
 #[cfg(feature = "mcp")]
