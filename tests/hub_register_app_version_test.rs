@@ -23,7 +23,6 @@ fn base_params() -> RegisterParams {
     RegisterParams {
         node_id: "node-abc".to_string(),
         display_name: "Test Library".to_string(),
-        book_count: 0,
         is_listed: false,
         requires_approval: true,
         accept_from: "everyone".to_string(),

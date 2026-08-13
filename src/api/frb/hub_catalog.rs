@@ -4,31 +4,6 @@
 // mirrors the include! order because the generated Dart facade follows
 // declaration order. Shared imports live in frb.rs.
 
-/// Pushes the local ISBN list to the hub catalog cache (legacy, ISBN-only).
-pub async fn hub_directory_push_catalog(isbn_list: Vec<String>) -> Result<(), String> {
-    use crate::services::hub_directory_service::CatalogEntry;
-    let db = hub_db()?;
-    let book_count = crate::services::book_service::count_books(db)
-        .await
-        .map_err(|e| format!("count_books: {e:?}"))?;
-    let entries: Vec<CatalogEntry> = isbn_list
-        .into_iter()
-        .map(|isbn| CatalogEntry {
-            isbn,
-            book_id: None,
-            title: String::new(),
-            author: None,
-            cover_url: None,
-            added_at: None,
-        })
-        .collect();
-    hub_directory_svc()
-        .push_catalog(db, &entries, book_count)
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
 /// Reads all owned books from the local database, collects title, author,
 /// and cover data, and pushes the enriched catalog to the hub.
 /// Every entry carries its local `book_id` so the hub-side cover GC
@@ -57,8 +32,9 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
 /// catalog and pushes it to the hub. Kept separate so the public entry point
 /// can beacon any failure for diagnosis without changing the FFI contract.
 async fn hub_directory_sync_catalog_inner() -> Result<i32, String> {
-    use crate::models::book::{Column as BookColumn, Entity as BookEntity};
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use crate::models::book::Entity as BookEntity;
+    use crate::services::hub_directory_service::public_catalog_condition;
+    use sea_orm::{EntityTrait, QueryFilter};
 
     let db = hub_db()?;
 
@@ -68,12 +44,15 @@ async fn hub_directory_sync_catalog_inner() -> Result<i32, String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Not registered in directory".to_string())?;
 
-    // Collect ALL owned books with their authors (no ISBN filter).
+    // Collect the books the catalog exposes with their authors (no ISBN
+    // filter): owned, not private, and carrying at least an ISBN or a title.
+    // The rule lives in `public_catalog_condition` so the pushed catalog and
+    // the profile's public book_count are computed from the same predicate.
     let books_with_authors: Vec<(
         crate::models::book::Model,
         Vec<crate::models::author::Model>,
     )> = BookEntity::find()
-        .filter(BookColumn::Owned.eq(true))
+        .filter(public_catalog_condition())
         .find_with_related(crate::models::author::Entity)
         .all(db)
         .await
@@ -104,11 +83,6 @@ async fn hub_directory_sync_catalog_inner() -> Result<i32, String> {
         // on disk. Omitting it on ISBN-bearing entries silently disables GC
         // and leaks orphan covers (see `skipped_empty_catalog` warnings).
         let book_id = Some(book_id_val.clone());
-
-        // Skip books with neither ISBN nor title (unusable entries)
-        if isbn.is_empty() && book.title.is_empty() {
-            continue;
-        }
 
         let author = if authors.is_empty() {
             None
@@ -173,9 +147,11 @@ async fn hub_directory_sync_catalog_inner() -> Result<i32, String> {
 
     let count = entries.len() as i32;
     // Hub-profile book_count matches what followers actually see. Using
-    // `entries.len()` (owned + isbn-or-title) instead of a raw `books` row
-    // count avoids inflating the public number with wishlist rows, stale
-    // sync entries, or owned books that were filtered out of the catalog.
+    // `entries.len()` (the rows `public_catalog_condition` selected) instead
+    // of a raw `books` row count avoids inflating the public number with
+    // wishlist rows or entries that carry neither ISBN nor title. The profile
+    // upsert derives the same number from the same predicate, so whichever of
+    // the two writers reaches the hub last, the announced count holds.
     let book_count = count as i64;
 
     // Always push: even with an empty catalog, book_count must reach the hub.

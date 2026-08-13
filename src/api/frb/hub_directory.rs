@@ -93,6 +93,9 @@ impl From<HubProfile> for FrbHubProfile {
 pub struct FrbRegisterParams {
     pub node_id: String,
     pub display_name: String,
+    /// Ignored. The public count is derived from the hub catalog at upsert
+    /// time so the profile header and the catalog cannot disagree; the field
+    /// stays on the FFI struct to keep the Dart call sites compiling.
     pub book_count: i32,
     pub is_listed: bool,
     pub requires_approval: bool,
@@ -117,7 +120,6 @@ impl From<FrbRegisterParams> for RegisterParams {
         Self {
             node_id: p.node_id,
             display_name: p.display_name,
-            book_count: p.book_count,
             is_listed: p.is_listed,
             requires_approval: p.requires_approval,
             accept_from: p.accept_from,

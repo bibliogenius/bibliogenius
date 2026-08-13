@@ -74,7 +74,6 @@ fn base_params(node_id: &str) -> RegisterParams {
     RegisterParams {
         node_id: node_id.to_string(),
         display_name: "Eve's Library".to_string(),
-        book_count: 70,
         is_listed: false,
         requires_approval: true,
         accept_from: "everyone".to_string(),

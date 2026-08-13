@@ -11,7 +11,7 @@
 //!   - Persisting local directory settings (node_id, write_token, visibility)
 
 use reqwest::Client;
-use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+use sea_orm::{ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
 
 fn default_true() -> Option<bool> {
@@ -332,11 +332,16 @@ pub struct HubBorrowRequest {
 // Register / update params
 // ---------------------------------------------------------------------------
 
+/// Profile fields the caller controls.
+///
+/// `book_count` is deliberately absent: the public number is derived from the
+/// catalog by [`HubDirectoryService::count_public_catalog_books`] at upsert
+/// time, so the profile header and the catalog followers receive can never
+/// disagree.
 #[derive(Debug, Clone, Default)]
 pub struct RegisterParams {
     pub node_id: String,
     pub display_name: String,
-    pub book_count: i32,
     pub is_listed: bool,
     pub requires_approval: bool,
     pub accept_from: String,
@@ -354,6 +359,53 @@ pub struct RegisterParams {
     pub relay_mailbox_id: Option<String>,
     pub relay_write_token: Option<String>,
     pub avatar_config: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Public catalog scope
+// ---------------------------------------------------------------------------
+
+/// The books that reach the hub catalog, and therefore the public
+/// `book_count`: owned, non-private copies carrying at least one identifier.
+///
+/// `private` books are excluded because the flag means exactly that: hidden
+/// from network peers. Every other peer-facing read path already honours it
+/// (`api/peer/search.rs`, the E2EE catalog responses in `api/e2ee.rs`); the
+/// hub directory catalog is the one that did not, and it is the most exposed
+/// of them, being served to followers without a live connection. The
+/// comparison is `= false` rather than `!= true` so a row that somehow holds
+/// NULL in this NOT NULL column (a corrupt replicated changeset) stays out of
+/// the public catalog: failing closed is the safe direction for a privacy gate.
+///
+/// This gate is about what leaves the device towards *other people*. It has no
+/// bearing on account sync between the user's own devices, which replicates
+/// raw cr-sqlite changesets and never goes through this predicate: a private
+/// book still reaches the owner's second device.
+///
+/// A row with neither ISBN nor title is unusable for a follower (nothing to
+/// render, nothing to match a wishlist against) and is never pushed. A row
+/// carrying only one of the two IS pushed and IS counted: a title-less book
+/// still lists under its ISBN on the viewer side, and hiding it would make
+/// the missing title invisible to the owner.
+///
+/// Single source of truth, shared by the catalog builder in
+/// `api/frb/hub_catalog.rs` and by
+/// [`HubDirectoryService::count_public_catalog_books`], so the catalog that
+/// is pushed and the count that is announced cannot drift apart.
+pub fn public_catalog_condition() -> Condition {
+    use crate::models::book::Column;
+    Condition::all()
+        .add(Column::Owned.eq(true))
+        .add(Column::Private.eq(false))
+        .add(
+            Condition::any()
+                .add(
+                    Condition::all()
+                        .add(Column::Isbn.is_not_null())
+                        .add(Column::Isbn.ne("")),
+                )
+                .add(Column::Title.ne("")),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -565,7 +617,27 @@ impl HubDirectoryService {
     // Profile
     // -----------------------------------------------------------------------
 
+    /// Counts the books the hub catalog exposes (see
+    /// [`public_catalog_condition`]). This is the number advertised as the
+    /// profile's `book_count`, so the library header never announces books a
+    /// follower cannot find in the catalog.
+    pub async fn count_public_catalog_books(
+        db: &DatabaseConnection,
+    ) -> Result<i64, HubDirectoryError> {
+        use crate::models::book::Entity as BookEntity;
+        use sea_orm::{EntityTrait, PaginatorTrait, QueryFilter};
+
+        let count = BookEntity::find()
+            .filter(public_catalog_condition())
+            .count(db)
+            .await?;
+        Ok(count as i64)
+    }
+
     /// Build the JSON body for a hub directory register/update request.
+    ///
+    /// `book_count` is passed separately from `params`: it is derived from the
+    /// catalog, not supplied by the caller (see [`RegisterParams`]).
     ///
     /// Most optional fields follow "Some = set, None = leave alone": the key
     /// is only added to the body when the caller passes a value. The hub's
@@ -576,11 +648,11 @@ impl HubDirectoryService {
     /// requires that toggling off "Partager ma ville" clears the hub side
     /// immediately. We therefore always include the key, sending JSON null
     /// when the caller passes None so the hub overwrites the stored value.
-    fn build_register_body(params: &RegisterParams) -> serde_json::Value {
+    fn build_register_body(params: &RegisterParams, book_count: i64) -> serde_json::Value {
         let mut body = serde_json::json!({
             "node_id":           params.node_id,
             "display_name":      params.display_name,
-            "book_count":        params.book_count,
+            "book_count":        book_count,
             "is_listed":         params.is_listed,
             "requires_approval": params.requires_approval,
             "accept_from":       params.accept_from,
@@ -641,7 +713,11 @@ impl HubDirectoryService {
         let hub_url = Self::hub_base_url()?;
         let existing = Self::get_config(db).await?;
 
-        let body = Self::build_register_body(&params);
+        // The profile upsert and the catalog push both write `book_count` on
+        // the hub, last one wins. Deriving it from the catalog here keeps the
+        // two writers in agreement whichever lands last.
+        let book_count = Self::count_public_catalog_books(db).await?;
+        let body = Self::build_register_body(&params, book_count);
 
         let initial_token = existing.as_ref().map(|c| c.write_token.clone());
         let has_auth = initial_token.is_some();
@@ -1966,7 +2042,6 @@ mod register_body_tests {
         RegisterParams {
             node_id: "node123".to_string(),
             display_name: "Test".to_string(),
-            book_count: 0,
             is_listed: true,
             requires_approval: false,
             accept_from: "anyone".to_string(),
@@ -1981,7 +2056,7 @@ mod register_body_tests {
             location_city_id: Some(2_988_507),
             ..base_params()
         };
-        let body = HubDirectoryService::build_register_body(&params);
+        let body = HubDirectoryService::build_register_body(&params, 0);
         assert_eq!(body["location_city_id"], serde_json::json!(2_988_507));
     }
 
@@ -1995,7 +2070,7 @@ mod register_body_tests {
             location_city_id: None,
             ..base_params()
         };
-        let body = HubDirectoryService::build_register_body(&params);
+        let body = HubDirectoryService::build_register_body(&params, 0);
         assert!(body.get("location_city_id").is_some());
         assert_eq!(body["location_city_id"], serde_json::Value::Null);
     }
@@ -2009,7 +2084,7 @@ mod register_body_tests {
             location_country: None,
             ..base_params()
         };
-        let body = HubDirectoryService::build_register_body(&params);
+        let body = HubDirectoryService::build_register_body(&params, 0);
         assert!(body.get("location_country").is_none());
     }
 }
