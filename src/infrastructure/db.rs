@@ -2373,6 +2373,54 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // `migrate_collection_book_added_at`.
     migrate_collection_book_added_at(db).await?;
 
+    // Migration 092: republish every entity once, as a complete changeset (ADR-056).
+    // Until now a re-pushed entity carried only the columns above the push watermark,
+    // and the lane store keeps a single blob per (entity, device) that each push
+    // overwrites, so the complete copy of an edited entity was lost. Devices that
+    // bootstrapped afterwards materialized those rows from a partial changeset, with
+    // every absent NOT NULL column silently falling back to its CRR-ready default.
+    // Resetting the watermark makes the next sync re-send everything under the fixed
+    // engine, stamped with a current clock that clears the receivers' anti-rollback
+    // floor, so the damaged rows heal through the ordinary sync path.
+    //
+    // One-shot: the flag column is added first (the ALTER is a no-op once present)
+    // and the reset is gated on it, so this costs one full push per device, not one
+    // per boot. Rows created later are born under the fixed engine and set the flag
+    // themselves on INSERT, so a device enrolling from now on is never re-pushed.
+    migrate_account_sync_full_repush(db).await?;
+
+    Ok(())
+}
+
+/// Migration 092: force a single full re-push of every entity per device (ADR-056).
+///
+/// `push_version` is the local `db_version` up to which our own changes were already
+/// sent. Setting it back to 0 makes the next `changes_since` treat every entity as
+/// outstanding, which under the ADR-056 engine emits a complete changeset per entity
+/// and overwrites the partial blobs already sitting in the lane store.
+///
+/// Gated on `full_repush_done` so it runs exactly once. A device that has never
+/// enrolled has no row here, and gets the fixed behaviour from its first push anyway.
+async fn migrate_account_sync_full_repush(db: &DatabaseConnection) -> Result<(), DbErr> {
+    if !table_exists(db, "account_sync_state").await? {
+        return Ok(());
+    }
+    // Additive; the ALTER is ignored once the column exists.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE account_sync_state ADD COLUMN full_repush_done INTEGER NOT NULL DEFAULT 0"
+                .to_owned(),
+        ))
+        .await;
+
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        "UPDATE account_sync_state SET push_version = 0, full_repush_done = 1 \
+         WHERE full_repush_done = 0"
+            .to_owned(),
+    ))
+    .await?;
     Ok(())
 }
 

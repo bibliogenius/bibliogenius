@@ -156,18 +156,41 @@ pub struct OutboundCover {
 #[derive(Debug)]
 pub struct MergeEngineError(pub String);
 
+/// What [`MergeEngine::apply`] observed about the change it merged.
+#[derive(Debug, Clone, Copy)]
+pub struct ApplyOutcome {
+    /// `false` when the changeset created a row without carrying every `NOT NULL`
+    /// column the table declares. The missing ones fell back to the CRR-ready
+    /// defaults, so the row exists, is well typed, and is wrong (ADR-056). The
+    /// caller must NOT raise the anti-rollback floor for such a lane, so a later
+    /// complete blob can still repair the row.
+    pub complete: bool,
+}
+
+impl ApplyOutcome {
+    /// The ordinary case: nothing was silently defaulted.
+    pub fn complete() -> Self {
+        Self { complete: true }
+    }
+}
+
 /// Local merge engine. cr-sqlite in production; an in-memory LWW store in tests.
 #[async_trait]
 pub trait MergeEngine: Send + Sync {
     /// Current local merge clock (cr-sqlite `db_version`), monotonic.
     async fn local_version(&self) -> std::result::Result<i64, MergeEngineError>;
-    /// Entities changed strictly after `since`, with their current changeset.
+    /// Entities changed strictly after `since`, each with the FULL changeset of its
+    /// current state. `since` selects WHICH entities to send, never which columns:
+    /// a lane blob must be applicable to an empty database (ADR-056).
     async fn changes_since(
         &self,
         since: i64,
     ) -> std::result::Result<Vec<OutboundChange>, MergeEngineError>;
     /// Apply a remote changeset; the engine merges (field-level LWW, OR-Set, tombstones).
-    async fn apply(&self, change: InboundChange) -> std::result::Result<(), MergeEngineError>;
+    async fn apply(
+        &self,
+        change: InboundChange,
+    ) -> std::result::Result<ApplyOutcome, MergeEngineError>;
 
     /// Repair referential integrity right after [`MergeEngine::apply`] merged a
     /// change: if the change deleted a parent entity, remove the orphan children
@@ -524,7 +547,7 @@ pub async fn sync_once_with_covers(
                     entity_type: frame.t,
                     entity_uuid: frame.u,
                 };
-                engine
+                let outcome = engine
                     .apply(InboundChange {
                         entity: entity.clone(),
                         deleted: frame.d,
@@ -539,6 +562,29 @@ pub async fn sync_once_with_covers(
                     .repair_after_apply(&entity.entity_type, &entity.entity_uuid)
                     .await
                     .map_err(|e| SyncError::Merge(e.0))?;
+                // A changeset that materialized a row without all its NOT NULL columns
+                // came from a sender predating ADR-056. Keep the partial row (the
+                // columns it does carry are correct) but leave the anti-rollback floor
+                // where it is.
+                //
+                // This does NOT re-deliver the blob: the pull cursor advances over it
+                // like any other. What the unraised floor buys is that the sender's
+                // next push of that entity, which carries the whole row under a new
+                // `change_seq`, is accepted instead of being discarded as a stale
+                // replay. Raising the floor here would freeze the amputated row for
+                // good, since nothing ever lowers it again.
+                if !outcome.complete {
+                    tracing::warn!(
+                        entity_type = %entity.entity_type,
+                        entity_uuid = %entity.entity_uuid,
+                        device = %lane.device_id,
+                        "applied an incomplete changeset: NOT NULL columns fell back to \
+                         their defaults; the anti-rollback floor is left unraised so a \
+                         complete changeset can still repair this row"
+                    );
+                    stats.applied += 1;
+                    continue;
+                }
             }
             // Raise the per-lane anti-rollback floor only after a successful apply.
             state
@@ -858,9 +904,17 @@ impl DbSyncStateStore {
         value: i64,
     ) -> std::result::Result<(), SyncError> {
         // `col` is one of two compile-time-fixed literals, never user input.
+        //
+        // A row created here is born under the ADR-056 engine, so it needs no
+        // repair: `full_repush_done` is set on INSERT. Leaving it to the column
+        // default (0, which is what backfills the rows that DO need repairing)
+        // would make migration 092 reset the watermark on the next boot and
+        // republish the whole library a second time after every enrolment. The
+        // ON CONFLICT branch deliberately leaves the flag alone, so a row that
+        // predates the migration keeps its pending repair.
         let sql = format!(
-            "INSERT INTO account_sync_state (account_id, {col}, last_synced_at) \
-             VALUES (?, ?, datetime('now')) \
+            "INSERT INTO account_sync_state (account_id, {col}, last_synced_at, full_repush_done) \
+             VALUES (?, ?, datetime('now'), 1) \
              ON CONFLICT(account_id) DO UPDATE SET {col} = excluded.{col}, \
              last_synced_at = datetime('now')",
         );
@@ -1256,7 +1310,10 @@ mod tests {
             Ok(out)
         }
 
-        async fn apply(&self, change: InboundChange) -> std::result::Result<(), MergeEngineError> {
+        async fn apply(
+            &self,
+            change: InboundChange,
+        ) -> std::result::Result<ApplyOutcome, MergeEngineError> {
             let cs: FakeChangeset = rmp_serde::from_slice(&change.changeset)
                 .map_err(|e| MergeEngineError(e.to_string()))?;
             let incoming = (cs.hlc_counter, cs.hlc_device.clone());
@@ -1283,7 +1340,8 @@ mod tests {
                     },
                 );
             }
-            Ok(())
+            // The fake stores a whole value, so a partial row cannot arise here.
+            Ok(ApplyOutcome::complete())
         }
 
         async fn repair_after_apply(
@@ -1827,10 +1885,13 @@ mod tests {
         let db = Database::connect(opts).await.unwrap();
         db.execute(Statement::from_string(
             db.get_database_backend(),
+            // Mirrors `db::run_migrations`; keep both in step, `full_repush_done`
+            // included (migration 092).
             "CREATE TABLE account_sync_state (account_id TEXT PRIMARY KEY, \
              pull_cursor INTEGER NOT NULL DEFAULT 0, \
              push_version INTEGER NOT NULL DEFAULT 0, \
-             registry_seq INTEGER NOT NULL DEFAULT 0, last_synced_at TEXT)"
+             registry_seq INTEGER NOT NULL DEFAULT 0, last_synced_at TEXT, \
+             full_repush_done INTEGER NOT NULL DEFAULT 0)"
                 .to_owned(),
         ))
         .await
