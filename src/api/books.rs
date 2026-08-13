@@ -431,10 +431,28 @@ async fn list_books_delta(
 pub async fn create_book(
     State(state): State<crate::infrastructure::AppState>,
     _claims: crate::auth::Claims,
-    Json(book): Json<Book>,
+    Json(mut book): Json<Book>,
 ) -> impl IntoResponse {
     let db = state.db();
     let now = chrono::Utc::now();
+
+    // Same title gate as the FFI path, which goes through
+    // `book_service::create_book`. This handler writes via the repository, so
+    // it has to call the shared validator itself or the rule would only hold
+    // on one of the two doors.
+    match crate::services::book_service::validate_title(&book.title) {
+        Ok(trimmed) => book.title = trimmed,
+        Err(crate::services::book_service::ServiceError::InvalidInput(msg)) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("{e:?}") })),
+            )
+                .into_response();
+        }
+    }
 
     // Extract author info before moving book to repository
     let author_names: Vec<String> = if let Some(ref authors) = book.authors {

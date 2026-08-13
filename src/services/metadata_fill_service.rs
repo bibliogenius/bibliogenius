@@ -113,6 +113,12 @@ fn parse_year(raw: &str) -> Option<i32> {
 /// Project a lookup result onto the gap-fill candidate fields.
 fn gap_values_from(meta: BookMetadata) -> GapValues {
     GapValues {
+        // The lookup always returns a title string; an empty one is no
+        // candidate at all, and `apply_fill` only writes it when the book has
+        // none of its own.
+        title: Some(meta.title)
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty()),
         summary: meta.summary,
         publisher: meta.publisher,
         page_count: meta.page_count.and_then(|p| i32::try_from(p).ok()),

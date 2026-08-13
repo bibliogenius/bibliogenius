@@ -299,6 +299,8 @@ async fn enrich_book(
 pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, ServiceError> {
     let now = chrono::Utc::now();
 
+    let title = validate_title(&book.title)?;
+
     let reading_status = book
         .reading_status
         .clone()
@@ -311,7 +313,7 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         .map(|s| serde_json::to_string(s).unwrap_or_else(|_| "[]".to_string()));
 
     let new_book = BookActiveModel {
-        title: Set(book.title.clone()),
+        title: Set(title),
         isbn: Set(normalize_isbn(book.isbn.clone())),
         summary: Set(book.summary.clone()),
         publisher: Set(book.publisher.clone()),
@@ -392,6 +394,32 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
 }
 
 /// Validates that the reading status is one of the allowed values
+/// Gate on the title of a book being created, and the canonical form to store.
+///
+/// A blank title leaves a row nothing can identify: it sorts nowhere, no
+/// search matches it, and it reaches peers as an empty tile. Refusing it at
+/// creation is the only place the user can still be told, while they are
+/// looking at the form.
+///
+/// Whitespace is trimmed rather than merely rejected, so a title typed with
+/// stray spaces behaves like any other. `"   "` is a missing title, not a
+/// title made of spaces.
+///
+/// Creation only, deliberately. Updates are not gated: the owner must stay
+/// able to fix the reading status or the cover of a book that is already
+/// title-less, and cr-sqlite replication inserts through the entity anyway,
+/// so a replicated row is never refused (that would desynchronise devices
+/// rather than surface the problem).
+pub fn validate_title(title: &str) -> Result<String, ServiceError> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err(ServiceError::InvalidInput(
+            "Book title is required".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 fn validate_reading_status(status: &str) -> Result<(), ServiceError> {
     match status {
         s if crate::models::book::READING_STATUSES.contains(&s) => Ok(()),

@@ -16,10 +16,17 @@ use async_trait::async_trait;
 
 use super::DomainError;
 
-/// The five gap-fillable fields, in their canonical string names. These are the
+/// The gap-fillable fields, in their canonical string names. These are the
 /// only values accepted in the `field` column of the journal and the only
 /// columns `apply_fill` may touch.
-pub const FILL_FIELDS: [&str; 5] = [
+///
+/// `title` is one of them even though it is the book's identity rather than
+/// decoration: a book saved without a title is unreadable everywhere, and the
+/// ISBN lookup that fills the other five knows it. It is also `NOT NULL` in
+/// the schema, which is why the undo path reverts it to the empty string
+/// instead of NULL.
+pub const FILL_FIELDS: [&str; 6] = [
+    "title",
     "summary",
     "publisher",
     "page_count",
@@ -32,14 +39,16 @@ pub const FILL_FIELDS: [&str; 5] = [
 pub struct CompletenessStats {
     /// Total owned books.
     pub owned_total: i64,
-    /// Owned books that have all five gap-fill fields populated.
+    /// Owned books that have every gap-fill field populated.
     pub complete: i64,
-    /// Owned books missing at least one gap-fill field.
+    /// Owned books missing at least one gap-fill field (a missing title
+    /// included).
     pub incomplete: i64,
     /// Owned, incomplete books that have no ISBN (not processable in V1).
     pub no_isbn: i64,
     /// Total empty gap-fill fields across all owned books (field-level progress,
-    /// drops by exactly the number of fields filled). Max is `owned_total * 5`.
+    /// drops by exactly the number of fields filled). Max is
+    /// `owned_total * FILL_FIELDS.len()`.
     pub empty_fields: i64,
 }
 
@@ -67,6 +76,7 @@ pub struct IncompleteBookDetail {
 /// the lookup found nothing for it. `apply_fill` applies these `None`-only.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GapValues {
+    pub title: Option<String>,
     pub summary: Option<String>,
     pub publisher: Option<String>,
     pub page_count: Option<i32>,
@@ -77,7 +87,8 @@ pub struct GapValues {
 impl GapValues {
     /// True when every candidate field is empty (nothing to apply).
     pub fn is_empty(&self) -> bool {
-        self.summary.is_none()
+        self.title.is_none()
+            && self.summary.is_none()
             && self.publisher.is_none()
             && self.page_count.is_none()
             && self.publication_year.is_none()

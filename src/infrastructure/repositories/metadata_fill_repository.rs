@@ -15,10 +15,15 @@ use crate::domain::metadata_fill::{
     MetadataFillRepository, RecentFilledBook, RecentFilledField, UndoOutcome,
 };
 
-/// A book counts as "incomplete" when any of the five gap-fill fields is empty.
+/// A book counts as "incomplete" when any gap-fill field is empty.
 /// Text fields treat NULL or whitespace-only as empty; integer fields treat
 /// NULL as empty. Kept as one fragment so stat/selection/total stay consistent.
-const INCOMPLETE_PRED: &str = "(summary IS NULL OR TRIM(summary) = '' \
+///
+/// `title` is a gap like any other here: it is `NOT NULL` in the schema, so a
+/// missing one is the empty string, and it is the gap the owner most needs to
+/// see (nothing else in the app reports it).
+const INCOMPLETE_PRED: &str = "(TRIM(title) = '' \
+     OR summary IS NULL OR TRIM(summary) = '' \
      OR publisher IS NULL OR TRIM(publisher) = '' \
      OR cover_url IS NULL OR TRIM(cover_url) = '' \
      OR publication_year IS NULL \
@@ -38,7 +43,7 @@ fn text_is_empty(v: &Option<String>) -> bool {
     v.as_deref().map(str::trim).unwrap_or("").is_empty()
 }
 
-/// Whitelist guard: only the five known columns may be interpolated into SQL.
+/// Whitelist guard: only the known fill columns may be interpolated into SQL.
 fn is_fill_field(field: &str) -> bool {
     crate::domain::metadata_fill::FILL_FIELDS.contains(&field)
 }
@@ -75,7 +80,8 @@ impl SeaOrmMetadataFillRepository {
     /// `INCOMPLETE_PRED` (text: NULL/blank; integer: NULL).
     async fn count_empty_fields(&self) -> Result<i64, DomainError> {
         let sql = "SELECT COALESCE(SUM(\
-             (CASE WHEN summary IS NULL OR TRIM(summary) = '' THEN 1 ELSE 0 END) \
+             (CASE WHEN TRIM(title) = '' THEN 1 ELSE 0 END) \
+             + (CASE WHEN summary IS NULL OR TRIM(summary) = '' THEN 1 ELSE 0 END) \
              + (CASE WHEN publisher IS NULL OR TRIM(publisher) = '' THEN 1 ELSE 0 END) \
              + (CASE WHEN cover_url IS NULL OR TRIM(cover_url) = '' THEN 1 ELSE 0 END) \
              + (CASE WHEN publication_year IS NULL THEN 1 ELSE 0 END) \
@@ -191,6 +197,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
 
         let mut out: Vec<IncompleteBookDetail> = Vec::with_capacity(rows.len());
         for row in &rows {
+            let title = row.try_get::<String>("", "title")?;
             let summary = row.try_get::<Option<String>>("", "summary")?;
             let publisher = row.try_get::<Option<String>>("", "publisher")?;
             let cover = row.try_get::<Option<String>>("", "cover_url")?;
@@ -198,6 +205,11 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
             let pages = row.try_get::<Option<i32>>("", "page_count")?;
 
             let mut missing = Vec::new();
+            // Title first: it is the gap that makes the row unidentifiable,
+            // and the list is read top-down.
+            if title.trim().is_empty() {
+                missing.push("title".to_string());
+            }
             if text_is_empty(&summary) {
                 missing.push("summary".to_string());
             }
@@ -216,7 +228,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
 
             out.push(IncompleteBookDetail {
                 id: row.try_get::<String>("", "id")?,
-                title: row.try_get::<String>("", "title")?,
+                title,
                 isbn: row.try_get::<Option<String>>("", "isbn")?,
                 cover_url: cover,
                 missing,
@@ -243,7 +255,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
         let row = txn
             .query_one(Statement::from_sql_and_values(
                 backend,
-                "SELECT summary, publisher, publication_year, cover_url, page_count \
+                "SELECT title, summary, publisher, publication_year, cover_url, page_count \
                  FROM books WHERE uuid = ?",
                 [Value::from(book_id.to_string())],
             ))
@@ -254,6 +266,7 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
             return Ok(vec![]);
         };
 
+        let cur_title = row.try_get::<String>("", "title")?;
         let cur_summary = row.try_get::<Option<String>>("", "summary")?;
         let cur_publisher = row.try_get::<Option<String>>("", "publisher")?;
         let cur_year = row.try_get::<Option<i32>>("", "publication_year")?;
@@ -267,6 +280,13 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
 
         // Each entry: (field, is-empty, value-to-write-as-Value, value-string).
         let mut writes: Vec<(&str, Value, String)> = Vec::new();
+        // Title is NOT NULL, so its "empty" is the blank string rather than
+        // NULL; the None-only invariant is otherwise identical.
+        if cur_title.trim().is_empty()
+            && let Some(v) = candidate.title.filter(|s| !s.trim().is_empty())
+        {
+            writes.push(("title", Value::from(v.clone()), v));
+        }
         if text_empty(&cur_summary)
             && let Some(v) = candidate.summary.filter(|s| !s.trim().is_empty())
         {
@@ -533,10 +553,18 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
         // completed" list; only revert the book column when it is still ours.
         let now = now_rfc3339();
         if still_ours {
+            // `books.title` is NOT NULL: reverting it to NULL would abort the
+            // transaction. Its empty form is the blank string, which is
+            // exactly the state the fill found it in.
+            let empty_value = if field == "title" {
+                Value::from(String::new())
+            } else {
+                Value::from(Option::<String>::None)
+            };
             txn.execute(Statement::from_sql_and_values(
                 backend,
-                format!("UPDATE books SET {field} = NULL, updated_at = ? WHERE uuid = ?"),
-                [Value::from(now.clone()), Value::from(book_id)],
+                format!("UPDATE books SET {field} = ?, updated_at = ? WHERE uuid = ?"),
+                [empty_value, Value::from(now.clone()), Value::from(book_id)],
             ))
             .await?;
         }
@@ -612,7 +640,8 @@ mod tests {
         db
     }
 
-    /// Insert a book and set the five gap-fill fields explicitly (NULL when None).
+    /// Insert a book with an explicit title and the five lookup-fillable
+    /// fields (NULL when None). Pass an empty title to seed the title gap.
     #[allow(clippy::too_many_arguments)]
     async fn seed_book(
         db: &DatabaseConnection,
@@ -726,6 +755,150 @@ mod tests {
         // empty fields: complete=0, incomplete(missing summary)=1, no-isbn(all 5)=5
         assert_eq!(stats.empty_fields, 6);
         assert_eq!(repo.count_incomplete_with_isbn().await.unwrap(), 1);
+    }
+
+    /// A book whose title is empty is incomplete even when every other field
+    /// is filled. Nothing else in the app tells the owner about it: it is the
+    /// row that renders as a blank tile, here and on any peer that caches it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_missing_title_counts_as_a_gap() {
+        let db = db().await;
+        let repo = SeaOrmMetadataFillRepository::new(db.clone());
+        seed_book(
+            &db,
+            "",
+            Some("9782070612918"),
+            true,
+            Some("s"),
+            Some("p"),
+            Some(2000),
+            Some("c"),
+            Some(100),
+        )
+        .await;
+
+        let stats = repo.completeness_stats().await.unwrap();
+        assert_eq!(stats.incomplete, 1, "a title-less book is incomplete");
+        assert_eq!(stats.complete, 0);
+        assert_eq!(stats.empty_fields, 1, "exactly one gap: the title");
+
+        let detail = repo.list_incomplete(50).await.unwrap();
+        assert_eq!(detail.len(), 1);
+        assert_eq!(detail[0].missing, vec!["title".to_string()]);
+
+        // It has an ISBN, so the bulk run can look it up and repair it.
+        assert_eq!(repo.count_incomplete_with_isbn().await.unwrap(), 1);
+    }
+
+    /// A whitespace-only title is a missing title, matching the creation gate
+    /// in `book_service::validate_title`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_blank_title_counts_as_a_gap() {
+        let db = db().await;
+        let repo = SeaOrmMetadataFillRepository::new(db.clone());
+        seed_book(
+            &db,
+            "   ",
+            Some("111"),
+            true,
+            Some("s"),
+            Some("p"),
+            Some(2000),
+            Some("c"),
+            Some(100),
+        )
+        .await;
+
+        assert_eq!(repo.completeness_stats().await.unwrap().incomplete, 1);
+    }
+
+    /// The bulk run fills a missing title from the ISBN lookup like any other
+    /// gap. Without this the book would never leave the work-list: it would be
+    /// re-looked-up on every run and stay incomplete forever.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_fill_writes_a_missing_title_and_undo_restores_it_empty() {
+        let db = db().await;
+        let repo = SeaOrmMetadataFillRepository::new(db.clone());
+        let id = seed_book(
+            &db,
+            "",
+            Some("9782070612918"),
+            true,
+            Some("s"),
+            Some("p"),
+            Some(2000),
+            Some("c"),
+            Some(100),
+        )
+        .await;
+
+        let filled = repo
+            .apply_fill(
+                "batch-1",
+                &id,
+                GapValues {
+                    title: Some("Le Mythe de Sisyphe".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(filled.len(), 1);
+        assert_eq!(filled[0].field, "title");
+        assert_eq!(
+            book_field(&db, &id, "title").await.as_deref(),
+            Some("Le Mythe de Sisyphe"),
+        );
+        assert_eq!(
+            repo.completeness_stats().await.unwrap().incomplete,
+            0,
+            "the filled book drains out of the work-list",
+        );
+
+        // Undoing must land on the empty string: `books.title` is NOT NULL, so
+        // the generic revert-to-NULL would fail and leave the journal entry
+        // retired against an unchanged book.
+        let reverted = repo.undo_book("batch-1", &id).await.unwrap();
+        assert_eq!(reverted, 1);
+        assert_eq!(book_field(&db, &id, "title").await.as_deref(), Some(""));
+    }
+
+    /// The None-only invariant holds for the title too: a real title is never
+    /// replaced by whatever an ISBN lookup believes the book is called.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_fill_never_overwrites_an_existing_title() {
+        let db = db().await;
+        let repo = SeaOrmMetadataFillRepository::new(db.clone());
+        let id = seed_book(
+            &db,
+            "Ma reliure maison",
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let filled = repo
+            .apply_fill(
+                "batch-1",
+                &id,
+                GapValues {
+                    title: Some("Something Else".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(filled.is_empty());
+        assert_eq!(
+            book_field(&db, &id, "title").await.as_deref(),
+            Some("Ma reliure maison"),
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -863,6 +1036,7 @@ mod tests {
         .await;
 
         let candidate = GapValues {
+            title: None,
             summary: Some("New summary".into()),
             publisher: Some("ShouldBeIgnored".into()),
             page_count: Some(321),
