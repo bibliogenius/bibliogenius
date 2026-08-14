@@ -40,6 +40,22 @@ const PULL_PAGE_LIMIT: u32 = 200;
 /// Hub per-push lane cap (`AccountSyncController::MAX_LANES_PER_PUSH`).
 const MAX_LANES_PER_PUSH: usize = 500;
 
+/// How many cycles a row lane that failed to merge is retried before this device
+/// gives up on it (ADR-058). A transient cause (a full disk, a locked database, a
+/// cr-sqlite connection released out from under the merge) clears within a few
+/// cycles, and one that survives ten is not transient. Giving up restores exactly
+/// the ADR-056 behaviour: the anti-rollback floor stays unraised, so the entity is
+/// still repaired by the sender's next push, whenever that comes.
+const MAX_PENDING_LANE_ATTEMPTS: i64 = 10;
+
+/// Hard ceiling on the per-account retry queue (ADR-058). The queue holds one row
+/// per lane, carrying that entity's changeset, so it is bounded by design; this cap
+/// bounds it against a receiver that refuses everything (a wedged connection during
+/// a bootstrap pull can produce thousands of failures in one cycle). Past the cap a
+/// failing lane is logged and NOT queued, which is the pre-ADR-058 behaviour rather
+/// than a loss: the floor stays unraised either way.
+const MAX_PENDING_LANES: usize = 500;
+
 /// Lane entity type carrying a custom cover's image bytes (ADR-046). cr-sqlite
 /// replicates rows, not files, so a hand-photographed cover's bytes ride their
 /// own lane alongside the `"book"` row lane: same opaque-id derivation, same
@@ -127,13 +143,14 @@ pub struct SyncContext {
 pub struct SyncStats {
     pub applied: usize,
     pub pushed: usize,
-    /// Row lanes this cycle pulled but could NOT merge, each logged and skipped
-    /// without raising the anti-rollback floor (ADR-056). Non-zero means this
-    /// device is behind on those entities and is waiting for the sender to push
-    /// them again; the rest of the cycle still converged. Reported to the caller
-    /// so a mixed-version fleet is visible instead of silent. Cover lanes are not
-    /// counted here: their bytes are re-offered by the cover source every cycle,
-    /// so a failed cover write retries on its own.
+    /// Row lanes this device is still behind on when the cycle ends: those pulled
+    /// this cycle and refused by the engine, plus those a previous cycle queued
+    /// whose retry failed again (ADR-056 isolation, ADR-058 retry). Each is logged
+    /// and skipped without raising the anti-rollback floor, so the rest of the
+    /// cycle still converged and the entity stays repairable. Reported to the
+    /// caller so a mixed-version fleet is visible instead of silent. Cover lanes
+    /// are not counted here: their bytes are re-offered by the cover source every
+    /// cycle, so a failed cover write retries on its own.
     pub failed: usize,
     /// `(book_uuid, file_mtime)` of every custom cover whose bytes pushed
     /// successfully this cycle (ADR-046). The caller records these in the local
@@ -142,6 +159,33 @@ pub struct SyncStats {
     /// row-only entrypoints. Kept out of the `CoverSource` trait so the
     /// flutter_rust_bridge parser never has to materialize its impls.
     pub pushed_covers: Vec<(String, i64)>,
+}
+
+/// A row lane pulled, authenticated and decrypted, that the engine refused to
+/// merge, kept locally so later cycles can retry it (ADR-058).
+///
+/// The pull cursor advances over a skipped lane and the sender's push watermark
+/// advances too, so without this nothing ever re-delivers that entity: a transient
+/// refusal would be as permanent as a definitive one. The queue is this device's
+/// own copy of the lane's LAST self-contained blob (ADR-056), which is exactly
+/// what the hub itself retains, so replaying it applies the same snapshot the
+/// sender published rather than a diff against a state nobody kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingLane {
+    /// The hub's non-invertible lane id, as pulled. Half of the lane identity.
+    pub opaque_id: String,
+    /// The device that published this blob. The other half of the lane identity,
+    /// and the AAD binding under which it was opened.
+    pub device_id: String,
+    pub entity: EntityRef,
+    pub deleted: bool,
+    pub changeset: Vec<u8>,
+    /// The in-ciphertext HLC this blob carried. Re-checked against the lane floor
+    /// on every retry: a queued blob that a fresher one has overtaken is dropped,
+    /// never replayed (that replay is precisely the H5 rollback, ADR-042 §14).
+    pub hlc: i64,
+    /// Retries already spent, capped by [`MAX_PENDING_LANE_ATTEMPTS`].
+    pub attempts: i64,
 }
 
 /// One custom cover's bytes to publish this cycle (ADR-046, producer side).
@@ -195,9 +239,14 @@ pub trait MergeEngine: Send + Sync {
         since: i64,
     ) -> std::result::Result<Vec<OutboundChange>, MergeEngineError>;
     /// Apply a remote changeset; the engine merges (field-level LWW, OR-Set, tombstones).
+    ///
+    /// Borrowed, not consumed: a lane the engine refuses is queued for retry with
+    /// the very bytes it was handed (ADR-058), and the caller cannot get them back
+    /// from a value it gave away. Every implementation reads the changeset (it
+    /// deserializes it) rather than storing it, so ownership buys nothing.
     async fn apply(
         &self,
-        change: InboundChange,
+        change: &InboundChange,
     ) -> std::result::Result<ApplyOutcome, MergeEngineError>;
 
     /// Repair referential integrity right after [`MergeEngine::apply`] merged a
@@ -316,6 +365,35 @@ pub trait SyncStateStore: Send + Sync {
         opaque_id: &str,
         device_id: &str,
         hlc: i64,
+    ) -> std::result::Result<(), SyncError>;
+
+    /// Lanes an earlier cycle pulled but could not merge, oldest first, each paired
+    /// with its lane's current anti-rollback floor (ADR-058). Retried at the start
+    /// of every cycle, before the pull leg.
+    ///
+    /// The floor rides along because every entry must be re-gated on it before
+    /// being replayed, and reading it per entry would be one extra query per queued
+    /// lane on every cycle.
+    async fn pending_lanes(
+        &self,
+        account_id: &str,
+    ) -> std::result::Result<Vec<(PendingLane, i64)>, SyncError>;
+    /// Queue a lane for retry, or replace the one already queued for the same
+    /// `(opaque_id, device_id)`. One row per lane: the newest blob supersedes the
+    /// older one, exactly as it does in the hub's snapshot store. The caller owns
+    /// `attempts` (0 on a fresh failure, incremented on each retry).
+    async fn put_pending_lane(
+        &self,
+        account_id: &str,
+        lane: &PendingLane,
+    ) -> std::result::Result<(), SyncError>;
+    /// Forget a queued lane: it merged, a fresher blob overtook it, or its retries
+    /// ran out.
+    async fn drop_pending_lane(
+        &self,
+        account_id: &str,
+        opaque_id: &str,
+        device_id: &str,
     ) -> std::result::Result<(), SyncError>;
 }
 
@@ -439,6 +517,193 @@ fn seal_lane(
 // The pipeline
 // ---------------------------------------------------------------------------
 
+/// Which half of a lane's merge refused it. Both are isolated on the same terms,
+/// but they are not the same event and the log must not conflate them: an `Apply`
+/// failure changed nothing, a `Repair` failure left the changeset merged with its
+/// referential cleanup unfinished.
+#[derive(Debug)]
+enum LaneMergeFailure {
+    Apply(String),
+    Repair(String),
+}
+
+impl LaneMergeFailure {
+    fn stage(&self) -> &'static str {
+        match self {
+            Self::Apply(_) => "merge",
+            Self::Repair(_) => "post-merge referential repair",
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Apply(e) | Self::Repair(e) => e,
+        }
+    }
+}
+
+/// Merge one inbound row lane: apply the changeset, then repair the referential
+/// integrity it may have broken. Shared by the pull leg and the retry queue so a
+/// replayed lane goes through exactly the same two steps as a freshly pulled one.
+///
+/// Takes the change by reference so the caller keeps the bytes: on refusal they go
+/// into the retry queue unchanged, with no copy made on the path where the merge
+/// succeeds (ADR-058).
+async fn merge_lane(
+    engine: &dyn MergeEngine,
+    change: &InboundChange,
+) -> std::result::Result<ApplyOutcome, LaneMergeFailure> {
+    let outcome = engine
+        .apply(change)
+        .await
+        .map_err(|e| LaneMergeFailure::Apply(e.0))?;
+    // If this change deleted a parent entity, cascade the orphan children it left
+    // behind (the database no longer enforces foreign keys since the replicated
+    // tables were rebuilt without them, ADR-044).
+    engine
+        .repair_after_apply(&change.entity.entity_type, &change.entity.entity_uuid)
+        .await
+        .map_err(|e| LaneMergeFailure::Repair(e.0))?;
+    Ok(outcome)
+}
+
+/// Retry the lanes an earlier cycle pulled but could not merge (ADR-058).
+///
+/// Runs before the pull leg, so a lane freshly refused this cycle gets its first
+/// retry on the next one rather than twice in a row. Each entry is re-gated on the
+/// lane's anti-rollback floor before being replayed: the floor may have moved since
+/// the blob was queued (a later blob for the same lane merged), and replaying a
+/// blob the floor has overtaken is exactly the rollback H5 forbids (ADR-042 §14).
+///
+/// Returns how many lanes are still queued afterwards, so the pull leg can enforce
+/// [`MAX_PENDING_LANES`] without a second count.
+///
+/// Queue bookkeeping (dropping an entry, spending an attempt) is best-effort: it
+/// must never abort the cycle. Propagating it would freeze every other lane of the
+/// account, which is the failure ADR-056 removed, and the conditions that make a
+/// local write fail are the same ones that make a merge fail. Every one of those
+/// failures is self-correcting on the next cycle. Raising the anti-rollback floor
+/// is NOT bookkeeping and stays fatal: it is the H5 obligation.
+async fn retry_pending_lanes(
+    engine: &dyn MergeEngine,
+    state: &dyn SyncStateStore,
+    account_id: &str,
+    stats: &mut SyncStats,
+) -> std::result::Result<usize, SyncError> {
+    let mut still_queued = 0usize;
+    for (lane, floor) in state.pending_lanes(account_id).await? {
+        if lane.hlc <= floor {
+            // A fresher blob for this lane merged in the meantime, so this one is
+            // stale. Dropping it is not a loss: the lane blob is self-contained
+            // (ADR-056), so the newer one already carries everything this one did.
+            forget_pending_lane(state, account_id, &lane.opaque_id, &lane.device_id).await;
+            continue;
+        }
+        let change = InboundChange {
+            entity: lane.entity,
+            deleted: lane.deleted,
+            changeset: lane.changeset,
+        };
+        match merge_lane(engine, &change).await {
+            Ok(outcome) => {
+                if outcome.complete {
+                    // Before the drop below, so a failure here leaves the entry
+                    // queued rather than losing both the entry and the floor.
+                    state
+                        .set_lane_hlc(account_id, &lane.opaque_id, &lane.device_id, lane.hlc)
+                        .await?;
+                } else {
+                    tracing::warn!(
+                        entity_type = %change.entity.entity_type,
+                        entity_uuid = %change.entity.entity_uuid,
+                        "a retried lane applied an incomplete changeset: NOT NULL columns \
+                         fell back to their defaults; the anti-rollback floor is left \
+                         unraised so a complete changeset can still repair this row"
+                    );
+                }
+                tracing::info!(
+                    entity_type = %change.entity.entity_type,
+                    entity_uuid = %change.entity.entity_uuid,
+                    attempts = lane.attempts + 1,
+                    "a lane an earlier cycle could not merge was applied on retry"
+                );
+                stats.applied += 1;
+                // A failed drop costs one futile replay next cycle, which the
+                // freshly raised floor then discards as superseded.
+                forget_pending_lane(state, account_id, &lane.opaque_id, &lane.device_id).await;
+            }
+            Err(e) => {
+                stats.failed += 1;
+                let attempts = lane.attempts + 1;
+                if attempts >= MAX_PENDING_LANE_ATTEMPTS {
+                    // Out of retries. This is where a definitive refusal ends up,
+                    // which is why the engine is not asked to tell a transient
+                    // failure from a permanent one: the queue finds out by trying.
+                    // Giving up returns this lane to the ADR-056 state exactly, an
+                    // unraised floor waiting for the sender's next push, and says so.
+                    tracing::warn!(
+                        entity_type = %change.entity.entity_type,
+                        entity_uuid = %change.entity.entity_uuid,
+                        stage = e.stage(),
+                        error = %e.message(),
+                        attempts,
+                        "giving up on a lane after its retries ran out; it stays behind on \
+                         this device until its sender pushes that entity again"
+                    );
+                    forget_pending_lane(state, account_id, &lane.opaque_id, &lane.device_id).await;
+                } else {
+                    tracing::warn!(
+                        entity_type = %change.entity.entity_type,
+                        entity_uuid = %change.entity.entity_uuid,
+                        stage = e.stage(),
+                        error = %e.message(),
+                        attempts,
+                        "a queued lane failed to merge again; it stays queued for a later cycle"
+                    );
+                    let spent = PendingLane {
+                        opaque_id: lane.opaque_id,
+                        device_id: lane.device_id,
+                        entity: change.entity,
+                        deleted: change.deleted,
+                        changeset: change.changeset,
+                        hlc: lane.hlc,
+                        attempts,
+                    };
+                    // A failed write leaves the entry with its previous attempt
+                    // count, so the lane is retried once more than its budget
+                    // rather than escaping it.
+                    if let Err(e) = state.put_pending_lane(account_id, &spent).await {
+                        tracing::warn!(
+                            entity_type = %spent.entity.entity_type,
+                            entity_uuid = %spent.entity.entity_uuid,
+                            error = %e,
+                            "could not record a spent retry attempt"
+                        );
+                    }
+                    still_queued += 1;
+                }
+            }
+        }
+    }
+    Ok(still_queued)
+}
+
+/// Drop a queued lane, tolerating a failure. See [`retry_pending_lanes`] for why
+/// queue bookkeeping must not abort a cycle.
+async fn forget_pending_lane(
+    state: &dyn SyncStateStore,
+    account_id: &str,
+    opaque_id: &str,
+    device_id: &str,
+) {
+    if let Err(e) = state
+        .drop_pending_lane(account_id, opaque_id, device_id)
+        .await
+    {
+        tracing::warn!(error = %e, "could not drop a lane from the retry queue");
+    }
+}
+
 /// Run one full sync cycle: pull + apply remote lanes, then push local changes.
 ///
 /// Idempotent across cycles via the persisted cursors: pull resumes from the hub
@@ -483,6 +748,12 @@ pub async fn sync_once_with_covers(
 ) -> std::result::Result<SyncStats, SyncError> {
     let mut stats = SyncStats::default();
     let account_aad = ctx.account_id.as_bytes();
+
+    // 0. RETRY the lanes an earlier cycle pulled but could not merge (ADR-058).
+    // Nothing else re-delivers them: the pull cursor advanced over them and the
+    // sender's push watermark advanced too, so a transient refusal would otherwise
+    // be as permanent as a definitive one.
+    let mut queued = retry_pending_lanes(engine, state, &ctx.account_id, &mut stats).await?;
 
     // 1. PULL + apply other devices' lanes, paging until the cursor stops moving.
     let mut cursor = state.pull_cursor(&ctx.account_id).await?;
@@ -564,58 +835,83 @@ pub async fn sync_once_with_covers(
                 // cannot anticipate (a changeset the local schema does not fit, a
                 // cr-sqlite connection whose per-connection state was released), and
                 // a mixed-version fleet is the normal state for users, so a refusal
-                // is an expected event rather than an exceptional one.
+                // is an expected event rather than an exceptional one. A repair
+                // failure counts too: the changeset landed, but the entity is left in
+                // a state this cycle could not finish.
                 //
                 // The skip is deliberately loud. Silence is what let ADR-056's
                 // divergence run for seven weeks; a warning per lane plus the
                 // `failed` counter returned to the caller is the minimum that makes
                 // the condition observable.
                 //
-                // Leaving the floor unraised is what keeps the entity repairable: the
-                // cursor advances over this blob, but the sender's next push of the
-                // same entity arrives under a new `change_seq` and is accepted rather
-                // than discarded as a stale replay.
-                let outcome = match engine
-                    .apply(InboundChange {
-                        entity: entity.clone(),
-                        deleted: frame.d,
-                        changeset: frame.c,
-                    })
-                    .await
-                {
+                // Leaving the floor unraised is what keeps the entity repairable from
+                // the sender's side: the cursor advances over this blob, but the
+                // sender's next push of the same entity arrives under a new
+                // `change_seq` and is accepted rather than discarded as a stale
+                // replay. That alone leaves the entity waiting for an edit that may
+                // never come, so on refusal the blob is ALSO queued locally and
+                // replayed on later cycles (ADR-058). The merge borrows it, so the
+                // bytes are still here to hand over, and nothing is copied on the
+                // path where the merge succeeds.
+                let change = InboundChange {
+                    entity,
+                    deleted: frame.d,
+                    changeset: frame.c,
+                };
+                let outcome = match merge_lane(engine, &change).await {
                     Ok(outcome) => outcome,
                     Err(e) => {
                         tracing::warn!(
-                            entity_type = %entity.entity_type,
-                            entity_uuid = %entity.entity_uuid,
-                            error = %e.0,
+                            entity_type = %change.entity.entity_type,
+                            entity_uuid = %change.entity.entity_uuid,
+                            stage = e.stage(),
+                            error = %e.message(),
                             "could not merge an inbound lane; skipping it and leaving the \
                              anti-rollback floor unraised so a later push can still apply it"
                         );
                         stats.failed += 1;
+                        if queued < MAX_PENDING_LANES {
+                            let pending = PendingLane {
+                                opaque_id: lane.opaque_id.clone(),
+                                device_id: lane.device_id.clone(),
+                                entity: change.entity,
+                                deleted: change.deleted,
+                                changeset: change.changeset,
+                                hlc: frame.h,
+                                attempts: 0,
+                            };
+                            // Best-effort, like every queue write: propagating this
+                            // would abort the cycle before the pull cursor advances
+                            // and freeze every other lane of the account, which is
+                            // the failure ADR-056 removed. Worse, the causes that
+                            // make this INSERT fail (a full disk, a locked database)
+                            // are the very ones the queue exists to survive. On
+                            // failure the lane simply falls back to waiting for its
+                            // sender, which is where it was before ADR-058.
+                            match state.put_pending_lane(&ctx.account_id, &pending).await {
+                                Ok(()) => queued += 1,
+                                Err(e) => tracing::warn!(
+                                    entity_type = %pending.entity.entity_type,
+                                    entity_uuid = %pending.entity.entity_uuid,
+                                    error = %e,
+                                    "could not queue a refused lane for retry; it waits for \
+                                     its sender to push that entity again"
+                                ),
+                            }
+                        } else {
+                            // Never silently: a lane that is not queued is one this
+                            // device only recovers if its sender pushes it again.
+                            tracing::warn!(
+                                entity_type = %change.entity.entity_type,
+                                entity_uuid = %change.entity.entity_uuid,
+                                cap = MAX_PENDING_LANES,
+                                "the lane retry queue is full; this lane is not queued and \
+                                 waits for its sender to push that entity again"
+                            );
+                        }
                         continue;
                     }
                 };
-                // If this change deleted a parent entity, cascade the orphan children
-                // it left behind (the database no longer enforces foreign keys since
-                // the replicated tables were rebuilt without them, ADR-044). A repair
-                // failure is isolated like the merge above: the changeset itself did
-                // land, but the entity is left in a state this cycle could not finish,
-                // so the floor stays unraised and the next push retries the pair.
-                if let Err(e) = engine
-                    .repair_after_apply(&entity.entity_type, &entity.entity_uuid)
-                    .await
-                {
-                    tracing::warn!(
-                        entity_type = %entity.entity_type,
-                        entity_uuid = %entity.entity_uuid,
-                        error = %e.0,
-                        "could not repair referential integrity after merging a lane; \
-                         skipping it and leaving the anti-rollback floor unraised"
-                    );
-                    stats.failed += 1;
-                    continue;
-                }
                 // A changeset that materialized a row without all its NOT NULL columns
                 // came from a sender predating ADR-056. Keep the partial row (the
                 // columns it does carry are correct) but leave the anti-rollback floor
@@ -629,8 +925,8 @@ pub async fn sync_once_with_covers(
                 // good, since nothing ever lowers it again.
                 if !outcome.complete {
                     tracing::warn!(
-                        entity_type = %entity.entity_type,
-                        entity_uuid = %entity.entity_uuid,
+                        entity_type = %change.entity.entity_type,
+                        entity_uuid = %change.entity.entity_uuid,
                         device = %lane.device_id,
                         "applied an incomplete changeset: NOT NULL columns fell back to \
                          their defaults; the anti-rollback floor is left unraised so a \
@@ -1072,6 +1368,113 @@ impl SyncStateStore for DbSyncStateStore {
             .map_err(|e| SyncError::State(e.to_string()))?;
         Ok(())
     }
+
+    async fn pending_lanes(
+        &self,
+        account_id: &str,
+    ) -> std::result::Result<Vec<(PendingLane, i64)>, SyncError> {
+        let rows = self
+            .db
+            .query_all(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                // Oldest first: an upsert keeps the row's rowid, so a lane that has
+                // been waiting the longest is retried first, cycle after cycle.
+                //
+                // The anti-rollback floor is joined in rather than read per entry:
+                // a saturated queue would otherwise cost one extra query per lane
+                // on every cycle. LEFT JOIN because a lane whose blob has never been
+                // applied has no floor row at all, which reads as 0.
+                "SELECT p.opaque_id, p.device_id, p.entity_type, p.entity_uuid, \
+                 p.deleted, p.changeset, p.hlc, p.attempts, \
+                 COALESCE(h.last_hlc, 0) AS floor \
+                 FROM account_pending_lane p \
+                 LEFT JOIN account_lane_hlc h \
+                 ON h.account_id = p.account_id AND h.opaque_id = p.opaque_id \
+                 AND h.device_id = p.device_id \
+                 WHERE p.account_id = ? ORDER BY p.rowid",
+                [account_id.into()],
+            ))
+            .await
+            .map_err(|e| SyncError::State(e.to_string()))?;
+        rows.into_iter()
+            .map(
+                |r| -> std::result::Result<(PendingLane, i64), sea_orm::DbErr> {
+                    Ok((
+                        PendingLane {
+                            opaque_id: r.try_get("", "opaque_id")?,
+                            device_id: r.try_get("", "device_id")?,
+                            entity: EntityRef {
+                                entity_type: r.try_get("", "entity_type")?,
+                                entity_uuid: r.try_get("", "entity_uuid")?,
+                            },
+                            deleted: r.try_get::<i64>("", "deleted")? != 0,
+                            changeset: r.try_get("", "changeset")?,
+                            hlc: r.try_get("", "hlc")?,
+                            attempts: r.try_get("", "attempts")?,
+                        },
+                        r.try_get("", "floor")?,
+                    ))
+                },
+            )
+            .collect::<std::result::Result<Vec<_>, sea_orm::DbErr>>()
+            .map_err(|e| SyncError::State(e.to_string()))
+    }
+
+    async fn put_pending_lane(
+        &self,
+        account_id: &str,
+        lane: &PendingLane,
+    ) -> std::result::Result<(), SyncError> {
+        self.db
+            .execute(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                // One row per lane: a newer blob replaces the older one exactly as it
+                // does in the hub's snapshot store, so the queue can never accumulate
+                // several generations of the same entity. `first_seen_at` survives the
+                // replacement, so how long a lane has been stuck stays readable.
+                "INSERT INTO account_pending_lane \
+                 (account_id, opaque_id, device_id, entity_type, entity_uuid, deleted, \
+                 changeset, hlc, attempts, first_seen_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now')) \
+                 ON CONFLICT(account_id, opaque_id, device_id) DO UPDATE SET \
+                 entity_type = excluded.entity_type, entity_uuid = excluded.entity_uuid, \
+                 deleted = excluded.deleted, changeset = excluded.changeset, \
+                 hlc = excluded.hlc, attempts = excluded.attempts, \
+                 updated_at = datetime('now')",
+                [
+                    account_id.into(),
+                    lane.opaque_id.clone().into(),
+                    lane.device_id.clone().into(),
+                    lane.entity.entity_type.clone().into(),
+                    lane.entity.entity_uuid.clone().into(),
+                    i64::from(lane.deleted).into(),
+                    lane.changeset.clone().into(),
+                    lane.hlc.into(),
+                    lane.attempts.into(),
+                ],
+            ))
+            .await
+            .map_err(|e| SyncError::State(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn drop_pending_lane(
+        &self,
+        account_id: &str,
+        opaque_id: &str,
+        device_id: &str,
+    ) -> std::result::Result<(), SyncError> {
+        self.db
+            .execute(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "DELETE FROM account_pending_lane \
+                 WHERE account_id = ? AND opaque_id = ? AND device_id = ?",
+                [account_id.into(), opaque_id.into(), device_id.into()],
+            ))
+            .await
+            .map_err(|e| SyncError::State(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1090,6 +1493,8 @@ mod tests {
         registry: Mutex<HashMap<String, i64>>,
         // key: (account_id, opaque_id, device_id) -> last applied HLC.
         lane: Mutex<HashMap<(String, String, String), i64>>,
+        // Retry queue (ADR-058), insertion-ordered like the SQLite one.
+        pending: Mutex<Vec<(String, PendingLane)>>,
     }
 
     #[async_trait]
@@ -1156,6 +1561,55 @@ mod tests {
                 device_id.to_string(),
             );
             self.lane.lock().unwrap().insert(key, hlc);
+            Ok(())
+        }
+
+        async fn pending_lanes(
+            &self,
+            account_id: &str,
+        ) -> std::result::Result<Vec<(PendingLane, i64)>, SyncError> {
+            let floors = self.lane.lock().unwrap();
+            Ok(self
+                .pending
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(acct, _)| acct == account_id)
+                .map(|(_, lane)| {
+                    let key = (
+                        account_id.to_string(),
+                        lane.opaque_id.clone(),
+                        lane.device_id.clone(),
+                    );
+                    (lane.clone(), *floors.get(&key).unwrap_or(&0))
+                })
+                .collect())
+        }
+
+        async fn put_pending_lane(
+            &self,
+            account_id: &str,
+            lane: &PendingLane,
+        ) -> std::result::Result<(), SyncError> {
+            let mut queue = self.pending.lock().unwrap();
+            match queue.iter_mut().find(|(acct, l)| {
+                acct == account_id && l.opaque_id == lane.opaque_id && l.device_id == lane.device_id
+            }) {
+                Some((_, existing)) => *existing = lane.clone(),
+                None => queue.push((account_id.to_string(), lane.clone())),
+            }
+            Ok(())
+        }
+
+        async fn drop_pending_lane(
+            &self,
+            account_id: &str,
+            opaque_id: &str,
+            device_id: &str,
+        ) -> std::result::Result<(), SyncError> {
+            self.pending.lock().unwrap().retain(|(acct, l)| {
+                acct != account_id || l.opaque_id != opaque_id || l.device_id != device_id
+            });
             Ok(())
         }
     }
@@ -1366,7 +1820,7 @@ mod tests {
 
         async fn apply(
             &self,
-            change: InboundChange,
+            change: &InboundChange,
         ) -> std::result::Result<ApplyOutcome, MergeEngineError> {
             let cs: FakeChangeset = rmp_serde::from_slice(&change.changeset)
                 .map_err(|e| MergeEngineError(e.to_string()))?;
@@ -1472,30 +1926,69 @@ mod tests {
     }
 
     /// A [`FakeEngine`] wrapper that refuses to merge (or to repair after merging)
-    /// one chosen entity. Stands in for any engine-level refusal; the error text is
+    /// what it is told to. Stands in for any engine-level refusal; the error text is
     /// the one a real device produced when its cr-sqlite connection had been
     /// released out from under the merge (ADR-056).
+    ///
+    /// The refusals live behind a `Mutex` so a test can lift them mid-run
+    /// ([`RejectingEngine::heal`]): a refusal that clears is what tells a transient
+    /// failure apart from a definitive one (ADR-058), and the retry queue exists
+    /// precisely for the first.
     struct RejectingEngine {
         inner: FakeEngine,
-        reject_apply: Option<String>,
-        reject_repair: Option<String>,
+        /// Refuse to apply this entity uuid.
+        reject_apply: Mutex<Option<String>>,
+        /// Refuse the post-merge repair of this entity uuid.
+        reject_repair: Mutex<Option<String>>,
+        /// Refuse to apply any changeset carrying this value, whatever its entity.
+        /// Lets a test refuse one GENERATION of an entity and accept the next.
+        reject_value: Mutex<Option<String>>,
+        /// Refuse everything, for the queue-cap test.
+        reject_all: Mutex<bool>,
     }
 
     impl RejectingEngine {
-        fn rejecting_apply(device: &str, uuid: &str) -> Self {
+        /// A wrapper that refuses nothing yet.
+        fn wrapping(device: &str) -> Self {
             Self {
                 inner: FakeEngine::new(device),
-                reject_apply: Some(uuid.to_string()),
-                reject_repair: None,
+                reject_apply: Mutex::new(None),
+                reject_repair: Mutex::new(None),
+                reject_value: Mutex::new(None),
+                reject_all: Mutex::new(false),
             }
         }
 
+        fn rejecting_apply(device: &str, uuid: &str) -> Self {
+            let engine = Self::wrapping(device);
+            *engine.reject_apply.lock().unwrap() = Some(uuid.to_string());
+            engine
+        }
+
         fn rejecting_repair(device: &str, uuid: &str) -> Self {
-            Self {
-                inner: FakeEngine::new(device),
-                reject_apply: None,
-                reject_repair: Some(uuid.to_string()),
-            }
+            let engine = Self::wrapping(device);
+            *engine.reject_repair.lock().unwrap() = Some(uuid.to_string());
+            engine
+        }
+
+        fn rejecting_value(device: &str, value: &str) -> Self {
+            let engine = Self::wrapping(device);
+            *engine.reject_value.lock().unwrap() = Some(value.to_string());
+            engine
+        }
+
+        fn rejecting_everything(device: &str) -> Self {
+            let engine = Self::wrapping(device);
+            *engine.reject_all.lock().unwrap() = true;
+            engine
+        }
+
+        /// Lift every refusal: the transient cause cleared.
+        fn heal(&self) {
+            *self.reject_apply.lock().unwrap() = None;
+            *self.reject_repair.lock().unwrap() = None;
+            *self.reject_value.lock().unwrap() = None;
+            *self.reject_all.lock().unwrap() = false;
         }
     }
 
@@ -1514,9 +2007,22 @@ mod tests {
 
         async fn apply(
             &self,
-            change: InboundChange,
+            change: &InboundChange,
         ) -> std::result::Result<ApplyOutcome, MergeEngineError> {
-            if self.reject_apply.as_deref() == Some(change.entity.entity_uuid.as_str()) {
+            let value_refused =
+                self.reject_value
+                    .lock()
+                    .unwrap()
+                    .as_deref()
+                    .is_some_and(|refused| {
+                        rmp_serde::from_slice::<FakeChangeset>(&change.changeset)
+                            .is_ok_and(|cs| cs.value == refused)
+                    });
+            if *self.reject_all.lock().unwrap()
+                || value_refused
+                || self.reject_apply.lock().unwrap().as_deref()
+                    == Some(change.entity.entity_uuid.as_str())
+            {
                 return Err(MergeEngineError(
                     "error returned from database: (code: 1) Failed to update CRR table information"
                         .to_string(),
@@ -1530,7 +2036,7 @@ mod tests {
             entity_type: &str,
             entity_uuid: &str,
         ) -> std::result::Result<(), MergeEngineError> {
-            if self.reject_repair.as_deref() == Some(entity_uuid) {
+            if self.reject_repair.lock().unwrap().as_deref() == Some(entity_uuid) {
                 return Err(MergeEngineError("cascade failed".to_string()));
             }
             self.inner
@@ -1834,6 +2340,188 @@ mod tests {
                 .unwrap(),
             0,
             "an unrepaired lane must stay repairable too"
+        );
+    }
+
+    // The point of ADR-058. A lane skipped for a TRANSIENT reason must heal on its
+    // own: nothing else re-delivers it (the pull cursor advanced over it and the
+    // sender's push watermark advanced too), so before the retry queue this entity
+    // stayed behind until someone happened to edit it again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lane_that_failed_transiently_is_retried_and_heals_with_no_new_push() {
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        hub_with_three_books(&hub, &bundle).await.unwrap();
+
+        let eng_b = RejectingEngine::rejecting_apply("devB", "book-2");
+        let state_b = MemState::default();
+        let first = sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+        assert_eq!(first.failed, 1);
+        assert_eq!(state_b.pending_lanes("acct-1").await.unwrap().len(), 1);
+
+        // The transient cause clears. The hub has nothing new: no push from devA,
+        // and the cursor already sits past all three lanes.
+        eng_b.heal();
+        let second = sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+
+        assert_eq!(second.failed, 0);
+        assert_eq!(second.applied, 1, "the queued lane merged on retry");
+        assert_eq!(
+            eng_b.inner.snapshot(),
+            vec![
+                ("book-1".to_string(), "v1".to_string(), false),
+                ("book-2".to_string(), "v1".to_string(), false),
+                ("book-3".to_string(), "v1".to_string(), false),
+            ],
+            "the skipped entity healed without its sender pushing it again"
+        );
+        assert!(
+            state_b
+                .lane_hlc("acct-1", &lane_id(&bundle, "book-2"), "devA")
+                .await
+                .unwrap()
+                > 0,
+            "a successful retry raises the anti-rollback floor it had left alone"
+        );
+        assert!(
+            state_b.pending_lanes("acct-1").await.unwrap().is_empty(),
+            "a merged lane leaves the queue"
+        );
+    }
+
+    // H5 (ADR-042 §14) applied to the queue. A queued blob is replayed only while
+    // it is still ahead of its lane's floor: once a fresher blob for the same lane
+    // has merged, replaying the old one is exactly the rollback the floor exists to
+    // prevent, so the entry is dropped unread.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_lane_overtaken_by_a_fresher_blob_is_dropped_not_replayed() {
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        let eng_a = FakeEngine::new("devA");
+        let state_a = MemState::default();
+        eng_a.edit("book-1", "v1", false);
+        sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
+            .await
+            .unwrap();
+
+        // B refuses this generation of the entity, so "v1" lands in the queue.
+        let eng_b = RejectingEngine::rejecting_value("devB", "v1");
+        let state_b = MemState::default();
+        sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+        let queued = state_b.pending_lanes("acct-1").await.unwrap();
+        assert_eq!(queued.len(), 1);
+        let stale_hlc = queued[0].0.hlc;
+
+        // A edits the same book. The lane's blob is replaced on the hub, and B can
+        // merge this generation: the retry of "v1" fails again first, then "v2"
+        // applies and raises the floor above the queued blob.
+        eng_a.edit("book-1", "v2", false);
+        sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
+            .await
+            .unwrap();
+        sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+        let floor = state_b
+            .lane_hlc("acct-1", &lane_id(&bundle, "book-1"), "devA")
+            .await
+            .unwrap();
+        assert!(
+            floor > stale_hlc,
+            "the fresher blob must have raised the floor above the queued one"
+        );
+
+        // The next cycle drains the queue. The stale entry must be discarded, not
+        // merged: merging it would roll book-1 back from "v2" to "v1".
+        let third = sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+        assert_eq!(third.failed, 0, "a superseded entry is not a failure");
+        assert_eq!(third.applied, 0, "and it is not applied either");
+        assert_eq!(
+            eng_b.inner.snapshot(),
+            vec![("book-1".to_string(), "v2".to_string(), false)],
+            "the entity must not be rolled back by its own retry queue"
+        );
+        assert!(
+            state_b.pending_lanes("acct-1").await.unwrap().is_empty(),
+            "the superseded entry is dropped rather than retried forever"
+        );
+    }
+
+    // Retrying is bounded. A refusal that survives every attempt is definitive in
+    // practice, and the queue gives up on it rather than replaying it for the life
+    // of the install. Giving up restores the ADR-056 state exactly: floor unraised,
+    // entity waiting for its sender.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lane_that_never_merges_is_given_up_after_bounded_retries() {
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        hub_with_three_books(&hub, &bundle).await.unwrap();
+
+        let eng_b = RejectingEngine::rejecting_apply("devB", "book-2");
+        let state_b = MemState::default();
+        // Cycle 1 pulls and queues it; each later cycle spends one attempt, so the
+        // budget runs out on the cycle after the last one.
+        for _ in 0..=MAX_PENDING_LANE_ATTEMPTS {
+            let stats = sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+                .await
+                .unwrap();
+            assert_eq!(stats.failed, 1, "still counted while it is still failing");
+        }
+
+        assert!(
+            state_b.pending_lanes("acct-1").await.unwrap().is_empty(),
+            "the queue must not keep a lane past its attempt budget"
+        );
+        let after = sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+        assert_eq!(after.failed, 0, "nothing is retried once it is given up");
+        assert_eq!(
+            state_b
+                .lane_hlc("acct-1", &lane_id(&bundle, "book-2"), "devA")
+                .await
+                .unwrap(),
+            0,
+            "giving up still leaves the floor unraised, so the sender can repair it"
+        );
+    }
+
+    // The queue is storage on a device the performance policy targets, so it is
+    // capped. A receiver that refuses everything (a wedged cr-sqlite connection
+    // during a bootstrap pull) must not turn every inbound lane into a stored row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_retry_queue_does_not_grow_past_its_cap() {
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        let eng_a = FakeEngine::new("devA");
+        let state_a = MemState::default();
+        let overflow = MAX_PENDING_LANES + 10;
+        for i in 0..overflow {
+            eng_a.edit(&format!("book-{i}"), "v1", false);
+        }
+        sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
+            .await
+            .unwrap();
+
+        let eng_b = RejectingEngine::rejecting_everything("devB");
+        let state_b = MemState::default();
+        let stats = sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+
+        assert_eq!(stats.failed, overflow, "every lane is still reported");
+        assert_eq!(
+            state_b.pending_lanes("acct-1").await.unwrap().len(),
+            MAX_PENDING_LANES,
+            "the queue stops at its cap; the rest wait for their sender as before"
         );
     }
 
@@ -2161,6 +2849,20 @@ mod tests {
         ))
         .await
         .unwrap();
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            // Migration 093 (ADR-058).
+            "CREATE TABLE account_pending_lane (account_id TEXT NOT NULL, \
+             opaque_id TEXT NOT NULL, device_id TEXT NOT NULL, \
+             entity_type TEXT NOT NULL, entity_uuid TEXT NOT NULL, \
+             deleted INTEGER NOT NULL DEFAULT 0, changeset BLOB NOT NULL, \
+             hlc INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, \
+             first_seen_at TEXT, updated_at TEXT, \
+             PRIMARY KEY (account_id, opaque_id, device_id))"
+                .to_owned(),
+        ))
+        .await
+        .unwrap();
 
         let store = DbSyncStateStore::new(db);
 
@@ -2210,6 +2912,68 @@ mod tests {
         assert_eq!(store.lane_hlc("acct-1", "oid-1", "devC").await.unwrap(), 0);
         // A different account is isolated.
         assert_eq!(store.lane_hlc("acct-2", "oid-1", "devB").await.unwrap(), 0);
+
+        // Retry queue (ADR-058): the changeset must survive the BLOB round trip
+        // intact, since replaying a truncated one would merge a partial row.
+        assert!(store.pending_lanes("acct-1").await.unwrap().is_empty());
+        let lane = PendingLane {
+            opaque_id: "oid-1".to_string(),
+            device_id: "devB".to_string(),
+            entity: EntityRef {
+                entity_type: "book".to_string(),
+                entity_uuid: "book-1".to_string(),
+            },
+            deleted: false,
+            changeset: vec![0x00, 0xFF, 0x10, 0x00, 0x7F],
+            hlc: 42,
+            attempts: 0,
+        };
+        store.put_pending_lane("acct-1", &lane).await.unwrap();
+        // The floor rides along, joined from `account_lane_hlc`: this lane's is the
+        // 99 set above, and a lane with no floor row at all reads as 0 (below).
+        assert_eq!(
+            store.pending_lanes("acct-1").await.unwrap(),
+            vec![(lane.clone(), 99)]
+        );
+        // Distinct accounts are isolated here too.
+        assert!(store.pending_lanes("acct-2").await.unwrap().is_empty());
+
+        // Upsert on the same lane replaces the blob rather than queueing a second
+        // generation of the same entity (one row per lane, like the hub's store).
+        let refreshed = PendingLane {
+            changeset: vec![0x01, 0x02],
+            hlc: 43,
+            attempts: 3,
+            ..lane.clone()
+        };
+        store.put_pending_lane("acct-1", &refreshed).await.unwrap();
+        assert_eq!(
+            store.pending_lanes("acct-1").await.unwrap(),
+            vec![(refreshed, 99)],
+            "the newest blob supersedes the queued one"
+        );
+
+        // A different device on the same opaque_id is a different lane.
+        let other_device = PendingLane {
+            device_id: "devC".to_string(),
+            ..lane.clone()
+        };
+        store
+            .put_pending_lane("acct-1", &other_device)
+            .await
+            .unwrap();
+        assert_eq!(store.pending_lanes("acct-1").await.unwrap().len(), 2);
+
+        store
+            .drop_pending_lane("acct-1", "oid-1", "devB")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.pending_lanes("acct-1").await.unwrap(),
+            vec![(other_device, 0)],
+            "dropping one lane leaves the others queued, and a lane that has never \
+             been applied joins no floor row"
+        );
     }
 
     // --- device registry: fetch/adopt + enroll ---

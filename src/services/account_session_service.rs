@@ -230,6 +230,24 @@ pub async fn clear(db: &DatabaseConnection) -> Result<(), SessionStoreError> {
     ))
     .await
     .map_err(|e| SessionStoreError::Storage(e.to_string()))?;
+    // Drop the inbound-lane retry queue with the session (ADR-058). Its entries
+    // are decrypted changesets waiting to be merged; sign-out also demotes the
+    // replicated tables back to plain ones, so nothing is left that could apply
+    // them, and keeping them would hold entity data past the moment the user
+    // asked for the account to leave this device. The anti-rollback floors stay:
+    // they carry no content and must survive a re-enrollment.
+    //
+    // Best-effort: sign-out must never be blocked by local bookkeeping, and a
+    // database old enough to predate migration 093 has no queue to clear anyway.
+    if let Err(e) = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM account_pending_lane".to_owned(),
+        ))
+        .await
+    {
+        tracing::warn!(error = %e, "could not clear the lane retry queue on sign-out");
+    }
     Ok(())
 }
 
@@ -333,5 +351,53 @@ mod tests {
         assert!(load(&db, "u").await.unwrap().is_none());
         // Idempotent.
         clear(&db).await.unwrap();
+    }
+
+    /// Sign-out also drops the inbound-lane retry queue (ADR-058). Its entries are
+    /// decrypted entity data, and sign-out demotes the replicated tables so nothing
+    /// is left that could apply them: keeping them would hold that data past the
+    /// moment the user asked for the account to leave this device.
+    #[tokio::test]
+    async fn clear_drops_the_lane_retry_queue() {
+        use crate::services::account_sync_engine::{
+            DbSyncStateStore, EntityRef, PendingLane, SyncStateStore,
+        };
+
+        let db = setup_db().await;
+        let store = DbSyncStateStore::new(db.clone());
+        store
+            .put_pending_lane(
+                "acct-1",
+                &PendingLane {
+                    opaque_id: "oid-1".to_string(),
+                    device_id: "devB".to_string(),
+                    entity: EntityRef {
+                        entity_type: "book".to_string(),
+                        entity_uuid: "book-1".to_string(),
+                    },
+                    deleted: false,
+                    changeset: vec![0xAB, 0xCD],
+                    hlc: 7,
+                    attempts: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.pending_lanes("acct-1").await.unwrap().len(), 1);
+
+        clear(&db).await.unwrap();
+
+        assert!(
+            store.pending_lanes("acct-1").await.unwrap().is_empty(),
+            "sign-out must not leave queued changesets on the device"
+        );
+        // The anti-rollback floors are deliberately NOT cleared: they carry no
+        // content and must survive a re-enrollment.
+        store
+            .set_lane_hlc("acct-1", "oid-1", "devB", 7)
+            .await
+            .unwrap();
+        clear(&db).await.unwrap();
+        assert_eq!(store.lane_hlc("acct-1", "oid-1", "devB").await.unwrap(), 7);
     }
 }

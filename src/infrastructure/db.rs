@@ -2388,6 +2388,39 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // themselves on INSERT, so a device enrolling from now on is never re-pushed.
     migrate_account_sync_full_repush(db).await?;
 
+    // Migration 093: retry queue for inbound sync lanes this device pulled but
+    // could not merge (ADR-058). ADR-056 isolates such a lane (log it, count it,
+    // skip it without raising the anti-rollback floor) so one unappliable entity
+    // cannot freeze the account, but nothing re-delivered it: the pull cursor
+    // advanced over it and the sender's push watermark advanced too, so a
+    // transient failure (a full disk, a locked database, a cr-sqlite connection
+    // released out from under the merge) was as permanent as a definitive
+    // refusal. The decrypted blob is kept here instead and replayed at the start
+    // of later cycles, re-gated on the lane's floor so a blob a fresher one has
+    // overtaken is dropped rather than rolled back. One row per lane, bounded by
+    // the engine's `MAX_PENDING_LANES`. Device-local like `account_lane_hlc`:
+    // deliberately NOT a CRR, and additive, so it is safe after the uuid rebuild.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            r#"CREATE TABLE IF NOT EXISTS account_pending_lane (
+            account_id TEXT NOT NULL,
+            opaque_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_uuid TEXT NOT NULL,
+            deleted INTEGER NOT NULL DEFAULT 0,
+            changeset BLOB NOT NULL,
+            hlc INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            first_seen_at TEXT,
+            updated_at TEXT,
+            PRIMARY KEY (account_id, opaque_id, device_id)
+        )"#
+            .to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
 

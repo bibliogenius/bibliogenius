@@ -294,7 +294,7 @@ impl MergeEngine for CrSqliteMergeEngine {
         Ok(out)
     }
 
-    async fn apply(&self, change: InboundChange) -> Result<ApplyOutcome, MergeEngineError> {
+    async fn apply(&self, change: &InboundChange) -> Result<ApplyOutcome, MergeEngineError> {
         let rows: Vec<ChangeRow> = rmp_serde::from_slice(&change.changeset).map_err(err)?;
         let pool = self.db.get_sqlite_connection_pool();
 
@@ -576,7 +576,7 @@ mod tests {
             .await
             .unwrap();
         let outcome = receiver
-            .apply(InboundChange {
+            .apply(&InboundChange {
                 entity: EntityRef {
                     entity_type: "books".to_owned(),
                     entity_uuid: uuid.to_owned(),
@@ -653,12 +653,12 @@ mod tests {
         };
 
         // A first cycle merges normally and warms the connection.
-        receiver.apply(lane(first)).await.expect("a warm merge");
+        receiver.apply(&lane(first)).await.expect("a warm merge");
 
         receiver.finalize().await.unwrap();
 
         let err = receiver
-            .apply(lane(second))
+            .apply(&lane(second))
             .await
             .expect_err("a finalized connection must not silently keep merging");
         assert!(
@@ -702,7 +702,7 @@ mod tests {
                 .iter()
                 .find(|c| c.entity.entity_uuid == uuid)
                 .expect("the book is in the outbound set");
-            to.apply(InboundChange {
+            to.apply(&InboundChange {
                 entity: change.entity.clone(),
                 deleted: change.deleted,
                 changeset: change.changeset.clone(),
@@ -843,7 +843,7 @@ mod tests {
             .await
             .unwrap();
         let outcome = receiver
-            .apply(InboundChange {
+            .apply(&InboundChange {
                 entity: EntityRef {
                     entity_type: "books".to_owned(),
                     entity_uuid: uuid.to_owned(),
@@ -872,7 +872,7 @@ mod tests {
         // Merging into an EXISTING row can only add or update columns, so the same
         // partial changeset is not flagged the second time around.
         let again = receiver
-            .apply(InboundChange {
+            .apply(&InboundChange {
                 entity: EntityRef {
                     entity_type: "books".to_owned(),
                     entity_uuid: uuid.to_owned(),
@@ -929,7 +929,7 @@ mod tests {
             .await
             .unwrap();
         let outcome = receiver
-            .apply(InboundChange {
+            .apply(&InboundChange {
                 entity: EntityRef {
                     entity_type: "books".to_owned(),
                     entity_uuid: uuid.to_owned(),
