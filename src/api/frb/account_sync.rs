@@ -537,12 +537,18 @@ pub async fn account_sync_now_ffi() -> Result<String, String> {
         tracing::info!(
             applied = stats.applied,
             pushed = stats.pushed,
+            failed = stats.failed,
             "account_sync_now: data sync complete"
         );
         Ok(serde_json::json!({
             "synced": true,
             "applied": stats.applied,
             "pushed": stats.pushed,
+            // Lanes pulled but not merged, skipped so one unappliable entity cannot
+            // freeze the account's whole sync (ADR-056). Reported rather than hidden:
+            // the cycle converged for everything else, but these entities are still
+            // behind on this device.
+            "failed": stats.failed,
         })
         .to_string())
     }
@@ -576,21 +582,30 @@ pub async fn account_sync_now_ffi() -> Result<String, String> {
     }
 }
 
-/// Release the database's cr-sqlite state before the app process exits.
+/// App-lifecycle shutdown hook. Deliberately does nothing to the database.
 ///
-/// cr-sqlite requires `crsql_finalize()` on any connection that touched a CRR or it
-/// can abort on teardown. Flutter calls this from its app-lifecycle shutdown. On
-/// builds without account sync there is no cr-sqlite state, so this is a no-op.
-/// Best-effort and idempotent: a failure is logged, never surfaced, because the
-/// process is on its way down.
+/// This used to run `crsql_finalize()` on the live pool, which is the one thing it
+/// must never do. `crsql_finalize` is only valid on a connection that will not be
+/// used again (see `crsqlite_crr::finalize`), and this hook cannot promise that:
+/// Flutter calls it on `AppLifecycleState.detached`, and on Android `detached`
+/// does not mean the process is dying. The activity can be destroyed while the
+/// process, the Flutter engine and the Rust pool all survive; the user reopens the
+/// app onto the same connection, and from then on every account-sync merge fails
+/// with `Failed to update CRR table information` until the process is really
+/// killed. That is what wedged a production device (ADR-056).
+///
+/// Nothing was lost by removing it. The finalize protected no close: the pool is
+/// never closed on this path, and a process that is genuinely ending does not run
+/// destructors for the statics holding it. The two places that DO retire a
+/// connection pair finalize with a close themselves
+/// (`crsqlite_crr::finalize_and_close`, and the server binary's exit path).
+///
+/// The entry point is kept, and Flutter keeps calling it, so the seam exists if a
+/// real backend teardown is ever built. That is a bigger change than it looks:
+/// closing the pool would also have to stop the embedded HTTP server, the relay
+/// poller, the WS nudge listener, the operation processor and the oplog pruner,
+/// each of which holds its own clone of the connection.
 pub async fn shutdown_backend_ffi() -> Result<String, String> {
-    #[cfg(feature = "account_sync")]
-    if let Some(db) = db()
-        && let Err(e) = crate::infrastructure::crsqlite_crr::finalize(db).await
-    {
-        tracing::warn!("crsql_finalize on shutdown failed: {e}");
-        return Ok("finalize failed".to_string());
-    }
     Ok("OK".to_string())
 }
 

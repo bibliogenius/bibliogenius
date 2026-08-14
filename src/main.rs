@@ -259,9 +259,14 @@ async fn main() {
         app.into_make_service_with_connect_info::<SocketAddr>(),
     );
 
-    // On account-sync builds the pool is a single cr-sqlite connection that must run
-    // `crsql_finalize()` before it is closed. Serve until a shutdown signal, then
-    // finalize.
+    // On account-sync builds the pool is a single cr-sqlite connection. Serve until a
+    // shutdown signal, then finalize.
+    //
+    // This is the one place a bare `finalize` is legitimate: the future below has
+    // returned, so nothing serves any more, and the process exits immediately after.
+    // Everywhere else the connection outlives the call, and finalizing it wedges
+    // every later merge (see `crsqlite_crr::finalize`); use `finalize_and_close`
+    // there instead.
     #[cfg(feature = "account_sync")]
     {
         serve

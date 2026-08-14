@@ -127,6 +127,14 @@ pub struct SyncContext {
 pub struct SyncStats {
     pub applied: usize,
     pub pushed: usize,
+    /// Row lanes this cycle pulled but could NOT merge, each logged and skipped
+    /// without raising the anti-rollback floor (ADR-056). Non-zero means this
+    /// device is behind on those entities and is waiting for the sender to push
+    /// them again; the rest of the cycle still converged. Reported to the caller
+    /// so a mixed-version fleet is visible instead of silent. Cover lanes are not
+    /// counted here: their bytes are re-offered by the cover source every cycle,
+    /// so a failed cover write retries on its own.
+    pub failed: usize,
     /// `(book_uuid, file_mtime)` of every custom cover whose bytes pushed
     /// successfully this cycle (ADR-046). The caller records these in the local
     /// cover dedup state AFTER the cycle succeeds, so an unchanged cover is not
@@ -547,21 +555,67 @@ pub async fn sync_once_with_covers(
                     entity_type: frame.t,
                     entity_uuid: frame.u,
                 };
-                let outcome = engine
+                // A lane this device cannot merge is isolated, exactly as a cover
+                // lane is: log it, skip it WITHOUT raising the anti-rollback floor,
+                // and carry on with the cycle. Propagating the error instead would
+                // abort the whole cycle before the pull cursor advances, so a single
+                // unappliable entity would freeze every other lane of the account for
+                // good. The engine can refuse a merge for reasons this pipeline
+                // cannot anticipate (a changeset the local schema does not fit, a
+                // cr-sqlite connection whose per-connection state was released), and
+                // a mixed-version fleet is the normal state for users, so a refusal
+                // is an expected event rather than an exceptional one.
+                //
+                // The skip is deliberately loud. Silence is what let ADR-056's
+                // divergence run for seven weeks; a warning per lane plus the
+                // `failed` counter returned to the caller is the minimum that makes
+                // the condition observable.
+                //
+                // Leaving the floor unraised is what keeps the entity repairable: the
+                // cursor advances over this blob, but the sender's next push of the
+                // same entity arrives under a new `change_seq` and is accepted rather
+                // than discarded as a stale replay.
+                let outcome = match engine
                     .apply(InboundChange {
                         entity: entity.clone(),
                         deleted: frame.d,
                         changeset: frame.c,
                     })
                     .await
-                    .map_err(|e| SyncError::Merge(e.0))?;
+                {
+                    Ok(outcome) => outcome,
+                    Err(e) => {
+                        tracing::warn!(
+                            entity_type = %entity.entity_type,
+                            entity_uuid = %entity.entity_uuid,
+                            error = %e.0,
+                            "could not merge an inbound lane; skipping it and leaving the \
+                             anti-rollback floor unraised so a later push can still apply it"
+                        );
+                        stats.failed += 1;
+                        continue;
+                    }
+                };
                 // If this change deleted a parent entity, cascade the orphan children
                 // it left behind (the database no longer enforces foreign keys since
-                // the replicated tables were rebuilt without them, ADR-044).
-                engine
+                // the replicated tables were rebuilt without them, ADR-044). A repair
+                // failure is isolated like the merge above: the changeset itself did
+                // land, but the entity is left in a state this cycle could not finish,
+                // so the floor stays unraised and the next push retries the pair.
+                if let Err(e) = engine
                     .repair_after_apply(&entity.entity_type, &entity.entity_uuid)
                     .await
-                    .map_err(|e| SyncError::Merge(e.0))?;
+                {
+                    tracing::warn!(
+                        entity_type = %entity.entity_type,
+                        entity_uuid = %entity.entity_uuid,
+                        error = %e.0,
+                        "could not repair referential integrity after merging a lane; \
+                         skipping it and leaving the anti-rollback floor unraised"
+                    );
+                    stats.failed += 1;
+                    continue;
+                }
                 // A changeset that materialized a row without all its NOT NULL columns
                 // came from a sender predating ADR-056. Keep the partial row (the
                 // columns it does carry are correct) but leave the anti-rollback floor
@@ -1417,6 +1471,74 @@ mod tests {
         }
     }
 
+    /// A [`FakeEngine`] wrapper that refuses to merge (or to repair after merging)
+    /// one chosen entity. Stands in for any engine-level refusal; the error text is
+    /// the one a real device produced when its cr-sqlite connection had been
+    /// released out from under the merge (ADR-056).
+    struct RejectingEngine {
+        inner: FakeEngine,
+        reject_apply: Option<String>,
+        reject_repair: Option<String>,
+    }
+
+    impl RejectingEngine {
+        fn rejecting_apply(device: &str, uuid: &str) -> Self {
+            Self {
+                inner: FakeEngine::new(device),
+                reject_apply: Some(uuid.to_string()),
+                reject_repair: None,
+            }
+        }
+
+        fn rejecting_repair(device: &str, uuid: &str) -> Self {
+            Self {
+                inner: FakeEngine::new(device),
+                reject_apply: None,
+                reject_repair: Some(uuid.to_string()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MergeEngine for RejectingEngine {
+        async fn local_version(&self) -> std::result::Result<i64, MergeEngineError> {
+            self.inner.local_version().await
+        }
+
+        async fn changes_since(
+            &self,
+            since: i64,
+        ) -> std::result::Result<Vec<OutboundChange>, MergeEngineError> {
+            self.inner.changes_since(since).await
+        }
+
+        async fn apply(
+            &self,
+            change: InboundChange,
+        ) -> std::result::Result<ApplyOutcome, MergeEngineError> {
+            if self.reject_apply.as_deref() == Some(change.entity.entity_uuid.as_str()) {
+                return Err(MergeEngineError(
+                    "error returned from database: (code: 1) Failed to update CRR table information"
+                        .to_string(),
+                ));
+            }
+            self.inner.apply(change).await
+        }
+
+        async fn repair_after_apply(
+            &self,
+            entity_type: &str,
+            entity_uuid: &str,
+        ) -> std::result::Result<(), MergeEngineError> {
+            if self.reject_repair.as_deref() == Some(entity_uuid) {
+                return Err(MergeEngineError("cascade failed".to_string()));
+            }
+            self.inner
+                .repair_after_apply(entity_type, entity_uuid)
+                .await
+        }
+    }
+
     /// A sink whose every write fails, to exercise cover-write error isolation.
     struct FailingCoverSink;
 
@@ -1580,6 +1702,139 @@ mod tests {
             "cover retried after the floor stayed unraised"
         );
         assert_eq!(written[0].0, "book-9");
+    }
+
+    /// Push three books from A in three separate cycles, so the hub hands them to B
+    /// in a deterministic `change_seq` order (`book-1`, `book-2`, `book-3`).
+    async fn hub_with_three_books(
+        hub: &MemHub,
+        bundle: &AccountKeyBundle,
+    ) -> std::result::Result<(), SyncError> {
+        let eng_a = FakeEngine::new("devA");
+        let state_a = MemState::default();
+        for uuid in ["book-1", "book-2", "book-3"] {
+            eng_a.edit(uuid, "v1", false);
+            sync_once(hub, &eng_a, bundle, &state_a, &ctx("devA")).await?;
+        }
+        Ok(())
+    }
+
+    fn lane_id(bundle: &AccountKeyBundle, uuid: &str) -> String {
+        encode_b64url(&bundle.opaque_id("book", uuid))
+    }
+
+    // A lane this device cannot merge must NOT abort the cycle. Before ADR-056's
+    // lane isolation the apply error propagated with `?`, so the pull cursor never
+    // advanced and one unappliable entity froze every other lane of the account
+    // permanently, which is exactly what a mixed-version fleet produces and what
+    // made the ADR-056 rollout unreleasable.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unappliable_lane_is_skipped_and_the_rest_of_the_cycle_converges() {
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        hub_with_three_books(&hub, &bundle).await.unwrap();
+
+        let eng_b = RejectingEngine::rejecting_apply("devB", "book-2");
+        let state_b = MemState::default();
+        let stats = sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .expect("one unappliable lane must not abort the cycle");
+
+        assert_eq!(stats.failed, 1, "the skip is counted, not swallowed");
+        assert_eq!(stats.applied, 2, "the two healthy lanes still applied");
+        assert_eq!(
+            eng_b.inner.snapshot(),
+            vec![
+                ("book-1".to_string(), "v1".to_string(), false),
+                ("book-3".to_string(), "v1".to_string(), false),
+            ],
+            "the lanes after the failing one must still be merged"
+        );
+
+        // The cursor advanced past all three, so the cycle is not stuck: without the
+        // isolation it would sit at 0 forever.
+        assert_eq!(state_b.pull_cursor("acct-1").await.unwrap(), 3);
+
+        // The anti-rollback floor was raised for what applied and left alone for what
+        // did not, which is what keeps the skipped entity repairable.
+        assert!(
+            state_b
+                .lane_hlc("acct-1", &lane_id(&bundle, "book-1"), "devA")
+                .await
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            state_b
+                .lane_hlc("acct-1", &lane_id(&bundle, "book-2"), "devA")
+                .await
+                .unwrap(),
+            0,
+            "the floor of a skipped lane must stay unraised"
+        );
+    }
+
+    // Skipping without raising the floor is only worth anything if the entity can
+    // still heal. Re-deliver the very same blobs to a device whose engine now
+    // accepts them: the skipped one applies, the two already-applied ones are
+    // rejected by their own floors.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_skipped_lane_still_applies_once_the_receiver_can_merge_it() {
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        hub_with_three_books(&hub, &bundle).await.unwrap();
+
+        let state_b = MemState::default();
+        let broken = RejectingEngine::rejecting_apply("devB", "book-2");
+        sync_once(&*hub, &broken, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+
+        // Same lanes, same HLCs, a receiver that can merge them now.
+        state_b.set_pull_cursor("acct-1", 0).await.unwrap();
+        let healthy = FakeEngine::new("devB");
+        let stats = sync_once(&*hub, &healthy, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+
+        assert_eq!(stats.failed, 0);
+        assert_eq!(
+            stats.applied, 1,
+            "only the lane whose floor stayed unraised is re-applied"
+        );
+        assert_eq!(
+            healthy.snapshot(),
+            vec![("book-2".to_string(), "v1".to_string(), false)],
+            "the previously skipped entity heals through the ordinary path"
+        );
+    }
+
+    // The post-merge referential repair is isolated on the same terms: the merge
+    // landed, but the entity is left in a state this cycle could not finish, so the
+    // lane is counted, logged, and left repairable rather than aborting everything.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failing_post_merge_repair_is_isolated_too() {
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        hub_with_three_books(&hub, &bundle).await.unwrap();
+
+        let eng_b = RejectingEngine::rejecting_repair("devB", "book-2");
+        let state_b = MemState::default();
+        let stats = sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .expect("a failing integrity repair must not abort the cycle");
+
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.applied, 2);
+        assert_eq!(state_b.pull_cursor("acct-1").await.unwrap(), 3);
+        assert_eq!(
+            state_b
+                .lane_hlc("acct-1", &lane_id(&bundle, "book-2"), "devA")
+                .await
+                .unwrap(),
+            0,
+            "an unrepaired lane must stay repairable too"
+        );
     }
 
     #[test]

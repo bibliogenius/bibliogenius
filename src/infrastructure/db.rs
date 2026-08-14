@@ -103,8 +103,7 @@ pub async fn init_db_account_sync(database_url: &str) -> Result<DatabaseConnecti
     }
     .await
     {
-        let _ = crate::infrastructure::crsqlite_crr::finalize(&db).await;
-        let _ = db.close().await;
+        let _ = crate::infrastructure::crsqlite_crr::finalize_and_close(db).await;
         return Err(e);
     }
 

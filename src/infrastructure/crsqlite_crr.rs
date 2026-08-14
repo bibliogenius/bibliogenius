@@ -55,10 +55,24 @@ pub async fn setup_crrs(db: &DatabaseConnection) -> Result<(), DbErr> {
     Ok(())
 }
 
-/// Run `crsql_finalize()` to release cr-sqlite's per-connection state before
-/// the connection is closed. cr-sqlite requires this on any connection that
-/// touched a CRR, or it can abort on close. The app wires this into DB
-/// shutdown (the single-connection account-sync pool finalizes once).
+/// Run `crsql_finalize()` to release cr-sqlite's per-connection state.
+///
+/// **This connection MUST NOT be used again.** `crsql_finalize` finalizes every
+/// statement cr-sqlite caches per connection and sets the pointers to null. It
+/// does not disable the extension: the CRR triggers and the `crsql_changes`
+/// virtual table are still wired up, they just reach for state that is gone. A
+/// connection that keeps serving after this answers, permanently:
+///
+/// - `Failed to update CRR table information` on any `crsql_changes` insert (a merge),
+/// - `Could not update table infos` on any `crsql_changes` read,
+/// - `failed to ensure table infos are up to date: 1` on any write to a CRR,
+/// - `failed to fill db version` on `crsql_db_version()`.
+///
+/// None of those name the real cause, and nothing recovers short of a new
+/// connection, so the whole account sync of a device can be wedged silently by a
+/// single stray call. Prefer [`finalize_and_close`], which makes the pair
+/// indivisible. Call this bare version ONLY when the process is about to exit and
+/// there is no pool to close (the server binary's shutdown path).
 pub async fn finalize(db: &DatabaseConnection) -> Result<(), DbErr> {
     db.execute(Statement::from_string(
         db.get_database_backend(),
@@ -66,6 +80,19 @@ pub async fn finalize(db: &DatabaseConnection) -> Result<(), DbErr> {
     ))
     .await?;
     Ok(())
+}
+
+/// Release cr-sqlite's per-connection state and close the pool, in that order.
+///
+/// This is the sanctioned way to retire a cr-sqlite connection, and the ordering
+/// is the whole point. Closing without finalizing first makes sqlx panic with
+/// "unable to close due to unfinalized statements"; finalizing without closing
+/// leaves a live handle onto a connection that can no longer merge anything (see
+/// [`finalize`]). Taking the connection by value is what keeps the caller from
+/// doing only half of it.
+pub async fn finalize_and_close(db: DatabaseConnection) -> Result<(), DbErr> {
+    finalize(&db).await?;
+    db.close().await
 }
 
 /// Whether any replicated table is currently a cr-sqlite CRR on this database,
@@ -91,11 +118,18 @@ pub async fn crrs_present(db: &DatabaseConnection) -> Result<bool, DbErr> {
     }
 }
 
-/// Demote every replicated CRR back to a plain table (`crsql_as_table`) and then
-/// release cr-sqlite's per-connection state (`crsql_finalize`). After this the
-/// database holds only flat tables again, with no CRR triggers calling the
-/// extension: it is writable by ANY build, reversing the lock-in that
+/// Demote every replicated CRR back to a plain table (`crsql_as_table`). After
+/// this the database holds only flat tables again, with no CRR triggers calling
+/// the extension: it is writable by ANY build, reversing the lock-in that
 /// [`setup_crrs`] introduces. The app wires this into account logout / disable.
+///
+/// Deliberately does NOT call [`finalize`]. The caller keeps using this connection
+/// (sign-out continues, then the app runs on), and a finalized connection can no
+/// longer serve cr-sqlite at all: a user who signs out and enrolls again in the
+/// same session would get a `setup_crrs` that reports success while every write to
+/// a replicated table fails with `failed to ensure table infos are up to date`.
+/// The per-connection state this would release is a handful of prepared statements
+/// that die with the process anyway.
 ///
 /// Idempotent and order-robust: a table that is not currently a CRR is skipped, so
 /// this is safe whether or not [`setup_crrs`] ever ran on the database (e.g. an
@@ -124,8 +158,7 @@ pub async fn teardown_crrs(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await?;
     }
-    // The CRRs are gone; release cr-sqlite's per-connection state.
-    finalize(db).await
+    Ok(())
 }
 
 #[cfg(all(test, feature = "crsqlite-static"))]
@@ -225,6 +258,53 @@ mod tests {
         finalize(&db).await.expect("crsql_finalize");
     }
 
+    // Signing out and enrolling again without restarting reaches `setup_crrs` on a
+    // connection `teardown_crrs` already handled. While teardown ended with a
+    // `crsql_finalize`, that second setup reported success and then every write to
+    // a replicated table failed with `failed to ensure table infos are up to date`,
+    // reads of `crsql_changes` with `Could not update table infos`. Nothing but a
+    // new connection recovered. Teardown must therefore leave cr-sqlite usable.
+    // Run isolated: `cargo test --features crsqlite-static setup_after_teardown`.
+    #[tokio::test]
+    async fn setup_after_teardown_leaves_the_connection_usable() {
+        crsqlite_static::register();
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory");
+        crate::db::run_migrations(&db)
+            .await
+            .expect("run_migrations");
+
+        setup_crrs(&db).await.expect("setup_crrs");
+        teardown_crrs(&db).await.expect("teardown_crrs");
+        setup_crrs(&db)
+            .await
+            .expect("re-enrollment in the same session");
+
+        author::ActiveModel {
+            id: Set("a-after-re-setup".to_owned()),
+            name: Set("Jack London".to_owned()),
+            created_at: Set("2026-06-30T00:00:00Z".to_owned()),
+            updated_at: Set("2026-06-30T00:00:00Z".to_owned()),
+        }
+        .insert(&db)
+        .await
+        .expect("a write to a re-promoted CRR must still reach cr-sqlite");
+
+        let row = db
+            .query_one(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT count(*) AS n FROM crsql_changes WHERE \"table\" = 'authors'".to_owned(),
+            ))
+            .await
+            .expect("crsql_changes must still be readable")
+            .expect("one row");
+        let n: i64 = row.try_get("", "n").expect("decode count");
+        assert!(n > 0, "the write must be captured by the re-created CRR");
+
+        finalize(&db).await.expect("crsql_finalize");
+    }
+
     // Demotion is idempotent and safe when no CRR was ever set up (an enrollment
     // that never reached its post-enrollment restart): teardown over a plain schema
     // is a no-op, and a second teardown over an already-demoted schema is too.
@@ -251,5 +331,9 @@ mod tests {
             .await
             .expect("idempotent second teardown");
         assert!(!crrs_present(&db).await.expect("crrs_present"));
+
+        // Teardown no longer finalizes, so do it here before the connection is
+        // dropped (the static extension is loaded process-wide).
+        finalize(&db).await.expect("crsql_finalize");
     }
 }

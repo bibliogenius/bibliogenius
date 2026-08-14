@@ -607,6 +607,145 @@ mod tests {
         receiver.finalize().await.unwrap();
     }
 
+    // Why no caller may run `crsql_finalize()` on a connection it keeps using
+    // (ADR-056). The wound is invisible until the next merge, it names no cause,
+    // and nothing recovers short of a new connection. A production device sat in
+    // this state and lost every sync cycle: the app's lifecycle hook finalized the
+    // live pool on `detached`, which on Android does not mean the process is dying.
+    //
+    // This pins the hazard, not a behaviour we want: it is the reason
+    // `crsqlite_crr::finalize_and_close` takes the connection by value and the
+    // reason `teardown_crrs` no longer finalizes. If cr-sqlite ever makes finalize
+    // recoverable, this test fails and the rule can be relaxed on purpose.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_finalized_connection_can_no_longer_merge_anything() {
+        let sender = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap();
+        let receiver = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap();
+        let first = "019f0000-0000-7000-8000-000000000006";
+        let second = "019f0000-0000-7000-8000-000000000007";
+        for (uuid, title) in [(first, "Martin Eden"), (second, "White Fang")] {
+            crate::models::book::ActiveModel {
+                id: Set(uuid.to_owned()),
+                title: Set(title.to_owned()),
+                created_at: Set("2026-06-22T15:22:47Z".to_owned()),
+                updated_at: Set("2026-06-22T15:22:47Z".to_owned()),
+                ..Default::default()
+            }
+            .insert(sender.db())
+            .await
+            .unwrap();
+        }
+        let changes = sender.changes_since(0).await.unwrap();
+        let lane = |uuid: &str| {
+            let change = changes
+                .iter()
+                .find(|c| c.entity.entity_uuid == uuid)
+                .expect("the book is in the outbound set");
+            InboundChange {
+                entity: change.entity.clone(),
+                deleted: change.deleted,
+                changeset: change.changeset.clone(),
+            }
+        };
+
+        // A first cycle merges normally and warms the connection.
+        receiver.apply(lane(first)).await.expect("a warm merge");
+
+        receiver.finalize().await.unwrap();
+
+        let err = receiver
+            .apply(lane(second))
+            .await
+            .expect_err("a finalized connection must not silently keep merging");
+        assert!(
+            err.0.contains("Failed to update CRR table information"),
+            "the exact wording a wedged device reports, unchanged: {}",
+            err.0
+        );
+        // The push leg is just as dead, under yet another unrelated wording.
+        let err = receiver
+            .local_version()
+            .await
+            .expect_err("crsql_db_version is gone too");
+        assert!(err.0.contains("failed to fill db version"), "{}", err.0);
+
+        sender.finalize().await.unwrap();
+        // `receiver` is deliberately left un-dropped: its pool cannot be closed
+        // cleanly once cr-sqlite's statement cache has been released.
+        std::mem::forget(receiver);
+    }
+
+    // Pass 2 of `changes_since` is unfiltered on `site_id`, so a re-push carries
+    // the columns another device authored back to that very device, alongside
+    // columns whose `db_version` sits far below the receiver's watermark. Both
+    // are new shapes on the wire since ADR-056 and both must merge cleanly: when
+    // a mixed-version fleet did start failing, this is the first explanation
+    // reached for, and it is wrong (see the ADR). Round-trip it so the answer
+    // stays recorded in the suite rather than in a diagnosis nobody re-reads.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_full_changeset_round_trips_through_the_device_that_authored_part_of_it() {
+        let a = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap();
+        let b = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap();
+        let uuid = "019f0000-0000-7000-8000-000000000005";
+
+        let ship = async |from: &CrSqliteMergeEngine, to: &CrSqliteMergeEngine| {
+            let changes = from.changes_since(0).await.unwrap();
+            let change = changes
+                .iter()
+                .find(|c| c.entity.entity_uuid == uuid)
+                .expect("the book is in the outbound set");
+            to.apply(InboundChange {
+                entity: change.entity.clone(),
+                deleted: change.deleted,
+                changeset: change.changeset.clone(),
+            })
+            .await
+            .expect("a full changeset must merge")
+        };
+
+        crate::models::book::ActiveModel {
+            id: Set(uuid.to_owned()),
+            title: Set("Martin Eden".to_owned()),
+            created_at: Set("2026-06-22T15:22:47Z".to_owned()),
+            updated_at: Set("2026-06-22T15:22:47Z".to_owned()),
+            ..Default::default()
+        }
+        .insert(a.db())
+        .await
+        .unwrap();
+        assert!(ship(&a, &b).await.complete);
+
+        // B authors one column, so A's clock ends up holding a row stamped with
+        // B's site id.
+        b.exec(&format!(
+            "UPDATE books SET isbn = '9781617294556' WHERE uuid = '{uuid}'"
+        ))
+        .await
+        .unwrap();
+        assert!(ship(&b, &a).await.complete);
+
+        // A re-pushes the whole row, B's column included, straight back to B.
+        assert!(ship(&a, &b).await.complete);
+        let merged = crate::models::book::Entity::find_by_id(uuid.to_owned())
+            .one(b.db())
+            .await
+            .unwrap()
+            .expect("the book survives the round trip");
+        assert_eq!(merged.title, "Martin Eden");
+        assert_eq!(merged.isbn.as_deref(), Some("9781617294556"));
+
+        a.finalize().await.unwrap();
+        b.finalize().await.unwrap();
+    }
+
     // The anti-rollback floor (ADR-042 H5) rejects any blob whose HLC does not
     // advance. When the HLC was `max(db_version)` over the changeset, re-pushing an
     // unmodified entity carried the very same value, so the floor discarded exactly
