@@ -548,11 +548,14 @@ async fn upsert_directory_catalog_cache(
                     .execute(&mut *conn)
                     .await;
                 for (title, isbn, author, cover_url, added_at) in &to_insert {
+                    // remote_book_id is TEXT: the sentinel id must be written
+                    // as text, an integer value in that column breaks every
+                    // `String` decode of the row (migration 095).
                     if let Err(e) = sqlx::query(
                         "INSERT INTO peer_books \
                          (peer_id, remote_book_id, title, isbn, author, cover_url, \
                           summary, synced_at, node_id, first_seen_at, added_at, notified_at) \
-                         VALUES (0, 0, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL)",
+                         VALUES (0, '0', ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL)",
                     )
                     .bind(title.as_str())
                     .bind(isbn.as_str())

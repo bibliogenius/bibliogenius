@@ -2435,6 +2435,23 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 095: retype `peer_books.remote_book_id` to TEXT and collapse
+    // the duplicate directory-cache sentinel rows that accumulated while the
+    // column was INTEGER. The base schema already declares TEXT (remote book
+    // ids are uuids since the uuid-PK rebuild), but databases created before
+    // that change kept the original INTEGER declaration, and the directory
+    // sentinel writer stores the literal integer 0 there: sqlx refuses to
+    // decode an INTEGER value into the entity's `String`, so every SeaORM
+    // read touching a sentinel row failed and was swallowed by
+    // `unwrap_or_default()`. Two symptoms: the offline directory-catalog
+    // fallback always came back empty (the peer screen showed nothing once
+    // the hub stopped serving), and the upsert's dedup pass saw an "empty"
+    // cache and re-inserted the full catalog on every fetch (25x duplication
+    // observed in the field). Same table-redefinition procedure as the
+    // metadata gap-fill rebuild: an in-place `UPDATE ... CAST` cannot work
+    // because INTEGER affinity coerces numeric-looking text right back.
+    migrate_peer_books_text_remote_ids(db).await?;
+
     Ok(())
 }
 
@@ -2804,6 +2821,114 @@ async fn migrate_metadata_fill_text_ids(db: &DatabaseConnection) -> Result<(), D
     }
     txn.commit().await?;
 
+    Ok(())
+}
+
+/// Migration 095: rebuild `peer_books` so `remote_book_id` is TEXT, and
+/// deduplicate the directory-cache sentinel rows (`peer_id = 0`).
+///
+/// Duplicates are collapsed first (fewer rows to copy): for sentinel rows the
+/// newest row per (node_id, isbn) is kept — falling back to the title as the
+/// key for ISBN-less entries, mirroring the upsert's own matching rule — so
+/// the freshest metadata survives. LAN rows (`peer_id != 0`) are never
+/// deduplicated: their lifecycle belongs to the live sync paths.
+///
+/// The copy must run with FK enforcement off: sentinel rows violate the
+/// `peers` FK by design (they are inserted in an FK-off window), and the
+/// INSERT..SELECT would otherwise abort. `PRAGMA foreign_keys` cannot change
+/// inside a transaction, so the toggle wraps it, on a dedicated pooled
+/// connection that is restored before release (see
+/// `seaorm_pragma_per_connection_pool_leak`).
+///
+/// Idempotent: gated on the declared column type still being INTEGER, and the
+/// rebuild is a single transaction, so a kill mid-way rolls back and the gate
+/// re-runs cleanly on the next boot.
+async fn migrate_peer_books_text_remote_ids(db: &DatabaseConnection) -> Result<(), DbErr> {
+    let is_integer = table_column_decl_type(db, "peer_books", "remote_book_id")
+        .await?
+        .is_some_and(|t| t.eq_ignore_ascii_case("INTEGER"));
+    if !is_integer {
+        return Ok(());
+    }
+
+    let pool = db.get_sqlite_connection_pool();
+    let mut conn = pool.acquire().await.map_err(map_sqlx)?;
+
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
+
+    let result = run_peer_books_text_rebuild(&mut conn).await;
+
+    // Restore enforcement regardless of outcome, before the connection
+    // rejoins the pool.
+    let _ = sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *conn)
+        .await;
+
+    result
+}
+
+/// Transactional body of migration 095. Split out so the caller can restore
+/// the connection pragma on both the success and the failure path.
+async fn run_peer_books_text_rebuild(conn: &mut sqlx::SqliteConnection) -> Result<(), DbErr> {
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
+
+    for stmt in [
+        // Collapse sentinel duplicates, newest row wins. The key mirrors the
+        // upsert's matching rule: ISBN when present, title otherwise.
+        "DELETE FROM peer_books \
+         WHERE peer_id = 0 \
+           AND id NOT IN ( \
+               SELECT MAX(id) FROM peer_books \
+                WHERE peer_id = 0 \
+                GROUP BY node_id, COALESCE(NULLIF(isbn, ''), 'title:' || title) \
+           )",
+        r#"CREATE TABLE peer_books_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            peer_id INTEGER NOT NULL,
+            remote_book_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            isbn TEXT,
+            author TEXT,
+            cover_url TEXT,
+            summary TEXT,
+            synced_at TEXT NOT NULL,
+            node_id TEXT,
+            first_seen_at TEXT,
+            notified_at TEXT,
+            added_at TEXT,
+            owned INTEGER NOT NULL DEFAULT 1,
+            available_copies INTEGER,
+            FOREIGN KEY (peer_id) REFERENCES peers(id) ON DELETE CASCADE
+        )"#,
+        "INSERT INTO peer_books_new \
+         (id, peer_id, remote_book_id, title, isbn, author, cover_url, summary, \
+          synced_at, node_id, first_seen_at, notified_at, added_at, owned, available_copies) \
+         SELECT id, peer_id, CAST(remote_book_id AS TEXT), title, isbn, author, cover_url, \
+                summary, synced_at, node_id, first_seen_at, notified_at, added_at, owned, \
+                available_copies \
+         FROM peer_books",
+        "DROP TABLE peer_books",
+        "ALTER TABLE peer_books_new RENAME TO peer_books",
+        // The indexes were dropped with the old table; recreate them.
+        "CREATE INDEX IF NOT EXISTS idx_peer_books_peer_id ON peer_books(peer_id)",
+        "CREATE INDEX IF NOT EXISTS idx_peer_books_isbn ON peer_books(isbn)",
+    ] {
+        if let Err(e) = sqlx::query(stmt).execute(&mut *conn).await {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Err(map_sqlx(e));
+        }
+    }
+
+    sqlx::query("COMMIT")
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
     Ok(())
 }
 
