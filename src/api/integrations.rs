@@ -692,6 +692,7 @@ pub async fn search_unified(
                 // A search result is not in the library: it has no copies.
                 is_borrowed: None,
                 is_lent: None,
+                wanted: None,
             };
             results.push(book);
         }
@@ -746,6 +747,7 @@ pub async fn search_unified(
                     // A search result is not in the library: it has no copies.
                     is_borrowed: None,
                     is_lent: None,
+                    wanted: None,
                 };
                 results.push(book);
             }
@@ -841,6 +843,7 @@ pub async fn search_unified(
                     // A search result is not in the library: it has no copies.
                     is_borrowed: None,
                     is_lent: None,
+                    wanted: None,
                 };
                 results.push(book);
             }

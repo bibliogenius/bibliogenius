@@ -29,6 +29,13 @@ pub struct Model {
     /// `None` means unknown (legacy rows before migration 073 or peers that
     /// don't broadcast it); `Some(0)` means every copy is on loan.
     pub available_copies: Option<i32>,
+    /// Whether the owning peer wants this book (their wishlist). Mirrors the
+    /// additive `wanted` DTO flag derived by `Book::redact_for_peer`.
+    /// `None` means the peer never stated it (older build, or simply not
+    /// wanted): the inverse wishlist join treats only `Some(true)` as a
+    /// wish and never falls back to `owned = false`, which also covers
+    /// books the peer merely borrowed.
+    pub wanted: Option<bool>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -99,6 +106,7 @@ impl From<Model> for super::Book {
             // and the owner's loan state is redacted from what they send us.
             is_borrowed: None,
             is_lent: None,
+            wanted: pb.wanted,
         }
     }
 }

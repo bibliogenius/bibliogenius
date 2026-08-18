@@ -75,32 +75,27 @@ pub async fn wanting_isbn_set(db: &DatabaseConnection) -> Result<HashSet<String>
         .collect())
 }
 
-/// Find owned cache rows matching the given ISBNs, with their source
-/// resolved (peer name/URL when paired, node id otherwise).
-///
-/// A library both paired and followed yields two cache rows for the same
-/// book (peer_id = X and peer_id = 0 + node_id); they are deduplicated on
-/// (source, isbn) with the paired row taking precedence, mirroring how the
-/// hub catalog pass reuses the peer ref_id for notifications.
-pub async fn providers_for_isbns(
+/// The source of a cache row, resolved: paired peers by id, followed
+/// libraries by library_uuid, "dir:{node}" fallback for unpaired
+/// directory rows. Shared by the forward (providers) and inverse
+/// (seekers) joins so the two directions cannot drift apart.
+#[derive(Debug, Clone)]
+struct RowSource {
+    peer_id: i32,
+    node_id: Option<String>,
+    /// Notification/dedup ref: "{peer_id}" or "dir:{node_id}".
+    source_ref_id: String,
+    source_name: String,
+    peer_url: Option<String>,
+}
+
+/// Resolve the source of every cache row. Paired-peer rows come FIRST in
+/// the returned list so a caller deduplicating on the source ref keeps the
+/// paired resolution when a library is both paired and followed.
+async fn resolve_row_sources(
     db: &DatabaseConnection,
-    isbns: &HashSet<String>,
-) -> Result<Vec<WishlistProviderMatch>, DbErr> {
-    if isbns.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let rows = peer_book::Entity::find()
-        .filter(peer_book::Column::Owned.eq(true))
-        .filter(peer_book::Column::Isbn.is_in(isbns.iter().cloned()))
-        .all(db)
-        .await?;
-
-    if rows.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Resolve sources: paired peers by id, followed libraries by library_uuid.
+    rows: Vec<peer_book::Model>,
+) -> Result<Vec<(peer_book::Model, RowSource)>, DbErr> {
     let peer_ids: Vec<i32> = rows
         .iter()
         .map(|r| r.peer_id)
@@ -131,17 +126,12 @@ pub async fn providers_for_isbns(
         }
     }
 
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    let mut matches: Vec<WishlistProviderMatch> = Vec::new();
-
-    // Paired-peer rows first so they win the (source, isbn) dedup below.
+    // Paired-peer rows first so they win a (source, …) dedup downstream.
     let (peer_rows, directory_rows): (Vec<_>, Vec<_>) =
         rows.into_iter().partition(|r| r.peer_id != 0);
 
+    let mut resolved = Vec::new();
     for row in peer_rows.into_iter().chain(directory_rows) {
-        let Some(isbn) = row.isbn.clone() else {
-            continue;
-        };
         let resolved_peer = if row.peer_id != 0 {
             peers_by_id.get(&row.peer_id)
         } else {
@@ -154,28 +144,213 @@ pub async fn providers_for_isbns(
             // ref stays stable, even if the name cannot be resolved.
             (None, None) => row.peer_id.to_string(),
         };
-        if !seen.insert((source_ref_id.clone(), isbn.clone())) {
-            continue;
-        }
         let source_name = resolved_peer
             .map(|p| p.display_name.clone().unwrap_or_else(|| p.name.clone()))
             .or_else(|| row.node_id.clone())
             .unwrap_or_else(|| source_ref_id.clone());
+        let source = RowSource {
+            peer_id: resolved_peer.map(|p| p.id).unwrap_or(row.peer_id),
+            node_id: row.node_id.clone(),
+            source_ref_id,
+            source_name,
+            peer_url: resolved_peer.map(|p| p.url.clone()),
+        };
+        resolved.push((row, source));
+    }
+    Ok(resolved)
+}
+
+/// Canonical comparison form of an ISBN: ISBN-13 when parseable, the raw
+/// string otherwise. Same convention as the hub catalog cache
+/// (api/frb/hub_catalog.rs): invalid values only ever match themselves.
+fn canonical_isbn(raw: &str) -> String {
+    crate::utils::isbn::to_isbn13(raw).unwrap_or_else(|| raw.to_string())
+}
+
+/// Expand a set of ISBNs with the alternate length form of each (10 ↔ 13),
+/// so the cache lookup also hits rows stored under the other form (the same
+/// edition circulates under both). 979-prefixed ISBN-13 values have no
+/// ISBN-10 form and invalid values expand to nothing; hyphenated stored
+/// values are out of scope (write paths store clean forms).
+fn expand_isbn_forms(isbns: &HashSet<String>) -> HashSet<String> {
+    let mut expanded = isbns.clone();
+    for isbn in isbns {
+        if let Some(alt) = crate::utils::isbn::alternate_isbn(isbn) {
+            expanded.insert(alt);
+        }
+    }
+    expanded
+}
+
+/// Find owned cache rows matching the given ISBNs, with their source
+/// resolved (peer name/URL when paired, node id otherwise).
+///
+/// A library both paired and followed yields two cache rows for the same
+/// book (peer_id = X and peer_id = 0 + node_id); they are deduplicated on
+/// (source, isbn) with the paired row taking precedence, mirroring how the
+/// hub catalog pass reuses the peer ref_id for notifications.
+pub async fn providers_for_isbns(
+    db: &DatabaseConnection,
+    isbns: &HashSet<String>,
+) -> Result<Vec<WishlistProviderMatch>, DbErr> {
+    if isbns.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = peer_book::Entity::find()
+        .filter(peer_book::Column::Owned.eq(true))
+        .filter(peer_book::Column::Isbn.is_in(expand_isbn_forms(isbns)))
+        .all(db)
+        .await?;
+
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Report every match under the CALLER's form, whatever form the peer
+    // stored: notification refs ("{source}:{isbn}") and the callers' lookup
+    // maps are keyed on the requested form, so returning the row's form
+    // would break dedup and rejoin whenever the two differ.
+    let requested_by_canonical: HashMap<String, String> = isbns
+        .iter()
+        .map(|i| (canonical_isbn(i), i.clone()))
+        .collect();
+
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut matches: Vec<WishlistProviderMatch> = Vec::new();
+
+    for (row, source) in resolve_row_sources(db, rows).await? {
+        let Some(row_isbn) = row.isbn.clone() else {
+            continue;
+        };
+        let canonical = canonical_isbn(&row_isbn);
+        let isbn = requested_by_canonical
+            .get(&canonical)
+            .cloned()
+            .unwrap_or(row_isbn);
+        // Canonical dedup key: a peer holding the same edition under both
+        // forms must yield a single match.
+        if !seen.insert((source.source_ref_id.clone(), canonical)) {
+            continue;
+        }
         matches.push(WishlistProviderMatch {
             isbn,
             book_id: None,
             book_title: None,
-            peer_id: resolved_peer.map(|p| p.id).unwrap_or(row.peer_id),
-            node_id: row.node_id,
-            source_name,
-            peer_url: resolved_peer.map(|p| p.url.clone()),
+            peer_id: source.peer_id,
+            node_id: source.node_id,
+            source_name: source.source_name,
+            peer_url: source.peer_url,
             available_copies: row.available_copies,
-            source_ref_id,
+            source_ref_id: source.source_ref_id,
         });
     }
 
     matches.sort_by(|a, b| a.source_name.cmp(&b.source_name).then(a.isbn.cmp(&b.isbn)));
     Ok(matches)
+}
+
+/// A peer / followed library that WANTS one of my books (their wishlist,
+/// mirrored through the additive `wanted` wire flag).
+#[derive(Debug, Clone)]
+pub struct WishlistSeekerMatch {
+    pub isbn: String,
+    /// Resolved peer id; 0 = directory-only entry (followed, not paired).
+    pub peer_id: i32,
+    pub node_id: Option<String>,
+    pub source_name: String,
+    /// Paired peer URL, when known. The lend offer path needs the peer id,
+    /// not this URL, but its presence distinguishes paired from followed.
+    pub peer_url: Option<String>,
+    pub source_ref_id: String,
+    /// Titles of MY wishlist entries this seeker can provide (their owned
+    /// books ∩ my wanting books): the mutual-exchange hint. Empty = not
+    /// mutual. Computed through the forward join so the private/owned lane
+    /// rules apply unchanged; capped at [`MUTUAL_WISH_TITLE_CAP`].
+    pub mutual_wish_titles: Vec<String>,
+}
+
+/// Cap on the mutual-wish titles attached to one seeker. The UI renders a
+/// one-line discreet hint, never a list; bounding here keeps the FFI
+/// payload small however large the thematic overlap.
+const MUTUAL_WISH_TITLE_CAP: usize = 5;
+
+/// Inverse join: who wants the given book of mine?
+///
+/// Only cache rows with `wanted = true` qualify. `owned = false` alone is
+/// NOT a wish: the flag also covers books the peer merely borrowed, and
+/// peers running builds that predate the `wanted` field send neither — so
+/// their wishes simply produce no marker rather than false positives.
+///
+/// Unlike the forward join, MY book's `private` flag is not consulted:
+/// the information flows inward only (the peer already broadcast their
+/// wish), displaying it discloses nothing, and lending a private book
+/// stays the owner's explicit, deliberate action.
+///
+/// The mutual-exchange hint DOES go through the forward join
+/// (`matches_for_wishlist`), so my private wishes never surface in it:
+/// acting on the hint sends a borrow request naming title + ISBN.
+pub async fn seekers_for_isbn(
+    db: &DatabaseConnection,
+    isbn: &str,
+) -> Result<Vec<WishlistSeekerMatch>, DbErr> {
+    // Match the peer's wish whichever ISBN length form they stored it under.
+    let forms = expand_isbn_forms(&HashSet::from([isbn.to_string()]));
+    let rows = peer_book::Entity::find()
+        .filter(peer_book::Column::Wanted.eq(true))
+        .filter(peer_book::Column::Isbn.is_in(forms))
+        .all(db)
+        .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // One row per source (a library both paired and followed yields two
+    // cache rows); paired resolution wins, same rule as the forward join.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut seekers: Vec<WishlistSeekerMatch> = Vec::new();
+    for (_row, source) in resolve_row_sources(db, rows).await? {
+        if !seen.insert(source.source_ref_id.clone()) {
+            continue;
+        }
+        seekers.push(WishlistSeekerMatch {
+            // The caller's form, not the row's: callers key on their own book.
+            isbn: isbn.to_string(),
+            peer_id: source.peer_id,
+            node_id: source.node_id,
+            source_name: source.source_name,
+            peer_url: source.peer_url,
+            source_ref_id: source.source_ref_id,
+            mutual_wish_titles: Vec::new(),
+        });
+    }
+    if seekers.is_empty() {
+        return Ok(seekers);
+    }
+
+    // Mutual hint: what I want that each seeker owns, through the forward
+    // join (single source of truth for the wanting/private/owned rules).
+    let mut titles_by_ref: HashMap<String, Vec<String>> = HashMap::new();
+    for m in matches_for_wishlist(db, None).await? {
+        if let Some(title) = m.book_title {
+            titles_by_ref
+                .entry(m.source_ref_id)
+                .or_default()
+                .push(title);
+        }
+    }
+    for s in &mut seekers {
+        if let Some(titles) = titles_by_ref.get(&s.source_ref_id) {
+            let mut t = titles.clone();
+            t.sort();
+            t.dedup();
+            t.truncate(MUTUAL_WISH_TITLE_CAP);
+            s.mutual_wish_titles = t;
+        }
+    }
+
+    seekers.sort_by(|a, b| a.source_name.cmp(&b.source_name));
+    Ok(seekers)
 }
 
 /// The wishlist join: providers for the current borrow-eligible wishlist
@@ -527,6 +702,183 @@ mod tests {
         assert_eq!(agg.ref_id.as_deref(), Some("batch-1"));
         assert_eq!(agg.title, "Ma liste");
         assert_eq!(agg.body.as_deref(), Some("3"));
+    }
+
+    /// Inserts a cache row carrying the peer's wishlist flag (or not).
+    /// Same peer_id = 0 sentinel workaround as `insert_peer_book`.
+    async fn insert_peer_book_wanted(
+        db: &DatabaseConnection,
+        peer_id: i32,
+        node_id: Option<&str>,
+        isbn: &str,
+        owned: bool,
+        wanted: Option<bool>,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        if peer_id == 0 {
+            use sea_orm::sea_query::OnConflict;
+            let _ = peer::Entity::insert(peer::ActiveModel {
+                id: Set(0),
+                name: Set("directory-sentinel".to_owned()),
+                url: Set("sentinel://0".to_owned()),
+                created_at: Set(now.clone()),
+                updated_at: Set(now.clone()),
+                ..Default::default()
+            })
+            .on_conflict(OnConflict::column(peer::Column::Id).do_nothing().to_owned())
+            .exec(db)
+            .await;
+        }
+        peer_book::Entity::insert(peer_book::ActiveModel {
+            peer_id: Set(peer_id),
+            remote_book_id: Set(uuid::Uuid::new_v4().to_string()),
+            title: Set(format!("Peer copy of {isbn}")),
+            isbn: Set(Some(isbn.to_owned())),
+            synced_at: Set(now),
+            node_id: Set(node_id.map(str::to_owned)),
+            owned: Set(owned),
+            wanted: Set(wanted),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .unwrap();
+    }
+
+    /// THE regression test for the inverse marker: a cache row with
+    /// owned = false but NO wanted flag must produce no seeker. On the
+    /// wire, owned = false covers both "the peer wants it" and "the peer
+    /// borrowed it from someone", and builds predating the `wanted` field
+    /// send no flag at all — an implementation inferring the wish from
+    /// owned = false would pass every other test and still be wrong.
+    #[tokio::test]
+    async fn owned_false_without_wanted_is_not_a_seeker() {
+        let db = test_db().await;
+        let peer_id = insert_peer(&db, "Marie", None).await;
+        insert_peer_book_wanted(&db, peer_id, None, "9780000000020", false, None).await;
+        insert_peer_book_wanted(&db, peer_id, None, "9780000000020", false, Some(false)).await;
+
+        let seekers = seekers_for_isbn(&db, "9780000000020").await.unwrap();
+        assert!(
+            seekers.is_empty(),
+            "owned=false without wanted=true must never produce a marker"
+        );
+    }
+
+    /// A wanted = true cache row resolves to a seeker with the peer's name.
+    #[tokio::test]
+    async fn wanted_row_produces_a_seeker() {
+        let db = test_db().await;
+        let peer_id = insert_peer(&db, "Marie", None).await;
+        insert_peer_book_wanted(&db, peer_id, None, "9780000000021", false, Some(true)).await;
+
+        let seekers = seekers_for_isbn(&db, "9780000000021").await.unwrap();
+        assert_eq!(seekers.len(), 1);
+        assert_eq!(seekers[0].source_name, "Marie");
+        assert_eq!(seekers[0].peer_id, peer_id);
+        assert!(seekers[0].peer_url.is_some());
+        assert!(
+            seekers[0].mutual_wish_titles.is_empty(),
+            "no wish of mine is fulfillable by Marie, so no mutual hint"
+        );
+    }
+
+    /// A library both paired and followed dedups to one seeker, resolved
+    /// to the paired peer (same precedence rule as the forward join).
+    #[tokio::test]
+    async fn seeker_dedups_paired_and_followed_source() {
+        let db = test_db().await;
+        let peer_id = insert_peer(&db, "Marie", Some("node-uuid-3")).await;
+        insert_peer_book_wanted(&db, peer_id, None, "9780000000022", false, Some(true)).await;
+        insert_peer_book_wanted(
+            &db,
+            0,
+            Some("node-uuid-3"),
+            "9780000000022",
+            false,
+            Some(true),
+        )
+        .await;
+
+        let seekers = seekers_for_isbn(&db, "9780000000022").await.unwrap();
+        assert_eq!(seekers.len(), 1, "same source must dedup");
+        assert_eq!(seekers[0].source_ref_id, peer_id.to_string());
+        assert_eq!(seekers[0].source_name, "Marie");
+    }
+
+    /// Mutual hint: the seeker also owns a book from MY wishlist, so the
+    /// exchange opportunity surfaces as that title. My private wishes stay
+    /// out of the hint (it goes through the forward join's lane rules).
+    #[tokio::test]
+    async fn mutual_wish_surfaces_and_respects_private_lane() {
+        let db = test_db().await;
+        let peer_id = insert_peer(&db, "Marie", None).await;
+        // Marie wants my book…
+        insert_peer_book_wanted(&db, peer_id, None, "9780000000023", false, Some(true)).await;
+        // …and owns two books I want, one of them a private wish of mine.
+        insert_wish(&db, "Public wish", "9780000000024", false).await;
+        insert_wish(&db, "Secret wish", "9780000000025", true).await;
+        insert_peer_book_wanted(&db, peer_id, None, "9780000000024", true, None).await;
+        insert_peer_book_wanted(&db, peer_id, None, "9780000000025", true, None).await;
+
+        let seekers = seekers_for_isbn(&db, "9780000000023").await.unwrap();
+        assert_eq!(seekers.len(), 1);
+        assert_eq!(
+            seekers[0].mutual_wish_titles,
+            vec!["Public wish".to_string()],
+            "the mutual hint must list my public wish only"
+        );
+    }
+
+    // Canonical ISBN-10 / ISBN-13 pair of the same edition.
+    const PAIR_10: &str = "0306406152";
+    const PAIR_13: &str = "9780306406157";
+
+    /// Forward join across ISBN length forms: my wish stored as ISBN-10
+    /// must match a peer row cached under the ISBN-13 form, and the match
+    /// must be reported under MY form so the local-book rejoin holds.
+    #[tokio::test]
+    async fn forward_join_matches_across_isbn_forms() {
+        let db = test_db().await;
+        insert_wish(&db, "Cross-form wish", PAIR_10, false).await;
+        let peer_id = insert_peer(&db, "Marie", None).await;
+        insert_peer_book(&db, peer_id, None, PAIR_13, true).await;
+
+        let matches = matches_for_wishlist(&db, None).await.unwrap();
+        assert_eq!(matches.len(), 1, "the two forms are the same edition");
+        assert_eq!(matches[0].isbn, PAIR_10, "reported under the wish's form");
+        assert_eq!(
+            matches[0].book_title.as_deref(),
+            Some("Cross-form wish"),
+            "the local-book rejoin must survive the form mismatch"
+        );
+    }
+
+    /// A peer holding the same edition under BOTH forms yields one match.
+    #[tokio::test]
+    async fn forward_join_dedups_both_isbn_forms_of_one_edition() {
+        let db = test_db().await;
+        insert_wish(&db, "Wish", PAIR_13, false).await;
+        let peer_id = insert_peer(&db, "Marie", None).await;
+        insert_peer_book(&db, peer_id, None, PAIR_10, true).await;
+        insert_peer_book(&db, peer_id, None, PAIR_13, true).await;
+
+        let matches = matches_for_wishlist(&db, None).await.unwrap();
+        assert_eq!(matches.len(), 1, "both forms must collapse to one match");
+    }
+
+    /// Inverse join across ISBN length forms: the peer cached their wish
+    /// under ISBN-13, my copy carries the ISBN-10 form.
+    #[tokio::test]
+    async fn inverse_join_matches_across_isbn_forms() {
+        let db = test_db().await;
+        let peer_id = insert_peer(&db, "Marie", None).await;
+        insert_peer_book_wanted(&db, peer_id, None, PAIR_13, false, Some(true)).await;
+
+        let seekers = seekers_for_isbn(&db, PAIR_10).await.unwrap();
+        assert_eq!(seekers.len(), 1);
+        assert_eq!(seekers[0].source_name, "Marie");
+        assert_eq!(seekers[0].isbn, PAIR_10, "reported under the caller's form");
     }
 
     /// An import with zero matches emits nothing at all.

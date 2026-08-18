@@ -276,6 +276,8 @@ async fn upsert_peer_book_row(
         // carousel filter drop books that aren't borrowable.
         active.owned = Set(book.owned.unwrap_or(true));
         active.available_copies = Set(book.available_copies);
+        // Always overwrite so a withdrawn wish (absent field) clears the flag.
+        active.wanted = Set(book.wanted);
         // notified_at intentionally preserved.
         active.update(db).await?;
     } else {
@@ -294,6 +296,7 @@ async fn upsert_peer_book_row(
             notified_at: Set(None),
             owned: Set(book.owned.unwrap_or(true)),
             available_copies: Set(book.available_copies),
+            wanted: Set(book.wanted),
             ..Default::default()
         };
         peer_book::Entity::insert(new_row).exec(db).await?;

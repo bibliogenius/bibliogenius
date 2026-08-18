@@ -852,8 +852,25 @@ pub async fn handle_book_sync_request(
         });
     }
 
-    let books = book::Entity::find().all(db).await.unwrap_or_default();
+    // Same privacy pipeline as every other peer-facing catalog lane
+    // (`/api/books`, the delta responder, the page/search handlers below):
+    // drop private books, then redact personal annotations. This lane
+    // historically sent the raw models; the receiving cache upsert only
+    // reads bibliographic fields plus `owned`/`available_copies`/`added_at`,
+    // all of which redaction preserves. `redact_for_peer` also derives the
+    // additive `wanted` flag from `reading_status` before stripping it, so
+    // the peer's wishlist keeps circulating (the inverse wishlist marker
+    // depends on it). Filter private BEFORE redact: redaction blanks the
+    // `private` field, so a later filter could no longer see it.
+    let books = book::Entity::find()
+        .filter(book::Column::Private.eq(false))
+        .all(db)
+        .await
+        .unwrap_or_default();
     let mut book_dtos = crate::models::Book::populate_authors(db, books).await;
+    for b in &mut book_dtos {
+        b.redact_for_peer();
+    }
     let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
     crate::models::Book::rewrite_cover_urls_for_relay(&mut book_dtos, hub_prefix.as_deref());
 
@@ -1442,7 +1459,15 @@ pub async fn handle_library_manifest_request(
 ) -> serde_json::Value {
     use crate::models::book;
 
-    let books = book::Entity::find().all(db).await.unwrap_or_default();
+    // Private books never leave the device: the count, last_updated and the
+    // preview below only cover public books. compute_catalog_hash keeps the
+    // full catalog on purpose (a superset hash can only cost a spurious full
+    // sync, never a missed one).
+    let books = book::Entity::find()
+        .filter(book::Column::Private.eq(false))
+        .all(db)
+        .await
+        .unwrap_or_default();
 
     let total_books = books.len();
 
@@ -1461,6 +1486,7 @@ pub async fn handle_library_manifest_request(
     let preview_books: Vec<serde_json::Value> = {
         use sea_orm::QueryOrder;
         let with_covers = book::Entity::find()
+            .filter(book::Column::Private.eq(false))
             .filter(book::Column::CoverUrl.is_not_null())
             .order_by_desc(book::Column::UpdatedAt)
             .all(db)
@@ -1934,6 +1960,148 @@ mod tests {
         assert!(
             response.get("books").is_some(),
             "full sync must include the book list",
+        );
+    }
+
+    async fn insert_book(
+        db: &DatabaseConnection,
+        title: &str,
+        reading_status: &str,
+        owned: bool,
+        private: bool,
+    ) {
+        use sea_orm::Set;
+        let now = chrono::Utc::now().to_rfc3339();
+        crate::models::book::Entity::insert(crate::models::book::ActiveModel {
+            id: Set(uuid::Uuid::new_v4().to_string()),
+            title: Set(title.to_owned()),
+            reading_status: Set(reading_status.to_owned()),
+            owned: Set(owned),
+            private: Set(private),
+            user_rating: Set(Some(9)),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .unwrap();
+    }
+
+    /// The relay full-catalog lane must apply the same privacy pipeline as
+    /// every other peer-facing lane: private books absent, personal
+    /// annotations (reading_status, user_rating, the private flag itself)
+    /// stripped from what remains. This lane historically sent raw models.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn book_sync_filters_private_and_redacts_annotations() {
+        let db = setup_test_db().await;
+        insert_book(&db, "Public", "reading", true, false).await;
+        insert_book(&db, "Hidden", "reading", true, true).await;
+
+        let response = handle_book_sync_request(&db, None).await;
+        let books = response["books"].as_array().expect("books array");
+
+        assert_eq!(books.len(), 1, "the private book must be absent");
+        let public = &books[0];
+        assert_eq!(public["title"].as_str(), Some("Public"));
+        // `reading_status` has no skip_serializing_if, so a redacted value
+        // serialises as an explicit null; the others disappear entirely.
+        for leaked in ["reading_status", "user_rating", "private"] {
+            assert!(
+                public.get(leaked).is_none_or(|v| v.is_null()),
+                "field {leaked} must be redacted from the relay catalog"
+            );
+        }
+    }
+
+    async fn insert_book_with_cover(
+        db: &DatabaseConnection,
+        title: &str,
+        private: bool,
+        updated_at: &str,
+    ) {
+        use sea_orm::Set;
+        crate::models::book::Entity::insert(crate::models::book::ActiveModel {
+            id: Set(uuid::Uuid::new_v4().to_string()),
+            title: Set(title.to_owned()),
+            reading_status: Set("read".to_owned()),
+            owned: Set(true),
+            private: Set(private),
+            cover_url: Set(Some("https://covers.example/cover.jpg".to_owned())),
+            created_at: Set(updated_at.to_owned()),
+            updated_at: Set(updated_at.to_owned()),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .unwrap();
+    }
+
+    /// The manifest lane must apply the same privacy filter as book_sync:
+    /// private books absent from both the count and the cover preview.
+    /// catalog_hash deliberately keeps the full catalog (superset hash can
+    /// only cost a spurious full sync, never leak data).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn library_manifest_filters_private_from_count_and_preview() {
+        let db = setup_test_db().await;
+        // The private book is the most recently updated one with a cover:
+        // without the filter it would top the preview.
+        insert_book_with_cover(&db, "Public", false, "2026-08-18T10:00:00+00:00").await;
+        insert_book_with_cover(&db, "Hidden", true, "2026-08-18T12:00:00+00:00").await;
+
+        let response = handle_library_manifest_request(&db, Some("lib-uuid")).await;
+
+        assert_eq!(
+            response["total_books"].as_u64(),
+            Some(1),
+            "total_books must count only public books"
+        );
+        let preview = response["preview_books"]
+            .as_array()
+            .expect("preview_books array");
+        assert_eq!(
+            preview.len(),
+            1,
+            "the private book must be absent from the preview"
+        );
+        assert_eq!(
+            preview[0]["title"].as_str(),
+            Some("Public"),
+            "the public book with a cover must appear in the preview"
+        );
+    }
+
+    /// Wishlist entries keep circulating on this lane, now as the additive
+    /// `wanted` flag instead of the raw reading_status; non-wanted books
+    /// must not carry the field at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn book_sync_carries_wanted_for_wishlist_entries_only() {
+        let db = setup_test_db().await;
+        insert_book(&db, "My wish", "wanting", false, false).await;
+        insert_book(&db, "My novel", "to_read", true, false).await;
+
+        let response = handle_book_sync_request(&db, None).await;
+        let books = response["books"].as_array().expect("books array");
+        assert_eq!(books.len(), 2, "wishlist entries must stay in the payload");
+
+        let wish = books
+            .iter()
+            .find(|b| b["title"].as_str() == Some("My wish"))
+            .expect("the wishlist entry");
+        assert_eq!(wish["wanted"].as_bool(), Some(true));
+        assert!(
+            wish.get("reading_status").is_none_or(|v| v.is_null()),
+            "the raw status must not survive redaction"
+        );
+        assert_eq!(wish["owned"].as_bool(), Some(false));
+
+        let novel = books
+            .iter()
+            .find(|b| b["title"].as_str() == Some("My novel"))
+            .expect("the owned book");
+        assert!(
+            novel.get("wanted").is_none(),
+            "non-wanted books must omit the field entirely"
         );
     }
 }

@@ -118,6 +118,9 @@ pub(crate) async fn upsert_peer_books_cache(
             // `true` so legacy books stay visible.
             active.owned = Set(book.owned.unwrap_or(true));
             active.available_copies = Set(book.available_copies);
+            // Always overwrite: a wish the peer withdrew (or fulfilled)
+            // arrives as an absent field and must clear the stale flag.
+            active.wanted = Set(book.wanted);
             // notified_at stays unchanged
             let _ = active.update(db).await;
         } else {
@@ -137,6 +140,7 @@ pub(crate) async fn upsert_peer_books_cache(
                 notified_at: Set(None),
                 owned: Set(book.owned.unwrap_or(true)),
                 available_copies: Set(book.available_copies),
+                wanted: Set(book.wanted),
                 ..Default::default()
             };
             let _ = peer_book::Entity::insert(cache).exec(db).await;
@@ -321,8 +325,14 @@ pub(crate) async fn sync_peer_internal(
         return Ok(0); // Return 0 books cached
     }
 
-    // Fetch remote books (owned only - exclude books the peer borrowed from others)
-    let url = format!("{}/api/books?owned_only=true", peer_url);
+    // Fetch the full peer-visible catalog, wishlist entries included. The
+    // E2EE book_sync lane already delivers `owned = false` rows, and pruning
+    // them here on every plaintext full snapshot would make the peer's
+    // wishlist (the `wanted` flag behind the inverse wishlist marker)
+    // flicker in and out of the cache depending on which lane synced last.
+    // Non-owned, non-wanted rows (books the peer merely borrowed) are inert:
+    // the carousel hides `owned = false` and both wishlist joins ignore them.
+    let url = format!("{}/api/books", peer_url);
 
     let response = client
         .get(&url)
@@ -346,8 +356,8 @@ pub(crate) async fn sync_peer_internal(
         .map_err(|_| "Invalid response format".to_string())?;
 
     // Upsert books cache (preserves first_seen_at for existing entries).
-    // `/api/books?owned_only=true` returns the peer's full catalog, so this is
-    // a complete snapshot: prune books the peer no longer owns.
+    // `/api/books` returns the peer's full peer-visible catalog, so this is
+    // a complete snapshot: prune books the peer no longer lists.
     let count = upsert_peer_books_cache(db, peer_id, None, data.books, true).await;
 
     // Sync gamification stats if both sides have the module enabled
@@ -633,7 +643,9 @@ pub async fn sync_peer(
         }
     }
 
-    let url = format!("{}/api/books?owned_only=true", peer.url);
+    // Full peer-visible catalog, wishlist entries included (see
+    // `sync_peer_internal` for why `owned_only` must NOT be passed here).
+    let url = format!("{}/api/books", peer.url);
 
     let res = client.get(&url).send().await;
 
@@ -649,7 +661,7 @@ pub async fn sync_peer(
                 match response.json::<BooksResponse>().await {
                     Ok(data) => {
                         // Upsert books cache (preserves first_seen_at).
-                        // Full `/api/books?owned_only=true` catalog → snapshot.
+                        // Full `/api/books` catalog → snapshot.
                         let count =
                             upsert_peer_books_cache(&db, peer.id, None, data.books, true).await;
 
@@ -1073,8 +1085,10 @@ pub async fn sync_peer_by_url(
                 vec![]
             }
             Ok(None) | Err(_) => {
-                // Fallback to plaintext
-                let url = format!("{}/api/books?owned_only=true", effective_url);
+                // Fallback to plaintext. Full peer-visible catalog, wishlist
+                // entries included, matching the E2EE branch above (see
+                // `sync_peer_internal` for the lane-consistency rationale).
+                let url = format!("{}/api/books", effective_url);
                 match client.get(&url).send().await {
                     Ok(response) if response.status().is_success() => {
                         #[derive(Deserialize)]
@@ -1265,6 +1279,7 @@ mod added_at_tests {
             notified_at: None,
             owned: true,
             available_copies: Some(2),
+            wanted: None,
         };
         let book: crate::models::Book = pb.into();
         assert_eq!(
@@ -1355,6 +1370,55 @@ mod added_at_tests {
             refreshed.available_copies,
             Some(0),
             "update must refresh available_copies to reflect the current loan state",
+        );
+    }
+
+    /// The peer's wishlist flag must round-trip through the cache on
+    /// insert, and a later sync WITHOUT the flag (wish withdrawn or
+    /// fulfilled, or a build predating the field) must clear it: keeping a
+    /// stale `wanted = true` would show a "wanted by" marker for a wish
+    /// that no longer exists.
+    #[tokio::test]
+    async fn upsert_peer_books_cache_persists_and_clears_wanted() {
+        let db = setup().await;
+        let peer_id = insert_peer(&db).await;
+
+        let books = vec![crate::models::Book {
+            id: Some("20".to_string()),
+            title: "Wished by peer".to_string(),
+            owned: Some(false),
+            wanted: Some(true),
+            ..Default::default()
+        }];
+        upsert_peer_books_cache(&db, peer_id, None, books, true).await;
+
+        let row = peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .filter(peer_book::Column::RemoteBookId.eq("20"))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.wanted, Some(true), "insert must persist the flag");
+
+        // Later sync: same book, no flag (the peer acquired it).
+        let updated = vec![crate::models::Book {
+            id: Some("20".to_string()),
+            title: "Wished by peer".to_string(),
+            owned: Some(true),
+            ..Default::default()
+        }];
+        upsert_peer_books_cache(&db, peer_id, None, updated, true).await;
+        let refreshed = peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .filter(peer_book::Column::RemoteBookId.eq("20"))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            refreshed.wanted, None,
+            "an absent flag must clear the cached wish"
         );
     }
 

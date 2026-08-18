@@ -213,6 +213,19 @@ pub struct Book {
     /// See `is_borrowed` for the axis and the `None` semantics.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub is_lent: Option<bool>,
+    /// Peer-facing wishlist flag: `Some(true)` means the sending library
+    /// wants this book (`reading_status = 'wanting'`). Derived by
+    /// `redact_for_peer` from `reading_status` BEFORE that field is
+    /// stripped, so the wish survives redaction without exposing the rest
+    /// of the reading state. Never set on owner-facing responses (the
+    /// owner reads `reading_status` directly).
+    ///
+    /// `None` means "not stated": an older peer that does not emit the
+    /// field, or a book that is simply not wanted. Receivers must treat
+    /// only `Some(true)` as a wish and must NOT fall back to `owned ==
+    /// false`, which also covers books the sender merely borrowed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub wanted: Option<bool>,
 }
 
 impl From<Model> for Book {
@@ -279,6 +292,8 @@ impl From<Model> for Book {
             // read paths populate them (see `book_service::list_books`).
             is_borrowed: None,
             is_lent: None,
+            // Peer-facing only; set by `redact_for_peer`.
+            wanted: None,
         }
     }
 }
@@ -442,6 +457,11 @@ impl Book {
         // Stripping it would break peer cover/loan routing. The hub stays blind
         // (ADR-043), so exposing it to LAN/relay friends does not weaken the E2EE
         // account sync. Do not "restore" redaction of the id here.
+        // Derive the wishlist flag before stripping `reading_status`: the
+        // wish is deliberately shared (it is what lets a peer offer the
+        // book), the rest of the reading state is not. Emitted only when
+        // true so non-wanted books keep their payload unchanged.
+        self.wanted = (self.reading_status.as_deref() == Some("wanting")).then_some(true);
         self.cataloguing_notes = None;
         self.source_data = None;
         self.shelf_position = None;
@@ -846,6 +866,46 @@ mod tests {
         Book::rewrite_cover_urls_strict(&mut books, Some("https://hub/covers")).unwrap();
 
         assert_eq!(books[0].cover_url.as_deref(), Some("https://hub/covers/7"));
+    }
+
+    /// `redact_for_peer` must translate `reading_status = "wanting"` into
+    /// the additive `wanted` flag before stripping the status: the wish is
+    /// the one piece of reading state deliberately shared with peers (it
+    /// feeds the inverse wishlist marker on their side).
+    #[test]
+    fn redact_derives_wanted_from_wanting_status() {
+        let mut book = Book {
+            title: "t".into(),
+            reading_status: Some("wanting".to_string()),
+            ..Default::default()
+        };
+        book.redact_for_peer();
+        assert_eq!(book.wanted, Some(true));
+        assert_eq!(book.reading_status, None);
+    }
+
+    /// Any other reading status must yield NO `wanted` field at all
+    /// (`None`, skipped at serialisation): receivers treat only an
+    /// explicit true as a wish, so emitting nothing keeps non-wanted
+    /// payloads byte-identical to pre-flag builds.
+    #[test]
+    fn redact_omits_wanted_for_non_wanting_statuses() {
+        for status in ["to_read", "reading", "read", "abandoned", "borrowed"] {
+            let mut book = Book {
+                title: "t".into(),
+                reading_status: Some(status.to_string()),
+                ..Default::default()
+            };
+            book.redact_for_peer();
+            assert_eq!(book.wanted, None, "status {status} must not set wanted");
+        }
+        // No status at all (already-redacted or peer-cached DTO): same rule.
+        let mut book = Book {
+            title: "t".into(),
+            ..Default::default()
+        };
+        book.redact_for_peer();
+        assert_eq!(book.wanted, None);
     }
 
     /// Guardrail: every handler in `api/e2ee.rs` produces a JSON payload

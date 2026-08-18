@@ -2452,6 +2452,26 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // because INTEGER affinity coerces numeric-looking text right back.
     migrate_peer_books_text_remote_ids(db).await?;
 
+    // Migration 096: nullable `wanted` on peer_books. Caches the additive
+    // wishlist flag peers broadcast in their catalog (derived from
+    // reading_status = 'wanting' by Book::redact_for_peer): the inverse
+    // wishlist join (services/wishlist_service.rs::seekers_for_isbn) keys
+    // on it, never on owned = false, which also covers books the peer
+    // merely borrowed. NULL = the peer never stated it (older build, or
+    // simply not wanted). Local cache table, not a CRR: a plain additive
+    // ALTER is safe; the error is ignored once the column exists.
+    //
+    // MUST stay ordered after the migration-095 call above: that rebuild
+    // recreates peer_books with a fixed column list that does not include
+    // `wanted`, so on a legacy database the rebuild has to run first and
+    // this ALTER re-adds the column afterwards.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE peer_books ADD COLUMN wanted INTEGER".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
 

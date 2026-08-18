@@ -62,6 +62,51 @@ pub async fn get_isbn_providers(isbns: Vec<String>) -> Result<Vec<FrbWishlistPro
         .map_err(|e| format!("{e:?}"))
 }
 
+// ── Wishlist seekers (inverse direction) ──────────────────────────────
+
+/// A peer / followed library that WANTS one of my books (their wishlist,
+/// mirrored through the additive `wanted` catalog flag).
+#[flutter_rust_bridge::frb]
+pub struct FrbWishlistSeeker {
+    pub isbn: String,
+    /// Resolved peer id; 0 = directory-only entry (followed, not paired).
+    /// The lend-offer path (`/api/peers/{id}/offer-loan`) needs a paired id.
+    pub peer_id: i32,
+    pub node_id: Option<String>,
+    pub source_name: String,
+    /// Present for paired peers only; its presence is what distinguishes
+    /// "can be offered a loan" from "display-only" in the UI.
+    pub peer_url: Option<String>,
+    /// Titles of MY wishlist entries this seeker owns (mutual-exchange
+    /// hint, capped in the service). Empty = no mutual wish.
+    pub mutual_wish_titles: Vec<String>,
+}
+
+impl From<crate::services::wishlist_service::WishlistSeekerMatch> for FrbWishlistSeeker {
+    fn from(m: crate::services::wishlist_service::WishlistSeekerMatch) -> Self {
+        Self {
+            isbn: m.isbn,
+            peer_id: m.peer_id,
+            node_id: m.node_id,
+            source_name: m.source_name,
+            peer_url: m.peer_url,
+            mutual_wish_titles: m.mutual_wish_titles,
+        }
+    }
+}
+
+/// Who wants the given book of mine? Backs the "wanted by" card on the
+/// details page of an owned book. Only explicit `wanted = true` cache rows
+/// qualify; peers on builds without the flag simply produce no marker.
+#[flutter_rust_bridge::frb]
+pub async fn get_wishlist_seekers(isbn: String) -> Result<Vec<FrbWishlistSeeker>, String> {
+    let db = db().ok_or("Database not initialized")?;
+    crate::services::wishlist_service::seekers_for_isbn(db, &isbn)
+        .await
+        .map(|v| v.into_iter().map(FrbWishlistSeeker::from).collect())
+        .map_err(|e| format!("{e:?}"))
+}
+
 /// Collapse the per-book wishlist_match notifications emitted during a
 /// curated list import into one aggregated notification (ref_type =
 /// "import", ref_id = batch_ref). Returns the number of matched ISBNs.

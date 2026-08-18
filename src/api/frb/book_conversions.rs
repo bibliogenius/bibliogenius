@@ -59,6 +59,8 @@ impl From<FrbBook> for crate::models::Book {
             // never dictated by the client. Whatever Dart sent is discarded.
             is_borrowed: None,
             is_lent: None,
+            // Peer-facing only (redact_for_peer); never accepted on write.
+            wanted: None,
         }
     }
 }

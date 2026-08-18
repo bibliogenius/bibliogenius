@@ -26,6 +26,7 @@ mod merge_directory_entry_tests {
             added_at: Some("2026-05-01T00:00:00Z".to_string()),
             owned: true,
             available_copies: None,
+            wanted: None,
         }
     }
 
