@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait,
 };
 
@@ -94,8 +94,12 @@ impl CopyRepository for SeaOrmCopyRepository {
     /// flag kept it out of the borrowed list and out of the dashboard counter
     /// while the library view showed it as borrowed.
     async fn find_borrowed(&self) -> Result<PaginatedCopies, DomainError> {
+        // Newest borrow first: without an explicit order the list follows
+        // rowid insertion order, which put the most recent borrow at the
+        // bottom of the Borrowed tab.
         let copies_with_books = CopyEntity::find()
             .filter(Column::Status.eq("borrowed"))
+            .order_by_desc(Column::CreatedAt)
             .find_also_related(BookEntity)
             .all(&self.db)
             .await?;
