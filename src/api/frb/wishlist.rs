@@ -101,8 +101,12 @@ impl From<crate::services::wishlist_service::WishlistSeekerMatch> for FrbWishlis
 #[flutter_rust_bridge::frb]
 pub async fn get_wishlist_seekers(isbn: String) -> Result<Vec<FrbWishlistSeeker>, String> {
     let db = db().ok_or("Database not initialized")?;
-    crate::services::wishlist_service::seekers_for_isbn(db, &isbn)
-        .await
+    let result = crate::services::wishlist_service::seekers_for_isbn(db, &isbn).await;
+    match &result {
+        Ok(v) => tracing::info!("get_wishlist_seekers: isbn={isbn} -> {} seeker(s)", v.len()),
+        Err(e) => tracing::warn!("get_wishlist_seekers: isbn={isbn} failed: {e:?}"),
+    }
+    result
         .map(|v| v.into_iter().map(FrbWishlistSeeker::from).collect())
         .map_err(|e| format!("{e:?}"))
 }
