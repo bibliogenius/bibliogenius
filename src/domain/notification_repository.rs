@@ -56,6 +56,9 @@ pub enum NotificationEventType {
     BorrowRequest,
     BorrowAccepted,
     BorrowRejected,
+    /// A lender-initiated loan the receiver never asked for. Distinct from
+    /// `BorrowAccepted`, which answers a request the receiver made.
+    LoanOffered,
     BookReturned,
     BookReclaimed,
     LoanDueReminder,
@@ -77,6 +80,7 @@ impl NotificationEventType {
             Self::BorrowRequest => "borrow_request",
             Self::BorrowAccepted => "borrow_accepted",
             Self::BorrowRejected => "borrow_rejected",
+            Self::LoanOffered => "loan_offered",
             Self::BookReturned => "book_returned",
             Self::BookReclaimed => "book_reclaimed",
             Self::LoanDueReminder => "loan_due_reminder",
@@ -96,6 +100,7 @@ impl NotificationEventType {
             Self::BorrowRequest
             | Self::BorrowAccepted
             | Self::BorrowRejected
+            | Self::LoanOffered
             | Self::BookReturned
             | Self::BookReclaimed
             | Self::LoanDueReminder
@@ -114,6 +119,7 @@ impl NotificationEventType {
             "borrow_request" => Some(Self::BorrowRequest),
             "borrow_accepted" => Some(Self::BorrowAccepted),
             "borrow_rejected" => Some(Self::BorrowRejected),
+            "loan_offered" => Some(Self::LoanOffered),
             "book_returned" => Some(Self::BookReturned),
             "book_reclaimed" => Some(Self::BookReclaimed),
             "loan_due_reminder" => Some(Self::LoanDueReminder),
@@ -229,6 +235,7 @@ mod tests {
             NotificationEventType::BorrowRequest,
             NotificationEventType::BorrowAccepted,
             NotificationEventType::BorrowRejected,
+            NotificationEventType::LoanOffered,
             NotificationEventType::BookReturned,
             NotificationEventType::BookReclaimed,
             NotificationEventType::LoanDueReminder,
@@ -266,6 +273,10 @@ mod tests {
             NotificationCategory::Loans
         );
         assert_eq!(
+            NotificationEventType::LoanOffered.category(),
+            NotificationCategory::Loans
+        );
+        assert_eq!(
             NotificationEventType::BookReturned.category(),
             NotificationCategory::Loans
         );
@@ -292,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_event_types_have_12_variants() {
+    fn test_all_event_types_parse() {
         // Ensure new variants are covered by tests
         let all = [
             "connection_request",
@@ -301,6 +312,7 @@ mod tests {
             "follow_request",
             "borrow_request",
             "borrow_accepted",
+            "loan_offered",
             "book_returned",
             "new_books",
             "wishlist_match",
@@ -315,6 +327,6 @@ mod tests {
                 s
             );
         }
-        assert_eq!(all.len(), 12);
+        assert_eq!(all.len(), 13);
     }
 }

@@ -1228,20 +1228,44 @@ pub async fn update_outgoing_status(
         new_status
     );
 
+    // The only identity a plaintext sender can assert is the `library_uuid` in the
+    // payload. Resolve it once (lookup only, never create): the ownership check and
+    // the offer-born fallback lookup below both key on it.
+    let claimed_uuid = payload.get("library_uuid").and_then(|v| v.as_str());
+    let claimed_peer = resolve_peer_by_library_uuid(&db, claimed_uuid).await;
+
     // Find the outgoing request
     let request = match p2p_outgoing_request::Entity::find_by_id(&id).one(&db).await {
-        Ok(Some(req)) => req,
-        Ok(None) => {
-            tracing::warn!("Outgoing request not found: {}", id);
-            // Return OK anyway - idempotent
-            return StatusCode::OK.into_response();
-        }
+        Ok(Some(req)) => Some(req),
+        // A loan born from an OFFER has no borrower request id the lender could know:
+        // the lender sends its own request id, which the offer receivers stored in
+        // `lender_request_id`, never as our primary key. Ownership is part of the
+        // query: only a loan the claimed sender granted can match, so a host naming
+        // someone else's lender_request_id resolves to nothing.
+        Ok(None) => match &claimed_peer {
+            Some(sender) => p2p_outgoing_request::Entity::find()
+                .filter(p2p_outgoing_request::Column::LenderRequestId.eq(&id))
+                .filter(p2p_outgoing_request::Column::ToPeerId.eq(sender.id))
+                .one(&db)
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        },
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": e.to_string() })),
             )
                 .into_response();
+        }
+    };
+    let request = match request {
+        Some(req) => req,
+        None => {
+            tracing::warn!("Outgoing request not found: {}", id);
+            // Return OK anyway - idempotent
+            return StatusCode::OK.into_response();
         }
     };
 
@@ -1273,15 +1297,11 @@ pub async fn update_outgoing_status(
         )
             .into_response();
     }
-    // For a keyless lender the only identity on offer is the `library_uuid` the payload
-    // asserts. Resolve it (lookup only, never create) and require it to name that lender.
-    // Absent or mismatched means anonymous: refuse rather than trust an unauthenticated POST.
-    let claimed_uuid = payload.get("library_uuid").and_then(|v| v.as_str());
-    if resolve_peer_by_library_uuid(&db, claimed_uuid)
-        .await
-        .map(|p| p.id)
-        != Some(request.to_peer_id)
-    {
+    // Require the claimed identity to name the very lender the request names. Absent or
+    // mismatched means anonymous: refuse rather than trust an unauthenticated POST.
+    // The fallback path satisfies this by construction; the primary-id path is where
+    // it bites.
+    if claimed_peer.as_ref().map(|p| p.id) != Some(request.to_peer_id) {
         tracing::warn!(
             "Plaintext status update for request {} carries no matching sender identity; refusing",
             id
@@ -1295,6 +1315,9 @@ pub async fn update_outgoing_status(
 
     // Read what the cleanup below needs before the model is consumed by the update.
     // The request names the lender, the book it was accepted for, and its own title.
+    // `local_request_id` is the row's own id: on the offer-born fallback path the
+    // path parameter is the lender's id, meaningless on this device.
+    let local_request_id = request.id.clone();
     let book_isbn = request.book_isbn.clone();
     let lender_peer_id = request.to_peer_id;
     let loan_book_id = request.book_id.clone();
@@ -1361,7 +1384,7 @@ pub async fn update_outgoing_status(
                         title: book_title,
                         body: Some(lender_name),
                         ref_type: Some("loan".to_string()),
-                        ref_id: Some(id.clone()),
+                        ref_id: Some(local_request_id.clone()),
                     },
                 )
                 .await;

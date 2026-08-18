@@ -363,6 +363,64 @@ mod loan_offer_lender_resolution_tests {
             "the confirmation names its lender through the outgoing request"
         );
     }
+
+    async fn notification_event_types(db: &DatabaseConnection) -> Vec<String> {
+        crate::models::notification::Entity::find()
+            .all(db)
+            .await
+            .expect("query notifications")
+            .into_iter()
+            .map(|n| n.event_type)
+            .collect()
+    }
+
+    /// An unsolicited offer is announced as an offer, not as the acceptance of a
+    /// request the receiver never made.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plaintext_loan_offer_is_notified_as_loan_offered() {
+        let db = setup_db().await;
+        insert_known_lender(&db, Some(LENDER_UUID)).await;
+
+        let response = receive_loan_offer(State(db.clone()), Json(offer(Some(LENDER_UUID))))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(
+            notification_event_types(&db).await,
+            vec!["loan_offered".to_string()],
+            "an unsolicited offer must not read as an acceptance"
+        );
+    }
+
+    /// The confirmation of a loan the borrower requested keeps its acceptance wording.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plaintext_loan_confirmation_is_still_notified_as_borrow_accepted() {
+        let db = setup_db().await;
+        let lender = insert_known_lender(&db, Some(LENDER_UUID)).await;
+        insert_pending_request(&db, "borrower-req-1", lender).await;
+
+        let payload = LoanConfirmation {
+            isbn: Some("978-1".to_string()),
+            title: "Le Livre".to_string(),
+            author: None,
+            cover_url: None,
+            lender_name: "christophe".to_string(),
+            due_date: "2026-09-01".to_string(),
+            request_id: Some("lender-req-1".to_string()),
+            requester_request_id: Some("borrower-req-1".to_string()),
+        };
+        let response = receive_loan_confirmation(State(db.clone()), Json(payload))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(
+            notification_event_types(&db).await,
+            vec!["borrow_accepted".to_string()],
+            "a confirmation answers a request the borrower made"
+        );
+    }
 }
 
 /// A book row is a bibliographic record carrying many copies, and each copy can be
@@ -728,6 +786,71 @@ mod multi_lender_borrow_tests {
                 .expect("find")
                 .is_some(),
             "Bob's loan is still running and must survive Alice's reclaim"
+        );
+    }
+
+    /// The reclaim of an OFFER-born loan arrives under the LENDER's request id: the
+    /// borrower never issued a request, so there was no borrower id the lender could
+    /// echo back. `receive_loan_offer` stored that id in `lender_request_id`, never
+    /// as the row's primary key, so the handler must fall back to that column.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plaintext_reclaim_resolves_an_offer_born_loan_by_the_lenders_request_id() {
+        let db = setup_db().await;
+        let alice = insert_peer(&db, "alice", ALICE_UUID).await;
+
+        receive(&db, offer_from(ALICE_UUID, "alice-req")).await;
+        assert_eq!(borrowed_copies(&db).await.len(), 1);
+
+        // The wire carries Alice's own request id, not the borrower's row id.
+        mark_returned(&db, "alice-req", ALICE_UUID).await;
+
+        assert!(
+            borrowed_copies(&db).await.is_empty(),
+            "the reclaim of an offered loan must purge the borrowed copy"
+        );
+        let request = p2p_outgoing_request::Entity::find()
+            .filter(p2p_outgoing_request::Column::ToPeerId.eq(alice))
+            .one(&db)
+            .await
+            .expect("query")
+            .expect("alice's request");
+        assert_eq!(request.status, "returned");
+    }
+
+    /// A host replaying the lender's request id under its own identity must resolve
+    /// nothing: the fallback lookup carries the claimed sender inside the query.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_intruder_cannot_reclaim_an_offer_born_loan_with_the_lenders_request_id() {
+        let db = setup_db().await;
+        let alice = insert_peer(&db, "alice", ALICE_UUID).await;
+        let _bob = insert_peer(&db, "bob", BOB_UUID).await;
+
+        receive(&db, offer_from(ALICE_UUID, "alice-req")).await;
+
+        let response = update_outgoing_status(
+            State(db.clone()),
+            axum::extract::Path("alice-req".to_string()),
+            Json(serde_json::json!({ "status": "returned", "library_uuid": BOB_UUID })),
+        )
+        .await
+        .into_response();
+        // Unknown ids answer 200 (idempotent); what matters is that nothing moved.
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(
+            borrowed_copies(&db).await.len(),
+            1,
+            "another peer's lender_request_id must not purge the copy"
+        );
+        let request = p2p_outgoing_request::Entity::find()
+            .filter(p2p_outgoing_request::Column::ToPeerId.eq(alice))
+            .one(&db)
+            .await
+            .expect("query")
+            .expect("alice's request");
+        assert_eq!(
+            request.status, "accepted",
+            "the loan status must be untouched"
         );
     }
 

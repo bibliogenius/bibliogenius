@@ -798,10 +798,12 @@ async fn handle_loan_offer(
             }
         }
 
+        // The receiver never asked for this loan, so it is announced as an offer,
+        // not as the acceptance of a request they never made.
         crate::services::notification_service::emit(
             db,
             crate::domain::CreateNotification {
-                event_type: crate::domain::NotificationEventType::BorrowAccepted,
+                event_type: crate::domain::NotificationEventType::LoanOffered,
                 title: title.to_string(),
                 body: Some(sender_peer.name.clone()),
                 ref_type: Some("loan".to_string()),
@@ -1054,31 +1056,51 @@ async fn handle_status_update(
     }
 
     // 1. Try borrower-side: update outgoing request (lender sent us accept/reject/returned)
-    if let Ok(Some(req)) = p2p_outgoing_request::Entity::find_by_id(loan_id)
+    let outgoing = match p2p_outgoing_request::Entity::find_by_id(loan_id)
         .one(db)
         .await
     {
-        // `loan_id` comes from the sender's payload, so a paired peer could name a
-        // loan granted by someone else and drive its status (and, on "returned",
-        // the copy cleanup below). Only the lender of a loan may move it.
-        //
-        // Every writer of `p2p_outgoing_requests` now records the lender's real
-        // `peers.id`, including the plaintext loan-offer endpoint, so this check
-        // runs unconditionally. It used to step aside for a `to_peer_id == 0`
-        // sentinel that the foreign key to `peers(id)` never let reach the table.
-        if req.to_peer_id != sender_peer.id {
-            tracing::warn!(
-                "E2EE: peer {} sent a status update for a loan granted by peer {}, rejecting",
-                sender_peer.id,
-                req.to_peer_id
-            );
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({ "error": "This loan belongs to another peer" })),
-            )
-                .into_response();
+        Ok(Some(req)) => {
+            // `loan_id` comes from the sender's payload, so a paired peer could name a
+            // loan granted by someone else and drive its status (and, on "returned",
+            // the copy cleanup below). Only the lender of a loan may move it.
+            //
+            // Every writer of `p2p_outgoing_requests` now records the lender's real
+            // `peers.id`, including the plaintext loan-offer endpoint, so this check
+            // runs unconditionally. It used to step aside for a `to_peer_id == 0`
+            // sentinel that the foreign key to `peers(id)` never let reach the table.
+            if req.to_peer_id != sender_peer.id {
+                tracing::warn!(
+                    "E2EE: peer {} sent a status update for a loan granted by peer {}, rejecting",
+                    sender_peer.id,
+                    req.to_peer_id
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "This loan belongs to another peer" })),
+                )
+                    .into_response();
+            }
+            Some(req)
         }
+        // A loan born from an OFFER has no borrower request id the lender could
+        // know: the lender sends its own request id, which `handle_loan_offer`
+        // stored in `lender_request_id`, never as our primary key. Ownership is
+        // part of the query: only a loan granted by the authenticated sender can
+        // match, so a peer naming someone else's lender_request_id resolves to
+        // nothing and falls through to the not-found path below.
+        Ok(None) => p2p_outgoing_request::Entity::find()
+            .filter(p2p_outgoing_request::Column::LenderRequestId.eq(loan_id))
+            .filter(p2p_outgoing_request::Column::ToPeerId.eq(sender_peer.id))
+            .one(db)
+            .await
+            .ok()
+            .flatten(),
+        Err(_) => None,
+    };
 
+    if let Some(req) = outgoing {
+        let local_request_id = req.id.clone();
         let book_isbn = req.book_isbn.clone();
         let book_title = req.book_title.clone();
         let book_id = req.book_id.clone();
@@ -1087,7 +1109,11 @@ async fn handle_status_update(
         active.updated_at = Set(chrono::Utc::now().to_rfc3339());
         match active.update(db).await {
             Ok(_) => {
-                tracing::info!("E2EE: Updated outgoing request {} to '{}'", loan_id, status);
+                tracing::info!(
+                    "E2EE: Updated outgoing request {} to '{}'",
+                    local_request_id,
+                    status
+                );
             }
             Err(e) => {
                 return (
@@ -1104,7 +1130,9 @@ async fn handle_status_update(
             && let Some(bk) =
                 release_reclaimed_book(db, sender_peer.id, book_id.as_deref(), &book_isbn).await
         {
-            // Emit book_reclaimed notification on borrower side (lender took the book back)
+            // Emit book_reclaimed notification on borrower side (lender took the book back).
+            // Reference the local request row: for an offer-born loan the wire
+            // `loan_id` is the lender's id, meaningless on this device.
             crate::services::notification_service::emit(
                 db,
                 crate::domain::CreateNotification {
@@ -1112,7 +1140,7 @@ async fn handle_status_update(
                     title: bk.title.clone(),
                     body: Some(sender_peer.name.clone()),
                     ref_type: Some("loan".to_string()),
-                    ref_id: Some(loan_id.to_string()),
+                    ref_id: Some(local_request_id.clone()),
                 },
             )
             .await;
@@ -1127,7 +1155,7 @@ async fn handle_status_update(
                     title: book_title.clone(),
                     body: Some(sender_peer.name.clone()),
                     ref_type: Some("loan".to_string()),
-                    ref_id: Some(loan_id.to_string()),
+                    ref_id: Some(local_request_id.clone()),
                 },
             )
             .await;
@@ -2689,5 +2717,228 @@ mod reclaim_tests {
         assert!(dup.owned, "the row sharing the ISBN keeps owned=true");
         assert_eq!(count_copies(&db, &duplicate_id).await, 1);
         assert_eq!(count_copies(&db, &borrowed_id).await, 0);
+    }
+
+    /// The outgoing request `handle_loan_offer` writes: a locally minted primary key,
+    /// with the lender's own request id in `lender_request_id`. That lender id is the
+    /// only reference the lender can put on the wire, since the borrower never sent
+    /// them a request id to echo back.
+    async fn insert_offer_born_request(
+        db: &DatabaseConnection,
+        local_id: &str,
+        to_peer_id: i32,
+        lender_request_id: &str,
+        book_id: &str,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        p2p_outgoing_request::ActiveModel {
+            id: Set(local_id.to_string()),
+            to_peer_id: Set(to_peer_id),
+            book_isbn: Set("978-1".to_string()),
+            book_title: Set("Le Livre".to_string()),
+            status: Set("accepted".to_string()),
+            lender_request_id: Set(Some(lender_request_id.to_string())),
+            book_id: Set(Some(book_id.to_string())),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+        }
+        .insert(db)
+        .await
+        .expect("insert offer-born outgoing request");
+    }
+
+    /// The lender of an OFFER-born loan reclaims it by naming its own request id,
+    /// the only one it knows. The borrower's row carries that id in
+    /// `lender_request_id`, not as its primary key, so the reclaim must fall back
+    /// to that column when `find_by_id` misses.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_lender_of_an_offer_born_loan_can_reclaim_it() {
+        let db = setup_test_db().await;
+        let lender = insert_lender(&db, "christophe").await;
+        let book_id = insert_read_but_not_owned(&db, "Le Livre", Some("978-1")).await;
+        insert_copy(&db, &book_id, "borrowed", Some(lender)).await;
+        insert_offer_born_request(&db, "local-uuid-1", lender, "lender-req-1", &book_id).await;
+
+        let lender_peer = peer::Entity::find_by_id(lender)
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("lender");
+        let response = handle_status_update(
+            &db,
+            &status_update("lender-req-1", "returned"),
+            &lender_peer,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            count_copies(&db, &book_id).await,
+            0,
+            "the borrowed copy is purged when the lender reclaims an offered loan"
+        );
+        let req = p2p_outgoing_request::Entity::find_by_id("local-uuid-1")
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("request");
+        assert_eq!(req.status, "returned");
+    }
+
+    /// A third peer replaying the lender's request id must not resolve the loan:
+    /// the fallback lookup carries the sender's identity inside the query.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_cannot_reclaim_an_offer_born_loan_of_another_peer() {
+        let db = setup_test_db().await;
+        let lender = insert_lender(&db, "christophe").await;
+        let intruder = insert_lender(&db, "mallory").await;
+        let book_id = insert_read_but_not_owned(&db, "Le Livre", Some("978-1")).await;
+        insert_copy(&db, &book_id, "borrowed", Some(lender)).await;
+        insert_offer_born_request(&db, "local-uuid-1", lender, "lender-req-1", &book_id).await;
+
+        let intruder_peer = peer::Entity::find_by_id(intruder)
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("intruder");
+        let response = handle_status_update(
+            &db,
+            &status_update("lender-req-1", "returned"),
+            &intruder_peer,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            count_copies(&db, &book_id).await,
+            1,
+            "another peer's lender_request_id must not purge the copy"
+        );
+        let req = p2p_outgoing_request::Entity::find_by_id("local-uuid-1")
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("request");
+        assert_eq!(req.status, "accepted", "the loan status must be untouched");
+    }
+}
+
+/// An offered loan is announced as an offer, never as the acceptance of a request
+/// the receiver never made (`handle_loan_confirmation` keeps `borrow_accepted`).
+#[cfg(test)]
+mod loan_offer_notification_tests {
+    use super::*;
+    use crate::crypto::envelope::ClearMessage;
+    use crate::models::{notification, p2p_outgoing_request, peer};
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+    async fn setup_test_db() -> DatabaseConnection {
+        crate::db::init_db("sqlite::memory:")
+            .await
+            .expect("init in-memory db")
+    }
+
+    async fn insert_sender(db: &DatabaseConnection, name: &str) -> peer::Model {
+        let now = chrono::Utc::now().to_rfc3339();
+        peer::ActiveModel {
+            name: Set(name.to_string()),
+            url: Set(format!("http://{name}.local:8000")),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert peer")
+    }
+
+    fn clear_message(message_type: &str, payload: serde_json::Value) -> ClearMessage {
+        ClearMessage {
+            message_type: message_type.to_string(),
+            payload,
+            timestamp: 0,
+            message_id: "test-message".to_string(),
+            correlation_id: None,
+            reply_to_mailbox: None,
+            reply_to_write_token: None,
+        }
+    }
+
+    async fn notification_event_types(db: &DatabaseConnection) -> Vec<String> {
+        notification::Entity::find()
+            .all(db)
+            .await
+            .expect("query notifications")
+            .into_iter()
+            .map(|n| n.event_type)
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_e2ee_loan_offer_is_notified_as_loan_offered() {
+        let db = setup_test_db().await;
+        let sender = insert_sender(&db, "christophe").await;
+
+        let msg = clear_message(
+            "loan_offer",
+            serde_json::json!({
+                "title": "Le Livre",
+                "isbn": "978-1",
+                "lender_name": "christophe",
+                "due_date": "2026-09-01",
+                "request_id": "lender-req-1",
+            }),
+        );
+        let response = handle_loan_offer(&db, &msg, &sender).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(
+            notification_event_types(&db).await,
+            vec!["loan_offered".to_string()],
+            "an unsolicited offer must not read as an acceptance"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_e2ee_loan_confirmation_is_still_notified_as_borrow_accepted() {
+        let db = setup_test_db().await;
+        let sender = insert_sender(&db, "christophe").await;
+
+        // The borrower asked for this loan: a pending outgoing request exists.
+        let now = chrono::Utc::now().to_rfc3339();
+        p2p_outgoing_request::ActiveModel {
+            id: Set("borrower-req-1".to_string()),
+            to_peer_id: Set(sender.id),
+            book_isbn: Set("978-1".to_string()),
+            book_title: Set("Le Livre".to_string()),
+            status: Set("pending".to_string()),
+            lender_request_id: Set(None),
+            book_id: Set(None),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+        }
+        .insert(&db)
+        .await
+        .expect("insert pending request");
+
+        let msg = clear_message(
+            "loan_confirmation",
+            serde_json::json!({
+                "title": "Le Livre",
+                "isbn": "978-1",
+                "lender_name": "christophe",
+                "due_date": "2026-09-01",
+                "request_id": "lender-req-1",
+                "requester_request_id": "borrower-req-1",
+            }),
+        );
+        let response = handle_loan_confirmation(&db, &msg, &sender).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(
+            notification_event_types(&db).await,
+            vec!["borrow_accepted".to_string()],
+            "a confirmation answers a request the borrower made"
+        );
     }
 }

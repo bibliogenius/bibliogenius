@@ -562,13 +562,16 @@ pub async fn receive_loan_offer(
             }
         }
 
+        // The receiver never asked for this loan, so it is announced as an offer,
+        // not as the acceptance of a request they never made. Same reference shape
+        // as the E2EE offer handler: the borrowed copy, under ref_type "loan".
         crate::services::notification_service::emit(
             &db,
             crate::domain::CreateNotification {
-                event_type: crate::domain::NotificationEventType::BorrowAccepted,
+                event_type: crate::domain::NotificationEventType::LoanOffered,
                 title: payload.title.clone(),
                 body: Some(payload.lender_name.clone()),
-                ref_type: Some("peer".to_string()),
+                ref_type: Some("loan".to_string()),
                 ref_id: Some(result.copy_id.to_string()),
             },
         )
