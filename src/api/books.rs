@@ -545,6 +545,21 @@ pub async fn create_book(
                 }
             }
 
+            // Reverse wishlist trigger: same rule as the FFI door, which
+            // goes through book_service::create_book. This handler writes
+            // via the repository, so it fires the shared trigger itself.
+            if created_book.reading_status.as_deref() == Some("wanting")
+                && !created_book.private.unwrap_or(false)
+                && let Some(ref isbn) = created_book.isbn
+            {
+                crate::services::wishlist_service::notify_providers_for_wish(
+                    db,
+                    isbn,
+                    &created_book.title,
+                )
+                .await;
+            }
+
             (
                 StatusCode::CREATED,
                 Json(json!({
@@ -671,6 +686,21 @@ pub async fn update_book(
     match state.book_repo.update(&id, book_data).await {
         Ok(updated_book) => {
             let _ = crate::sync::log_operation(db, "book", &id, "UPDATE", None).await;
+
+            // Reverse wishlist trigger, on the transition INTO 'wanting'
+            // only (same rule as book_service::update_book on the FFI door).
+            if updated_book.reading_status.as_deref() == Some("wanting")
+                && current_book.reading_status.as_deref() != Some("wanting")
+                && !updated_book.private.unwrap_or(false)
+                && let Some(ref isbn) = updated_book.isbn
+            {
+                crate::services::wishlist_service::notify_providers_for_wish(
+                    db,
+                    isbn,
+                    &updated_book.title,
+                )
+                .await;
+            }
 
             // Update authors in book_authors join table
             {

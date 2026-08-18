@@ -2421,6 +2421,20 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 094: index peer_books.isbn. The wishlist-provider join
+    // (services/wishlist_service.rs) looks cached peer/directory books up
+    // by ISBN on every wish creation, book-details open and wishlist
+    // filter render; without this index each lookup scans the whole cache
+    // (already >11k rows on a library following a single directory
+    // catalog). Local cache table, not a CRR: a plain CREATE INDEX is
+    // safe and idempotent.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE INDEX IF NOT EXISTS idx_peer_books_isbn ON peer_books(isbn)".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
 

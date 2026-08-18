@@ -390,6 +390,18 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         }
     }
 
+    // Reverse wishlist trigger: a wish just entered the library, scan the
+    // cached peer/directory catalogs for it. Event-driven on purpose (a
+    // periodic sweep would re-emit after notification pruning). Private
+    // books never match: the notification names the source and unlocks an
+    // outbound borrow request.
+    if model.reading_status == "wanting"
+        && !model.private
+        && let Some(ref isbn) = model.isbn
+    {
+        crate::services::wishlist_service::notify_providers_for_wish(db, isbn, &model.title).await;
+    }
+
     Ok(Book::from(model))
 }
 
@@ -443,6 +455,7 @@ pub async fn update_book(
         .await?
         .ok_or(ServiceError::NotFound)?;
 
+    let previous_reading_status = book_model.reading_status.clone();
     let mut book: BookActiveModel = book_model.into();
 
     book.title = Set(book_data.title);
@@ -483,6 +496,17 @@ pub async fn update_book(
     let model = book.update(db).await?;
 
     let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
+
+    // Reverse wishlist trigger, on the transition INTO 'wanting' only:
+    // unrelated edits of an existing wish must not re-fire the scan (the
+    // notification table is pruned, so a repeat scan could re-emit).
+    if model.reading_status == "wanting"
+        && previous_reading_status != "wanting"
+        && !model.private
+        && let Some(ref isbn) = model.isbn
+    {
+        crate::services::wishlist_service::notify_providers_for_wish(db, isbn, &model.title).await;
+    }
 
     // Handle author update. The caller signals "I am updating the authors"
     // by setting either `authors` (Vec form) or `author` (comma-joined string).

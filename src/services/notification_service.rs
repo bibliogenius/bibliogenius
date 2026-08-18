@@ -60,29 +60,20 @@ pub async fn check_wishlist_matches(
         return;
     }
 
-    // Load wishlist ISBNs (books with reading_status='wanting' and an ISBN)
-    use crate::models::book;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
-    let wishlist: Vec<String> = match book::Entity::find()
-        .filter(book::Column::ReadingStatus.eq("wanting"))
-        .filter(book::Column::Isbn.is_not_null())
-        .all(db)
-        .await
-    {
-        Ok(books) => books.into_iter().filter_map(|b| b.isbn).collect(),
+    // Borrow-eligible wishlist ISBNs (wanting, with an ISBN, not private).
+    // The lane filter lives in wishlist_service so notifications, badges and
+    // the borrow button all obey the same rule.
+    let wishlist_set = match crate::services::wishlist_service::wanting_isbn_set(db).await {
+        Ok(set) => set,
         Err(e) => {
             tracing::warn!("wishlist query failed: {e:?}");
             return;
         }
     };
 
-    if wishlist.is_empty() {
+    if wishlist_set.is_empty() {
         return;
     }
-
-    let wishlist_set: std::collections::HashSet<&str> =
-        wishlist.iter().map(|s| s.as_str()).collect();
 
     for (isbn, title) in new_isbns {
         if wishlist_set.contains(isbn.as_str()) {
