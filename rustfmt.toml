@@ -1,0 +1,7 @@
+# Bare `rustfmt` does NOT read Cargo.toml: without this file it parses in
+# edition 2015 and chokes on `async fn` (E0670). `cargo fmt` gets the edition
+# from Cargo.toml, but the include!-ed files under src/api/frb/ are invisible
+# to it and MUST be formatted with a direct `rustfmt src/api/frb/*.rs`
+# (see the FFI module layout note in .agents/instructions/architecture.md),
+# which only reads this file. Keep in sync with Cargo.toml's `edition`.
+edition = "2024"
