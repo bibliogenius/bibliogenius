@@ -47,6 +47,12 @@ const SUBJECT_SCORE_CAP: f64 = 5.0;
 const W_SAME_PUBLISHER: f64 = 0.5;
 const W_CLOSE_PERIOD: f64 = 0.5;
 const W_LIKED_CANDIDATE: f64 = 1.0;
+/// Deprioritizes already-read candidates in "similar to this book": the
+/// reminder of a liked same-universe book keeps value for a reader who does
+/// not remember everything, but it must not squat the few slots ahead of
+/// unread books. Sized to outweigh the liked fallback bonus a read book
+/// otherwise gets (net -0.5), without ever excluding it (ADR-059).
+const READ_CANDIDATE_PENALTY: f64 = -1.5;
 const W_DEWEY_MAJOR: f64 = 1.0;
 const W_FAVORITE_AUTHOR: f64 = 2.0;
 const W_PREFERRED_DECADE: f64 = 0.5;
@@ -373,6 +379,12 @@ fn score_against_reference(
         {
             reasons.push(RecommendationReason::HighlyRated);
         }
+    }
+
+    // Already read: deprioritized, never excluded. At equal signal an
+    // unread book must win the slot.
+    if candidate.raw_status == "read" {
+        score += READ_CANDIDATE_PENALTY;
     }
 
     // Dewey major class: precise when present, neutral when absent (most
@@ -729,11 +741,26 @@ mod tests {
     #[test]
     fn liked_candidate_via_read_fallback_boosts_without_reason() {
         // No rating anywhere in the library: "liked" falls back to read.
+        // Net for a read candidate: +1.0 subject +1.0 liked -1.5 read.
         let r = sb("r", "Ref").subjects(&["x"]).build();
         let c = sb("c", "Cand").subjects(&["x"]).status("read").build();
         let (score, reasons) = score_against_reference(&r, &c).unwrap();
-        assert_eq!(score, 2.0);
+        assert_eq!(score, 0.5);
         assert!(!reasons.contains(&RecommendationReason::HighlyRated));
+    }
+
+    #[test]
+    fn read_candidate_is_deprioritized_but_never_excluded() {
+        let books = vec![
+            sb("r", "Ref").authors(&["A"]).build(),
+            sb("read", "Read").authors(&["A"]).status("read").build(),
+            sb("unread", "Unread").authors(&["A"]).build(),
+        ];
+        let recs = similar_books(&books, "r", 5);
+        // At equal signal the unread book wins the slot; the read one still
+        // surfaces behind it (revisiting keeps value, it just cannot squat).
+        let ids: Vec<&str> = recs.iter().filter_map(|b| b.book.id.as_deref()).collect();
+        assert_eq!(ids, vec!["unread", "read"]);
     }
 
     #[test]
