@@ -24,6 +24,7 @@ pub mod metadata_fill;
 pub mod peer;
 pub mod profile;
 pub mod public_stats;
+pub mod recommendations;
 pub mod relay;
 pub mod sales; // Sales endpoints for bookseller profile
 pub mod scan;
@@ -187,6 +188,15 @@ fn owner_routes() -> Router<AppState> {
             put(books::update_book).delete(books::delete_book),
         )
         .route("/books/reorder", axum::routing::patch(books::reorder_books))
+        // Reading recommendations (ADR-059): owner-facing, computed locally
+        .route(
+            "/books/:id/recommendations",
+            get(recommendations::book_recommendations),
+        )
+        .route(
+            "/recommendations",
+            get(recommendations::personal_recommendations),
+        )
         .route(
             "/books/:id/collections",
             get(collections::get_book_collections).put(collections::update_book_collections),

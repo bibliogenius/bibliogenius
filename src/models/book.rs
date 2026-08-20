@@ -126,7 +126,10 @@ impl ActiveModelBehavior for ActiveModel {
 }
 
 // DTO for API responses
-#[derive(Debug, Default, Serialize, Deserialize)]
+// Clone: the recommendation scoring pass (ADR-059) clones winning candidates
+// out of an in-memory Vec; every field is already Clone, the FFI shape is
+// untouched.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Book {
     pub id: Option<String>,
     pub title: String,

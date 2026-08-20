@@ -47,3 +47,4 @@ include!("frb/book_notes.rs");
 include!("frb/backup.rs");
 include!("frb/wishlist.rs");
 include!("frb/hub_catalog_tests.rs");
+include!("frb/recommendations.rs");

@@ -14,6 +14,7 @@ pub mod linked_device_repository;
 pub mod loan_settings_repository;
 pub mod metadata_fill;
 pub mod notification_repository;
+pub mod recommendations;
 
 pub use errors::DomainError;
 
@@ -26,3 +27,4 @@ pub use linked_device_repository::*;
 pub use loan_settings_repository::*;
 pub use metadata_fill::*;
 pub use notification_repository::*;
+pub use recommendations::*;

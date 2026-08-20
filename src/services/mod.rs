@@ -37,6 +37,7 @@ pub mod peer_delta_sync;
 pub mod peer_identity_sync;
 pub mod profile_events;
 pub mod profile_notification;
+pub mod recommendation_service;
 pub mod relay_poller;
 pub mod relay_session;
 pub mod relay_transport;
