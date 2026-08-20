@@ -228,24 +228,29 @@ pub struct Book {
     pub wanted: Option<bool>,
 }
 
+/// Read the book's language code out of the raw `source_data` JSON.
+///
+/// `books` has no `language` column: the code is whatever the metadata provider
+/// stored under `languages`, kept verbatim (`"fr"`, `"fre"`, `"eng"`...).
+/// Shared by the [`Book`] DTO and the catalogue CSV export so both report the
+/// same value for a given row.
+pub fn language_from_source_data(source_data: Option<&str>) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(source_data?)
+        .ok()?
+        .get("languages")
+        .and_then(|l| l.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 impl From<Model> for Book {
     fn from(model: Model) -> Self {
         let subjects: Option<Vec<String>> = model
             .subjects
             .map(|s| serde_json::from_str(&s).unwrap_or_default());
 
-        // Extract language from source_data if available
-        let language: Option<String> = model.source_data.as_ref().and_then(|sd| {
-            serde_json::from_str::<serde_json::Value>(sd)
-                .ok()
-                .and_then(|json| {
-                    json.get("languages")
-                        .and_then(|l| l.as_array())
-                        .and_then(|arr| arr.first())
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                })
-        });
+        let language = language_from_source_data(model.source_data.as_deref());
 
         let digital_formats: Option<Vec<String>> = model
             .digital_formats

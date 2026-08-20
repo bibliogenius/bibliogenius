@@ -434,6 +434,9 @@ fn owner_routes() -> Router<AppState> {
         .route("/stats/views", get(view_counter::get_view_stats_handler))
         // Export/Import
         .route("/export", get(export::export_data))
+        // Human-readable catalogue listing (spreadsheet), not a backup:
+        // it cannot be re-imported and is not the `.bgbackup` archive.
+        .route("/export/csv", get(export::export_catalog_csv))
         .route("/import", post(export::import_data))
         .route("/import-upsert", post(export::import_data_upsert))
 }

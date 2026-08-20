@@ -1,12 +1,15 @@
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
+
 use axum::{
     Json,
     extract::State,
     http::{HeaderMap, StatusCode, header},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, Set, TransactionTrait,
-    sea_query::OnConflict,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
+    Set, TransactionTrait, sea_query::OnConflict,
 };
 use serde::{Deserialize, Serialize};
 
@@ -121,6 +124,267 @@ pub async fn export_data(State(db): State<DatabaseConnection>) -> impl IntoRespo
     );
 
     (StatusCode::OK, headers, Json(backup))
+}
+
+// --- Catalogue CSV export ---
+
+/// Column headers of the catalogue CSV, in output order.
+///
+/// English snake_case and stable across versions: a user who has built
+/// spreadsheet formulas on top of an export must not see them break after an
+/// update, so these names are a contract rather than UI copy. The translated
+/// labels live in the `.po` catalogues and are applied by the client.
+const CATALOG_CSV_HEADERS: [&str; 12] = [
+    "title",
+    "authors",
+    "isbn",
+    "publisher",
+    "publication_year",
+    "language",
+    "ownership_status",
+    "reading_status",
+    "user_rating",
+    "price",
+    "tags",
+    "added_at",
+];
+
+/// French spreadsheets split a CSV on `;`, not on `,`. Fields are quoted on
+/// top of that (see the writer below): the delimiter alone is not enough to
+/// keep a reader from splitting on a comma it was separately told to honour.
+const CATALOG_CSV_DELIMITER: u8 = b';';
+
+/// Without a byte-order mark, Excel reads a UTF-8 CSV as Latin-1 and mangles
+/// every accented title.
+const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
+/// How the user holds a book, as the single `ownership_status` column.
+///
+/// `owned` wins over a borrowed copy: one may own a title and borrow a second
+/// copy of it at the same time, and the question this export answers ("what is
+/// mine?") is settled by the book flag.
+///
+/// Stable English tokens, like the column names: the client swaps them for the
+/// translated labels it already shows on screen, and a script hitting this
+/// endpoint keeps a fixed vocabulary to match on.
+fn ownership_status(owned: bool, has_borrowed_copy: bool) -> &'static str {
+    if owned {
+        "owned"
+    } else if has_borrowed_copy {
+        "borrowed"
+    } else {
+        "wishlist"
+    }
+}
+
+/// Leading characters a spreadsheet reads as the start of a formula.
+const FORMULA_LEAD: [char; 6] = ['=', '+', '-', '@', '\t', '\r'];
+
+/// Neutralize a cell a spreadsheet would execute instead of display.
+///
+/// Excel and LibreOffice run a cell starting with `=`, `+`, `-` or `@` as a
+/// formula, and quoting does not stop them: `"=1+1"` is still evaluated. The
+/// text in this export is not all first-party, so this is not theoretical: book
+/// metadata comes from external providers, and the title of a borrowed book is
+/// whatever the lending peer sent (see `api::peer::loan_shared`). A leading
+/// apostrophe is the standard defusing (OWASP CSV injection / CWE-1236); it
+/// marks the cell as text.
+///
+/// Numbers are left alone: one is never a formula, and prefixing it would turn
+/// a sortable cell into text. This mirrors the `QuoteStyle::NonNumeric` split
+/// used by the writer, so a negative price stays a number.
+fn defuse_formula(value: &str) -> Cow<'_, str> {
+    if value.parse::<f64>().is_ok() || !value.starts_with(FORMULA_LEAD) {
+        return Cow::Borrowed(value);
+    }
+    Cow::Owned(format!("'{value}"))
+}
+
+/// Keep only the date part of an ISO 8601 timestamp; pass anything else
+/// through untouched rather than dropping it.
+fn date_only(timestamp: &str) -> String {
+    timestamp.split('T').next().unwrap_or(timestamp).to_string()
+}
+
+/// Group a many-to-many link table into `owner id -> sorted labels`.
+///
+/// Neither `book_authors` nor `book_tags` carries an ordering column, so the
+/// labels are sorted by name: the same library must export the same cell
+/// twice in a row, whatever order the rows come back in.
+fn group_labels<I>(links: I, labels: &HashMap<String, String>) -> HashMap<String, Vec<String>>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+    for (owner_id, label_id) in links {
+        if let Some(label) = labels.get(&label_id) {
+            grouped.entry(owner_id).or_default().push(label.clone());
+        }
+    }
+    for names in grouped.values_mut() {
+        names.sort();
+    }
+    grouped
+}
+
+/// Export the catalogue as a spreadsheet-readable CSV, one row per book.
+///
+/// Distinct from [`export_data`], which dumps every table verbatim so it can be
+/// re-imported: this one is an inventory listing meant for a human, so it
+/// flattens authors and tags into a single cell and collapses possession into
+/// one `ownership_status` column. Neither format feeds the other.
+pub async fn export_catalog_csv(State(db): State<DatabaseConnection>) -> Response {
+    let books = match book::Entity::find()
+        .order_by_asc(book::Column::Title)
+        .all(&db)
+        .await
+    {
+        Ok(books) => books,
+        Err(e) => return csv_export_failed("books", e),
+    };
+
+    let author_names: HashMap<String, String> = match author::Entity::find().all(&db).await {
+        Ok(authors) => authors.into_iter().map(|a| (a.id, a.name)).collect(),
+        Err(e) => return csv_export_failed("authors", e),
+    };
+    let authors_by_book = match book_authors::Entity::find().all(&db).await {
+        Ok(links) => group_labels(
+            links.into_iter().map(|l| (l.book_id, l.author_id)),
+            &author_names,
+        ),
+        Err(e) => return csv_export_failed("book_authors", e),
+    };
+
+    let tag_names: HashMap<String, String> = match tag::Entity::find().all(&db).await {
+        Ok(tags) => tags.into_iter().map(|t| (t.id, t.name)).collect(),
+        Err(e) => return csv_export_failed("tags", e),
+    };
+    let tags_by_book = match book_tags::Entity::find().all(&db).await {
+        Ok(links) => group_labels(links.into_iter().map(|l| (l.book_id, l.tag_id)), &tag_names),
+        Err(e) => return csv_export_failed("book_tags", e),
+    };
+
+    // `status = 'borrowed'` alone, like `copy_repository::find_borrowed` and
+    // `book_service::list_books`: a copy borrowed from a contact is stored
+    // permanently (`is_temporary = false`, ADR-034), so filtering on that flag
+    // would drop it from the inventory.
+    let borrowed_books: HashSet<String> = match copy::Entity::find()
+        .filter(copy::Column::Status.eq("borrowed"))
+        .all(&db)
+        .await
+    {
+        Ok(copies) => copies.into_iter().map(|c| c.book_id).collect(),
+        Err(e) => return csv_export_failed("copies", e),
+    };
+
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(CATALOG_CSV_DELIMITER)
+        // Quote every field that is not a plain number, even when a
+        // `;`-delimited reader would not require it. LibreOffice's import
+        // dialog remembers its separator checkboxes, so a user who once opened
+        // a comma-separated file sees `Hugo, Victor` split across two columns
+        // here; a quoted field is immune to that whatever separators the
+        // reader was told to honour. Numbers stay bare so the spreadsheet
+        // still sorts the year, the rating and the price as numbers.
+        .quote_style(csv::QuoteStyle::NonNumeric)
+        .from_writer(Vec::new());
+
+    // Written unconditionally so an empty library still exports a usable file
+    // with its column names.
+    if let Err(e) = writer.write_record(CATALOG_CSV_HEADERS) {
+        return csv_write_failed(e);
+    }
+
+    for book in books {
+        let authors = authors_by_book
+            .get(&book.id)
+            .map(|names| names.join(", "))
+            .unwrap_or_default();
+        let tags = tags_by_book
+            .get(&book.id)
+            .map(|names| names.join(", "))
+            .unwrap_or_default();
+        let ownership = ownership_status(book.owned, borrowed_books.contains(&book.id));
+        let language = crate::models::book::language_from_source_data(book.source_data.as_deref())
+            .unwrap_or_default();
+
+        // Field order MUST match CATALOG_CSV_HEADERS above.
+        let record = [
+            book.title,
+            authors,
+            book.isbn.unwrap_or_default(),
+            book.publisher.unwrap_or_default(),
+            book.publication_year
+                .map(|year| year.to_string())
+                .unwrap_or_default(),
+            language,
+            ownership.to_string(),
+            // The raw stored value, without the `borrowed`/`lent` overlay
+            // `Book::populate_authors` paints on the DTO for display: those two
+            // describe a copy, and possession already has its own column.
+            book.reading_status,
+            book.user_rating
+                .map(|rating| rating.to_string())
+                .unwrap_or_default(),
+            book.price
+                .map(|price| price.to_string())
+                .unwrap_or_default(),
+            tags,
+            date_only(&book.created_at),
+        ];
+        let defused: Vec<Cow<'_, str>> = record.iter().map(|f| defuse_formula(f)).collect();
+        if let Err(e) = writer.write_record(defused.iter().map(|f| f.as_bytes())) {
+            return csv_write_failed(e);
+        }
+    }
+
+    let rows = match writer.into_inner() {
+        Ok(rows) => rows,
+        Err(e) => return csv_write_failed(e.into_error().into()),
+    };
+
+    let mut body = Vec::with_capacity(UTF8_BOM.len() + rows.len());
+    body.extend_from_slice(&UTF8_BOM);
+    body.extend_from_slice(&rows);
+
+    let filename = format!(
+        "bibliogenius_catalogue_{}.csv",
+        chrono::Utc::now().format("%Y-%m-%d")
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        "text/csv; charset=utf-8".parse().unwrap(),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{}\"", filename)
+            .parse()
+            .unwrap(),
+    );
+
+    (StatusCode::OK, headers, body).into_response()
+}
+
+/// The catalogue could not be read. The table name stays in the log, never in
+/// the response body.
+fn csv_export_failed(table: &str, err: DbErr) -> Response {
+    tracing::error!("CSV catalogue export failed reading {table}: {err}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Failed to export the catalogue as CSV",
+    )
+        .into_response()
+}
+
+fn csv_write_failed(err: csv::Error) -> Response {
+    tracing::error!("CSV catalogue export failed writing rows: {err}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Failed to export the catalogue as CSV",
+    )
+        .into_response()
 }
 
 // --- Import ---
