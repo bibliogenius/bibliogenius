@@ -96,6 +96,9 @@ pub struct ScoringBook {
     pub norm_publisher: Option<String>,
     pub decade: Option<i32>,
     pub dewey_major: Option<char>,
+    /// One of the shelves is a favorites label. Kept OUT of
+    /// [`Self::norm_subjects`]: it feeds the liked signal only.
+    pub has_favorite_shelf: bool,
 }
 
 fn norm(s: &str) -> String {
@@ -118,15 +121,29 @@ fn decade_of(year: Option<i32>) -> Option<i32> {
     year.map(|y| y - y.rem_euclid(10))
 }
 
+/// A favorites shelf marks affection, not theme: it must feed the liked
+/// signal and NOTHING else. Left among the scoring subjects it would make
+/// any two favorites count as thematically similar ("shared subject:
+/// favoris"), which is exactly the poisoning the favorites-as-collection
+/// design forbids.
+fn is_favorite_label(normed: &str) -> bool {
+    FAVORITE_SHELF_LABELS.contains(&normed)
+}
+
 impl ScoringBook {
     pub fn new(book: Book, raw_status: String) -> Self {
-        let norm_subjects = book
+        let all_subjects: Vec<String> = book
             .subjects
             .as_deref()
             .unwrap_or(&[])
             .iter()
             .map(|s| norm(s))
             .filter(|s| !s.is_empty())
+            .collect();
+        let has_favorite_shelf = all_subjects.iter().any(|s| is_favorite_label(s));
+        let norm_subjects = all_subjects
+            .into_iter()
+            .filter(|s| !is_favorite_label(s))
             .collect();
         let norm_authors = book
             .authors
@@ -147,22 +164,21 @@ impl ScoringBook {
             norm_publisher,
             decade,
             dewey_major,
+            has_favorite_shelf,
         }
     }
 
     /// Whether the user liked this book. With ratings almost never filled,
     /// "liked" falls back to having read the book, or having shelved it as
     /// a favorite (ADR-059). An explicit low rating vetoes the fallbacks.
+    ///
+    /// When the typed favorites collection ships (`collections.source =
+    /// 'favorites'`, series-pattern), membership in it must join this test;
+    /// the shelf-label fallback then remains for legacy shelves only.
     pub fn is_liked(&self) -> bool {
         match self.book.user_rating {
             Some(r) => r >= LIKED_RATING_MIN,
-            None => {
-                self.raw_status == "read"
-                    || self
-                        .norm_subjects
-                        .iter()
-                        .any(|s| FAVORITE_SHELF_LABELS.contains(&s.as_str()))
-            }
+            None => self.raw_status == "read" || self.has_favorite_shelf,
         }
     }
 
@@ -238,7 +254,7 @@ pub fn build_taste_profile(books: &[ScoringBook]) -> TasteProfile {
             .unwrap_or(&[])
             .iter()
             .map(|s| (s.trim(), norm(s)))
-            .filter(|(_, n)| !n.is_empty())
+            .filter(|(_, n)| !n.is_empty() && !is_favorite_label(n))
         {
             let entry = subject_counts
                 .entry(normed)
@@ -770,6 +786,29 @@ mod tests {
         // An explicit low rating vetoes the fallback.
         let vetoed = sb("v", "V").subjects(&["Favoris"]).rating(3).build();
         assert!(!vetoed.is_liked());
+    }
+
+    #[test]
+    fn favorites_shelf_never_counts_as_thematic_overlap() {
+        // Two books sharing ONLY a favorites shelf are not thematically
+        // similar: the label feeds the liked signal, nothing else. Without
+        // this, any two favorites would recommend each other with a bogus
+        // "shared subject: favoris" reason.
+        let r = sb("r", "Ref").subjects(&["Favoris"]).build();
+        let c = sb("c", "Cand").subjects(&["favoris"]).build();
+        assert!(score_against_reference(&r, &c).is_none());
+        assert!(r.is_liked() && c.is_liked());
+
+        // And the taste profile never elects it as a top subject.
+        let books = vec![
+            sb("1", "A")
+                .status("read")
+                .subjects(&["favoris", "SF"])
+                .build(),
+            sb("2", "B").status("read").subjects(&["favoris"]).build(),
+        ];
+        let profile = build_taste_profile(&books);
+        assert_eq!(profile.top_subjects, vec![("SF".to_string(), 1)]);
     }
 
     #[test]
