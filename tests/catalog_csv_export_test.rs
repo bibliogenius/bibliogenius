@@ -81,6 +81,39 @@ async fn add_tag(db: &DatabaseConnection, book_id: &str, name: &str) {
     link.insert(db).await.expect("link tag");
 }
 
+/// Turn the bookseller module on, which is what makes the export emit a price
+/// column. Absent an installation profile row, the export treats the library as
+/// one that does not sell.
+async fn enable_commerce(db: &DatabaseConnection) {
+    use sea_orm::EntityTrait;
+    // `init_db` seeds row 1 with an empty module list, so this updates rather
+    // than inserts: a second row would never be the one the export reads.
+    let profile = rust_lib_app::models::installation_profile::Entity::find_by_id(1)
+        .one(db)
+        .await
+        .expect("find profile")
+        .expect("seeded profile");
+    let mut active: rust_lib_app::models::installation_profile::ActiveModel = profile.into();
+    active.profile_type = Set("bookseller".to_string());
+    active.enabled_modules = Set(r#"["network","commerce"]"#.to_string());
+    active.update(db).await.expect("enable commerce");
+}
+
+/// Set the book's shelves the way the app does: a JSON array in
+/// `books.subjects`, not a `book_tags` row.
+async fn set_subjects(db: &DatabaseConnection, book_id: &str, subjects: &[&str]) {
+    use sea_orm::{ActiveValue::Set as S, EntityTrait};
+    let json = serde_json::to_string(subjects).expect("json");
+    let book = rust_lib_app::models::book::Entity::find_by_id(book_id.to_string())
+        .one(db)
+        .await
+        .expect("find")
+        .expect("book");
+    let mut active: rust_lib_app::models::book::ActiveModel = book.into();
+    active.subjects = S(Some(json));
+    active.update(db).await.expect("update subjects");
+}
+
 /// Insert a copy of `book_id` with the given status. `is_temporary` is left
 /// false on purpose: the borrowed derivation must not depend on it.
 async fn create_copy(db: &DatabaseConnection, book_id: &str, status: &str) {
@@ -119,6 +152,12 @@ async fn fetch_csv(db: DatabaseConnection) -> (StatusCode, Vec<u8>) {
     (status, body.to_vec())
 }
 
+/// Today's date in the export's format, to check a column landed where the
+/// dropped one left it.
+fn date_only_today() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
 /// Body as text, byte-order mark stripped.
 fn csv_text(body: &[u8]) -> String {
     assert_eq!(&body[..3], UTF8_BOM, "export must start with a UTF-8 BOM");
@@ -139,11 +178,12 @@ async fn test_csv_export_has_bom_and_semicolon_header() {
     let text = csv_text(&body);
     let header = text.lines().next().expect("header line");
     // Column names are quoted like every other non-numeric field.
+    // No price column: the commerce module is off without a profile row.
     assert_eq!(
         header,
         "\"title\";\"authors\";\"isbn\";\"publisher\";\"publication_year\";\
          \"language\";\"ownership_status\";\"reading_status\";\"user_rating\";\
-         \"price\";\"tags\";\"added_at\""
+         \"tags\";\"added_at\""
     );
     assert!(text.contains("Les Misérables"));
 
@@ -179,8 +219,94 @@ async fn test_csv_export_quotes_a_field_holding_a_comma() {
         .delimiter(b';')
         .from_reader(text.as_bytes());
     let record = reader.records().next().expect("row").expect("record");
-    assert_eq!(record.len(), 12, "a comma split the row");
+    assert_eq!(record.len(), 11, "a comma split the row");
     assert_eq!(&record[1], "Autre, Auteur, Maupassant, Guy de");
+}
+
+#[tokio::test]
+async fn test_csv_export_omits_the_price_column_without_the_commerce_module() {
+    let db = setup_test_db().await;
+    // The default profile sells nothing, so a price column would be empty on
+    // every row of the inventory.
+    create_book(&db, "A Book", true, "read").await;
+
+    let (_, body) = fetch_csv(db).await;
+    let text = csv_text(&body);
+    assert!(!text.contains("\"price\""), "price column emitted: {text}");
+
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .from_reader(text.as_bytes());
+    let record = reader.records().next().expect("row").expect("record");
+    assert_eq!(record.len(), 11);
+    // The columns after the dropped one shift up with it, values included.
+    assert_eq!(&record[10], date_only_today());
+}
+
+#[tokio::test]
+async fn test_csv_export_keeps_the_price_column_for_a_bookseller() {
+    let db = setup_test_db().await;
+    enable_commerce(&db).await;
+    let now = chrono::Utc::now().to_rfc3339();
+    let book = rust_lib_app::models::book::ActiveModel {
+        title: Set("A Book".to_string()),
+        owned: Set(true),
+        private: Set(false),
+        reading_status: Set("read".to_string()),
+        price: Set(Some(12.5)),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    book.insert(&db).await.expect("insert book");
+
+    let (_, body) = fetch_csv(db).await;
+    let text = csv_text(&body);
+    assert!(text.contains("\"price\""), "price column missing: {text}");
+
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .from_reader(text.as_bytes());
+    let record = reader.records().next().expect("row").expect("record");
+    assert_eq!(record.len(), 12);
+    assert_eq!(&record[9], "12.5");
+}
+
+#[tokio::test]
+async fn test_csv_export_reports_shelves_from_books_subjects() {
+    let db = setup_test_db().await;
+    // Where the app actually files a book. The `book_tags` join table is empty
+    // on a current install, so reading it alone reported no shelf at all.
+    let shelved = create_book(&db, "L'énigme argentine", true, "read").await;
+    set_subjects(&db, &shelved, &["Amérique latine", "Essai & document"]).await;
+
+    let (_, body) = fetch_csv(db).await;
+    let text = csv_text(&body);
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .from_reader(text.as_bytes());
+    let record = reader.records().next().expect("row").expect("record");
+
+    assert_eq!(&record[9], "Amérique latine, Essai & document");
+}
+
+#[tokio::test]
+async fn test_csv_export_merges_both_shelf_stores_without_duplicating() {
+    let db = setup_test_db().await;
+    let book = create_book(&db, "Deux sources", true, "read").await;
+    add_tag(&db, &book, "favoris").await;
+    add_tag(&db, &book, "Drupal").await;
+    // "Drupal" recorded in both stores must appear once.
+    set_subjects(&db, &book, &["Drupal", "CMS"]).await;
+
+    let (_, body) = fetch_csv(db).await;
+    let text = csv_text(&body);
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .from_reader(text.as_bytes());
+    let record = reader.records().next().expect("row").expect("record");
+
+    assert_eq!(&record[9], "CMS, Drupal, favoris");
 }
 
 #[tokio::test]
@@ -216,11 +342,7 @@ async fn test_csv_export_defuses_spreadsheet_formulas() {
         "title still a formula: {}",
         &row[0]
     );
-    assert!(
-        row[10].starts_with('\''),
-        "tag still a formula: {}",
-        &row[10]
-    );
+    assert!(row[9].starts_with('\''), "tag still a formula: {}", &row[9]);
 
     assert!(by_title("41 tours")[0].starts_with('\''));
 
@@ -240,6 +362,7 @@ async fn test_csv_export_defuses_spreadsheet_formulas() {
 #[tokio::test]
 async fn test_csv_export_leaves_a_plain_title_and_a_negative_price_alone() {
     let db = setup_test_db().await;
+    enable_commerce(&db).await;
     let now = chrono::Utc::now().to_rfc3339();
     let book = rust_lib_app::models::book::ActiveModel {
         title: Set("Les Misérables".to_string()),
@@ -272,6 +395,7 @@ async fn test_csv_export_leaves_a_plain_title_and_a_negative_price_alone() {
 #[tokio::test]
 async fn test_csv_export_leaves_numbers_unquoted() {
     let db = setup_test_db().await;
+    enable_commerce(&db).await;
     let now = chrono::Utc::now().to_rfc3339();
     let book = rust_lib_app::models::book::ActiveModel {
         title: Set("Numbers".to_string()),
@@ -336,6 +460,21 @@ async fn test_csv_export_headers_advertise_a_csv_attachment() {
         "unexpected disposition: {disposition}"
     );
     assert!(disposition.ends_with(".csv\""));
+
+    // Stamped down to the minute, so a second export of the same day does not
+    // silently overwrite the first (a file a spreadsheet still has open).
+    let stamp = disposition
+        .trim_start_matches("attachment; filename=\"bibliogenius_catalogue_")
+        .trim_end_matches(".csv\"");
+    assert_eq!(stamp.len(), 16, "expected YYYY-MM-DD_HH-MM, got {stamp}");
+    assert!(
+        stamp.chars().enumerate().all(|(i, c)| match i {
+            4 | 7 | 13 => c == '-',
+            10 => c == '_',
+            _ => c.is_ascii_digit(),
+        }),
+        "unexpected timestamp shape: {stamp}"
+    );
 }
 
 #[tokio::test]
@@ -441,13 +580,13 @@ async fn test_csv_export_book_without_author_keeps_its_columns() {
     // Authorless book: an empty cell, not a missing column and not a shifted row.
     assert_eq!(&records[0][0], "Anonyme");
     assert_eq!(&records[0][1], "");
-    assert_eq!(records[0].len(), 12);
-    assert_eq!(&records[0][10], "poésie");
+    assert_eq!(records[0].len(), 11);
+    assert_eq!(&records[0][9], "poésie");
 
     // Several authors are joined by ", " in a single quoted cell, name-sorted
     // so two exports of the same library match.
     assert_eq!(&records[1][1], "Autre, Auteur, Zola, Émile");
-    assert_eq!(records[1].len(), 12);
+    assert_eq!(records[1].len(), 11);
 }
 
 #[tokio::test]
@@ -461,7 +600,7 @@ async fn test_csv_export_added_at_is_a_bare_date() {
         .delimiter(b';')
         .from_reader(text.as_bytes());
     let record = reader.records().next().expect("row").expect("record");
-    let added_at = &record[11];
+    let added_at = &record[10];
     assert_eq!(added_at.len(), 10, "expected YYYY-MM-DD, got {added_at}");
     assert!(!added_at.contains('T'));
 }

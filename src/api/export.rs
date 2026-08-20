@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use axum::{
     Json,
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::{
     author, book, book_authors, book_tags, collection, collection_book, contact, copy,
     gamification_achievements, gamification_config, gamification_progress, gamification_streaks,
-    library_config, loan, peer, sale, tag,
+    installation_profile, library_config, loan, peer, sale, tag,
 };
 
 // --- Export ---
@@ -128,7 +128,10 @@ pub async fn export_data(State(db): State<DatabaseConnection>) -> impl IntoRespo
 
 // --- Catalogue CSV export ---
 
-/// Column headers of the catalogue CSV, in output order.
+/// Column names of the catalogue CSV, in output order.
+///
+/// Not all of them are always emitted: see `price` and
+/// [`commerce_module_enabled`]. The order is what is fixed.
 ///
 /// English snake_case and stable across versions: a user who has built
 /// spreadsheet formulas on top of an export must not see them break after an
@@ -148,6 +151,9 @@ const CATALOG_CSV_HEADERS: [&str; 12] = [
     "tags",
     "added_at",
 ];
+
+/// The one column whose presence depends on an enabled module.
+const PRICE_COLUMN: &str = "price";
 
 /// French spreadsheets split a CSV on `;`, not on `,`. Fields are quoted on
 /// top of that (see the writer below): the delimiter alone is not enough to
@@ -204,6 +210,37 @@ fn defuse_formula(value: &str) -> Cow<'_, str> {
 /// through untouched rather than dropping it.
 fn date_only(timestamp: &str) -> String {
     timestamp.split('T').next().unwrap_or(timestamp).to_string()
+}
+
+/// Module id the bookseller features are gated on, as written by
+/// `theme_provider.dart` into `installation_profile.enabled_modules`.
+const COMMERCE_MODULE: &str = "commerce";
+
+/// Whether this installation sells books.
+///
+/// The price column only means something to a library that does; everyone else
+/// gets a column empty on every row. Read from the local profile rather than
+/// asked of the client, so the CSV says the same thing whichever door it came
+/// through. A profile that cannot be read or parsed counts as "does not sell":
+/// omitting a column no one filled beats inventing one.
+async fn commerce_module_enabled(db: &DatabaseConnection) -> bool {
+    let Ok(Some(profile)) = installation_profile::Entity::find().one(db).await else {
+        return false;
+    };
+    serde_json::from_str::<Vec<String>>(&profile.enabled_modules)
+        .map(|modules| modules.iter().any(|m| m == COMMERCE_MODULE))
+        .unwrap_or(false)
+}
+
+/// Shelf names stored on the book row itself, as a JSON array.
+///
+/// `books.subjects` is where the app actually files a book: the `book_tags`
+/// join table is the legacy path and is empty on a current install, where the
+/// `tags` rows serve only as a name registry. Reading one source alone silently
+/// drops every shelf the user set, so the export merges both.
+fn subjects_of(raw: Option<&str>) -> Vec<String> {
+    raw.and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+        .unwrap_or_default()
 }
 
 /// Group a many-to-many link table into `owner id -> sorted labels`.
@@ -277,6 +314,13 @@ pub async fn export_catalog_csv(State(db): State<DatabaseConnection>) -> Respons
         Err(e) => return csv_export_failed("copies", e),
     };
 
+    let sells_books = commerce_module_enabled(&db).await;
+    let keep = |name: &str| sells_books || name != PRICE_COLUMN;
+    let headers: Vec<&str> = CATALOG_CSV_HEADERS
+        .into_iter()
+        .filter(|name| keep(name))
+        .collect();
+
     let mut writer = csv::WriterBuilder::new()
         .delimiter(CATALOG_CSV_DELIMITER)
         // Quote every field that is not a plain number, even when a
@@ -291,7 +335,7 @@ pub async fn export_catalog_csv(State(db): State<DatabaseConnection>) -> Respons
 
     // Written unconditionally so an empty library still exports a usable file
     // with its column names.
-    if let Err(e) = writer.write_record(CATALOG_CSV_HEADERS) {
+    if let Err(e) = writer.write_record(&headers) {
         return csv_write_failed(e);
     }
 
@@ -300,16 +344,21 @@ pub async fn export_catalog_csv(State(db): State<DatabaseConnection>) -> Respons
             .get(&book.id)
             .map(|names| names.join(", "))
             .unwrap_or_default();
-        let tags = tags_by_book
+        // Merged and de-duplicated across both stores, sorted by the set so a
+        // shelf recorded in each one is reported once.
+        let mut tag_names: BTreeSet<String> = tags_by_book
             .get(&book.id)
-            .map(|names| names.join(", "))
+            .map(|names| names.iter().cloned().collect())
             .unwrap_or_default();
+        tag_names.extend(subjects_of(book.subjects.as_deref()));
+        let tags = tag_names.into_iter().collect::<Vec<_>>().join(", ");
         let ownership = ownership_status(book.owned, borrowed_books.contains(&book.id));
         let language = crate::models::book::language_from_source_data(book.source_data.as_deref())
             .unwrap_or_default();
 
-        // Field order MUST match CATALOG_CSV_HEADERS above.
-        let record = [
+        // Paired with CATALOG_CSV_HEADERS below, so a column and its value are
+        // dropped together and can never drift apart.
+        let values = [
             book.title,
             authors,
             book.isbn.unwrap_or_default(),
@@ -332,8 +381,13 @@ pub async fn export_catalog_csv(State(db): State<DatabaseConnection>) -> Respons
             tags,
             date_only(&book.created_at),
         ];
-        let defused: Vec<Cow<'_, str>> = record.iter().map(|f| defuse_formula(f)).collect();
-        if let Err(e) = writer.write_record(defused.iter().map(|f| f.as_bytes())) {
+        let record: Vec<Cow<'_, str>> = CATALOG_CSV_HEADERS
+            .iter()
+            .zip(values.iter())
+            .filter(|(name, _)| keep(name))
+            .map(|(_, value)| defuse_formula(value))
+            .collect();
+        if let Err(e) = writer.write_record(record.iter().map(|f| f.as_bytes())) {
             return csv_write_failed(e);
         }
     }
@@ -347,9 +401,13 @@ pub async fn export_catalog_csv(State(db): State<DatabaseConnection>) -> Respons
     body.extend_from_slice(&UTF8_BOM);
     body.extend_from_slice(&rows);
 
+    // Local time, down to the minute. Two exports on the same day must not land
+    // on the same name: overwriting a file a spreadsheet already has open leaves
+    // the user reading the stale import with nothing to signal it. `-` rather
+    // than `:` between hours and minutes, which Windows forbids in a filename.
     let filename = format!(
         "bibliogenius_catalogue_{}.csv",
-        chrono::Utc::now().format("%Y-%m-%d")
+        chrono::Local::now().format("%Y-%m-%d_%H-%M")
     );
 
     let mut headers = HeaderMap::new();
