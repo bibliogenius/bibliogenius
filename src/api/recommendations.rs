@@ -99,3 +99,29 @@ pub async fn personal_recommendations(
         "profile_summary": profile_summary_json(&profile),
     })))
 }
+
+/// GET /api/recommendations/discovery-inputs - inputs of the external
+/// discovery lookups (ADR-060). Owner-only like the other recommendation
+/// routes: the identity index summarizes the whole library.
+pub async fn discovery_lookup_inputs(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let inputs = crate::services::discovery_lookup_service::discovery_lookup_inputs(state.db())
+        .await
+        .map_err(error_response)?;
+    Ok(Json(json!({
+        "series": inputs.series.iter().map(|s| json!({
+            "collection_id": s.collection_id,
+            "name": s.name,
+            "anchor_isbns": s.anchor_isbns,
+            "member_isbns": s.member_isbns,
+            "member_title_author_keys": s.member_title_author_keys,
+        })).collect::<Vec<_>>(),
+        "authors": inputs.authors.iter().map(|a| json!({
+            "name": a.name,
+            "anchor_isbns": a.anchor_isbns,
+        })).collect::<Vec<_>>(),
+        "library_isbns": inputs.library_isbns,
+        "library_title_author_keys": inputs.library_title_author_keys,
+    })))
+}

@@ -197,6 +197,12 @@ fn owner_routes() -> Router<AppState> {
             "/recommendations",
             get(recommendations::personal_recommendations),
         )
+        // External discovery lookup inputs (ADR-060): what the client asks
+        // the hub resolver, plus the identity filter index.
+        .route(
+            "/recommendations/discovery-inputs",
+            get(recommendations::discovery_lookup_inputs),
+        )
         .route(
             "/books/:id/collections",
             get(collections::get_book_collections).put(collections::update_book_collections),

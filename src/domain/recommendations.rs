@@ -1,9 +1,12 @@
-//! Pure types for the local reading recommendations engine (ADR-059).
+//! Pure types for the local reading recommendations engine (ADR-059) and
+//! the inputs of the external discovery lookups (ADR-060).
 //!
-//! Everything here is computed on-device from the user's own library: no
-//! cloud, no profiling, no data leaves the device. Scoring lives in
-//! `services/recommendation_service.rs`; these types are the contract it
-//! shares with the API and FFI layers.
+//! The scoring computation stays local: no cloud, no profiling, the taste
+//! profile is built on-device and never transits. External discovery
+//! (series/author completion) sends an anonymous search to the hub: a short
+//! ISBN list and a name, never the profile itself (ADR-060 privacy
+//! contract). Scoring lives in `services/recommendation_service.rs`; these
+//! types are the contract it shares with the API and FFI layers.
 
 use crate::models::book::Book;
 
@@ -74,4 +77,56 @@ pub struct ScoredRecommendation {
     pub book: Book,
     pub score: f64,
     pub reasons: Vec<RecommendationReason>,
+}
+
+/// One "complete the series" lookup the client may send to the hub
+/// resolver (ADR-060): the anchors identify the series, the member
+/// identity lets the client match returned volumes against what is
+/// already owned (source ordinals are truth; local `volume_number` is
+/// never consulted because frieze reordering renumbers 1..N).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoverySeriesLookup {
+    /// Local `collections.id` of the series-typed collection. Client-side
+    /// throttle/cache key; never sent to the hub.
+    pub collection_id: String,
+    /// User-authored series name, sent as an opaque tiebreaker only.
+    pub name: String,
+    /// Up to 3 checksum-valid member ISBNs (canonical ISBN-13), the
+    /// request anchors.
+    pub anchor_isbns: Vec<String>,
+    /// All member ISBNs in both ISBN-10/13 forms, for matching returned
+    /// volumes against owned members.
+    pub member_isbns: Vec<String>,
+    /// Normalized "title|author" keys of the members (one per author),
+    /// the ISBN-less half of the matching rule.
+    pub member_title_author_keys: Vec<String>,
+}
+
+/// One "complete the author" lookup (ADR-060, second lane): the display
+/// name plus up to 3 anchor ISBNs of liked books by that author. The hub
+/// verifies the name against the entity the anchors resolve to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveryAuthorLookup {
+    /// Display-cased author name from the taste profile.
+    pub name: String,
+    /// Up to 3 checksum-valid ISBNs (canonical ISBN-13) of liked books by
+    /// this author.
+    pub anchor_isbns: Vec<String>,
+}
+
+/// Everything the Flutter side needs to run external discovery: the
+/// lookups derived from the library, and the library-wide identity index
+/// used to filter answers (a returned volume or work matching the index
+/// by ISBN or by title+author is never suggested). Empty below the
+/// ADR-059 profile threshold: no external lookups without local signal.
+#[derive(Debug, Clone, Default)]
+pub struct DiscoveryLookupInputs {
+    pub series: Vec<DiscoverySeriesLookup>,
+    pub authors: Vec<DiscoveryAuthorLookup>,
+    /// Every library ISBN (all statuses including `wanting`), expanded to
+    /// both ISBN-10/13 forms, sorted and deduplicated.
+    pub library_isbns: Vec<String>,
+    /// Normalized "title|author" keys for every library book (one per
+    /// author), sorted and deduplicated.
+    pub library_title_author_keys: Vec<String>,
 }

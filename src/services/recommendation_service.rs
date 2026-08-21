@@ -2,10 +2,12 @@
 //!
 //! Scores books from the user's own library against a reference book
 //! ("You might also like", book details) or against a taste profile
-//! ("Suggestions for you", dashboard). Everything is computed in-memory
+//! ("Suggestions for you", dashboard). The scoring is computed in-memory
 //! and on-device from data the library already holds: no cloud, no
-//! profiling, no network. Explainability is the trust contract: every
-//! recommendation carries the human-readable reasons that produced it.
+//! profiling. External discovery (ADR-060) sends an anonymous search to
+//! the hub from the client side; the profile built here never transits.
+//! Explainability is the trust contract: every recommendation carries the
+//! human-readable reasons that produced it.
 //!
 //! Data-coverage reality this engine is tuned for (field audit, 2026-08):
 //! ratings and Dewey codes are almost never filled, `book_tags` is unused
@@ -101,7 +103,7 @@ pub struct ScoringBook {
     pub has_favorite_shelf: bool,
 }
 
-fn norm(s: &str) -> String {
+pub(crate) fn norm(s: &str) -> String {
     s.trim().to_lowercase()
 }
 
