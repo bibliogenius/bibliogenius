@@ -619,27 +619,63 @@ pub async fn delete_book(db: &DatabaseConnection, id: &str) -> Result<(), Servic
     Ok(())
 }
 
-/// List all unique tags with counts
-pub async fn list_tags(db: &DatabaseConnection) -> Result<Vec<TagDto>, ServiceError> {
+/// Per-subject book counts, scoped to the default library view (ADR-063).
+///
+/// The opened shelf filters on physical presence (owned, or on loan through a
+/// copy), so the badge must count the same books or it over-counts: a wishlist
+/// book carrying the subject would inflate the number without ever appearing
+/// in the shelf. Subjects carried only by books outside the view still get an
+/// entry, at zero, so the shelf itself stays listed.
+///
+/// The Flutter side additionally lets the user hide on-loan books from the
+/// default view (a display preference the backend does not know); with that
+/// preference on, badges keep counting on-loan copies.
+pub async fn subject_counts(db: &DatabaseConnection) -> Result<HashMap<String, i64>, ServiceError> {
     let books = BookEntity::find().all(db).await?;
 
-    let mut tag_counts: HashMap<String, usize> = HashMap::new();
+    // One query for the on-loan book ids: any copy lent out or borrowed keeps
+    // its book physically relevant even when `owned` is false (same rule as
+    // the `is_borrowed`/`is_lent` flags in `list_books`).
+    let on_loan: std::collections::HashSet<String> = crate::models::copy::Entity::find()
+        .filter(crate::models::copy::Column::Status.is_in(["loaned", "borrowed"]))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|c| c.book_id)
+        .collect();
+
+    let mut tag_counts: HashMap<String, i64> = HashMap::new();
 
     for book in books {
+        let in_default_view = book.owned || on_loan.contains(&book.id);
         if let Some(subjects_json) = book.subjects
             && let Ok(subjects) = serde_json::from_str::<Vec<String>>(&subjects_json)
         {
             for subject in subjects {
-                if !subject.trim().is_empty() {
-                    *tag_counts.entry(subject.trim().to_string()).or_insert(0) += 1;
+                let trimmed = subject.trim();
+                if !trimmed.is_empty() {
+                    let entry = tag_counts.entry(trimmed.to_string()).or_insert(0);
+                    if in_default_view {
+                        *entry += 1;
+                    }
                 }
             }
         }
     }
 
+    Ok(tag_counts)
+}
+
+/// List all unique tags with counts (default-view scoped, see [`subject_counts`])
+pub async fn list_tags(db: &DatabaseConnection) -> Result<Vec<TagDto>, ServiceError> {
+    let tag_counts = subject_counts(db).await?;
+
     let mut tags: Vec<TagDto> = tag_counts
         .into_iter()
-        .map(|(name, count)| TagDto { name, count })
+        .map(|(name, count)| TagDto {
+            name,
+            count: count as usize,
+        })
         .collect();
 
     tags.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
@@ -1990,5 +2026,79 @@ mod tests {
         book.redact_for_peer();
         assert_eq!(book.is_borrowed, None);
         assert_eq!(book.is_lent, None);
+    }
+
+    // ---- Shelf badge counts: `list_tags` ----
+    //
+    // The opened shelf applies the default library view (owned or on loan),
+    // but the badge used to count every book carrying the subject. A wishlist
+    // book inflated the badge without ever appearing inside the shelf.
+
+    async fn insert_test_book_with_subjects(
+        db: &DatabaseConnection,
+        title: &str,
+        owned: bool,
+        subjects: &[&str],
+    ) -> String {
+        use crate::models::book;
+        use sea_orm::Set;
+        let now = chrono::Utc::now().to_rfc3339();
+        let id = uuid::Uuid::new_v4().to_string();
+        let subjects_json = serde_json::to_string(subjects).unwrap();
+        book::Entity::insert(book::ActiveModel {
+            id: Set(id.clone()),
+            title: Set(title.to_owned()),
+            owned: Set(owned),
+            subjects: Set(Some(subjects_json)),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// The badge must agree with what the opened shelf shows: owned books and
+    /// on-loan copies count, a wishlist book does not.
+    #[tokio::test]
+    async fn list_tags_counts_only_books_in_the_default_view() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+
+        insert_test_book_with_subjects(&db, "Owned", true, &["SF"]).await;
+        insert_test_book_with_subjects(&db, "Wished", false, &["SF"]).await;
+        let borrowed = insert_test_book_with_subjects(&db, "Borrowed", false, &["SF"]).await;
+        insert_test_copy(&db, &borrowed, "borrowed", false).await;
+        let lent = insert_test_book_with_subjects(&db, "Lent out", true, &["SF"]).await;
+        insert_test_copy(&db, &lent, "loaned", false).await;
+
+        let tags = list_tags(&db).await.unwrap();
+        let sf = tags
+            .iter()
+            .find(|t| t.name == "SF")
+            .expect("SF shelf listed");
+        assert_eq!(
+            sf.count, 3,
+            "wishlist books must not inflate the shelf badge"
+        );
+    }
+
+    /// A shelf whose books are all outside the default view stays listed, with
+    /// an honest zero: hiding it would strand the books it still organizes.
+    #[tokio::test]
+    async fn list_tags_keeps_a_shelf_of_not_owned_books_listed_at_zero() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+
+        insert_test_book_with_subjects(&db, "Dream book", false, &["Envies"]).await;
+
+        let tags = list_tags(&db).await.unwrap();
+        let envies = tags
+            .iter()
+            .find(|t| t.name == "Envies")
+            .expect("shelf must stay listed even when all its books are not owned");
+        assert_eq!(envies.count, 0);
     }
 }

@@ -26,25 +26,12 @@ pub async fn get_all_tags() -> Result<Vec<FrbTag>, String> {
         .await
         .map_err(|e| format!("{:?}", e))?;
 
-    // 2. Fetch counts from legacy book subjects (JSON)
-    // We reuse the logic from `list_tags` because `book_tags` table might be empty
-    let books = crate::models::book::Entity::find()
-        .all(db)
+    // 2. Fetch counts from legacy book subjects (JSON), scoped to the default
+    // library view so the badge agrees with the opened shelf (ADR-063). The
+    // rule lives in `book_service::subject_counts`, shared with the HTTP path.
+    let tag_counts = crate::services::book_service::subject_counts(db)
         .await
         .map_err(|e| format!("{:?}", e))?;
-
-    let mut tag_counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    for book in books {
-        if let Some(subjects_json) = book.subjects
-            && let Ok(subjects) = serde_json::from_str::<Vec<String>>(&subjects_json)
-        {
-            for subject in subjects {
-                if !subject.trim().is_empty() {
-                    *tag_counts.entry(subject.trim().to_string()).or_insert(0) += 1;
-                }
-            }
-        }
-    }
 
     // 3. Merge: Prioritize DB hierarchy, add legacy tags as roots if missing
     let mut result = Vec::new();
