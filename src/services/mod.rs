@@ -22,6 +22,7 @@ pub mod crypto_service;
 pub mod delta_service;
 pub mod discovery_lookup_service;
 pub mod e2ee_transport;
+pub mod favorites_service;
 pub mod gamification_service;
 pub mod hub_directory_service;
 pub mod identity_service;

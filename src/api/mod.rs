@@ -12,6 +12,7 @@ pub mod data;
 pub mod discovery;
 pub mod e2ee;
 pub mod export;
+pub mod favorites;
 pub mod frb; // FFI API for flutter_rust_bridge
 pub mod gamification;
 pub mod health;
@@ -202,6 +203,18 @@ fn owner_routes() -> Router<AppState> {
         .route(
             "/recommendations/discovery-inputs",
             get(recommendations::discovery_lookup_inputs),
+        )
+        // Favorites (ADR-064): owner-facing, mirrors the FFI surface
+        .route("/favorites", get(favorites::list_favorites))
+        .route(
+            "/favorites/adoption-candidate",
+            get(favorites::adoption_candidate),
+        )
+        .route("/favorites/seed", post(favorites::seed_favorites))
+        .route("/favorites/adopt/:collection_id", post(favorites::adopt))
+        .route(
+            "/favorites/:book_id/toggle",
+            post(favorites::toggle_favorite),
         )
         .route(
             "/books/:id/collections",

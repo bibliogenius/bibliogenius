@@ -272,6 +272,21 @@ pub async fn mark_collection_as_series(
     } else {
         "manual"
     };
+    // The favorites collection's source is its identity (ADR-064): refuse
+    // the series flip here too (the FFI path carries the same guard).
+    if let Err(e) = crate::services::favorites_service::ensure_not_favorites(state.db(), &id).await
+    {
+        return match e {
+            crate::domain::DomainError::Validation(msg) => {
+                (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
+            }
+            other => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": other.to_string() })),
+            )
+                .into_response(),
+        };
+    }
     match state.collection_repo.set_source(&id, source).await {
         Ok(()) => {
             let _ = crate::sync::log_operation_with_str_id(

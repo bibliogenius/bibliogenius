@@ -217,6 +217,12 @@ pub async fn mark_collection_as_series(
 ) -> Result<(), String> {
     use crate::domain::collection_repository::CollectionRepository;
     let db = db().ok_or("Database not initialized")?;
+    // The favorites collection's source is its identity (ADR-064): a
+    // series flip would silently untype it. The UI hides the toggle; this
+    // guard covers every other caller.
+    crate::services::favorites_service::ensure_not_favorites(db, &collection_id)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
     let repo = collection_repo!(db);
     let source = if is_series { "series" } else { "manual" };
     repo.set_source(&collection_id, source)

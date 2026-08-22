@@ -73,8 +73,10 @@ const LIKED_RATING_MIN: i32 = 7;
 
 /// Shelf labels that mark a book as a favorite, compared normalized.
 /// Favorites are ordinary shelves (there is no first-class flag), so the
-/// engine recognizes the common labels a user would type.
-const FAVORITE_SHELF_LABELS: [&str; 5] =
+/// engine recognizes the common labels a user would type. Also reused by
+/// the favorites seeding/adoption gates (ADR-064) so both features agree
+/// on what "favorites-like" means.
+pub(crate) const FAVORITE_SHELF_LABELS: [&str; 5] =
     ["favoris", "favori", "favorites", "favorite", "favourites"];
 
 /// How many reasons of one kind a single recommendation may carry; keeps
@@ -101,6 +103,11 @@ pub struct ScoringBook {
     /// One of the shelves is a favorites label. Kept OUT of
     /// [`Self::norm_subjects`]: it feeds the liked signal only.
     pub has_favorite_shelf: bool,
+    /// Member of the typed favorites collection (`collections.source =
+    /// 'favorites'`, ADR-064). Like the shelf flag, it feeds the liked
+    /// signal and NOTHING else: never the thematic scoring, never the
+    /// taste profile's top subjects.
+    pub is_favorite_member: bool,
 }
 
 pub(crate) fn norm(s: &str) -> String {
@@ -167,20 +174,20 @@ impl ScoringBook {
             decade,
             dewey_major,
             has_favorite_shelf,
+            is_favorite_member: false,
         }
     }
 
     /// Whether the user liked this book. With ratings almost never filled,
-    /// "liked" falls back to having read the book, or having shelved it as
-    /// a favorite (ADR-059). An explicit low rating vetoes the fallbacks.
-    ///
-    /// When the typed favorites collection ships (`collections.source =
-    /// 'favorites'`, series-pattern), membership in it must join this test;
-    /// the shelf-label fallback then remains for legacy shelves only.
+    /// "liked" falls back to having read the book, being a member of the
+    /// typed favorites collection (`collections.source = 'favorites'`,
+    /// ADR-064, matched on the machine source, never a display name), or
+    /// having shelved it under a favorites label (legacy shelves only).
+    /// An explicit low rating vetoes all fallbacks.
     pub fn is_liked(&self) -> bool {
         match self.book.user_rating {
             Some(r) => r >= LIKED_RATING_MIN,
-            None => self.raw_status == "read" || self.has_favorite_shelf,
+            None => self.raw_status == "read" || self.is_favorite_member || self.has_favorite_shelf,
         }
     }
 
@@ -202,13 +209,38 @@ impl ScoringBook {
 }
 
 /// Load the whole library as scoring rows: raw entity rows (bypassing the
-/// borrowed/lent display overlay) plus a batch author join.
+/// borrowed/lent display overlay) plus a batch author join, plus the typed
+/// favorites membership set (one query per table, never per book).
 pub async fn load_scoring_books(db: &DatabaseConnection) -> Result<Vec<ScoringBook>, ServiceError> {
-    use crate::models::{author, book, book_authors};
+    use sea_orm::{ColumnTrait, QueryFilter};
+
+    use crate::models::{author, book, book_authors, collection, collection_book};
 
     let models = book::Entity::find().all(db).await?;
     let links = book_authors::Entity::find().all(db).await?;
     let authors = author::Entity::find().all(db).await?;
+
+    // Typed favorites membership (ADR-064). All `source = 'favorites'` rows
+    // are considered, not only the canonical one, so a not-yet-merged
+    // multi-device duplicate still feeds the liked signal correctly.
+    let favorites_ids: Vec<String> = collection::Entity::find()
+        .filter(collection::Column::Source.eq(crate::services::favorites_service::FAVORITES_SOURCE))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    let favorite_members: HashSet<String> = if favorites_ids.is_empty() {
+        HashSet::new()
+    } else {
+        collection_book::Entity::find()
+            .filter(collection_book::Column::CollectionId.is_in(favorites_ids))
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|cb| cb.book_id)
+            .collect()
+    };
 
     let name_by_id: HashMap<String, String> = authors.into_iter().map(|a| (a.id, a.name)).collect();
     let mut authors_by_book: HashMap<String, Vec<String>> = HashMap::new();
@@ -233,7 +265,9 @@ pub async fn load_scoring_books(db: &DatabaseConnection) -> Result<Vec<ScoringBo
                 book.author = Some(names.join(", "));
                 book.authors = Some(names);
             }
-            ScoringBook::new(book, raw_status)
+            let mut sb = ScoringBook::new(book, raw_status);
+            sb.is_favorite_member = favorite_members.contains(&id);
+            sb
         })
         .collect())
 }
@@ -788,6 +822,33 @@ mod tests {
         // An explicit low rating vetoes the fallback.
         let vetoed = sb("v", "V").subjects(&["Favoris"]).rating(3).build();
         assert!(!vetoed.is_liked());
+    }
+
+    #[test]
+    fn liked_candidate_via_typed_favorites_membership() {
+        // Membership in the `source = 'favorites'` collection (ADR-064)
+        // marks liked on its own: no rating, no read status, no shelf.
+        let plain = sb("p", "Plain").build();
+        assert!(!plain.is_liked());
+        let mut member = sb("m", "Member").build();
+        member.is_favorite_member = true;
+        assert!(member.is_liked());
+        // An explicit low rating vetoes the membership fallback too.
+        let mut vetoed = sb("v", "V").rating(3).build();
+        vetoed.is_favorite_member = true;
+        assert!(!vetoed.is_liked());
+    }
+
+    #[test]
+    fn typed_favorites_membership_feeds_liked_and_nothing_else() {
+        // Two members sharing no author and no subject stay unexplainable:
+        // membership must never create a thematic or content signal.
+        let mut r = sb("r", "Ref").build();
+        r.is_favorite_member = true;
+        let mut c = sb("c", "Cand").build();
+        c.is_favorite_member = true;
+        assert!(score_against_reference(&r, &c).is_none());
+        assert!(r.is_liked() && c.is_liked());
     }
 
     #[test]

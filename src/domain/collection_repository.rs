@@ -62,8 +62,15 @@ pub trait CollectionRepository: Send + Sync {
     async fn delete(&self, id: &str) -> Result<(), DomainError>;
 
     /// Set (or clear, with `None`) a collection's `source`. Used to flip a
-    /// plain collection to a series (`source = 'series'`) and back.
+    /// plain collection to a series (`source = 'series'`) and back, and to
+    /// adopt a manual collection as the typed favorites one (ADR-064).
     async fn set_source(&self, id: &str, source: &str) -> Result<(), DomainError>;
+
+    /// Find all collections of a given `source`, ordered oldest first
+    /// (`created_at` asc, then `id` asc): a total order identical on every
+    /// device, which the favorites keep-oldest merge rule relies on
+    /// (ADR-064).
+    async fn find_by_source(&self, source: &str) -> Result<Vec<Collection>, DomainError>;
 
     /// Get all books in a collection, ordered by `volume_number` (numbered
     /// volumes first, ascending; unnumbered last, then by `added_at`).

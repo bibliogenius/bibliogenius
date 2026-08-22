@@ -195,6 +195,36 @@ impl CollectionRepository for SeaOrmCollectionRepository {
         Ok(())
     }
 
+    async fn find_by_source(&self, source: &str) -> Result<Vec<Collection>, DomainError> {
+        let collections = CollectionEntity::find()
+            .filter(Column::Source.eq(source))
+            .order_by_asc(Column::CreatedAt)
+            .order_by_asc(Column::Id)
+            .all(&self.db)
+            .await?;
+
+        let mut result = Vec::new();
+        for col in collections {
+            let total = CollectionBookEntity::find()
+                .filter(collection_book::Column::CollectionId.eq(&col.id))
+                .count(&self.db)
+                .await
+                .unwrap_or(0) as i64;
+            let owned = self.count_owned_books(&col.id).await;
+            result.push(Collection {
+                id: col.id,
+                name: col.name,
+                description: col.description,
+                source: col.source,
+                created_at: col.created_at,
+                updated_at: col.updated_at,
+                total_books: total,
+                owned_books: owned,
+            });
+        }
+        Ok(result)
+    }
+
     async fn set_book_volume(
         &self,
         collection_id: &str,

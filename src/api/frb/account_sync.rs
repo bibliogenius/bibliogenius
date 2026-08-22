@@ -540,6 +540,18 @@ pub async fn account_sync_now_ffi() -> Result<String, String> {
             failed = stats.failed,
             "account_sync_now: data sync complete"
         );
+        // Favorites uniqueness (ADR-064): another device's lane may have
+        // brought in a second `source = 'favorites'` collection; merge to
+        // the canonical one (keep-oldest) now that the cycle applied.
+        // Best-effort: the resolve path re-runs the same idempotent merge
+        // on the next favorites read/write, so a failure here must not
+        // surface the sync cycle as failed.
+        if stats.applied > 0
+            && let Err(e) =
+                crate::services::favorites_service::resolve_favorites_collection(db).await
+        {
+            tracing::warn!(error = ?e, "favorites merge after sync failed; next favorites access retries");
+        }
         Ok(serde_json::json!({
             "synced": true,
             "applied": stats.applied,
