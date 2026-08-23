@@ -21,3 +21,19 @@ pub(crate) fn xml_text_content(e: &quick_xml::events::BytesText) -> String {
         .and_then(|t| quick_xml::escape::unescape(&t).ok().map(|u| u.into_owned()))
         .unwrap_or_default()
 }
+
+/// The text an entity reference stands for.
+///
+/// quick-xml reports `&amp;`, `&apos;` and `&#233;` as their own events
+/// rather than folding them into the surrounding text, so a parser that
+/// reads text alone drops them AND splits the value around them. Numeric
+/// references resolve to a char, named ones to their predefined string;
+/// anything else (a DTD-declared entity, which these catalogues do not use)
+/// resolves to nothing rather than to a guess.
+pub(crate) fn xml_entity_text(e: &quick_xml::events::BytesRef) -> Option<String> {
+    if let Ok(Some(c)) = e.resolve_char_ref() {
+        return Some(c.to_string());
+    }
+    let name = String::from_utf8_lossy(e).to_string();
+    quick_xml::escape::resolve_predefined_entity(&name).map(|s| s.to_string())
+}

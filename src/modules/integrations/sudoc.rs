@@ -110,7 +110,11 @@ pub async fn fetch_by_isbn(isbn: &str) -> Result<SudocBook, String> {
 
 fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    // NOT trim_text(true): a subfield's text arrives in fragments whenever it
+    // contains an entity, and trimming each fragment eats the spaces on
+    // either side of it ("Orgueil &amp; prejuges" would become
+    // "Orgueil&prejuges"). The accumulated value is trimmed once instead.
+    reader.config_mut().trim_text(false);
 
     let mut title = String::new();
     let mut publisher = None;
@@ -132,6 +136,13 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
     let mut buf = Vec::new();
     let mut current_tag = String::new();
     let mut current_code = String::new();
+    // A subfield's value is ACCUMULATED and dispatched once, at its closing
+    // tag. quick-xml reports an entity reference as its own event, so
+    // "L&apos;etranger" arrives as Text("L"), GeneralRef("apos"),
+    // Text("etranger"); a dispatch that assigned on every text event kept
+    // only the last fragment and stored the book as "etranger".
+    let mut current_text = String::new();
+    let mut in_subfield = false;
 
     // Simple parser state machine
     // Note: SUDOC XML is MARCXML-like but specific (UNIMARC).
@@ -164,11 +175,23 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
                             current_code = String::from_utf8_lossy(&a.value).to_string();
                         }
                     }
+                    current_text.clear();
+                    in_subfield = true;
                 }
             }
-            Ok(Event::Text(e)) => {
-                let text = super::xml_text_content(&e);
-
+            Ok(Event::Text(e)) if in_subfield => {
+                current_text.push_str(&super::xml_text_content(&e));
+            }
+            // The other half of a fragmented value: `&amp;`, `&apos;` and
+            // `&#233;` are all reported here rather than inside the text.
+            Ok(Event::GeneralRef(e)) => {
+                if in_subfield && let Some(resolved) = super::xml_entity_text(&e) {
+                    current_text.push_str(&resolved);
+                }
+            }
+            Ok(Event::End(e)) if e.name().as_ref() == b"subfield" => {
+                in_subfield = false;
+                let text = current_text.trim().to_string();
                 match (current_tag.as_str(), current_code.as_str()) {
                     ("200", "a") => title = text,
                     ("200", "f") if responsibility_200f.is_none() => {
@@ -198,14 +221,13 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
                     ("606", "a") => subjects.push(text),
                     _ => {}
                 }
+                current_code.clear();
             }
             Ok(Event::End(e)) => {
                 let qname = e.name();
                 let name = std::str::from_utf8(qname.as_ref()).unwrap_or("");
                 if name == "datafield" {
                     current_tag.clear();
-                } else if name == "subfield" {
-                    current_code.clear();
                 }
             }
             Ok(Event::Eof) => break,
@@ -242,6 +264,53 @@ mod tests {
     /// statement of responsibility). Author must come from `700`, not `200 $f`.
     const SUDOC_PIGAFETTA_FIXTURE: &str =
         include_str!("../../../tests/fixtures/sudoc_9782367321257.xml");
+
+    /// The second half of the same trap, and the one a naive fix walks into.
+    ///
+    /// The reader used to trim EVERY text event, so the fragments around an
+    /// entity lost the spaces that separated them from it: accumulating
+    /// "Orgueil " + "&" + " prejuges" under that setting yields
+    /// "Orgueil&prejuges". Interior spacing survives, and the trim happens
+    /// once on the finished value.
+    #[test]
+    fn keeps_the_spaces_around_an_entity() {
+        let xml = r##"<?xml version="1.0" encoding="UTF-8"?>
+<record>
+  <datafield tag="200" ind1="1" ind2=" ">
+    <subfield code="a">  Orgueil &amp; pr&#233;jug&#233;s  </subfield>
+  </datafield>
+</record>"##;
+
+        let book = parse_sudoc_xml(xml, "1").expect("record parses");
+
+        assert_eq!(book.title, "Orgueil & préjugés");
+    }
+
+    /// A title with an apostrophe, exactly as the SUDOC serves it.
+    ///
+    /// `L&apos;etranger` is an entity reference in the middle of a text run,
+    /// and quick-xml 0.41 reports it as its own event: the parser sees
+    /// Text("L"), a general reference, then Text("etranger"). A dispatch that
+    /// ASSIGNS on every text event keeps only the last fragment, so the book
+    /// is stored as "etranger". French titles are full of apostrophes, and
+    /// the BnF serves `&amp;` the same way ("Orgueil &amp; prejuges").
+    #[test]
+    fn keeps_the_whole_title_when_it_contains_an_entity() {
+        let xml = r##"<?xml version="1.0" encoding="UTF-8"?>
+<record>
+  <datafield tag="200" ind1="1" ind2=" ">
+    <subfield code="a">L&apos;etranger</subfield>
+  </datafield>
+  <datafield tag="700" ind1="#" ind2="1">
+    <subfield code="a">Camus</subfield>
+    <subfield code="b">Albert</subfield>
+  </datafield>
+</record>"##;
+
+        let book = parse_sudoc_xml(xml, "001896431").expect("record parses");
+
+        assert_eq!(book.title, "L'etranger");
+    }
 
     #[test]
     fn parses_author_from_700_not_200f() {

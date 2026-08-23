@@ -501,7 +501,10 @@ fn parse_bnf_sru_record(
     use quick_xml::reader::Reader;
 
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    // NOT trim_text(true): a subfield's text arrives in fragments whenever it
+    // contains an entity, and trimming each fragment eats the spaces on either
+    // side of it. The accumulated value is trimmed once, at its closing tag.
+    reader.config_mut().trim_text(false);
 
     let mut builder = BnfBookBuilder::default();
     let mut buf = Vec::new();
@@ -509,6 +512,10 @@ fn parse_bnf_sru_record(
     let mut current_code = String::new();
     let mut in_datafield = false;
     let mut in_subfield = false;
+    // Accumulated and dispatched once, at the subfield's closing tag: quick-xml
+    // reports `&amp;` and `&apos;` as their own events, so a dispatch on every
+    // text event kept only the fragment after the last entity.
+    let mut current_text = String::new();
     let mut in_controlfield = false;
     let mut controlfield_tag = String::new();
 
@@ -526,6 +533,7 @@ fn parse_bnf_sru_record(
                     }
                 } else if name.ends_with("subfield") && in_datafield {
                     in_subfield = true;
+                    current_text.clear();
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"code" {
                             current_code = String::from_utf8_lossy(&attr.value).to_string();
@@ -547,10 +555,28 @@ fn parse_bnf_sru_record(
                     && controlfield_tag == "003"
                     && let Some(ark_start) = text.find("ark:/12148/")
                 {
-                    builder.ark_id = Some(text[ark_start..].to_string());
+                    builder.ark_id = Some(text[ark_start..].trim().to_string());
                 }
 
                 if in_subfield {
+                    current_text.push_str(&text);
+                }
+            }
+            // The other half of a fragmented value: `&amp;`, `&apos;` and
+            // `&#233;` are all reported here rather than inside the text.
+            Ok(Event::GeneralRef(e)) => {
+                if in_subfield && let Some(resolved) = super::xml_entity_text(&e) {
+                    current_text.push_str(&resolved);
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name.ends_with("datafield") {
+                    in_datafield = false;
+                    current_tag.clear();
+                } else if name.ends_with("subfield") {
+                    in_subfield = false;
+                    let text = current_text.trim().to_string();
                     match (current_tag.as_str(), current_code.as_str()) {
                         ("200", "a") => builder.title = text,
                         ("200", "f") if builder.responsibility_200f.is_none() => {
@@ -586,15 +612,6 @@ fn parse_bnf_sru_record(
                         ("330", "a") => builder.description = Some(text),
                         _ => {}
                     }
-                }
-            }
-            Ok(Event::End(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                if name.ends_with("datafield") {
-                    in_datafield = false;
-                    current_tag.clear();
-                } else if name.ends_with("subfield") {
-                    in_subfield = false;
                     current_code.clear();
                 } else if name.ends_with("controlfield") {
                     in_controlfield = false;
@@ -696,7 +713,10 @@ pub async fn search_bnf_sru(
     // Parse multiple MARC records
     let mut books = Vec::new();
     let mut reader = Reader::from_str(&xml);
-    reader.config_mut().trim_text(true);
+    // NOT trim_text(true): a subfield's text arrives in fragments whenever it
+    // contains an entity, and trimming each fragment eats the spaces on either
+    // side of it. The accumulated value is trimmed once, at its closing tag.
+    reader.config_mut().trim_text(false);
 
     let mut current_book = BnfBookBuilder::default();
     let mut buf = Vec::new();
@@ -704,6 +724,10 @@ pub async fn search_bnf_sru(
     let mut current_code = String::new();
     let mut in_datafield = false;
     let mut in_subfield = false;
+    // Accumulated and dispatched once, at the subfield's closing tag: quick-xml
+    // reports `&amp;` and `&apos;` as their own events, so a dispatch on every
+    // text event kept only the fragment after the last entity.
+    let mut current_text = String::new();
     let mut in_controlfield = false;
     let mut in_record = false;
     let mut controlfield_tag = String::new();
@@ -724,6 +748,7 @@ pub async fn search_bnf_sru(
                     }
                 } else if name.ends_with("subfield") && in_datafield {
                     in_subfield = true;
+                    current_text.clear();
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"code" {
                             current_code = String::from_utf8_lossy(&attr.value).to_string();
@@ -745,10 +770,37 @@ pub async fn search_bnf_sru(
                     && controlfield_tag == "003"
                     && let Some(ark_start) = text.find("ark:/12148/")
                 {
-                    current_book.ark_id = Some(text[ark_start..].to_string());
+                    current_book.ark_id = Some(text[ark_start..].trim().to_string());
                 }
 
                 if in_subfield {
+                    current_text.push_str(&text);
+                }
+            }
+            // The other half of a fragmented value: `&amp;`, `&apos;` and
+            // `&#233;` are all reported here rather than inside the text.
+            Ok(Event::GeneralRef(e)) => {
+                if in_subfield && let Some(resolved) = super::xml_entity_text(&e) {
+                    current_text.push_str(&resolved);
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name.ends_with("record") {
+                    in_record = false;
+                    // Build and save book if it has a title
+                    let book = std::mem::take(&mut current_book);
+                    if !book.title.is_empty()
+                        && let Some((b, pending_cover)) = book.build()
+                    {
+                        books.push((b, pending_cover));
+                    }
+                } else if name.ends_with("datafield") {
+                    in_datafield = false;
+                    current_tag.clear();
+                } else if name.ends_with("subfield") {
+                    in_subfield = false;
+                    let text = current_text.trim().to_string();
                     match (current_tag.as_str(), current_code.as_str()) {
                         ("200", "a") => current_book.title = text,
                         ("200", "f") if current_book.responsibility_200f.is_none() => {
@@ -791,24 +843,6 @@ pub async fn search_bnf_sru(
                         ("330", "a") => current_book.description = Some(text),
                         _ => {}
                     }
-                }
-            }
-            Ok(Event::End(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                if name.ends_with("record") {
-                    in_record = false;
-                    // Build and save book if it has a title
-                    let book = std::mem::take(&mut current_book);
-                    if !book.title.is_empty()
-                        && let Some((b, pending_cover)) = book.build()
-                    {
-                        books.push((b, pending_cover));
-                    }
-                } else if name.ends_with("datafield") {
-                    in_datafield = false;
-                    current_tag.clear();
-                } else if name.ends_with("subfield") {
-                    in_subfield = false;
                     current_code.clear();
                 } else if name.ends_with("controlfield") {
                     in_controlfield = false;
@@ -921,6 +955,34 @@ mod tests {
     /// fall back to `702`, never to the `200 $f` sentence.
     const BNF_SRU_PIGAFETTA_FIXTURE: &str =
         include_str!("../../../tests/fixtures/bnf_sru_9782367321257.xml");
+
+    /// The same fragmentation trap as the SUDOC's, on the source that
+    /// actually serves it: the BnF returns "Orgueil &amp; prejuges", and
+    /// quick-xml reports the `&amp;` as its own event. A dispatch on every
+    /// text event kept only what followed it.
+    #[test]
+    fn sru_keeps_a_title_broken_by_an_entity() {
+        let xml = r##"<?xml version="1.0" encoding="UTF-8"?>
+<srw:searchRetrieveResponse xmlns:srw="http://www.loc.gov/zing/srw/">
+<srw:records><srw:record><srw:recordData>
+<mxc:record xmlns:mxc="info:lc/xmlns/marcxchange-v2">
+  <mxc:datafield tag="200" ind1="1" ind2=" ">
+    <mxc:subfield code="a">Orgueil &amp; pr&#233;jug&#233;s</mxc:subfield>
+  </mxc:datafield>
+  <mxc:datafield tag="700" ind1="#" ind2="1">
+    <mxc:subfield code="a">Austen</mxc:subfield>
+    <mxc:subfield code="b">Jane</mxc:subfield>
+  </mxc:datafield>
+</mxc:record>
+</srw:recordData></srw:record></srw:records>
+</srw:searchRetrieveResponse>"##;
+
+        let parsed = parse_bnf_sru_record(xml, "9782322182510")
+            .expect("record parses")
+            .expect("record found");
+
+        assert_eq!(parsed.0.title, "Orgueil & préjugés");
+    }
 
     #[test]
     fn parse_bnf_sru_record_falls_back_to_702_over_200f() {
