@@ -132,12 +132,27 @@ pub fn build_discovery_lookup_inputs(
 
     let mut library_isbns = BTreeSet::new();
     let mut library_keys = BTreeSet::new();
+    // The liked halves are a strict subset of the two above, filled in the
+    // same pass (ADR-066). `is_liked` is the engine's own predicate, so the
+    // editorial affinity tier and the recommendation engine cannot disagree
+    // on what "liked" means.
+    let mut liked_isbns = BTreeSet::new();
+    let mut liked_keys = BTreeSet::new();
     for sb in books {
+        let liked = sb.is_liked();
         if let Some(raw) = sb.book.isbn.as_deref() {
-            library_isbns.extend(expanded_isbn_forms(raw));
+            let forms = expanded_isbn_forms(raw);
+            if liked {
+                liked_isbns.extend(forms.iter().cloned());
+            }
+            library_isbns.extend(forms);
         }
         let authors = sb.book.authors.as_deref().unwrap_or(&[]);
-        library_keys.extend(title_author_keys(&sb.book.title, authors));
+        let keys = title_author_keys(&sb.book.title, authors);
+        if liked {
+            liked_keys.extend(keys.iter().cloned());
+        }
+        library_keys.extend(keys);
     }
 
     let mut series_lookups = Vec::new();
@@ -222,6 +237,8 @@ pub fn build_discovery_lookup_inputs(
         authors: author_lookups,
         library_isbns: library_isbns.into_iter().collect(),
         library_title_author_keys: library_keys.into_iter().collect(),
+        liked_isbns: liked_isbns.into_iter().collect(),
+        liked_title_author_keys: liked_keys.into_iter().collect(),
     }
 }
 
@@ -514,5 +531,73 @@ mod tests {
         }
         let inputs = build_discovery_lookup_inputs(&books, &[]);
         assert_eq!(inputs.authors.len(), AUTHOR_LOOKUPS_MAX);
+    }
+
+    // ── liked index halves (ADR-066) ────────────────────────────────
+
+    #[test]
+    fn liked_index_is_a_strict_subset_of_the_library_index() {
+        let mut books = gated_library();
+        // Owned but not liked: to_read, no rating, no favorites shelf.
+        books.push(with_isbn(
+            scoring_book("u1", "Unread One", &["Alia Sun"], "to_read"),
+            ISBN_C,
+        ));
+        let inputs = build_discovery_lookup_inputs(&books, &[]);
+
+        // The read book carrying ISBN_A is liked through the ADR-059
+        // fallback (no ratings anywhere in this fixture).
+        assert!(inputs.liked_isbns.contains(&"9782070541270".to_string()));
+        assert!(
+            inputs
+                .liked_title_author_keys
+                .contains(&"book 1|ursula k le guin".to_string())
+        );
+
+        // The unread book is in the library index and NOT in the liked one.
+        assert!(inputs.library_isbns.contains(&"9780441007318".to_string()));
+        assert!(!inputs.liked_isbns.contains(&"9780441007318".to_string()));
+        assert!(
+            inputs
+                .library_title_author_keys
+                .contains(&"unread one|alia sun".to_string())
+        );
+        assert!(
+            !inputs
+                .liked_title_author_keys
+                .contains(&"unread one|alia sun".to_string())
+        );
+
+        // Subset, always: the affinity tier counts liked books among the
+        // owned ones, so a liked key outside the library index would mean
+        // an overlap that can exceed its own total.
+        for isbn in &inputs.liked_isbns {
+            assert!(inputs.library_isbns.contains(isbn));
+        }
+        for key in &inputs.liked_title_author_keys {
+            assert!(inputs.library_title_author_keys.contains(key));
+        }
+    }
+
+    #[test]
+    fn liked_index_is_empty_below_the_profile_threshold() {
+        let books = vec![with_isbn(
+            scoring_book("b1", "Book 1", &["A"], "read"),
+            ISBN_A,
+        )];
+        let inputs = build_discovery_lookup_inputs(&books, &[]);
+        assert!(inputs.liked_isbns.is_empty());
+        assert!(inputs.liked_title_author_keys.is_empty());
+    }
+
+    #[test]
+    fn an_explicit_low_rating_vetoes_the_read_fallback_in_the_liked_index() {
+        let mut books = gated_library();
+        let mut vetoed = scoring_book("v1", "Disliked", &["Alia Sun"], "read");
+        vetoed.book.user_rating = Some(2);
+        books.push(with_isbn(vetoed, ISBN_D));
+        let inputs = build_discovery_lookup_inputs(&books, &[]);
+        assert!(inputs.library_isbns.contains(&"9782253006329".to_string()));
+        assert!(!inputs.liked_isbns.contains(&"9782253006329".to_string()));
     }
 }

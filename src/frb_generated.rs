@@ -8420,11 +8420,15 @@ impl SseDecode for crate::api::frb::FrbDiscoveryLookupInputs {
             <Vec<crate::api::frb::FrbDiscoveryAuthorLookup>>::sse_decode(deserializer);
         let mut var_libraryIsbns = <Vec<String>>::sse_decode(deserializer);
         let mut var_libraryTitleAuthorKeys = <Vec<String>>::sse_decode(deserializer);
+        let mut var_likedIsbns = <Vec<String>>::sse_decode(deserializer);
+        let mut var_likedTitleAuthorKeys = <Vec<String>>::sse_decode(deserializer);
         return crate::api::frb::FrbDiscoveryLookupInputs {
             series: var_series,
             authors: var_authors,
             library_isbns: var_libraryIsbns,
             library_title_author_keys: var_libraryTitleAuthorKeys,
+            liked_isbns: var_likedIsbns,
+            liked_title_author_keys: var_likedTitleAuthorKeys,
         };
     }
 }
@@ -9273,11 +9277,13 @@ impl SseDecode for crate::api::frb::FrbTag {
         let mut var_name = <String>::sse_decode(deserializer);
         let mut var_parentId = <Option<String>>::sse_decode(deserializer);
         let mut var_count = <i64>::sse_decode(deserializer);
+        let mut var_totalCount = <i64>::sse_decode(deserializer);
         return crate::api::frb::FrbTag {
             id: var_id,
             name: var_name,
             parent_id: var_parentId,
             count: var_count,
+            total_count: var_totalCount,
         };
     }
 }
@@ -11163,6 +11169,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbDiscoveryLookupInputs
             self.authors.into_into_dart().into_dart(),
             self.library_isbns.into_into_dart().into_dart(),
             self.library_title_author_keys.into_into_dart().into_dart(),
+            self.liked_isbns.into_into_dart().into_dart(),
+            self.liked_title_author_keys.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -12206,6 +12214,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbTag {
             self.name.into_into_dart().into_dart(),
             self.parent_id.into_into_dart().into_dart(),
             self.count.into_into_dart().into_dart(),
+            self.total_count.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -12633,6 +12642,8 @@ impl SseEncode for crate::api::frb::FrbDiscoveryLookupInputs {
         <Vec<crate::api::frb::FrbDiscoveryAuthorLookup>>::sse_encode(self.authors, serializer);
         <Vec<String>>::sse_encode(self.library_isbns, serializer);
         <Vec<String>>::sse_encode(self.library_title_author_keys, serializer);
+        <Vec<String>>::sse_encode(self.liked_isbns, serializer);
+        <Vec<String>>::sse_encode(self.liked_title_author_keys, serializer);
     }
 }
 
@@ -13144,6 +13155,7 @@ impl SseEncode for crate::api::frb::FrbTag {
         <String>::sse_encode(self.name, serializer);
         <Option<String>>::sse_encode(self.parent_id, serializer);
         <i64>::sse_encode(self.count, serializer);
+        <i64>::sse_encode(self.total_count, serializer);
     }
 }
 

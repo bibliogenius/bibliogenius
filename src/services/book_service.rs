@@ -630,7 +630,24 @@ pub async fn delete_book(db: &DatabaseConnection, id: &str) -> Result<(), Servic
 /// The Flutter side additionally lets the user hide on-loan books from the
 /// default view (a display preference the backend does not know); with that
 /// preference on, badges keep counting on-loan copies.
-pub async fn subject_counts(db: &DatabaseConnection) -> Result<HashMap<String, i64>, ServiceError> {
+/// How many books carry a subject, on each of the two scopes the reader can
+/// be browsing under.
+///
+/// Two numbers rather than one because the ownership axis is remembered
+/// (ADR-063): the badge has to agree with the shelf the tap opens, and which
+/// shelf that is depends on the reader's choice. Reporting both here and
+/// letting the client pick keeps that decision where the preference lives.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SubjectCount {
+    /// Books the default library view shows: owned, or physically here on loan.
+    pub in_default_view: i64,
+    /// Every book carrying the subject, whatever its ownership.
+    pub total: i64,
+}
+
+pub async fn subject_counts(
+    db: &DatabaseConnection,
+) -> Result<HashMap<String, SubjectCount>, ServiceError> {
     let books = BookEntity::find().all(db).await?;
 
     // One query for the on-loan book ids: any copy lent out or borrowed keeps
@@ -644,26 +661,43 @@ pub async fn subject_counts(db: &DatabaseConnection) -> Result<HashMap<String, i
         .map(|c| c.book_id)
         .collect();
 
-    let mut tag_counts: HashMap<String, i64> = HashMap::new();
+    Ok(tally_subjects(books.iter().map(|book| {
+        (
+            book.subjects.as_deref(),
+            book.owned || on_loan.contains(&book.id),
+        )
+    })))
+}
 
-    for book in books {
-        let in_default_view = book.owned || on_loan.contains(&book.id);
-        if let Some(subjects_json) = book.subjects
-            && let Ok(subjects) = serde_json::from_str::<Vec<String>>(&subjects_json)
+/// The counting itself, over `(subjects JSON, is in the default view)` rows.
+///
+/// Split out of [`subject_counts`] so the rule can be tested without a
+/// database: what it has to get right is the bookkeeping, not the query.
+fn tally_subjects<'a>(
+    rows: impl Iterator<Item = (Option<&'a str>, bool)>,
+) -> HashMap<String, SubjectCount> {
+    let mut tag_counts: HashMap<String, SubjectCount> = HashMap::new();
+
+    for (subjects_json, in_default_view) in rows {
+        if let Some(json) = subjects_json
+            && let Ok(subjects) = serde_json::from_str::<Vec<String>>(json)
         {
             for subject in subjects {
                 let trimmed = subject.trim();
                 if !trimmed.is_empty() {
-                    let entry = tag_counts.entry(trimmed.to_string()).or_insert(0);
+                    // Subjects carried only by books outside the view still
+                    // get an entry, so the shelf itself stays listed.
+                    let entry = tag_counts.entry(trimmed.to_string()).or_default();
+                    entry.total += 1;
                     if in_default_view {
-                        *entry += 1;
+                        entry.in_default_view += 1;
                     }
                 }
             }
         }
     }
 
-    Ok(tag_counts)
+    tag_counts
 }
 
 /// List all unique tags with counts (default-view scoped, see [`subject_counts`])
@@ -674,7 +708,9 @@ pub async fn list_tags(db: &DatabaseConnection) -> Result<Vec<TagDto>, ServiceEr
         .into_iter()
         .map(|(name, count)| TagDto {
             name,
-            count: count as usize,
+            // The HTTP path keeps the default-view number it has always
+            // served: it answers peers, who see the physical library.
+            count: count.in_default_view as usize,
         })
         .collect();
 
@@ -1561,6 +1597,69 @@ fn title_label_relevant(query_title: &str, work_label: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── subject counts (shelf badges) ───────────────────────────────────
+    //
+    // The badge has to say what the tap will show. Since the ownership axis
+    // is remembered (ADR-063) the client picks which of the two numbers to
+    // print, so both have to be right here.
+
+    #[test]
+    fn subject_tally_counts_both_scopes() {
+        let counts = tally_subjects(
+            [
+                (Some(r#"["Dystopie","Science-fiction"]"#), false),
+                (Some(r#"["Dystopie"]"#), false),
+                (Some(r#"["Dystopie"]"#), true),
+            ]
+            .into_iter(),
+        );
+
+        let dystopie = counts.get("Dystopie").unwrap();
+        assert_eq!(dystopie.in_default_view, 1);
+        assert_eq!(dystopie.total, 3);
+    }
+
+    #[test]
+    fn a_subject_only_on_hidden_books_still_gets_an_entry() {
+        // Otherwise the shelf itself would vanish from the shelves screen,
+        // which is exactly what an import of wished books produces.
+        let counts = tally_subjects([(Some(r#"["Dystopie"]"#), false)].into_iter());
+
+        let dystopie = counts.get("Dystopie").unwrap();
+        assert_eq!(dystopie.in_default_view, 0);
+        assert_eq!(dystopie.total, 1);
+    }
+
+    #[test]
+    fn blank_and_unparseable_subjects_are_ignored() {
+        let counts = tally_subjects(
+            [
+                (Some(r#"["  ",""]"#), true),
+                (Some("not json at all"), true),
+                (None, true),
+            ]
+            .into_iter(),
+        );
+
+        assert!(counts.is_empty());
+    }
+
+    #[test]
+    fn subjects_are_trimmed_so_one_shelf_is_not_two() {
+        let counts = tally_subjects(
+            [
+                (Some(r#"[" Dystopie"]"#), true),
+                (Some(r#"["Dystopie "]"#), false),
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(counts.len(), 1);
+        let dystopie = counts.get("Dystopie").unwrap();
+        assert_eq!(dystopie.in_default_view, 1);
+        assert_eq!(dystopie.total, 2);
+    }
 
     #[test]
     fn test_author_tokens_match_same_order() {

@@ -129,4 +129,17 @@ pub struct DiscoveryLookupInputs {
     /// Normalized "title|author" keys for every library book (one per
     /// author), sorted and deduplicated.
     pub library_title_author_keys: Vec<String>,
+    /// The same two index halves restricted to LIKED books (ADR-066): a
+    /// strict subset of the two above, built from the engine's own
+    /// [`crate::services::recommendation_service::ScoringBook::is_liked`]
+    /// so the definition of "liked" never forks.
+    ///
+    /// The editorial affinity tier needs it to weigh and to explain an
+    /// overlap ("N books in common, M of them liked"). It is derived here
+    /// rather than client-side because the repository read path overlays
+    /// `borrowed` and `lent` onto `reading_status` for display, and a
+    /// client reading that overlay would silently stop counting a borrowed
+    /// book that was read.
+    pub liked_isbns: Vec<String>,
+    pub liked_title_author_keys: Vec<String>,
 }

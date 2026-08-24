@@ -131,6 +131,11 @@ pub struct FrbDiscoveryLookupInputs {
     pub library_isbns: Vec<String>,
     /// Normalized "title|author" keys for every library book.
     pub library_title_author_keys: Vec<String>,
+    /// The two index halves restricted to LIKED books (ADR-066), a strict
+    /// subset of the two above. Additive fields (Rule R5); older Flutter
+    /// builds simply ignore them.
+    pub liked_isbns: Vec<String>,
+    pub liked_title_author_keys: Vec<String>,
 }
 
 impl From<crate::domain::recommendations::DiscoveryLookupInputs> for FrbDiscoveryLookupInputs {
@@ -157,6 +162,8 @@ impl From<crate::domain::recommendations::DiscoveryLookupInputs> for FrbDiscover
                 .collect(),
             library_isbns: inputs.library_isbns,
             library_title_author_keys: inputs.library_title_author_keys,
+            liked_isbns: inputs.liked_isbns,
+            liked_title_author_keys: inputs.liked_title_author_keys,
         }
     }
 }

@@ -10,7 +10,16 @@ pub struct FrbTag {
     pub id: String,
     pub name: String,
     pub parent_id: Option<String>,
+    /// Books on this shelf that the DEFAULT library view shows.
     pub count: i64,
+    /// Books on this shelf whatever their ownership.
+    ///
+    /// The two differ as soon as a shelf holds wished or given-away books,
+    /// and the reader can now remember an ownership axis that shows them
+    /// (ADR-063), so the client picks the number that matches the shelf its
+    /// tap will open. Printing `count` under a "show everything" axis is how
+    /// a shelf ends up announcing 0 and then listing ten books.
+    pub total_count: i64,
 }
 
 /// Get all tags with hierarchy info
@@ -39,26 +48,28 @@ pub async fn get_all_tags() -> Result<Vec<FrbTag>, String> {
 
     // Add DB tags
     for t in db_tags {
-        let count = *tag_counts.get(&t.name).unwrap_or(&0);
+        let counts = tag_counts.get(&t.name).copied().unwrap_or_default();
         processed_names.insert(t.name.clone());
         result.push(FrbTag {
             id: t.id,
             name: t.name,
             parent_id: t.parent_id,
-            count,
+            count: counts.in_default_view,
+            total_count: counts.total,
         });
     }
 
     // Add remaining legacy tags (as orphans)
     // Give them synthetic "legacy:" string ids to distinguish from DB tags (uuids).
     let mut next_legacy_id = -1;
-    for (name, count) in tag_counts {
+    for (name, counts) in tag_counts {
         if !processed_names.contains(&name) {
             result.push(FrbTag {
                 id: format!("legacy:{next_legacy_id}"),
                 name,
                 parent_id: None,
-                count,
+                count: counts.in_default_view,
+                total_count: counts.total,
             });
             next_legacy_id -= 1;
         }
@@ -92,6 +103,7 @@ pub async fn create_tag(name: String, parent_id: Option<String>) -> Result<FrbTa
                 name: t.name,
                 parent_id: t.parent_id,
                 count: 0,
+                total_count: 0,
             })
         }
         Err(e) => Err(format!("{:?}", e)),
@@ -135,6 +147,7 @@ pub async fn update_tag(
                 name: t.name,
                 parent_id: t.parent_id,
                 count: 0,
+                total_count: 0,
             })
         }
         Err(e) => Err(format!("{:?}", e)),
