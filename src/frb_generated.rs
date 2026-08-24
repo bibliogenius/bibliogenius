@@ -8246,6 +8246,7 @@ impl SseDecode for crate::api::frb::FrbCollectionBook {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_bookId = <String>::sse_decode(deserializer);
         let mut var_title = <String>::sse_decode(deserializer);
+        let mut var_isbn = <Option<String>>::sse_decode(deserializer);
         let mut var_author = <Option<String>>::sse_decode(deserializer);
         let mut var_coverUrl = <Option<String>>::sse_decode(deserializer);
         let mut var_publisher = <Option<String>>::sse_decode(deserializer);
@@ -8258,6 +8259,7 @@ impl SseDecode for crate::api::frb::FrbCollectionBook {
         return crate::api::frb::FrbCollectionBook {
             book_id: var_bookId,
             title: var_title,
+            isbn: var_isbn,
             author: var_author,
             cover_url: var_coverUrl,
             publisher: var_publisher,
@@ -10965,6 +10967,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbCollectionBook {
         [
             self.book_id.into_into_dart().into_dart(),
             self.title.into_into_dart().into_dart(),
+            self.isbn.into_into_dart().into_dart(),
             self.author.into_into_dart().into_dart(),
             self.cover_url.into_into_dart().into_dart(),
             self.publisher.into_into_dart().into_dart(),
@@ -12539,6 +12542,7 @@ impl SseEncode for crate::api::frb::FrbCollectionBook {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.book_id, serializer);
         <String>::sse_encode(self.title, serializer);
+        <Option<String>>::sse_encode(self.isbn, serializer);
         <Option<String>>::sse_encode(self.author, serializer);
         <Option<String>>::sse_encode(self.cover_url, serializer);
         <Option<String>>::sse_encode(self.publisher, serializer);

@@ -1354,8 +1354,13 @@ async fn find_cover_by_title_for_author(title: &str, author: &str, isbn: &str) -
 }
 
 /// Comma-joined author names linked to a book, or `None` when the book has no
-/// author. Used to verify a title-based cover match on the silent bulk path.
-async fn fetch_book_author_names(db: &DatabaseConnection, book_id: &str) -> Option<String> {
+/// author. Used to verify a title-based cover match on the silent bulk path,
+/// and to fill a collection entry's author: a shared list whose notes read
+/// "Title - Unknown" cannot be repaired by anyone who receives it.
+pub(crate) async fn fetch_book_author_names(
+    db: &DatabaseConnection,
+    book_id: &str,
+) -> Option<String> {
     use crate::models::{author, book_authors};
     let links = book_authors::Entity::find()
         .filter(book_authors::Column::BookId.eq(book_id))

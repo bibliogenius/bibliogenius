@@ -10,11 +10,14 @@ use uuid::Uuid;
 use crate::domain::{
     Collection, CollectionBook, CollectionRepository, CreateCollectionInput, DomainError,
 };
-use crate::models::book::Entity as BookEntity;
+use std::collections::HashMap;
+
+use crate::models::book::{self, Entity as BookEntity};
 use crate::models::collection::{ActiveModel, Column, Entity as CollectionEntity};
 use crate::models::collection_book::{
     self, ActiveModel as CollectionBookActiveModel, Entity as CollectionBookEntity,
 };
+use crate::models::{author, book_authors};
 
 /// SeaORM-based implementation of CollectionRepository
 pub struct SeaOrmCollectionRepository {
@@ -157,14 +160,72 @@ impl CollectionRepository for SeaOrmCollectionRepository {
                 .then_with(|| a.added_at.cmp(&b.added_at))
         });
 
+        // Everything below is fetched in BATCHES, never per book. This loop
+        // used to run one query per member to load the book, and gained a
+        // second and a third when authors were added for the shared-list
+        // export: a 500-book collection then cost 1500 round trips on the
+        // path that also draws the collection screen. Chunked because an
+        // `IN (...)` list is bound parameters, and a large collection would
+        // otherwise walk into SQLite's variable ceiling.
+        let ids: Vec<String> = collection_books
+            .iter()
+            .map(|cb| cb.book_id.clone())
+            .collect();
+
+        let mut books_by_id: HashMap<String, book::Model> = HashMap::new();
+        let mut author_links: Vec<(String, String)> = Vec::new();
+        for chunk in ids.chunks(500) {
+            let chunk: Vec<String> = chunk.to_vec();
+            for book in BookEntity::find()
+                .filter(book::Column::Id.is_in(chunk.clone()))
+                .all(&self.db)
+                .await?
+            {
+                books_by_id.insert(book.id.clone(), book);
+            }
+            for link in book_authors::Entity::find()
+                .filter(book_authors::Column::BookId.is_in(chunk))
+                .all(&self.db)
+                .await?
+            {
+                author_links.push((link.book_id, link.author_id));
+            }
+        }
+
+        // Deduplicated before chunking: one author shared by three hundred
+        // books would otherwise be asked for three hundred times across the
+        // `IN` lists, for a map that keeps one entry either way.
+        let author_ids: Vec<String> = author_links
+            .iter()
+            .map(|(_, author_id)| author_id.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut author_names: HashMap<String, String> = HashMap::new();
+        for chunk in author_ids.chunks(500) {
+            for a in author::Entity::find()
+                .filter(author::Column::Id.is_in(chunk.to_vec()))
+                .all(&self.db)
+                .await?
+            {
+                author_names.insert(a.id.clone(), a.name);
+            }
+        }
+
+        let authors_by_book = group_author_names(&author_links, &author_names);
+
         let mut result = Vec::new();
         for cb in collection_books {
-            // Fetch book details for each (N+1 query for now, optimization later)
-            if let Some(book) = BookEntity::find_by_id(cb.book_id).one(&self.db).await? {
+            // Both `isbn` and `author` feed the shared-list export, where an
+            // entry is nothing but an ISBN and a "Title - Author" note:
+            // without them a shared list is empty or names its books after
+            // nobody.
+            if let Some(book) = books_by_id.remove(&cb.book_id) {
                 result.push(CollectionBook {
+                    author: authors_by_book.get(&book.id).cloned(),
                     book_id: book.id,
                     title: book.title,
-                    author: None, // TODO: Join with authors table
+                    isbn: book.isbn,
                     cover_url: book.cover_url,
                     publisher: book.publisher,
                     publication_year: book.publication_year,
@@ -504,5 +565,88 @@ mod tests {
             None,
             "a newly-added collection starts unnumbered"
         );
+    }
+}
+
+/// Groups `(book_id, author_id)` links into one comma-joined author string per
+/// book.
+///
+/// Split out and pure so the batched read can be checked without a database.
+/// Mirrors `book_service::fetch_book_author_names` exactly, blank names
+/// filtered and a book with no usable name yielding no entry at all rather
+/// than an empty string, because the export turns an empty author into a note
+/// that names the book after nobody.
+fn group_author_names(
+    links: &[(String, String)],
+    names: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut by_book: HashMap<String, Vec<String>> = HashMap::new();
+    for (book_id, author_id) in links {
+        if let Some(name) = names.get(author_id)
+            && !name.trim().is_empty()
+        {
+            by_book
+                .entry(book_id.clone())
+                .or_default()
+                .push(name.clone());
+        }
+    }
+    by_book
+        .into_iter()
+        .map(|(book_id, names)| (book_id, names.join(", ")))
+        .collect()
+}
+
+#[cfg(test)]
+mod get_books_tests {
+    use super::*;
+
+    fn names(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(id, name)| (id.to_string(), name.to_string()))
+            .collect()
+    }
+
+    fn links(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(b, a)| (b.to_string(), a.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn several_authors_join_in_one_string() {
+        let grouped = group_author_names(
+            &links(&[("b1", "a1"), ("b1", "a2")]),
+            &names(&[("a1", "Boileau"), ("a2", "Narcejac")]),
+        );
+
+        let joined = grouped.get("b1").unwrap();
+        assert!(joined.contains("Boileau") && joined.contains("Narcejac"));
+        assert!(joined.contains(", "));
+    }
+
+    #[test]
+    fn a_book_with_no_usable_name_gets_no_entry() {
+        // Not an empty string: the export would then write "Title - " and the
+        // note would name the book after nobody.
+        let grouped = group_author_names(
+            &links(&[("b1", "a1"), ("b2", "missing")]),
+            &names(&[("a1", "   ")]),
+        );
+
+        assert!(grouped.is_empty());
+    }
+
+    #[test]
+    fn books_do_not_borrow_each_others_authors() {
+        let grouped = group_author_names(
+            &links(&[("b1", "a1"), ("b2", "a2")]),
+            &names(&[("a1", "Hugo"), ("a2", "Zola")]),
+        );
+
+        assert_eq!(grouped.get("b1").unwrap(), "Hugo");
+        assert_eq!(grouped.get("b2").unwrap(), "Zola");
     }
 }

@@ -39,6 +39,9 @@ impl From<crate::domain::collection_repository::Collection> for FrbCollection {
 pub struct FrbCollectionBook {
     pub book_id: String,
     pub title: String,
+    /// How a shared list names this entry. Carried all the way to Dart
+    /// because the export is ISBN-based: an entry without one is dropped.
+    pub isbn: Option<String>,
     pub author: Option<String>,
     pub cover_url: Option<String>,
     pub publisher: Option<String>,
@@ -59,6 +62,7 @@ impl From<crate::domain::collection_repository::CollectionBook> for FrbCollectio
         FrbCollectionBook {
             book_id: cb.book_id,
             title: cb.title,
+            isbn: cb.isbn,
             author: cb.author,
             cover_url: cb.cover_url,
             publisher: cb.publisher,

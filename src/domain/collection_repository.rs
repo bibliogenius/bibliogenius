@@ -22,6 +22,11 @@ pub struct Collection {
 pub struct CollectionBook {
     pub book_id: String,
     pub title: String,
+    /// The book's ISBN, which is how a shared list names its entries.
+    ///
+    /// Absent from this DTO until 2026-08-24, which silently emptied every
+    /// exported list: the exporter keeps an entry only when it carries one.
+    pub isbn: Option<String>,
     pub author: Option<String>,
     pub cover_url: Option<String>,
     pub publisher: Option<String>,
