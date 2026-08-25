@@ -26,6 +26,17 @@ pub type CoverRewriteError = cover_url::CoverResolveError;
 /// column must tolerate values outside it rather than assume completeness.
 pub const READING_STATUSES: [&str; 5] = ["to_read", "reading", "read", "wanting", "abandoned"];
 
+/// The value `books.reading_status` holds when the reader recorded no reading
+/// intent at all: they own the book, have not read it, are not reading it, and
+/// have not planned to.
+///
+/// The column is NOT NULL, so absence is spelled as the empty string rather
+/// than NULL. `validate_reading_status` accepts it alongside
+/// [`READING_STATUSES`]; it is deliberately kept OUT of that list, which is
+/// the *reading* vocabulary and feeds the MCP filter enum (ADR-048), where an
+/// empty choice would be noise.
+pub const NO_READING_STATUS: &str = "";
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "books")]
 pub struct Model {
@@ -54,6 +65,7 @@ pub struct Model {
     /// - `read`: Finished reading
     /// - `wanting`: Wishlist (want to read someday)
     /// - `abandoned`: Stopped reading
+    /// - `""` ([`NO_READING_STATUS`]): no reading intent recorded
     ///
     /// NOTE: Do NOT use `lent`/`borrowed` here - those belong to Copy.status
     #[sea_orm(default_value = "to_read")]

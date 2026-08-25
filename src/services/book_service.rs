@@ -434,6 +434,10 @@ pub fn validate_title(title: &str) -> Result<String, ServiceError> {
 
 fn validate_reading_status(status: &str) -> Result<(), ServiceError> {
     match status {
+        // Absence is a choice the reader can make, not a missing value: the
+        // book sheet and the cover badges offer it, both forms let a chip be
+        // deselected into it, and the library filters on it.
+        crate::models::book::NO_READING_STATUS => Ok(()),
         s if crate::models::book::READING_STATUSES.contains(&s) => Ok(()),
         _ => Err(ServiceError::InvalidInput(format!(
             "Invalid reading status: '{}'",
@@ -1602,6 +1606,36 @@ fn title_label_relevant(query_title: &str, work_label: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── reading status vocabulary ───────────────────────────────────────
+    //
+    // The absence of a reading status is a value the reader picks, not a gap
+    // in the data: the book sheet, the cover badges and both forms all offer
+    // it, and the library has a "no status" filter that reads it back. The
+    // column is NOT NULL, so absence is spelled as the empty string.
+
+    #[test]
+    fn the_absence_of_a_reading_status_is_a_storable_value() {
+        assert!(validate_reading_status(crate::models::book::NO_READING_STATUS).is_ok());
+    }
+
+    #[test]
+    fn every_declared_reading_status_is_accepted() {
+        for status in crate::models::book::READING_STATUSES {
+            assert!(validate_reading_status(status).is_ok(), "{status}");
+        }
+    }
+
+    #[test]
+    fn a_value_outside_the_vocabulary_is_still_rejected() {
+        // `borrowed` and `lent` are the tempting ones: they describe a Copy,
+        // older payloads smuggled them through this column, and they must
+        // never become storable. A blank string is not the absence marker
+        // either, or a stray space would read as a deliberate choice.
+        for status in ["borrowed", "lent", "Read", " ", "none"] {
+            assert!(validate_reading_status(status).is_err(), "{status}");
+        }
+    }
 
     // ── subject counts (shelf badges) ───────────────────────────────────
     //
