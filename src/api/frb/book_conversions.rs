@@ -65,6 +65,22 @@ impl From<FrbBook> for crate::models::Book {
     }
 }
 
+/// Turn the FFI DTO into the payload expected by `book_service::update_book`.
+///
+/// `From<FrbBook>` maps an absent reading date to `None`, which the update
+/// service reads as "leave the stored value alone" - the right default for
+/// the create path, where every field is optional. The update path is the
+/// opposite: Dart always sends a complete book (each field is either the
+/// reader's new value or the one carried over from the stored row), so an
+/// absent date means the reader removed it. Flatten it into an explicit
+/// clear (`Some(None)`) or the date can never be taken back off a book.
+pub(crate) fn frb_book_into_update_payload(frb_book: FrbBook) -> crate::models::Book {
+    let mut book: crate::models::Book = frb_book.into();
+    book.finished_reading_at = Some(book.finished_reading_at.flatten());
+    book.started_reading_at = Some(book.started_reading_at.flatten());
+    book
+}
+
 #[cfg(test)]
 mod frb_book_conversion_tests {
     use super::*;
@@ -98,5 +114,59 @@ mod frb_book_conversion_tests {
 
         let back: Book = frb.into();
         assert!(back.added_at.is_none());
+    }
+
+    /// The create path must keep treating an absent date as "no opinion":
+    /// `create_book` maps `None` to `NotSet`, and nothing should start
+    /// writing explicit NULLs into a fresh row.
+    #[test]
+    fn create_conversion_leaves_absent_reading_dates_untouched() {
+        let frb: FrbBook = Book {
+            title: "Sans date".to_string(),
+            ..Default::default()
+        }
+        .into();
+        assert!(frb.finished_reading_at.is_none());
+
+        let book: Book = frb.into();
+        assert!(book.finished_reading_at.is_none());
+        assert!(book.started_reading_at.is_none());
+    }
+
+    /// Regression: a reader who clears the "finished reading" date in the
+    /// edit form sends a book with no date at all. That has to reach the
+    /// service as an explicit clear, not as an absent field.
+    #[test]
+    fn update_payload_turns_an_absent_reading_date_into_an_explicit_clear() {
+        let frb: FrbBook = Book {
+            title: "Martin Eden".to_string(),
+            ..Default::default()
+        }
+        .into();
+
+        let book = frb_book_into_update_payload(frb);
+        assert_eq!(book.finished_reading_at, Some(None));
+        assert_eq!(book.started_reading_at, Some(None));
+    }
+
+    #[test]
+    fn update_payload_keeps_a_date_the_reader_did_set() {
+        let mut frb: FrbBook = Book {
+            title: "Martin Eden".to_string(),
+            ..Default::default()
+        }
+        .into();
+        frb.finished_reading_at = Some("2026-07-01".to_string());
+        frb.started_reading_at = Some("2026-06-01".to_string());
+
+        let book = frb_book_into_update_payload(frb);
+        assert_eq!(
+            book.finished_reading_at,
+            Some(Some("2026-07-01".to_string()))
+        );
+        assert_eq!(
+            book.started_reading_at,
+            Some(Some("2026-06-01".to_string()))
+        );
     }
 }

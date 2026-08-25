@@ -2239,4 +2239,55 @@ mod tests {
             .expect("shelf must stay listed even when all its books are not owned");
         assert_eq!(envies.count, 0);
     }
+    /// A reader can take a reading date back off a book: the edit form sends
+    /// `Some(None)` for a date it no longer holds, and the row must end up
+    /// NULL. Nothing in the domain makes `finished_reading_at` mandatory -
+    /// "read" without a date is a supported state.
+    #[tokio::test]
+    async fn update_book_clears_reading_dates_when_explicitly_nulled() {
+        use crate::db;
+        use crate::models::book;
+        use sea_orm::{ConnectionTrait, EntityTrait, Set, Statement};
+
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "PRAGMA foreign_keys = OFF".to_owned(),
+        ))
+        .await
+        .unwrap();
+
+        let book_id = insert_test_book(&db, "Martin Eden").await;
+        let mut active: book::ActiveModel = book::Entity::find_by_id(book_id.clone())
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+        active.reading_status = Set("read".to_owned());
+        active.started_reading_at = Set(Some("2026-06-01".to_owned()));
+        active.finished_reading_at = Set(Some("2026-07-01".to_owned()));
+        active.update(&db).await.unwrap();
+
+        let payload = Book {
+            title: "Martin Eden".to_string(),
+            reading_status: Some("read".to_string()),
+            started_reading_at: Some(None),
+            finished_reading_at: Some(None),
+            ..Default::default()
+        };
+        update_book(&db, &book_id, payload).await.unwrap();
+
+        let stored = book::Entity::find_by_id(book_id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.finished_reading_at, None);
+        assert_eq!(stored.started_reading_at, None);
+        assert_eq!(
+            stored.reading_status, "read",
+            "clearing the date must not change the reading status",
+        );
+    }
 }

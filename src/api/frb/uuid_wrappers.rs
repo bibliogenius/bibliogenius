@@ -33,7 +33,7 @@ pub async fn get_book_by_uuid(uuid: String) -> Result<FrbBook, String> {
 /// Update a book identified by its uuid.
 pub async fn update_book_by_uuid(uuid: String, book: FrbBook) -> Result<FrbBook, String> {
     let db = db().ok_or("Database not initialized")?;
-    let book_dto: crate::models::Book = book.into();
+    let book_dto = frb_book_into_update_payload(book);
     match crate::services::book_service::update_book(db, &uuid, book_dto).await {
         Ok(b) => Ok(FrbBook::from(b)),
         Err(crate::services::book_service::ServiceError::InvalidInput(m)) => Err(m),
