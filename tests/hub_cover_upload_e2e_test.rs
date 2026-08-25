@@ -96,6 +96,22 @@ fn write_tiny_png_to_temp(tag: &str) -> TempCoverFile {
     TempCoverFile { path }
 }
 
+/// Writes a PNG of the given dimensions straight to `path`. Two different sizes
+/// produce files of different length, so a dedup entry keyed on file identity
+/// is invalidated whatever the filesystem's mtime resolution happens to be.
+fn write_png_at(path: &std::path::Path, width: u32, height: u32) {
+    let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(
+        width,
+        height,
+        image::Rgb([120, 80, 160]),
+    ));
+    let mut bytes = Cursor::new(Vec::new());
+    img.write_to(&mut bytes, ImageFormat::Png)
+        .expect("encode png");
+    let mut file = std::fs::File::create(path).expect("create cover file");
+    file.write_all(&bytes.into_inner()).expect("write png");
+}
+
 async fn read_failure_flag(db: &DatabaseConnection, book_id: &str) -> Option<String> {
     // The flag is device-local: stored in `book_local`, not on the `books`
     // row (ADR-044).
@@ -347,5 +363,307 @@ async fn a_traversal_path_is_refused_before_any_read() {
     assert!(
         url.is_none(),
         "a traversal path must never produce a hub URL"
+    );
+}
+
+/// An absolute path that names a readable file OUTSIDE the covers directory
+/// must never be opened, even though it contains no `..` segment at all.
+///
+/// This is the half of the class the `..` guard does not reach. `books.cover_url`
+/// is replicated raw across devices (ADR-011), so a compromised paired device can
+/// store `/etc/hosts` there: no relative segment, perfectly readable, and the
+/// bytes would be POSTed to the hub for anyone following the library to fetch.
+/// In app mode the stored value is therefore ignored entirely and the path is
+/// derived from the book's own identity, the same way `services/cover_sync.rs`
+/// builds `covers_dir/<uuid>.jpg`.
+///
+/// The decoy is a REAL decodable image, so the pipeline would read it, re-encode
+/// it and upload it if the derivation were dropped. Pointing at a file that does
+/// not decode would make this test pass at the decode step instead, proving
+/// nothing about whether the read happened.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn an_absolute_path_outside_the_covers_dir_is_never_read() {
+    let db = setup_db_with_hub_config().await;
+    let book_id = insert_book(&db, "Outside").await;
+
+    // An empty covers dir: this book has no legitimate local cover to upload.
+    let covers_dir = std::env::temp_dir().join(format!("bg_covers_outside_{}", std::process::id()));
+    std::fs::create_dir_all(&covers_dir).expect("create covers dir");
+    assert!(
+        !covers_dir.join(format!("{book_id}.jpg")).exists(),
+        "the covers dir must hold no cover for this book, or the test proves nothing"
+    );
+
+    // The decoy stands in for any absolute path a paired device could plant.
+    let decoy = write_tiny_png_to_temp("outside");
+    let stored = decoy.path().to_str().expect("utf-8 temp path").to_owned();
+    assert!(
+        !stored.split(['/', '\\']).any(|seg| seg == ".."),
+        "the decoy must carry no traversal segment: the `..` guard is not what is under test"
+    );
+    assert!(
+        std::fs::read(&stored).is_ok(),
+        "the decoy must really be readable, or the test proves nothing"
+    );
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+    // Deliberately no mock mounted: the request log is what proves the bytes
+    // never left the device. `verify()` passes trivially with nothing mounted.
+
+    let svc = HubDirectoryService::new();
+    let url = svc
+        .process_local_cover_upload(&db, &book_id, Some(covers_dir.as_path()), &stored)
+        .await;
+
+    let _ = std::fs::remove_dir_all(&covers_dir);
+
+    let seen = hub.received_requests().await.unwrap_or_default();
+    assert!(
+        seen.is_empty(),
+        "a file outside the covers dir must never be read or uploaded, got {} request(s)",
+        seen.len()
+    );
+    assert!(
+        url.is_none(),
+        "a cover this device does not actually hold must not produce a hub URL"
+    );
+}
+
+/// A cover already sent during this run is not sent again, and the caller still
+/// gets its hub URL back.
+///
+/// The second half is the point, not a detail. The catalog builder starts every
+/// local cover at `cover_url: None` and fills it FROM THE RETURN VALUE of this
+/// call (`api/frb/hub_catalog.rs`), so a dedup that returned `None` on a hit
+/// would push a catalog carrying no cover at all and every follower browsing
+/// the library would see a placeholder. Skipping the upload has to be invisible
+/// to the caller.
+///
+/// The test drives one service instance twice, which is what production does:
+/// `hub_directory_svc()` is a process-wide `OnceLock` singleton.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn an_unchanged_cover_is_uploaded_once_and_its_url_replayed() {
+    let db = setup_db_with_hub_config().await;
+    let book_id = insert_book(&db, "Dedup").await;
+
+    let covers_dir = std::env::temp_dir().join(format!("bg_covers_dedup_{}", std::process::id()));
+    std::fs::create_dir_all(&covers_dir).expect("create covers dir");
+    let stored = covers_dir.join(format!("{book_id}.jpg"));
+    write_png_at(&stored, 64, 96);
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/api/directory/my-node/covers/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&hub)
+        .await;
+
+    let svc = HubDirectoryService::new();
+    let path = stored.to_str().expect("utf-8 path");
+    let first = svc
+        .process_local_cover_upload(&db, &book_id, Some(covers_dir.as_path()), path)
+        .await;
+    let second = svc
+        .process_local_cover_upload(&db, &book_id, Some(covers_dir.as_path()), path)
+        .await;
+
+    let _ = std::fs::remove_dir_all(&covers_dir);
+
+    assert!(first.is_some(), "the first upload must succeed");
+    assert_eq!(
+        second, first,
+        "a cache hit must replay the same hub URL: the pushed catalog is built \
+         from this value, and `None` here means followers see no cover"
+    );
+    assert_eq!(
+        hub.received_requests().await.unwrap_or_default().len(),
+        1,
+        "an unchanged cover must reach the hub exactly once per run"
+    );
+}
+
+/// The companion guard to the test above: dedup must not outlive the file it
+/// describes. Replacing the photo has to send the new bytes.
+///
+/// This one passes vacuously before the dedup exists (nothing is ever skipped),
+/// so it proves nothing on its own. It earns its keep afterwards, as the test
+/// that fails if the cache never invalidates.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_replaced_cover_is_uploaded_again() {
+    let db = setup_db_with_hub_config().await;
+    let book_id = insert_book(&db, "Replaced").await;
+
+    let covers_dir =
+        std::env::temp_dir().join(format!("bg_covers_replaced_{}", std::process::id()));
+    std::fs::create_dir_all(&covers_dir).expect("create covers dir");
+    let stored = covers_dir.join(format!("{book_id}.jpg"));
+    write_png_at(&stored, 64, 96);
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/api/directory/my-node/covers/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&hub)
+        .await;
+
+    let svc = HubDirectoryService::new();
+    let path = stored.to_str().expect("utf-8 path");
+    svc.process_local_cover_upload(&db, &book_id, Some(covers_dir.as_path()), path)
+        .await;
+
+    // The reader picked a new photo: different dimensions, different length.
+    write_png_at(&stored, 80, 120);
+    let after = svc
+        .process_local_cover_upload(&db, &book_id, Some(covers_dir.as_path()), path)
+        .await;
+
+    let _ = std::fs::remove_dir_all(&covers_dir);
+
+    assert!(after.is_some(), "the replacement upload must succeed");
+    assert_eq!(
+        hub.received_requests().await.unwrap_or_default().len(),
+        2,
+        "a replaced photo must be sent again, not masked by a stale dedup entry"
+    );
+}
+
+/// Purging the hub registration drops the remembered uploads.
+///
+/// The replayed URL carries the node id, and a purge is what precedes getting a
+/// new one. Keeping the entries would hand followers URLs pointing at a node
+/// that no longer owns the blobs, and no upload would ever correct it for the
+/// rest of the run. `hub_directory_purge_config` calls this alongside the
+/// failure-flag reset it already did.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn purging_the_registration_forgets_the_uploaded_covers() {
+    let db = setup_db_with_hub_config().await;
+    let book_id = insert_book(&db, "Purged").await;
+
+    let covers_dir = std::env::temp_dir().join(format!("bg_covers_purged_{}", std::process::id()));
+    std::fs::create_dir_all(&covers_dir).expect("create covers dir");
+    let stored = covers_dir.join(format!("{book_id}.jpg"));
+    write_png_at(&stored, 64, 96);
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/api/directory/my-node/covers/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&hub)
+        .await;
+
+    let svc = HubDirectoryService::new();
+    let path = stored.to_str().expect("utf-8 path");
+    svc.process_local_cover_upload(&db, &book_id, Some(covers_dir.as_path()), path)
+        .await;
+
+    svc.forget_uploaded_covers();
+
+    let after = svc
+        .process_local_cover_upload(&db, &book_id, Some(covers_dir.as_path()), path)
+        .await;
+
+    let _ = std::fs::remove_dir_all(&covers_dir);
+
+    assert!(after.is_some(), "the upload after a purge must succeed");
+    assert_eq!(
+        hub.received_requests().await.unwrap_or_default().len(),
+        2,
+        "a purge must not leave the cover masked by a remembered upload"
+    );
+}
+
+/// A hub change invalidates the remembered upload, and a failure against the
+/// new hub must not leave the old entry behind to mask the recovery.
+///
+/// Reachable, not theoretical: `api/peer/relay_config.rs` drops the directory
+/// config whenever the relay's hub URL changes, mid-run, and the
+/// re-registration that follows yields a different node id. The remembered URL
+/// carries both, so it has to stop being trusted the moment the hub does not
+/// match.
+///
+/// The tail is what the eviction protects. Once the hub comes back, a stale
+/// entry would be replayed, the caller would skip clearing the failure flag it
+/// believes a previous success already cleared, and the book would keep a
+/// "cover not synced" badge for the rest of the run over a cover the hub holds.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_hub_change_invalidates_the_remembered_upload() {
+    let db = setup_db_with_hub_config().await;
+    let book_id = insert_book(&db, "Moved").await;
+
+    let covers_dir = std::env::temp_dir().join(format!("bg_covers_moved_{}", std::process::id()));
+    std::fs::create_dir_all(&covers_dir).expect("create covers dir");
+    let stored = covers_dir.join(format!("{book_id}.jpg"));
+    write_png_at(&stored, 64, 96);
+    let path = stored.to_str().expect("utf-8 path").to_owned();
+
+    let svc = HubDirectoryService::new();
+
+    // The original hub accepts the cover, so it is remembered.
+    let first_hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", first_hub.uri()) };
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/api/directory/my-node/covers/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&first_hub)
+        .await;
+    svc.process_local_cover_upload(&db, &book_id, Some(covers_dir.as_path()), &path)
+        .await;
+    assert!(
+        read_failure_flag(&db, &book_id).await.is_none(),
+        "the first upload must leave no warning badge"
+    );
+
+    // The relay is repointed at another hub, which refuses. The remembered URL
+    // belongs to the old hub, so it must not be replayed here.
+    let second_hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", second_hub.uri()) };
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&second_hub)
+        .await;
+    let refused = svc
+        .process_local_cover_upload(&db, &book_id, Some(covers_dir.as_path()), &path)
+        .await;
+    assert!(
+        refused.is_none(),
+        "the new hub refused, so no URL may come back"
+    );
+    assert_eq!(
+        second_hub
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .len(),
+        1,
+        "the cover must really be offered to the new hub, not replayed from cache"
+    );
+    assert!(
+        read_failure_flag(&db, &book_id).await.is_some(),
+        "a refused upload must raise the warning badge"
+    );
+
+    // Back on the original hub. The file never changed, so a surviving entry
+    // would be replayed and the badge would never clear again.
+    unsafe { std::env::set_var("HUB_URL", first_hub.uri()) };
+    let recovered = svc
+        .process_local_cover_upload(&db, &book_id, Some(covers_dir.as_path()), &path)
+        .await;
+
+    let _ = std::fs::remove_dir_all(&covers_dir);
+
+    assert!(recovered.is_some(), "the recovery upload must succeed");
+    assert!(
+        read_failure_flag(&db, &book_id).await.is_none(),
+        "the badge must clear on recovery: a stale cache entry would skip the \
+         clearing and pin it for the rest of the run"
     );
 }

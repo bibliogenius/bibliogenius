@@ -297,6 +297,10 @@ pub async fn hub_directory_purge_config() -> Result<(), String> {
     // warnings become meaningless and would never auto-clear (no next sync
     // with the old registration). Next registration starts fresh.
     crate::services::hub_directory_service::HubDirectoryService::reset_all_hub_cover_upload_failures(db).await;
+    // Same reasoning for the in-memory "already uploaded" cache: it hands back
+    // URLs carrying the old node id, and the hub holds none of those blobs any
+    // more. Next registration re-uploads from scratch.
+    hub_directory_svc().forget_uploaded_covers();
     tracing::info!("hub_directory_config purged for 401 recovery");
     Ok(())
 }

@@ -437,8 +437,49 @@ pub struct DirectoryConfig {
 // Service
 // ---------------------------------------------------------------------------
 
+/// One cover this run already pushed to the hub, so the next catalog sync can
+/// skip the read, the re-encode and the POST.
+struct UploadedCover {
+    /// Identity of the file that was sent. Modification time alone is not
+    /// enough: it has second resolution on some filesystems, and a photo
+    /// replaced within the same second would then be masked.
+    modified: std::time::SystemTime,
+    len: u64,
+    /// The URL the upload returned, replayed verbatim on a hit. The catalog
+    /// builder fills its entry from this value, so a hit MUST answer with the
+    /// URL and not merely report success: `None` would push a catalog with no
+    /// cover and leave every follower on a placeholder.
+    hub_url: String,
+}
+
+/// What a cover upload attempt actually did, so the caller can tell a real POST
+/// from a replayed cache hit and skip the bookkeeping a hit cannot have
+/// invalidated.
+pub enum CoverUpload {
+    /// The file was read, re-encoded and POSTed to the hub.
+    Sent(String),
+    /// Already sent during this run and untouched since: nothing left the
+    /// device, and the URL is the one the original upload returned.
+    AlreadySent(String),
+}
+
 pub struct HubDirectoryService {
     http_client: Client,
+    /// Covers already uploaded during this run, keyed by book id.
+    ///
+    /// Deliberately in memory and not persisted (ADR-044 A.6 defers the shared
+    /// marker). The catalog push is debounced 5s behind every book edit, so a
+    /// cataloguing session used to re-send every custom cover once per edit.
+    /// This collapses that to once per run. Dying with the process is the
+    /// feature, not a limitation: if the hub ever loses a blob, the next launch
+    /// re-uploads it with no bookkeeping to repair.
+    ///
+    /// Bounded by construction, one entry per catalogued book carrying a custom
+    /// cover, so it cannot outgrow the `entries` vector the same sync builds. No
+    /// eviction policy on top: capping it would mean dropping entries a sync
+    /// still needs and re-uploading them, which is the cost this exists to
+    /// avoid.
+    uploaded_covers: std::sync::Mutex<std::collections::HashMap<String, UploadedCover>>,
 }
 
 impl HubDirectoryService {
@@ -449,7 +490,82 @@ impl HubDirectoryService {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
-        Self { http_client }
+        Self {
+            http_client,
+            uploaded_covers: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Drop every remembered upload. Called when the hub registration is
+    /// purged: the node id is part of the URLs handed back on a hit, and the
+    /// hub no longer holds any of the blobs.
+    pub fn forget_uploaded_covers(&self) {
+        if let Ok(mut cache) = self.uploaded_covers.lock() {
+            cache.clear();
+        }
+    }
+
+    /// Forget one book's remembered upload, so the next sync really re-sends it.
+    ///
+    /// Called whenever an upload attempt fails. It keeps the invariant a cache
+    /// hit relies on: a hit means the last attempt for this exact file
+    /// succeeded, so the failure flag it cleared is still clear. Without this,
+    /// a cover that failed once (file briefly unreadable) and then came back
+    /// unchanged would hit the cache, skip the flag clearing, and keep a
+    /// "cover not synced" badge forever on a cover the hub actually holds.
+    fn forget_uploaded_cover(&self, book_id: &str) {
+        if let Ok(mut cache) = self.uploaded_covers.lock() {
+            cache.remove(book_id);
+        }
+    }
+
+    /// The URL already returned for this exact file, if it was uploaded during
+    /// this run and has not been touched since.
+    ///
+    /// The entry is also checked against the hub currently configured. The
+    /// remembered URL carries the hub host and the node id, and a registration
+    /// can be purged mid-run: `api/peer/relay_config.rs` drops the directory
+    /// config when the hub URL changes, and the re-registration that follows
+    /// yields a different node id. Replaying the old URL would then publish, to
+    /// the new hub's followers, cover links pointing at a node that holds none
+    /// of the blobs, with no upload ever correcting it for the rest of the run.
+    ///
+    /// This covers every purge path that can strike mid-run with books still in
+    /// the catalog: the hub-URL changes are caught here, and the explicit
+    /// `hub_directory_purge_config` clears the cache outright. The startup path
+    /// runs before anything is cached, and the full app reset leaves no book to
+    /// look up.
+    fn cached_cover_url(
+        &self,
+        book_id: &str,
+        modified: std::time::SystemTime,
+        len: u64,
+    ) -> Option<String> {
+        let current_hub = Self::hub_base_url().ok()?;
+        let prefix = format!("{current_hub}/api/directory/");
+        let cache = self.uploaded_covers.lock().ok()?;
+        let hit = cache.get(book_id)?;
+        (hit.modified == modified && hit.len == len && hit.hub_url.starts_with(&prefix))
+            .then(|| hit.hub_url.clone())
+    }
+
+    fn remember_uploaded_cover(
+        &self,
+        book_id: &str,
+        modified: std::time::SystemTime,
+        len: u64,
+        hub_url: &str,
+    ) {
+        if let Ok(mut cache) = self.uploaded_covers.lock() {
+            cache.insert(
+                book_id.to_string(),
+                UploadedCover {
+                    modified,
+                    len,
+                    hub_url: hub_url.to_string(),
+                },
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1210,38 +1326,90 @@ impl HubDirectoryService {
         }
     }
 
-    /// Reads a local cover file, resizes it to a JPEG thumbnail, and uploads
-    /// it to the hub. Shared pipeline so LAN peer responses and hub-stored
-    /// covers stay pixel-for-pixel identical.
+    /// Reads a local cover file, resizes it to a JPEG thumbnail and uploads it
+    /// to the hub, UNLESS this run already sent that exact file. Shared pipeline
+    /// so LAN peer responses and hub-stored covers stay pixel-for-pixel
+    /// identical.
+    ///
+    /// Returns `CoverUpload::Sent` when the bytes really left the device, and
+    /// `CoverUpload::AlreadySent` when the URL is replayed from `uploaded_covers`
+    /// and nothing was read, re-encoded or POSTed. Both carry the same hub URL,
+    /// so a caller that only wants the URL may treat them alike. A caller doing
+    /// bookkeeping around the upload must not: see `process_local_cover_upload`,
+    /// where clearing the failure flag on a replay would be a write with nothing
+    /// to write about, and where a failed attempt has to evict the entry to keep
+    /// that reasoning true.
     ///
     /// `stored_cover` is the raw `books.cover_url` value and `covers_dir` the
     /// directory covers actually live in on this device (`None` in
-    /// server-binary mode). The two are resolved through
-    /// `resolve_local_cover_read_path`: reading `stored_cover` directly breaks
-    /// on iOS as soon as the data-container UUID changes, and the resulting
-    /// ENOENT would flag every custom cover as un-syncable forever.
+    /// server-binary mode). In app mode `stored_cover` never decides WHERE the
+    /// read happens: reading it directly breaks on iOS as soon as the
+    /// data-container UUID changes, and the resulting ENOENT would flag every
+    /// custom cover as un-syncable forever.
     pub async fn resize_and_upload_cover(
         &self,
         db: &DatabaseConnection,
         book_id: &str,
         covers_dir: Option<&std::path::Path>,
         stored_cover: &str,
-    ) -> Result<String, String> {
+    ) -> Result<CoverUpload, String> {
         // `books.cover_url` is replicated raw across devices (ADR-011), so its
-        // value is not necessarily one this device wrote. Re-basing only kicks
-        // in when the basename is this book's own `<book_id>.jpg`; every other
-        // value is opened as given, which would otherwise let a path planted on
-        // a paired device drive an arbitrary local read whose bytes are POSTed
-        // to the hub. Same rejection the peer-facing endpoint applies.
-        if stored_cover.split(['/', '\\']).any(|seg| seg == "..") {
-            return Err(format!("refused traversal path for book {book_id}"));
+        // value is not necessarily one this device wrote: a paired device can
+        // store any readable path there, and these bytes are POSTed to the hub
+        // for every follower to fetch. Refusing `..` only covers half of that
+        // class, since `/etc/hosts` carries no relative segment.
+        //
+        // So in app mode the stored value is ignored entirely and the path is
+        // derived from the book's own identity, the strict pattern
+        // `services/cover_sync.rs` already applies. No legitimate case changes:
+        // this device's own custom covers are always `<book_id>.jpg` under
+        // `covers_dir`, which is exactly what the derivation yields, and any
+        // other value names a file that is absent locally, so it fails now as
+        // it failed before.
+        //
+        // In server-binary mode there is no covers directory to derive from and
+        // paths are stable, so the stored value is read as given, minus the
+        // traversal segments the peer-facing endpoint also refuses. That leaves
+        // the absolute-path half of the class open on that build ALONE, and
+        // knowingly: it has no covers directory to key a derivation on, and it
+        // does not run on the devices where a paired peer can write the column.
+        // Do not read the narrower guard here as an oversight to copy outward.
+        let path = match covers_dir {
+            Some(dir) => {
+                // `book_id` becomes a filename component, so an absolute or
+                // dotted id would escape `covers_dir` through `join`. Same
+                // allowlist as the `is_safe_uuid` guard in `cover_sync.rs`.
+                if book_id.is_empty()
+                    || !book_id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    return Err(format!("refused unsafe book id {book_id}"));
+                }
+                dir.join(crate::utils::cover_url::local_cover_filename(book_id))
+            }
+            None => {
+                if stored_cover.split(['/', '\\']).any(|seg| seg == "..") {
+                    return Err(format!("refused traversal path for book {book_id}"));
+                }
+                std::path::PathBuf::from(stored_cover)
+            }
+        };
+        // File identity, read before the bytes: a cover already sent this run
+        // and untouched since needs no read, no re-encode and no POST. `None`
+        // here just means the metadata call failed, in which case the read
+        // below reports the real error.
+        let identity = tokio::fs::metadata(&path)
+            .await
+            .ok()
+            .and_then(|meta| meta.modified().ok().map(|when| (when, meta.len())));
+
+        if let Some((modified, len)) = identity
+            && let Some(hub_url) = self.cached_cover_url(book_id, modified, len)
+        {
+            return Ok(CoverUpload::AlreadySent(hub_url));
         }
 
-        let path = crate::utils::cover_url::resolve_local_cover_read_path(
-            covers_dir,
-            stored_cover,
-            book_id,
-        );
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -1252,9 +1420,15 @@ impl HubDirectoryService {
         .await
         .map_err(|e| format!("spawn: {e}"))??;
 
-        self.upload_cover(db, book_id, jpeg_bytes)
+        let hub_url = self
+            .upload_cover(db, book_id, jpeg_bytes)
             .await
-            .map_err(|e| format!("upload: {e}"))
+            .map_err(|e| format!("upload: {e}"))?;
+
+        if let Some((modified, len)) = identity {
+            self.remember_uploaded_cover(book_id, modified, len, &hub_url);
+        }
+        Ok(CoverUpload::Sent(hub_url))
     }
 
     /// End-to-end wrapper around `resize_and_upload_cover` that also drives
@@ -1273,12 +1447,22 @@ impl HubDirectoryService {
             .resize_and_upload_cover(db, book_id, covers_dir, stored_cover)
             .await
         {
-            Ok(hub_url) => {
+            Ok(CoverUpload::Sent(hub_url)) => {
                 Self::clear_hub_cover_upload_failure(db, book_id).await;
                 Some(hub_url)
             }
+            // Nothing was sent, so nothing needs clearing: the upload this hit
+            // replays already cleared the flag, and a failure since would have
+            // evicted the entry. Saves one DB write per cover on a loop that
+            // runs 5s behind every book edit.
+            Ok(CoverUpload::AlreadySent(hub_url)) => Some(hub_url),
             Err(e) => {
                 tracing::error!("cover upload failed for book {book_id}: {e}");
+                // Drop any entry for this book, so the retry really re-uploads
+                // instead of replaying a hit and skipping the flag clearing
+                // above. Without it the badge raised on the next line would
+                // never come down again this run.
+                self.forget_uploaded_cover(book_id);
                 Self::mark_hub_cover_upload_failure(db, book_id).await;
                 None
             }
