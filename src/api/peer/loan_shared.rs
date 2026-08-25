@@ -163,6 +163,7 @@ pub(crate) async fn perform_loan_acceptance(
             &book.id,
             Some(book.updated_at.as_str()),
             hub_prefix.as_deref(),
+            crate::api::frb::covers_dir().map(|d| d.as_path()),
         ),
     })
 }

@@ -461,6 +461,9 @@ pub enum CoverUpload {
     /// Already sent during this run and untouched since: nothing left the
     /// device, and the URL is the one the original upload returned.
     AlreadySent(String),
+    /// The row names a local custom cover whose bytes are not on this device.
+    /// Nothing was read, nothing was sent, and nothing failed.
+    Missing,
 }
 
 pub struct HubDirectoryService {
@@ -1375,19 +1378,12 @@ impl HubDirectoryService {
         // does not run on the devices where a paired peer can write the column.
         // Do not read the narrower guard here as an oversight to copy outward.
         let path = match covers_dir {
-            Some(dir) => {
-                // `book_id` becomes a filename component, so an absolute or
-                // dotted id would escape `covers_dir` through `join`. Same
-                // allowlist as the `is_safe_uuid` guard in `cover_sync.rs`.
-                if book_id.is_empty()
-                    || !book_id
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                {
-                    return Err(format!("refused unsafe book id {book_id}"));
-                }
-                dir.join(crate::utils::cover_url::local_cover_filename(book_id))
-            }
+            // `book_id` becomes a filename component, so an absolute or dotted
+            // id would escape `covers_dir` through `join`. The derivation and
+            // its allowlist live in `cover_url` so the read side asks about the
+            // very file this reads, and neither can drift from the other.
+            Some(dir) => crate::utils::cover_url::own_local_cover_path(dir, book_id)
+                .ok_or_else(|| format!("refused unsafe book id {book_id}"))?,
             None => {
                 if stored_cover.split(['/', '\\']).any(|seg| seg == "..") {
                     return Err(format!("refused traversal path for book {book_id}"));
@@ -1410,9 +1406,23 @@ impl HubDirectoryService {
             return Ok(CoverUpload::AlreadySent(hub_url));
         }
 
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        // `books.cover_url` replicates but the file does not: the cover lane
+        // carries it separately (ADR-046), so between the row landing on a
+        // device and its bytes arriving, the derived path resolves to nothing.
+        // That is an absence, not a failure, and the two must not share an exit.
+        //
+        // Only in app mode: there the path is derived from the book's identity,
+        // so nothing being there means exactly "the bytes have not arrived".
+        // The server binary has no covers directory and no cover lane, it reads
+        // the stored path as given, and a path that leads nowhere there is a
+        // genuine local fault worth reporting.
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && covers_dir.is_some() => {
+                return Ok(CoverUpload::Missing);
+            }
+            Err(e) => return Err(format!("read {}: {e}", path.display())),
+        };
 
         let jpeg_bytes = tokio::task::spawn_blocking(move || {
             crate::utils::cover_image::resize_to_jpeg_thumbnail(&bytes)
@@ -1436,6 +1446,9 @@ impl HubDirectoryService {
     /// on failure, so the owner's UI stays in sync with the actual hub state
     /// without the caller having to remember the bookkeeping. Returns the
     /// hub URL on success, `None` on failure (already logged at ERROR).
+    ///
+    /// A cover whose bytes are not on this device is neither: it clears the
+    /// flag and returns `None` without touching the network.
     pub async fn process_local_cover_upload(
         &self,
         db: &DatabaseConnection,
@@ -1456,6 +1469,20 @@ impl HubDirectoryService {
             // evicted the entry. Saves one DB write per cover on a loop that
             // runs 5s behind every book edit.
             Ok(CoverUpload::AlreadySent(hub_url)) => Some(hub_url),
+            // Nothing to upload and nothing to report. Flagging an absence
+            // would pin a permanent "cover not synced" badge on every book a
+            // paired device catalogued with a photo, on a device that never
+            // held the file and so can never clear the flag by succeeding.
+            // Clearing is what brings down the flags an earlier build raised
+            // when it read this same absence as a failure.
+            Ok(CoverUpload::Missing) => {
+                tracing::debug!(
+                    "cover bytes for book {book_id} are not on this device; \
+                     nothing to upload until the cover lane delivers them"
+                );
+                Self::clear_hub_cover_upload_failure(db, book_id).await;
+                None
+            }
             Err(e) => {
                 tracing::error!("cover upload failed for book {book_id}: {e}");
                 // Drop any entry for this book, so the retry really re-uploads

@@ -440,7 +440,17 @@ impl Book {
     /// Callers that produce E2EE / relay payloads should prefer this over
     /// `rewrite_local_cover_urls` so the peer never receives
     /// `/api/books/{id}/cover` paths it cannot resolve.
-    pub fn rewrite_cover_urls_for_relay(books: &mut [Book], hub_cover_prefix: Option<&str>) {
+    ///
+    /// `covers_dir` is this device's covers directory (`None` in server-binary
+    /// mode). Covers whose bytes are absent from it are dropped before the
+    /// rewrite: a relay payload is cached by the receiving peer for days, so a
+    /// URL this device cannot back with a file is not a transient miss there.
+    pub fn rewrite_cover_urls_for_relay(
+        books: &mut [Book],
+        hub_cover_prefix: Option<&str>,
+        covers_dir: Option<&std::path::Path>,
+    ) {
+        Self::drop_absent_local_covers(books, covers_dir);
         if let Err(e) = Self::rewrite_cover_urls_strict(books, hub_cover_prefix) {
             tracing::error!(
                 "relay cover rewrite failed, stripping {} offender(s) to None: {e}",
@@ -452,6 +462,28 @@ impl Book {
                 {
                     book.cover_url = None;
                 }
+            }
+        }
+    }
+
+    /// Clears `cover_url` on every book naming a local custom cover this device
+    /// does not hold. See `cover_url::local_cover_bytes_absent` for why such a
+    /// cover cannot be advertised: the hub URL the rewrite would build points
+    /// under this device's own node, where only its own uploads land.
+    fn drop_absent_local_covers(books: &mut [Book], covers_dir: Option<&std::path::Path>) {
+        if covers_dir.is_none() {
+            return;
+        }
+        for book in books.iter_mut() {
+            let Some(id) = book.id.as_deref() else {
+                continue;
+            };
+            let absent = book
+                .cover_url
+                .as_deref()
+                .is_some_and(|url| cover_url::local_cover_bytes_absent(covers_dir, url, id));
+            if absent {
+                book.cover_url = None;
             }
         }
     }
@@ -532,12 +564,23 @@ impl Book {
     /// returns `None` if the source is an unservable local path and no
     /// hub prefix is available, so E2EE payloads never carry unreachable
     /// paths.
+    ///
+    /// Returns `None` too when the value names a local cover whose bytes are
+    /// absent from `covers_dir` (this device's covers directory, `None` in
+    /// server-binary mode): the hub URL it would otherwise build points under
+    /// this device's own node, where only its own uploads land.
     pub fn safe_cover_url_for_relay(
         cover_url: Option<&str>,
         book_id: &str,
         updated_at: Option<&str>,
         hub_cover_prefix: Option<&str>,
+        covers_dir: Option<&std::path::Path>,
     ) -> Option<String> {
+        if cover_url
+            .is_some_and(|url| cover_url::local_cover_bytes_absent(covers_dir, url, book_id))
+        {
+            return None;
+        }
         match Self::safe_cover_url_strict(cover_url, book_id, updated_at, hub_cover_prefix) {
             Ok(v) => v,
             Err(e) => {
@@ -782,13 +825,80 @@ mod tests {
             mk_book(Some("1"), Some("/var/local.jpg")),
             mk_book(Some("2"), Some("https://cdn/ok.jpg")),
         ];
-        Book::rewrite_cover_urls_for_relay(&mut books, None);
+        Book::rewrite_cover_urls_for_relay(&mut books, None, None);
 
         assert_eq!(books[0].cover_url, None, "local path must be stripped");
         assert_eq!(
             books[1].cover_url.as_deref(),
             Some("https://cdn/ok.jpg"),
             "HTTP URL must be preserved"
+        );
+    }
+
+    /// A device holds rows for covers it has never received: `cover_url`
+    /// replicates, the bytes travel on their own lane (ADR-046). Advertising
+    /// such a cover to a relay peer publishes a hub URL under THIS device's
+    /// node, where only this device's own uploads land, and the peer caches
+    /// that dead URL for days.
+    #[test]
+    fn relay_wrapper_drops_covers_whose_bytes_are_not_on_this_device() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("present.jpg"), b"jpeg").expect("write cover");
+
+        let mut books = vec![
+            mk_book(Some("present"), Some("present.jpg")),
+            mk_book(Some("absent"), Some("absent.jpg")),
+            mk_book(Some("remote"), Some("https://cdn/ok.jpg")),
+        ];
+        Book::rewrite_cover_urls_for_relay(
+            &mut books,
+            Some("https://hub/api/directory/n/covers"),
+            Some(dir.path()),
+        );
+
+        assert_eq!(
+            books[0].cover_url.as_deref(),
+            Some("https://hub/api/directory/n/covers/present"),
+            "a cover this device holds is still advertised"
+        );
+        assert_eq!(
+            books[1].cover_url, None,
+            "a cover this device does not hold must not be advertised"
+        );
+        assert_eq!(
+            books[2].cover_url.as_deref(),
+            Some("https://cdn/ok.jpg"),
+            "an external URL needs no local file"
+        );
+    }
+
+    #[test]
+    fn safe_relay_wrapper_drops_a_cover_whose_bytes_are_absent() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let out = Book::safe_cover_url_for_relay(
+            Some("absent.jpg"),
+            "absent",
+            None,
+            Some("https://hub/api/directory/n/covers"),
+            Some(dir.path()),
+        );
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn safe_relay_wrapper_keeps_a_cover_whose_bytes_are_present() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("here.jpg"), b"jpeg").expect("write cover");
+        let out = Book::safe_cover_url_for_relay(
+            Some("here.jpg"),
+            "here",
+            None,
+            Some("https://hub/api/directory/n/covers"),
+            Some(dir.path()),
+        );
+        assert_eq!(
+            out.as_deref(),
+            Some("https://hub/api/directory/n/covers/here")
         );
     }
 
@@ -843,7 +953,7 @@ mod tests {
 
     #[test]
     fn safe_relay_wrapper_returns_none_on_failure() {
-        let out = Book::safe_cover_url_for_relay(Some("/var/mobile/c.jpg"), "42", None, None);
+        let out = Book::safe_cover_url_for_relay(Some("/var/mobile/c.jpg"), "42", None, None, None);
         assert_eq!(out, None);
     }
 

@@ -331,7 +331,11 @@ pub async fn build_book_delta_response(
             Book::rewrite_local_cover_urls(&mut upserts, None);
         }
         CoverRewriteMode::Relay { hub_prefix } => {
-            Book::rewrite_cover_urls_for_relay(&mut upserts, hub_prefix.as_deref());
+            Book::rewrite_cover_urls_for_relay(
+                &mut upserts,
+                hub_prefix.as_deref(),
+                crate::api::frb::covers_dir().map(|d| d.as_path()),
+            );
         }
     }
 

@@ -227,6 +227,7 @@ pub async fn offer_loan(
             &book.id,
             Some(book.updated_at.as_str()),
             hub_prefix.as_deref(),
+            crate::api::frb::covers_dir().map(|d| d.as_path()),
         ),
         "lender_name": lender_name,
         "due_date": due_date_str,

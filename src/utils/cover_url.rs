@@ -195,6 +195,57 @@ pub fn resolve_local_cover_read_path(
     }
 }
 
+/// The on-disk path of a book's OWN local custom cover in app mode:
+/// `<covers_dir>/<book_id>.jpg`.
+///
+/// `books.cover_url` replicates raw across devices (ADR-011), so the stored
+/// value is not necessarily one this device wrote: a paired device can put any
+/// readable path there. Nothing in app mode may therefore let that value decide
+/// where a read, or even a stat, happens. The location is derived from the
+/// book's own identity instead, which is exactly where `services/cover_sync.rs`
+/// writes and where the upload reads.
+///
+/// `None` when `book_id` cannot stand as a single path component, so a hostile
+/// id can never climb out of the covers directory through `join`. Same allowlist
+/// as the `is_safe_uuid` guard in `cover_sync.rs`.
+pub fn own_local_cover_path(covers_dir: &Path, book_id: &str) -> Option<PathBuf> {
+    if book_id.is_empty()
+        || !book_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    Some(covers_dir.join(local_cover_filename(book_id)))
+}
+
+/// True when a stored `cover_url` names a local custom cover whose bytes are
+/// NOT on this device.
+///
+/// `books.cover_url` replicates across a user's devices, the file does not: the
+/// cover lane carries it separately (ADR-046), so between the row landing and
+/// the bytes arriving, a device holds a row claiming a cover it cannot produce.
+/// Reading that as "there is a cover here" makes the device advertise a hub URL
+/// built from its OWN node id, and the hub registration is device-local, not
+/// replicated: only this device's own uploads can ever land under that node. The
+/// URL is therefore dead by construction, and a peer caches it for days.
+///
+/// The presence test derives the path the same way the upload does, so the two
+/// can never disagree about whether the bytes are there, and the replicated
+/// value is never used to pick what gets stat'd. A book id too hostile to derive
+/// from counts as absent: nothing can be advertised for it either way.
+/// `None` covers_dir is server-binary mode, which has no covers directory to key
+/// the check on and reads stored paths as given: unchanged there.
+pub fn local_cover_bytes_absent(covers_dir: Option<&Path>, cover_url: &str, book_id: &str) -> bool {
+    match covers_dir {
+        None => false,
+        Some(dir) => {
+            is_local_cover(cover_url)
+                && !own_local_cover_path(dir, book_id).is_some_and(|path| path.exists())
+        }
+    }
+}
+
 /// Reduce a stored `cover_url` to its device-independent form for storage.
 ///
 /// The same logical cover must be stored identically on every device so the
@@ -652,5 +703,97 @@ mod tests {
         let (stored, rename) = plan_cover_migration(None, U);
         assert_eq!(stored, None);
         assert_eq!(rename, None);
+    }
+
+    // local_cover_bytes_absent -------------------------------------------
+
+    /// The row replicates, the file does not: a device can hold a book whose
+    /// `cover_url` names a custom cover it has never received (ADR-046 carries
+    /// the bytes separately). Advertising it would build a hub URL under this
+    /// device's own node, where only this device's uploads land.
+    #[test]
+    fn absent_local_cover_is_reported_missing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(local_cover_bytes_absent(
+            Some(dir.path()),
+            &format!("{U}.jpg"),
+            U
+        ));
+    }
+
+    #[test]
+    fn present_local_cover_is_not_reported_missing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let name = format!("{U}.jpg");
+        std::fs::write(dir.path().join(&name), b"jpeg").expect("write cover");
+        assert!(!local_cover_bytes_absent(Some(dir.path()), &name, U));
+    }
+
+    /// The stale absolute prefix the column carries from whichever device wrote
+    /// it must not make a cover that IS on disk look missing.
+    #[test]
+    fn a_stale_stored_prefix_does_not_hide_a_present_cover() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let name = format!("{U}.jpg");
+        std::fs::write(dir.path().join(&name), b"jpeg").expect("write cover");
+        let stale = format!("/var/mobile/Containers/Data/Application/dead/covers/{name}");
+        assert!(!local_cover_bytes_absent(Some(dir.path()), &stale, U));
+    }
+
+    /// The mirror of `an_absolute_path_outside_the_covers_dir_is_never_read` on
+    /// the read side. `cover_url` replicates raw (ADR-011), so a paired device
+    /// can point it at any readable file. That file is not this book's cover:
+    /// the upload derives its path and will never send those bytes, so treating
+    /// the decoy's existence as "the cover is here" would advertise a hub URL
+    /// nothing ever backs, and would stat an attacker-chosen path on the way.
+    #[test]
+    fn a_readable_decoy_outside_the_covers_dir_is_still_missing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let decoy = dir.path().join("decoy.jpg");
+        std::fs::write(&decoy, b"jpeg").expect("write decoy");
+
+        assert!(local_cover_bytes_absent(
+            Some(dir.path()),
+            decoy.to_str().expect("utf-8 path"),
+            U
+        ));
+    }
+
+    /// A book id that cannot be a path component has no derivable cover, so it
+    /// can never be advertised. Guards `join` against a hostile replicated id.
+    #[test]
+    fn an_unsafe_book_id_has_no_own_cover_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert_eq!(own_local_cover_path(dir.path(), "../../etc/passwd"), None);
+        assert_eq!(own_local_cover_path(dir.path(), ""), None);
+        assert!(local_cover_bytes_absent(
+            Some(dir.path()),
+            "cover.jpg",
+            "../../etc/passwd"
+        ));
+    }
+
+    /// Values that are not local covers are never "missing": they need no file.
+    #[test]
+    fn remote_and_peer_urls_are_never_missing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(!local_cover_bytes_absent(
+            Some(dir.path()),
+            "https://covers.example/x.jpg",
+            U
+        ));
+        assert!(!local_cover_bytes_absent(
+            Some(dir.path()),
+            "/api/books/42/cover",
+            U
+        ));
+        assert!(!local_cover_bytes_absent(Some(dir.path()), "", U));
+    }
+
+    /// Server-binary mode has no covers directory to key the check on and reads
+    /// stored paths as given, so it keeps its behavior.
+    #[test]
+    fn no_covers_dir_never_reports_missing() {
+        assert!(!local_cover_bytes_absent(None, &format!("{U}.jpg"), U));
     }
 }

@@ -596,6 +596,7 @@ pub async fn update_request_status(
             &book.id,
             Some(book.updated_at.as_str()),
             hub_prefix.as_deref(),
+            crate::api::frb::covers_dir().map(|d| d.as_path()),
         );
         let due_date = (chrono::Utc::now()
             + chrono::Duration::days(resolve_loan_duration_days(&db, &book.id).await))

@@ -667,3 +667,54 @@ async fn a_hub_change_invalidates_the_remembered_upload() {
          clearing and pin it for the rest of the run"
     );
 }
+
+/// A book whose cover file is simply not on this device must NOT be flagged,
+/// and must clear a flag an earlier build left behind.
+///
+/// `books.cover_url` replicates across a user's devices, the file does not: the
+/// cover lane carries it separately (ADR-046). A second device therefore holds
+/// rows naming covers whose bytes have not arrived, and reading that absence as
+/// an upload failure pinned a permanent "cover not synced" badge on books that
+/// device never had the file for, with no possible way down: it can never
+/// succeed at uploading bytes it does not have.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn absent_cover_bytes_neither_flag_nor_reach_the_hub() {
+    let db = setup_db_with_hub_config().await;
+    let book_id = insert_book(&db, "El Aleph").await;
+
+    // An empty covers directory: the row claims a cover, the device has none.
+    let covers_dir = std::env::temp_dir().join(format!("bg_cover_absent_{}", std::process::id()));
+    std::fs::create_dir_all(&covers_dir).expect("create covers dir");
+
+    // Seed the flag the way the previous build did on this exact absence.
+    HubDirectoryService::mark_hub_cover_upload_failure(&db, &book_id).await;
+    assert!(read_failure_flag(&db, &book_id).await.is_some());
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+
+    let svc = HubDirectoryService::new();
+    let url = svc
+        .process_local_cover_upload(
+            &db,
+            &book_id,
+            Some(covers_dir.as_path()),
+            &format!("{book_id}.jpg"),
+        )
+        .await;
+
+    let _ = std::fs::remove_dir_all(&covers_dir);
+
+    assert!(url.is_none(), "there is nothing to advertise");
+    assert!(
+        read_failure_flag(&db, &book_id).await.is_none(),
+        "an absence must not be reported as a failure, and must bring down a \
+         flag raised for it by an earlier build"
+    );
+    assert_eq!(
+        hub.received_requests().await.unwrap_or_default().len(),
+        0,
+        "nothing to send means nothing must be sent"
+    );
+}
