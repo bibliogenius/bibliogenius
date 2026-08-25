@@ -1500,3 +1500,201 @@ mod multi_lender_borrow_tests {
         assert!(!created.auto_approve);
     }
 }
+
+/// `allow_borrowing` is a hub-directory setting and must never gate peer-to-peer loans.
+///
+/// The flag lives in `hub_directory_config` and is enforced in exactly one place: the
+/// hub's own `DirectoryService::createBorrowRequest`, which governs loan requests coming
+/// from directory followers. The lender-side P2P entry points gate on copy availability,
+/// peer approval and duplicates instead, and deliberately never read it. Turning the
+/// directory setting off must therefore leave a paired peer able to borrow over LAN or
+/// relay.
+///
+/// Nothing in the type system holds that boundary, and the setting is off for the vast
+/// majority of libraries: it is hardcoded to `false` at silent registration, and the only
+/// UI that flips it is nested under "appear in the directory". A future change that added
+/// the check to the peer path would therefore cut P2P lending for nearly every install,
+/// silently. These tests pin the invariant on the two live entry points:
+/// `receive_request` (plaintext LAN) and `handle_loan_request_for_relay` (E2EE/relay).
+///
+/// A third handler, `receive_loan_request`, is deliberately NOT covered: `api/mod.rs`
+/// documents it as a dead plaintext receiver superseded by `POST /peers/request`, with no
+/// caller in either the Rust core or the Flutter client, and it sits behind the loopback
+/// guard. Should that route ever be revived, this module needs a third test.
+#[cfg(test)]
+mod allow_borrowing_does_not_gate_p2p_loans_tests {
+    use super::*;
+    use crate::crypto::envelope::ClearMessage;
+    use crate::db;
+    use crate::models::{copy, p2p_request};
+    use sea_orm::{ConnectionTrait, EntityTrait, Set, Statement};
+
+    const ISBN: &str = "978-2-07-036822-8";
+    const TITLE: &str = "Voyage au bout de la nuit";
+
+    async fn setup_db() -> DatabaseConnection {
+        db::init_db("sqlite::memory:").await.expect("init db")
+    }
+
+    /// Writes the singleton hub config row with borrowing refused, mirroring what
+    /// `HubDirectoryService::save_config` persists after a silent registration (which
+    /// hardcodes `allow_borrowing: false`).
+    async fn disable_hub_borrowing(db: &DatabaseConnection) {
+        let now = chrono::Utc::now().to_rfc3339();
+        db.execute(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "INSERT INTO hub_directory_config
+                 (id, node_id, write_token, is_listed, requires_approval,
+                  accept_from, allow_borrowing, created_at, updated_at)
+             VALUES (1, 'node-under-test', 'token-under-test', 0, 0,
+                     'everyone', 0, ?, ?)",
+            [now.clone().into(), now.into()],
+        ))
+        .await
+        .expect("insert hub config");
+
+        // Guard the guard: a schema drift that dropped the column would make the
+        // INSERT above fail loudly, but a default flipped to 1 would not.
+        let row = db
+            .query_one(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT allow_borrowing FROM hub_directory_config WHERE id = 1".to_owned(),
+            ))
+            .await
+            .expect("query hub config")
+            .expect("hub config row");
+        assert_eq!(
+            row.try_get::<i32>("", "allow_borrowing").expect("column"),
+            0,
+            "the fixture must really have borrowing refused, or the test proves nothing"
+        );
+    }
+
+    /// A book we own with one copy on the shelf, so availability never masks the
+    /// behaviour under test.
+    async fn insert_lendable_book(db: &DatabaseConnection) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let book_id = crate::models::book::ActiveModel {
+            title: Set(TITLE.to_string()),
+            isbn: Set(Some(ISBN.to_string())),
+            owned: Set(true),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert book")
+        .id;
+
+        let lib_id = crate::utils::library_helpers::resolve_library_id(db)
+            .await
+            .expect("library");
+        copy::ActiveModel {
+            book_id: Set(book_id),
+            library_id: Set(lib_id),
+            status: Set("available".to_string()),
+            is_temporary: Set(false),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert copy");
+    }
+
+    async fn insert_paired_peer(db: &DatabaseConnection, url: &str) -> peer::Model {
+        let now = chrono::Utc::now().to_rfc3339();
+        peer::ActiveModel {
+            name: Set("paired-borrower".to_string()),
+            url: Set(url.to_string()),
+            connection_status: Set("accepted".to_string()),
+            auto_approve: Set(false),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert peer")
+    }
+
+    async fn stored_status(db: &DatabaseConnection) -> String {
+        let all = p2p_request::Entity::find()
+            .all(db)
+            .await
+            .expect("list requests");
+        assert_eq!(
+            all.len(),
+            1,
+            "exactly one request should have been recorded"
+        );
+        all[0].status.clone()
+    }
+
+    /// LAN / plaintext path: `receive_request`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plaintext_peer_request_is_accepted_while_hub_borrowing_is_off() {
+        let db = setup_db().await;
+        disable_hub_borrowing(&db).await;
+        insert_lendable_book(&db).await;
+        insert_paired_peer(&db, "http://borrower.local:8000").await;
+
+        let response = receive_request(
+            State(crate::infrastructure::AppState::new(db.clone())),
+            Json(IncomingRequest {
+                from_peer_url: "http://borrower.local:8000".to_string(),
+                from_peer_name: "paired-borrower".to_string(),
+                book_isbn: ISBN.to_string(),
+                book_title: TITLE.to_string(),
+                requester_request_id: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_ne!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "hub-directory borrowing being off must not auto-reject a P2P request"
+        );
+        assert_eq!(
+            stored_status(&db).await,
+            "pending",
+            "the request must land pending for the owner to decide, not rejected"
+        );
+    }
+
+    /// E2EE / relay path: `handle_loan_request_for_relay`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_relayed_request_is_accepted_while_hub_borrowing_is_off() {
+        let db = setup_db().await;
+        disable_hub_borrowing(&db).await;
+        insert_lendable_book(&db).await;
+        let borrower = insert_paired_peer(&db, "relay://borrower-mailbox").await;
+
+        let msg = ClearMessage {
+            message_type: "loan_request".to_string(),
+            payload: json!({ "book_isbn": ISBN, "book_title": TITLE }),
+            timestamp: chrono::Utc::now().timestamp(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            correlation_id: None,
+            reply_to_mailbox: None,
+            reply_to_write_token: None,
+        };
+
+        let result = crate::api::e2ee::handle_loan_request_for_relay(&db, &borrower, &msg).await;
+
+        assert_ne!(
+            result.get("status").and_then(|v| v.as_str()),
+            Some("rejected"),
+            "hub-directory borrowing being off must not reject a relayed P2P request"
+        );
+        assert_eq!(
+            stored_status(&db).await,
+            "pending",
+            "the relayed request must land pending, not rejected"
+        );
+    }
+}
