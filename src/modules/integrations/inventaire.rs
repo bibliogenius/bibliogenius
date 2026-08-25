@@ -124,7 +124,7 @@ pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<InventaireMetadata,
         .publication_date
         .as_ref()
         .and_then(|v| v.first().cloned())
-        .map(|d| d.chars().take(4).collect());
+        .and_then(|d| crate::utils::year::normalize_year(&d));
 
     let cover_url = get_entity_image_url(&edition_entity);
 

@@ -29,6 +29,7 @@ use crate::domain::metadata_fill::{
 };
 use crate::infrastructure::AppState;
 use crate::openlibrary::BookMetadata;
+use crate::utils::year::parse_year;
 
 /// Page size for the incomplete-book work-list query.
 const PAGE: u64 = 50;
@@ -95,19 +96,6 @@ impl MetadataFillManager {
 
 fn err_to_string<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
-}
-
-/// Extract the first 4-digit year from a free-form date/year string.
-fn parse_year(raw: &str) -> Option<i32> {
-    let bytes = raw.as_bytes();
-    let mut i = 0;
-    while i + 4 <= bytes.len() {
-        if bytes[i..i + 4].iter().all(|b| b.is_ascii_digit()) {
-            return raw[i..i + 4].parse::<i32>().ok();
-        }
-        i += 1;
-    }
-    None
 }
 
 /// Project a lookup result onto the gap-fill candidate fields.
@@ -431,15 +419,6 @@ async fn run_fill_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_year_extracts_four_digits() {
-        assert_eq!(parse_year("1998"), Some(1998));
-        assert_eq!(parse_year("1998-03-01"), Some(1998));
-        assert_eq!(parse_year("publié en 2001."), Some(2001));
-        assert_eq!(parse_year("n/a"), None);
-        assert_eq!(parse_year(""), None);
-    }
 
     #[test]
     fn gap_values_converts_types() {

@@ -9,6 +9,9 @@ pub struct BookMetadata {
     pub title: String,
     pub authors: Vec<AuthorMetadata>,
     pub publisher: Option<String>,
+    /// Canonical four-digit year (e.g. `"2004"`), never a full date. Sources
+    /// that answer a free-form date reduce it through [`crate::utils::year`];
+    /// those that answer an integer are canonical by construction.
     pub publication_year: Option<String>,
     pub cover_url: Option<String>,
     pub summary: Option<String>,
@@ -81,51 +84,63 @@ pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
 
     let key = format!("ISBN:{}", isbn);
     if let Some(book) = parsed.books.get(&key) {
-        let authors = book
-            .authors
-            .as_ref()
-            .map(|a| {
-                a.iter()
-                    .filter(|auth| {
-                        let n = auth.name.trim();
-                        !n.eq_ignore_ascii_case("unknown author")
-                            && !n.eq_ignore_ascii_case("unknown")
-                    })
-                    .map(|auth| AuthorMetadata {
-                        name: auth.name.clone(),
-                        birth_year: None,
-                        death_year: None,
-                        image_url: None,
-                        bio: None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let publisher = book
-            .publishers
-            .as_ref()
-            .and_then(|p| p.first().map(|publ| publ.name.clone()));
-
-        let cover_url = book
-            .cover
-            .as_ref()
-            .and_then(|c| c.large.clone().or(c.medium.clone()));
-
         // Fetch description from edition/work API
         let summary = fetch_description(isbn).await;
-
-        Ok(BookMetadata {
-            title: book.title.clone(),
-            authors,
-            publisher,
-            publication_year: book.publish_date.clone(),
-            cover_url,
-            summary,
-            page_count: book.number_of_pages,
-        })
+        Ok(metadata_from_book(book, summary))
     } else {
         Err("Book not found".to_string())
+    }
+}
+
+/// Project an OpenLibrary record onto the shared metadata shape.
+///
+/// Split from the fetch so the field mapping stays testable without a network
+/// call: this is where `publish_date` — the one free-text field of the record —
+/// is reduced, and where a mis-wired field would go unnoticed.
+fn metadata_from_book(book: &OpenLibraryBook, summary: Option<String>) -> BookMetadata {
+    let authors = book
+        .authors
+        .as_ref()
+        .map(|a| {
+            a.iter()
+                .filter(|auth| {
+                    let n = auth.name.trim();
+                    !n.eq_ignore_ascii_case("unknown author") && !n.eq_ignore_ascii_case("unknown")
+                })
+                .map(|auth| AuthorMetadata {
+                    name: auth.name.clone(),
+                    birth_year: None,
+                    death_year: None,
+                    image_url: None,
+                    bio: None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let publisher = book
+        .publishers
+        .as_ref()
+        .and_then(|p| p.first().map(|publ| publ.name.clone()));
+
+    let cover_url = book
+        .cover
+        .as_ref()
+        .and_then(|c| c.large.clone().or(c.medium.clone()));
+
+    BookMetadata {
+        title: book.title.clone(),
+        authors,
+        publisher,
+        // `publish_date` is free text ("Jan 01, 2004", "c1998"), so it is
+        // reduced here to the year every consumer expects.
+        publication_year: book
+            .publish_date
+            .as_deref()
+            .and_then(crate::utils::year::normalize_year),
+        cover_url,
+        summary,
+        page_count: book.number_of_pages,
     }
 }
 
@@ -323,5 +338,40 @@ mod tests {
     fn test_extract_ol_description_unexpected_type_returns_none() {
         let data = json!({ "description": 42 });
         assert_eq!(extract_ol_description(&data), None);
+    }
+
+    fn ol_book(value: serde_json::Value) -> OpenLibraryBook {
+        serde_json::from_value(value).expect("fixture should deserialize")
+    }
+
+    /// OpenLibrary answers a free-text `publish_date`. Reading its first four
+    /// characters offered the reader a month prefix ("Jan ") as a year.
+    #[test]
+    fn metadata_reduces_a_free_text_publish_date_to_its_year() {
+        let book = ol_book(json!({
+            "title": "L'étranger",
+            "publish_date": "Jan 01, 2004",
+            "publishers": [{ "name": "Gallimard" }],
+            "number_of_pages": 186
+        }));
+
+        let metadata = metadata_from_book(&book, None);
+
+        assert_eq!(metadata.publication_year.as_deref(), Some("2004"));
+        // The neighbouring fields prove the mapping is not merely shuffled.
+        assert_eq!(metadata.publisher.as_deref(), Some("Gallimard"));
+        assert_eq!(metadata.page_count, Some(186));
+    }
+
+    #[test]
+    fn metadata_reports_no_year_when_the_date_holds_none() {
+        let book = ol_book(json!({ "title": "T", "publish_date": "unknown" }));
+        assert_eq!(metadata_from_book(&book, None).publication_year, None);
+    }
+
+    #[test]
+    fn metadata_reports_no_year_when_the_date_is_absent() {
+        let book = ol_book(json!({ "title": "T" }));
+        assert_eq!(metadata_from_book(&book, None).publication_year, None);
     }
 }

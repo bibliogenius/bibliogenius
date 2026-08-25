@@ -91,47 +91,56 @@ pub async fn fetch_book_metadata(
     if let Some(items) = parsed.items
         && let Some(first_item) = items.first()
     {
-        let info = &first_item.volume_info;
-
-        let authors = info
-            .authors
-            .as_ref()
-            .map(|list| {
-                list.iter()
-                    .filter(|name| {
-                        let n = name.trim();
-                        !n.eq_ignore_ascii_case("unknown author")
-                            && !n.eq_ignore_ascii_case("unknown")
-                    })
-                    .map(|name| AuthorMetadata {
-                        name: name.clone(),
-                        birth_year: None,
-                        death_year: None,
-                        image_url: None,
-                        bio: None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let cover_url = info
-            .image_links
-            .as_ref()
-            .and_then(|l| l.thumbnail.clone())
-            .map(|url| url.replace("http://", "https://"));
-
-        return Ok(BookMetadata {
-            title: info.title.clone(),
-            authors,
-            publisher: info.publisher.clone(),
-            publication_year: info.published_date.clone(),
-            cover_url,
-            summary: info.description.clone(),
-            page_count: info.page_count,
-        });
+        return Ok(metadata_from_volume_info(&first_item.volume_info));
     }
 
     Err("Book not found in Google Books".to_string())
+}
+
+/// Project a Google Books volume onto the shared metadata shape.
+///
+/// Split from the fetch so the field mapping stays testable without a network
+/// call: `publishedDate` is an ISO date as often as a bare year, and a
+/// mis-wired field would go unnoticed here.
+fn metadata_from_volume_info(info: &GoogleVolumeInfo) -> BookMetadata {
+    let authors = info
+        .authors
+        .as_ref()
+        .map(|list| {
+            list.iter()
+                .filter(|name| {
+                    let n = name.trim();
+                    !n.eq_ignore_ascii_case("unknown author") && !n.eq_ignore_ascii_case("unknown")
+                })
+                .map(|name| AuthorMetadata {
+                    name: name.clone(),
+                    birth_year: None,
+                    death_year: None,
+                    image_url: None,
+                    bio: None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let cover_url = info
+        .image_links
+        .as_ref()
+        .and_then(|l| l.thumbnail.clone())
+        .map(|url| url.replace("http://", "https://"));
+
+    BookMetadata {
+        title: info.title.clone(),
+        authors,
+        publisher: info.publisher.clone(),
+        publication_year: info
+            .published_date
+            .as_deref()
+            .and_then(crate::utils::year::normalize_year),
+        cover_url,
+        summary: info.description.clone(),
+        page_count: info.page_count,
+    }
 }
 
 pub async fn fetch_cover_url(isbn: &str, api_key: Option<&str>) -> Option<String> {
@@ -323,7 +332,8 @@ async fn search_books_at(
                 publisher: info.publisher,
                 publication_year: info
                     .published_date
-                    .and_then(|d| d.chars().take(4).collect::<String>().parse().ok()),
+                    .as_deref()
+                    .and_then(crate::utils::year::parse_year),
                 summary: info.description,
                 dewey_decimal: None,
                 lcc: None,
@@ -374,6 +384,7 @@ async fn search_books_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -454,5 +465,43 @@ mod tests {
         let result = search_books_at("http://127.0.0.1:0/books/v1/volumes", &empty, None).await;
         assert!(!result.quota_exceeded);
         assert!(result.books.is_empty());
+    }
+
+    fn volume_info(value: serde_json::Value) -> GoogleVolumeInfo {
+        serde_json::from_value(value).expect("fixture should deserialize")
+    }
+
+    /// Google answers `publishedDate` as an ISO date as often as a bare year.
+    /// Parsing the whole string as an integer dropped every dated one.
+    #[test]
+    fn metadata_reduces_an_iso_published_date_to_its_year() {
+        let info = volume_info(json!({
+            "title": "The Stranger",
+            "publishedDate": "2004-01-01",
+            "publisher": "Vintage",
+            "pageCount": 123
+        }));
+
+        let metadata = metadata_from_volume_info(&info);
+
+        assert_eq!(metadata.publication_year.as_deref(), Some("2004"));
+        // The neighbouring fields prove the mapping is not merely shuffled.
+        assert_eq!(metadata.publisher.as_deref(), Some("Vintage"));
+        assert_eq!(metadata.page_count, Some(123));
+    }
+
+    #[test]
+    fn metadata_keeps_a_bare_published_year() {
+        let info = volume_info(json!({ "title": "T", "publishedDate": "1998" }));
+        assert_eq!(
+            metadata_from_volume_info(&info).publication_year.as_deref(),
+            Some("1998")
+        );
+    }
+
+    #[test]
+    fn metadata_reports_no_year_when_the_date_is_absent() {
+        let info = volume_info(json!({ "title": "T" }));
+        assert_eq!(metadata_from_volume_info(&info).publication_year, None);
     }
 }
