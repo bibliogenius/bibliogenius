@@ -127,7 +127,7 @@ async fn hub_500_sets_failure_flag() {
 
     let svc = HubDirectoryService::new();
     let url = svc
-        .process_local_cover_upload(&db, &book_id, tmp.path().to_str().unwrap())
+        .process_local_cover_upload(&db, &book_id, None, tmp.path().to_str().unwrap())
         .await;
 
     assert!(url.is_none(), "hub 500 must be surfaced as None to caller");
@@ -162,7 +162,7 @@ async fn retry_success_clears_failure_flag() {
 
     let svc = HubDirectoryService::new();
     let url = svc
-        .process_local_cover_upload(&db, &book_id, tmp.path().to_str().unwrap())
+        .process_local_cover_upload(&db, &book_id, None, tmp.path().to_str().unwrap())
         .await;
 
     assert!(url.is_some(), "successful upload must return the hub URL");
@@ -195,10 +195,157 @@ async fn hub_401_also_sets_failure_flag() {
 
     let svc = HubDirectoryService::new();
     let url = svc
-        .process_local_cover_upload(&db, &book_id, tmp.path().to_str().unwrap())
+        .process_local_cover_upload(&db, &book_id, None, tmp.path().to_str().unwrap())
         .await;
 
     assert!(url.is_none());
     assert!(read_failure_flag(&db, &book_id).await.is_some());
     hub.verify().await;
+}
+
+/// A cover whose stored path points at a dead iOS data container must still be
+/// uploaded, and must therefore NOT raise the warning badge.
+///
+/// `books.cover_url` keeps the absolute path the device had when the user
+/// picked the photo. iOS reassigns the app's data-container UUID across some
+/// updates, so that prefix rots while the file itself survives under the new
+/// container. The Flutter side re-bases on the book id when it renders, so the
+/// cover looks perfectly fine in the app; only the hub upload used to read the
+/// column raw, fail with ENOENT, and pin a permanent "cover not synced" badge
+/// on the book detail sheet.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn stale_container_path_is_rebased_and_uploads_cleanly() {
+    let db = setup_db_with_hub_config().await;
+    let book_id = insert_book(&db, "El Aleph").await;
+
+    // The file lives under the CURRENT covers dir, named `<book_id>.jpg`.
+    let covers_dir = std::env::temp_dir().join(format!("bg_covers_{}", std::process::id()));
+    std::fs::create_dir_all(&covers_dir).expect("create covers dir");
+    let real = write_tiny_png_to_temp("stale");
+    let current = covers_dir.join(format!("{book_id}.jpg"));
+    std::fs::copy(real.path(), &current).expect("seed current cover");
+
+    // ...while the DB still holds the path of a container that no longer exists.
+    let stored = format!(
+        "/var/mobile/Containers/Data/Application/DEAD-UUID/Library/Application Support/covers/{book_id}.jpg"
+    );
+    assert!(
+        !std::path::Path::new(&stored).exists(),
+        "the stored path must really be dead for this test to mean anything"
+    );
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/api/directory/my-node/covers/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&hub)
+        .await;
+
+    let svc = HubDirectoryService::new();
+    let url = svc
+        .process_local_cover_upload(&db, &book_id, Some(covers_dir.as_path()), &stored)
+        .await;
+
+    let _ = std::fs::remove_dir_all(&covers_dir);
+
+    assert!(
+        url.is_some(),
+        "the cover file is on disk under the current container: the upload must succeed"
+    );
+    assert!(
+        read_failure_flag(&db, &book_id).await.is_none(),
+        "no warning badge may be raised for a cover that uploaded fine"
+    );
+    hub.verify().await;
+}
+
+/// The negative control for the test above: with no covers directory to
+/// re-base onto (server-binary mode) the dead path is read as-is and fails,
+/// which is the behaviour the app used to have on every custom cover.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_dead_path_without_a_covers_dir_still_flags_the_book() {
+    let db = setup_db_with_hub_config().await;
+    let book_id = insert_book(&db, "Les mouches 2").await;
+    let stored = format!(
+        "/var/mobile/Containers/Data/Application/DEAD-UUID/Library/Application Support/covers/{book_id}.jpg"
+    );
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+
+    let svc = HubDirectoryService::new();
+    let url = svc
+        .process_local_cover_upload(&db, &book_id, None, &stored)
+        .await;
+
+    assert!(url.is_none(), "an unreadable cover cannot be uploaded");
+    assert!(
+        read_failure_flag(&db, &book_id).await.is_some(),
+        "a genuinely unreadable cover must still raise the badge"
+    );
+}
+
+/// A `cover_url` carrying a relative segment must be refused before the file is
+/// opened, and must never reach the hub.
+///
+/// The column is replicated raw across devices (ADR-011), so its value is not
+/// necessarily something this device wrote: a compromised paired device can put
+/// an arbitrary path there. The peer-facing endpoint already rejects `..`; this
+/// pins the same guard on the upload side, which otherwise reads whatever the
+/// column names whenever the basename does not match `<book_id>.jpg` and POSTs
+/// the bytes to the hub.
+///
+/// The traversal target here is a REAL decodable image, so the pipeline would
+/// happily read it and upload it if the guard were dropped: an unreadable
+/// target would fail at the decode step and make this test pass for the wrong
+/// reason.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_traversal_path_is_refused_before_any_read() {
+    let db = setup_db_with_hub_config().await;
+    let book_id = insert_book(&db, "Traversal").await;
+
+    let real = write_tiny_png_to_temp("traversal");
+    let dir = real.path().parent().expect("temp dir");
+    let name = real.path().file_name().expect("file name");
+    // `<tmp>/sub/../<file>` resolves to the very same readable PNG. The
+    // intermediate directory has to exist: the kernel walks `..` through real
+    // directories, it does not collapse the path lexically.
+    let sub = dir.join(format!("bg_traversal_sub_{}", std::process::id()));
+    std::fs::create_dir_all(&sub).expect("create intermediate dir");
+    let traversal = sub.join("..").join(name);
+    assert!(
+        std::fs::read(&traversal).is_ok(),
+        "the traversal target must really be readable, or the test proves nothing"
+    );
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+    // Deliberately no mock: the request log below is what proves the bytes
+    // never left the device. `verify()` would pass trivially with nothing
+    // mounted, and an unmatched request still gets a 404 the caller reports as
+    // a plain failure, so neither would discriminate.
+
+    let svc = HubDirectoryService::new();
+    let url = svc
+        .process_local_cover_upload(&db, &book_id, None, traversal.to_str().unwrap())
+        .await;
+
+    let _ = std::fs::remove_dir_all(&sub);
+
+    let seen = hub.received_requests().await.unwrap_or_default();
+    assert!(
+        seen.is_empty(),
+        "the path must be refused before any read or upload, got {} request(s)",
+        seen.len()
+    );
+    assert!(
+        url.is_none(),
+        "a traversal path must never produce a hub URL"
+    );
 }

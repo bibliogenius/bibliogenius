@@ -133,8 +133,17 @@ async fn hub_directory_sync_catalog_inner() -> Result<i32, String> {
     // includes the now-filled cover_url so its hash differs and the push
     // goes through). Logged at ERROR so the failure is diagnosable rather
     // than drowned in warn-level noise.
+    // `path` is the raw `books.cover_url` value; the upload resolves it
+    // against the current covers directory rather than opening it directly,
+    // the same way the peer-facing endpoint does. On iOS the absolute prefix
+    // stored in the column dies with the next data-container UUID change, and
+    // a raw read would then fail with ENOENT on a file that is still on disk,
+    // pinning a "cover not synced" badge on a book whose cover renders fine.
+    let covers_dir = crate::api::frb::covers_dir().map(|d| d.as_path());
     for (bid, path, updated_at) in &local_covers {
-        if let Some(hub_url) = svc.process_local_cover_upload(db, bid, path).await
+        if let Some(hub_url) = svc
+            .process_local_cover_upload(db, bid, covers_dir, path)
+            .await
             && let Some(&idx) = id_to_index.get(bid)
         {
             // Append the canonical ?v=tag so peers bust their

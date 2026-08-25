@@ -961,10 +961,11 @@ pub async fn get_book_cover(
     // persisted absolute path pointing at a dead container even though the file
     // survives under the new one. In server-binary mode the covers dir is not
     // registered, so the stored path is read as-is (paths are stable there).
-    let read_path = match crate::api::frb::covers_dir() {
-        Some(dir) => crate::utils::cover_url::rebase_local_cover_path(dir, cover_path, &id),
-        None => std::path::PathBuf::from(cover_path),
-    };
+    let read_path = crate::utils::cover_url::resolve_local_cover_read_path(
+        crate::api::frb::covers_dir().map(|d| d.as_path()),
+        cover_path,
+        &id,
+    );
 
     let raw = tokio::fs::read(&read_path)
         .await

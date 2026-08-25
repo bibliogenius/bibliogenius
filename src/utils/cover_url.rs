@@ -170,6 +170,31 @@ pub fn rebase_local_cover_path(covers_dir: &Path, stored: &str, book_id: &str) -
     }
 }
 
+/// The on-disk path every reader of a book's OWN local cover must go through.
+///
+/// `covers_dir` is `Some` in app (FFI) mode, where `init_backend` registers the
+/// current covers directory, and `None` in server-binary mode, where paths are
+/// stable and the stored value is read as-is.
+///
+/// Every code path that opens a stored `books.cover_url` as a file must resolve
+/// it here rather than reading the column raw. The column keeps whatever
+/// absolute path the writing device had at the time; on iOS that prefix dies
+/// with the next data-container UUID change. A raw read then fails with ENOENT
+/// on a file that is still there under the new container, which is invisible in
+/// the UI (the Flutter side re-bases too, so the cover still renders) and
+/// surfaces only as a downstream failure, such as a hub cover upload that never
+/// stops retrying.
+pub fn resolve_local_cover_read_path(
+    covers_dir: Option<&Path>,
+    stored: &str,
+    book_id: &str,
+) -> PathBuf {
+    match covers_dir {
+        Some(dir) => rebase_local_cover_path(dir, stored, book_id),
+        None => PathBuf::from(stored),
+    }
+}
+
 /// Reduce a stored `cover_url` to its device-independent form for storage.
 ///
 /// The same logical cover must be stored identically on every device so the
@@ -427,6 +452,40 @@ mod tests {
         let stored = "/Users/x/Application Support/covers/7.jpg";
         assert_eq!(
             rebase_local_cover_path(covers, stored, "7"),
+            Path::new(stored)
+        );
+    }
+
+    // resolve_local_cover_read_path ---------------------------------------
+
+    #[test]
+    fn resolve_rebases_a_dead_container_path_when_the_covers_dir_is_known() {
+        let covers = Path::new("/now/covers");
+        let stored = "/var/mobile/Containers/Data/Application/OLD-UUID/Library/Application Support/covers/42.jpg";
+        assert_eq!(
+            resolve_local_cover_read_path(Some(covers), stored, "42"),
+            covers.join("42.jpg")
+        );
+    }
+
+    #[test]
+    fn resolve_reads_the_stored_path_as_is_in_server_binary_mode() {
+        let stored = "/srv/covers/42.jpg";
+        assert_eq!(
+            resolve_local_cover_read_path(None, stored, "42"),
+            Path::new(stored)
+        );
+    }
+
+    #[test]
+    fn resolve_leaves_a_foreign_synced_path_alone() {
+        // Same guard as `rebase_local_cover_path`: a path replicated from
+        // another device carries that device's basename, so re-basing it would
+        // serve an unrelated book's cover.
+        let covers = Path::new("/now/covers");
+        let stored = "/var/mobile/.../covers/42.jpg";
+        assert_eq!(
+            resolve_local_cover_read_path(Some(covers), stored, "87"),
             Path::new(stored)
         );
     }

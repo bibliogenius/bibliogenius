@@ -1213,15 +1213,38 @@ impl HubDirectoryService {
     /// Reads a local cover file, resizes it to a JPEG thumbnail, and uploads
     /// it to the hub. Shared pipeline so LAN peer responses and hub-stored
     /// covers stay pixel-for-pixel identical.
+    ///
+    /// `stored_cover` is the raw `books.cover_url` value and `covers_dir` the
+    /// directory covers actually live in on this device (`None` in
+    /// server-binary mode). The two are resolved through
+    /// `resolve_local_cover_read_path`: reading `stored_cover` directly breaks
+    /// on iOS as soon as the data-container UUID changes, and the resulting
+    /// ENOENT would flag every custom cover as un-syncable forever.
     pub async fn resize_and_upload_cover(
         &self,
         db: &DatabaseConnection,
         book_id: &str,
-        path: &str,
+        covers_dir: Option<&std::path::Path>,
+        stored_cover: &str,
     ) -> Result<String, String> {
-        let bytes = tokio::fs::read(path)
+        // `books.cover_url` is replicated raw across devices (ADR-011), so its
+        // value is not necessarily one this device wrote. Re-basing only kicks
+        // in when the basename is this book's own `<book_id>.jpg`; every other
+        // value is opened as given, which would otherwise let a path planted on
+        // a paired device drive an arbitrary local read whose bytes are POSTed
+        // to the hub. Same rejection the peer-facing endpoint applies.
+        if stored_cover.split(['/', '\\']).any(|seg| seg == "..") {
+            return Err(format!("refused traversal path for book {book_id}"));
+        }
+
+        let path = crate::utils::cover_url::resolve_local_cover_read_path(
+            covers_dir,
+            stored_cover,
+            book_id,
+        );
+        let bytes = tokio::fs::read(&path)
             .await
-            .map_err(|e| format!("read {path}: {e}"))?;
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
 
         let jpeg_bytes = tokio::task::spawn_blocking(move || {
             crate::utils::cover_image::resize_to_jpeg_thumbnail(&bytes)
@@ -1243,9 +1266,13 @@ impl HubDirectoryService {
         &self,
         db: &DatabaseConnection,
         book_id: &str,
-        path: &str,
+        covers_dir: Option<&std::path::Path>,
+        stored_cover: &str,
     ) -> Option<String> {
-        match self.resize_and_upload_cover(db, book_id, path).await {
+        match self
+            .resize_and_upload_cover(db, book_id, covers_dir, stored_cover)
+            .await
+        {
             Ok(hub_url) => {
                 Self::clear_hub_cover_upload_failure(db, book_id).await;
                 Some(hub_url)
