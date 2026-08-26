@@ -269,22 +269,43 @@ struct OpenLibrarySearchDoc {
     cover_i: Option<i64>,
 }
 
+const COVERS_BASE_URL: &str = "https://covers.openlibrary.org";
+
 /// Fetch cover URL from OpenLibrary's Cover API (most reliable endpoint).
 /// Uses `?default=false` so OpenLibrary returns 404 for missing covers
 /// instead of redirecting to a 1x1 transparent placeholder.
 pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
-    let cover_url = format!("https://covers.openlibrary.org/b/isbn/{}-L.jpg", isbn);
+    try_fetch_cover_url(isbn).await.ok().flatten()
+}
+
+/// Like [`fetch_cover_url`], but keeps "OpenLibrary has no cover for this ISBN"
+/// (a 404, which is an answer) apart from "OpenLibrary did not answer". The
+/// cover picker reports the two differently: an outage presented as an absence
+/// makes the user give up on a cover that exists.
+pub async fn try_fetch_cover_url(isbn: &str) -> Result<Option<String>, String> {
+    try_fetch_cover_url_at(COVERS_BASE_URL, isbn).await
+}
+
+/// Implementation of [`try_fetch_cover_url`] with an injectable endpoint so the
+/// 404 and outage branches can be exercised against a mock server.
+async fn try_fetch_cover_url_at(covers_base: &str, isbn: &str) -> Result<Option<String>, String> {
+    // Encoded: the ISBN column has no validator, so a hand-typed "/" or "?"
+    // would otherwise alter the path or truncate it.
+    let cover_url = format!("{}/b/isbn/{}-L.jpg", covers_base, urlencoding::encode(isbn));
     let check_url = format!("{}?default=false", &cover_url);
 
     let client = reqwest::Client::builder()
         .user_agent(API_USER_AGENT)
         .timeout(std::time::Duration::from_secs(3))
         .build()
-        .ok()?;
+        .map_err(|e| format!("Failed to build client: {}", e))?;
 
     match client.head(&check_url).send().await {
-        Ok(resp) if resp.status().is_success() => Some(cover_url),
-        _ => None,
+        Ok(resp) if resp.status().is_success() => Ok(Some(cover_url)),
+        // 404 is OpenLibrary telling us it has no cover for this ISBN.
+        Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => Ok(None),
+        Ok(resp) => Err(format!("HTTP {}", resp.status())),
+        Err(e) => Err(format!("Request failed: {}", e)),
     }
 }
 
@@ -292,6 +313,34 @@ pub async fn fetch_cover_url(isbn: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ── cover lookup: a 404 is an answer, anything else is silence ──────
+
+    #[tokio::test]
+    async fn a_404_means_openlibrary_has_no_cover() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("HEAD"))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let result = try_fetch_cover_url_at(&server.uri(), "9782073087768").await;
+
+        assert_eq!(result, Ok(None));
+    }
+
+    #[tokio::test]
+    async fn a_503_is_not_an_absence_of_cover() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("HEAD"))
+            .respond_with(wiremock::ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let result = try_fetch_cover_url_at(&server.uri(), "9782073087768").await;
+
+        assert!(result.is_err(), "503 must not read as \"no cover\"");
+    }
 
     #[test]
     fn test_extract_ol_description_plain_string() {

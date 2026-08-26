@@ -260,9 +260,130 @@ fn get_summary(
         .or_else(|| pick_lang(edition_descriptions))
 }
 
+/// Fetch just the cover of an ISBN edition, keeping "Inventaire has no record
+/// for this ISBN" and "Inventaire did not answer" apart.
+///
+/// [`fetch_inventaire_metadata`] collapses both into `Err`, and it also walks
+/// the work and every author to build metadata a cover search then throws away.
+/// The cover picker needs neither: it needs one round trip, and it needs to know
+/// which of the two happened, because telling a user "no cover found" during an
+/// outage makes them stop looking for a cover that exists.
+pub async fn fetch_inventaire_cover(isbn: &str) -> Result<Option<String>, String> {
+    fetch_inventaire_cover_at(INVENTAIRE_BY_URIS_URL, isbn).await
+}
+
+/// Implementation of [`fetch_inventaire_cover`] with an injectable endpoint so
+/// the outage and not-found branches can be exercised against a mock server.
+async fn fetch_inventaire_cover_at(
+    by_uris_url: &str,
+    isbn: &str,
+) -> Result<Option<String>, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(API_USER_AGENT)
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("Failed to build client: {}", e))?;
+
+    // Encoded, like every other query this module builds: the ISBN column
+    // has no validator, so a hand-typed "&" or "#" would otherwise inject a
+    // parameter or truncate the query.
+    let url = format!(
+        "{}?action=by-uris&uris=isbn:{}",
+        by_uris_url,
+        urlencoding::encode(isbn)
+    );
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("Read body failed: {}", e))?;
+
+    // A body we cannot parse is a source that did not answer, not an absence.
+    let parsed: InventaireResponse =
+        serde_json::from_str(&body).map_err(|e| format!("Parse error: {}", e))?;
+
+    // No entity for this ISBN is a real answer: Inventaire does not know it.
+    Ok(parsed
+        .entities
+        .into_iter()
+        .next()
+        .and_then(|(_, entity)| get_entity_image_url(&entity)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── cover lookup: absence and outage are different answers ──────────
+
+    #[tokio::test]
+    async fn an_unknown_isbn_is_an_absence_not_a_failure() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "entities": {},
+                    "notFound": ["isbn:9782073087768"],
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let result = fetch_inventaire_cover_at(&server.uri(), "9782073087768").await;
+
+        assert_eq!(result, Ok(None));
+    }
+
+    #[tokio::test]
+    async fn a_source_that_does_not_answer_is_a_failure_not_an_absence() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let result = fetch_inventaire_cover_at(&server.uri(), "9782073087768").await;
+
+        assert!(result.is_err(), "503 must not read as \"no cover\"");
+    }
+
+    #[tokio::test]
+    async fn a_known_isbn_yields_its_absolute_cover_url() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "entities": {
+                        "inv:abc": {
+                            "uri": "inv:abc",
+                            "image": { "url": "/img/entities/deadbeef" },
+                            "claims": {},
+                            "labels": {},
+                        }
+                    }
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let result = fetch_inventaire_cover_at(&server.uri(), "9782264005564").await;
+
+        assert_eq!(
+            result,
+            Ok(Some(
+                "https://inventaire.io/img/entities/deadbeef".to_string()
+            ))
+        );
+    }
 
     #[tokio::test]
     #[ignore] // Flaky in CI due to external network request
@@ -323,6 +444,8 @@ mod tests {
         );
     }
 }
+
+const INVENTAIRE_BY_URIS_URL: &str = "https://inventaire.io/api/entities";
 
 async fn fetch_entity(client: &reqwest::Client, uri: &str) -> Result<InventaireEntity, String> {
     let url = format!(

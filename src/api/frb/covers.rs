@@ -43,10 +43,16 @@ pub async fn search_cover_by_title(
 }
 
 /// A cover candidate from an external source, for the multi-cover picker.
+///
+/// `language` is the edition's language code when the source states it. The
+/// picker shows it: choosing between covers of several editions of the same
+/// work is a decision the reader can only make if the editions are told apart,
+/// and the language is the difference that shows.
 #[frb(dart_metadata=("freezed"))]
 pub struct FrbCoverCandidate {
     pub url: String,
     pub source: String,
+    pub language: Option<String>,
 }
 
 impl From<crate::services::book_service::CoverCandidate> for FrbCoverCandidate {
@@ -54,17 +60,65 @@ impl From<crate::services::book_service::CoverCandidate> for FrbCoverCandidate {
         FrbCoverCandidate {
             url: c.url,
             source: c.source,
+            language: c.language,
+        }
+    }
+}
+
+/// What one source answered during a cover search.
+///
+/// `state` is one of `found`, `empty`, `skipped`, `unavailable`. `detail` carries
+/// the reason behind `unavailable` (HTTP status, transport error, or `quota`).
+/// Flattened to strings rather than mirrored as an enum, matching the rest of
+/// this bridge.
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbCoverSourceStatus {
+    pub source: String,
+    pub state: String,
+    pub detail: Option<String>,
+}
+
+impl From<crate::services::book_service::CoverSourceStatus> for FrbCoverSourceStatus {
+    fn from(s: crate::services::book_service::CoverSourceStatus) -> Self {
+        use crate::services::book_service::CoverSourceOutcome as O;
+        let (state, detail) = match s.outcome {
+            O::Found(_) => ("found", None),
+            O::Empty => ("empty", None),
+            O::Skipped => ("skipped", None),
+            O::Unavailable(reason) => ("unavailable", Some(reason)),
+        };
+        FrbCoverSourceStatus {
+            source: s.source,
+            state: state.to_string(),
+            detail,
+        }
+    }
+}
+
+/// Cover candidates plus what each source answered, so the picker can tell the
+/// user that a source was down instead of claiming no cover exists.
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbCoverSearchResult {
+    pub candidates: Vec<FrbCoverCandidate>,
+    pub sources: Vec<FrbCoverSourceStatus>,
+}
+
+impl From<crate::services::book_service::CoverSearchReport> for FrbCoverSearchResult {
+    fn from(r: crate::services::book_service::CoverSearchReport) -> Self {
+        FrbCoverSearchResult {
+            candidates: r.candidates.into_iter().map(Into::into).collect(),
+            sources: r.sources.into_iter().map(Into::into).collect(),
         }
     }
 }
 
 /// Search ALL enabled cover sources in parallel for a given ISBN.
-/// Returns all found cover candidates for the picker carousel.
-pub async fn search_all_covers_for_book(isbn: String) -> Result<Vec<FrbCoverCandidate>, String> {
+/// Returns the candidates for the picker carousel and each source's answer.
+pub async fn search_all_covers_for_book(isbn: String) -> Result<FrbCoverSearchResult, String> {
     let db = db().ok_or("Database not initialized")?;
     crate::services::book_service::search_all_covers_for_book(db, &isbn)
         .await
-        .map(|v| v.into_iter().map(FrbCoverCandidate::from).collect())
+        .map(FrbCoverSearchResult::from)
         .map_err(|e| format!("{:?}", e))
 }
 
@@ -73,7 +127,7 @@ pub async fn search_all_covers_by_title(
     title: String,
     author: Option<String>,
     enable_google: Option<bool>,
-) -> Result<Vec<FrbCoverCandidate>, String> {
+) -> Result<FrbCoverSearchResult, String> {
     let db = db().ok_or("Database not initialized")?;
     let gb_api_key = load_google_books_api_key().await;
     crate::services::book_service::search_all_covers_by_title(
@@ -84,6 +138,6 @@ pub async fn search_all_covers_by_title(
         gb_api_key.as_deref(),
     )
     .await
-    .map(|v| v.into_iter().map(FrbCoverCandidate::from).collect())
+    .map(FrbCoverSearchResult::from)
     .map_err(|e| format!("{:?}", e))
 }

@@ -1,3 +1,4 @@
+use super::API_USER_AGENT;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +52,61 @@ fn append_api_key(url: &str, api_key: Option<&str>) -> String {
         Some(key) => format!("{}&key={}", url, key),
         None => url.to_string(),
     }
+}
+
+/// Whether the caller can afford a second attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryPolicy {
+    /// Someone is waiting on the answer, so a 5xx is worth one more try: the
+    /// alternative is telling them a source is down when it merely hiccuped.
+    Interactive,
+    /// A background sweep over the whole library. A second try per failing book
+    /// buys almost nothing there (the sweep already reports what it found) and
+    /// costs a fixed pause on every one of them at each app start.
+    Background,
+}
+
+/// GET, retrying once on a 5xx when the policy allows it.
+///
+/// Google answers 503 in bursts, and the code used to give up on the first one:
+/// the only source that holds a cover for a French edition absent from
+/// Inventaire and OpenLibrary would then report itself unavailable, and the
+/// reader saw a search that had in fact never reached it. 503 is by definition
+/// "come back", so we come back once. A 429 is NEVER retried, whatever the
+/// policy: the quota is spent, and asking again only digs deeper.
+async fn get_with_one_retry(
+    client: &reqwest::Client,
+    url: &str,
+    policy: RetryPolicy,
+) -> Result<reqwest::Response, String> {
+    let first = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", redact(e)))?;
+    if policy == RetryPolicy::Background || !first.status().is_server_error() {
+        return Ok(first);
+    }
+    // Warn, not debug: the default filter is `info`, and a silent retry makes
+    // the failure that follows it unreadable in a log.
+    tracing::warn!("Google Books: {}, retrying once", first.status());
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", redact(e)))
+}
+
+/// Strip the URL out of a transport error before it is logged or handed back.
+///
+/// [`append_api_key`] puts the user's key in the query string, and a
+/// `reqwest::Error` renders the whole URL in its `Display`. That message reaches
+/// the log file and, since covers report per-source failures, the Flutter side
+/// too. The rest of the error (timeout, connect, decode) is what diagnoses the
+/// problem anyway; the URL never was.
+fn redact(e: reqwest::Error) -> reqwest::Error {
+    e.without_url()
 }
 
 pub async fn fetch_book_metadata(
@@ -143,19 +199,65 @@ fn metadata_from_volume_info(info: &GoogleVolumeInfo) -> BookMetadata {
     }
 }
 
+const GOOGLE_BOOKS_VOLUMES_URL: &str = "https://www.googleapis.com/books/v1/volumes";
+
 pub async fn fetch_cover_url(isbn: &str, api_key: Option<&str>) -> Option<String> {
-    let base_url = format!(
-        "https://www.googleapis.com/books/v1/volumes?q=isbn:{}",
-        isbn
-    );
+    // Background: this is the startup sweep over every coverless book, where a
+    // retry per failure would add a fixed pause to each one.
+    try_fetch_cover_url_at(
+        GOOGLE_BOOKS_VOLUMES_URL,
+        isbn,
+        api_key,
+        RetryPolicy::Background,
+    )
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Like [`fetch_cover_url`], but keeps "Google has no cover for this ISBN" apart
+/// from "Google did not answer" (transport error, 5xx, or a saturated quota).
+/// The cover picker reports the two differently: an outage presented as an
+/// absence makes the user give up on a cover that exists.
+pub async fn try_fetch_cover_url(
+    isbn: &str,
+    api_key: Option<&str>,
+) -> Result<Option<String>, String> {
+    try_fetch_cover_url_at(
+        GOOGLE_BOOKS_VOLUMES_URL,
+        isbn,
+        api_key,
+        RetryPolicy::Interactive,
+    )
+    .await
+}
+
+/// Implementation of [`try_fetch_cover_url`] with an injectable endpoint so the
+/// quota and outage branches can be exercised against a mock server.
+async fn try_fetch_cover_url_at(
+    volumes_url: &str,
+    isbn: &str,
+    api_key: Option<&str>,
+    policy: RetryPolicy,
+) -> Result<Option<String>, String> {
+    // Encoded: the ISBN column has no validator, so a hand-typed "&" or "#"
+    // would otherwise inject a parameter or truncate the query.
+    let base_url = format!("{}?q=isbn:{}", volumes_url, urlencoding::encode(isbn));
     let url = append_api_key(&base_url, api_key);
 
     let client = reqwest::Client::builder()
+        .user_agent(API_USER_AGENT)
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .ok()?;
+        .map_err(|e| format!("Failed to build client: {}", e))?;
 
-    let resp = client.get(&url).send().await.ok()?;
+    let resp = get_with_one_retry(&client, &url, policy)
+        .await
+        .inspect_err(|e| {
+            // Logged like every other failure branch: this one used to be the only
+            // silent one, so an unreachable Google left no trace at all.
+            tracing::warn!("Google Books cover fetch failed for ISBN {}: {}", isbn, e);
+        })?;
 
     let status = resp.status();
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -168,7 +270,7 @@ pub async fn fetch_cover_url(isbn: &str, api_key: Option<&str>) -> Option<String
                 ""
             }
         );
-        return None;
+        return Err(QUOTA_FAILURE.to_string());
     }
     if !status.is_success() {
         tracing::warn!(
@@ -176,11 +278,15 @@ pub async fn fetch_cover_url(isbn: &str, api_key: Option<&str>) -> Option<String
             isbn,
             status
         );
-        return None;
+        return Err(format!("HTTP {}", status));
     }
 
-    let body = resp.text().await.ok()?;
-    let parsed: GoogleBooksResponse = serde_json::from_str(&body).ok()?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("Read body failed: {}", e))?;
+    let parsed: GoogleBooksResponse =
+        serde_json::from_str(&body).map_err(|e| format!("Parse error: {}", e))?;
 
     if let Some(items) = parsed.items
         && let Some(first_item) = items.first()
@@ -189,10 +295,11 @@ pub async fn fetch_cover_url(isbn: &str, api_key: Option<&str>) -> Option<String
     {
         // Google Books returns http links often, upgrade to https
         let secure_url = thumb.replace("http://", "https://");
-        return Some(secure_url);
+        return Ok(Some(secure_url));
     }
 
-    None
+    // A volume without an image, or no volume at all, is a real answer.
+    Ok(None)
 }
 
 /// Outcome of a Google Books search.
@@ -202,13 +309,20 @@ pub async fn fetch_cover_url(isbn: &str, api_key: Option<&str>) -> Option<String
 /// routinely saturated, so an empty `books` list is otherwise indistinguishable
 /// from "no match". Callers use this flag to surface an honest "limite atteinte"
 /// notice instead of a silent empty result.
+///
+/// `failure` carries the same distinction for everything that is not a quota:
+/// a transport error, a 5xx, or a body we cannot parse. Without it an outage is
+/// indistinguishable from "Google knows nothing about this book".
 #[derive(Debug, Default)]
 pub struct GoogleBooksSearchResult {
     pub books: Vec<crate::models::book::Model>,
     pub quota_exceeded: bool,
+    pub failure: Option<String>,
 }
 
-const GOOGLE_BOOKS_VOLUMES_URL: &str = "https://www.googleapis.com/books/v1/volumes";
+/// Marker for a saturated Google quota, so callers can name it rather than
+/// showing a bare HTTP code.
+pub const QUOTA_FAILURE: &str = "quota";
 
 pub async fn search_books(
     query: &crate::api::search::SearchQuery,
@@ -258,14 +372,16 @@ async fn search_books_at(
     let url = append_api_key(&base_url, api_key);
 
     let client = reqwest::Client::builder()
+        .user_agent(API_USER_AGENT)
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let resp = match client.get(&url).send().await {
+    let resp = match get_with_one_retry(&client, &url, RetryPolicy::Interactive).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("Google Books search request failed: {}", e);
+            result.failure = Some(e);
             return result;
         }
     };
@@ -280,10 +396,12 @@ async fn search_books_at(
             tracing::warn!("Google Books search quota exceeded for your API key");
         }
         result.quota_exceeded = true;
+        result.failure = Some(QUOTA_FAILURE.to_string());
         return result;
     }
     if !status.is_success() {
         tracing::warn!("Google Books search error: HTTP {}", status);
+        result.failure = Some(format!("HTTP {}", status));
         return result;
     }
 
@@ -291,6 +409,7 @@ async fn search_books_at(
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("Google Books response parse error: {}", e);
+            result.failure = Some(format!("Parse error: {}", e));
             return result;
         }
     };
@@ -401,6 +520,232 @@ mod tests {
             sources: None,
             autocomplete: None,
         }
+    }
+
+    // ── cover lookup: absence, quota and outage are three answers ───────
+
+    // ── Google answers 503 in bursts; one 503 is not an outage ──────────
+
+    #[tokio::test]
+    async fn a_503_is_retried_once_and_the_second_answer_counts() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/books/v1/volumes"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/books/v1/volumes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "items": [{ "volumeInfo": { "title": "Mécanismes de survie en milieu hostile",
+                                            "imageLinks": { "thumbnail": "http://books.google.com/x" } } }]
+            })))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/books/v1/volumes", server.uri());
+        let result =
+            try_fetch_cover_url_at(&url, "9782070468287", None, RetryPolicy::Interactive).await;
+
+        assert_eq!(result, Ok(Some("https://books.google.com/x".to_string())));
+    }
+
+    #[tokio::test]
+    async fn the_startup_sweep_does_not_retry() {
+        // `enrich_missing_covers` walks every coverless book at each app start.
+        // A retry per failure there adds a fixed pause to each one and buys
+        // nothing: nobody is waiting on that answer.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/books/v1/volumes"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/books/v1/volumes", server.uri());
+        let result =
+            try_fetch_cover_url_at(&url, "9782073087768", None, RetryPolicy::Background).await;
+
+        assert!(result.is_err(), "503 is still not an absence");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "the background sweep must ask exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spent_quota_is_never_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/books/v1/volumes"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/books/v1/volumes", server.uri());
+        let _ = try_fetch_cover_url_at(&url, "9782070468287", None, RetryPolicy::Interactive).await;
+
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "asking again only digs the quota deeper"
+        );
+    }
+
+    #[tokio::test]
+    async fn google_is_told_who_is_calling() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/books/v1/volumes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/books/v1/volumes", server.uri());
+        let _ = try_fetch_cover_url_at(&url, "9782070468287", None, RetryPolicy::Interactive).await;
+
+        let received = &server.received_requests().await.unwrap()[0];
+        assert_eq!(
+            received
+                .headers
+                .get("user-agent")
+                .map(|v| v.to_str().unwrap()),
+            Some(API_USER_AGENT),
+            "every other integration identifies itself; this one did not"
+        );
+    }
+
+    // ── the API key must not ride along in what we log or return ────────
+    //
+    // `append_api_key` puts the key in the query string, and a reqwest error
+    // renders the full URL. Covers now report per-source failures to Flutter,
+    // so that message leaves the log file: it must carry no key.
+
+    #[tokio::test]
+    async fn a_transport_error_carries_no_api_key() {
+        // Port 1 is closed: this fails at connect, the branch that renders a URL.
+        let unreachable = "http://127.0.0.1:1/books/v1/volumes";
+        let key = "AIzaTESTKEYTESTKEYTESTKEY";
+
+        let cover = try_fetch_cover_url_at(
+            unreachable,
+            "9782073087768",
+            Some(key),
+            RetryPolicy::Interactive,
+        )
+        .await;
+        let search = search_books_at(unreachable, &query("Retour en Afrique"), Some(key)).await;
+
+        let cover_err = cover.expect_err("a closed port must fail");
+        assert!(
+            !cover_err.contains(key),
+            "cover lookup leaked the API key: {cover_err}"
+        );
+        let search_err = search.failure.expect("a closed port must fail");
+        assert!(
+            !search_err.contains(key),
+            "search leaked the API key: {search_err}"
+        );
+    }
+
+    // ── the ISBN column has no validator, so it must be encoded ─────────
+
+    #[tokio::test]
+    async fn a_hand_typed_isbn_cannot_inject_a_query_parameter() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/books/v1/volumes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/books/v1/volumes", server.uri());
+        let _ =
+            try_fetch_cover_url_at(&url, "978&key=stolen", None, RetryPolicy::Interactive).await;
+
+        let received = &server.received_requests().await.unwrap()[0];
+        let query = received.url.query().unwrap_or_default();
+        assert!(
+            !query.contains("&key="),
+            "the ISBN injected a parameter: {query}"
+        );
+        assert!(
+            query.contains("%26"),
+            "the ampersand should have been encoded: {query}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_volume_without_an_image_is_an_absence_not_a_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/books/v1/volumes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "items": [{ "volumeInfo": { "title": "Retour en Afrique" } }]
+            })))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/books/v1/volumes", server.uri());
+        let result =
+            try_fetch_cover_url_at(&url, "9782073087768", None, RetryPolicy::Interactive).await;
+
+        assert_eq!(result, Ok(None));
+    }
+
+    #[tokio::test]
+    async fn a_503_cover_lookup_is_not_an_absence() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/books/v1/volumes"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/books/v1/volumes", server.uri());
+        let result =
+            try_fetch_cover_url_at(&url, "9782073087768", None, RetryPolicy::Interactive).await;
+
+        assert!(result.is_err(), "503 must not read as \"no cover\"");
+    }
+
+    #[tokio::test]
+    async fn a_saturated_quota_names_itself_on_the_cover_lookup() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/books/v1/volumes"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/books/v1/volumes", server.uri());
+        let result =
+            try_fetch_cover_url_at(&url, "9782073087768", None, RetryPolicy::Interactive).await;
+
+        assert_eq!(result, Err(QUOTA_FAILURE.to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_search_outage_is_reported_as_a_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/books/v1/volumes"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/books/v1/volumes", server.uri());
+        let result = search_books_at(&url, &query("Retour en Afrique"), None).await;
+
+        assert!(result.books.is_empty());
+        assert!(
+            result.failure.is_some(),
+            "an empty book list after a 503 must carry the failure"
+        );
     }
 
     #[tokio::test]

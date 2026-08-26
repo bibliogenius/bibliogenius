@@ -8352,9 +8352,39 @@ impl SseDecode for crate::api::frb::FrbCoverCandidate {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_url = <String>::sse_decode(deserializer);
         let mut var_source = <String>::sse_decode(deserializer);
+        let mut var_language = <Option<String>>::sse_decode(deserializer);
         return crate::api::frb::FrbCoverCandidate {
             url: var_url,
             source: var_source,
+            language: var_language,
+        };
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbCoverSearchResult {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_candidates =
+            <Vec<crate::api::frb::FrbCoverCandidate>>::sse_decode(deserializer);
+        let mut var_sources =
+            <Vec<crate::api::frb::FrbCoverSourceStatus>>::sse_decode(deserializer);
+        return crate::api::frb::FrbCoverSearchResult {
+            candidates: var_candidates,
+            sources: var_sources,
+        };
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbCoverSourceStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_source = <String>::sse_decode(deserializer);
+        let mut var_state = <String>::sse_decode(deserializer);
+        let mut var_detail = <Option<String>>::sse_decode(deserializer);
+        return crate::api::frb::FrbCoverSourceStatus {
+            source: var_source,
+            state: var_state,
+            detail: var_detail,
         };
     }
 }
@@ -9455,6 +9485,20 @@ impl SseDecode for Vec<crate::api::frb::FrbCoverCandidate> {
         let mut ans_ = vec![];
         for idx_ in 0..len_ {
             ans_.push(<crate::api::frb::FrbCoverCandidate>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::frb::FrbCoverSourceStatus> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::frb::FrbCoverSourceStatus>::sse_decode(
                 deserializer,
             ));
         }
@@ -11077,6 +11121,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbCoverCandidate {
         [
             self.url.into_into_dart().into_dart(),
             self.source.into_into_dart().into_dart(),
+            self.language.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -11089,6 +11134,49 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbCoverCandidate>
     for crate::api::frb::FrbCoverCandidate
 {
     fn into_into_dart(self) -> crate::api::frb::FrbCoverCandidate {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbCoverSearchResult {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.candidates.into_into_dart().into_dart(),
+            self.sources.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbCoverSearchResult
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbCoverSearchResult>
+    for crate::api::frb::FrbCoverSearchResult
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbCoverSearchResult {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbCoverSourceStatus {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.source.into_into_dart().into_dart(),
+            self.state.into_into_dart().into_dart(),
+            self.detail.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbCoverSourceStatus
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbCoverSourceStatus>
+    for crate::api::frb::FrbCoverSourceStatus
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbCoverSourceStatus {
         self
     }
 }
@@ -12603,6 +12691,24 @@ impl SseEncode for crate::api::frb::FrbCoverCandidate {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.url, serializer);
         <String>::sse_encode(self.source, serializer);
+        <Option<String>>::sse_encode(self.language, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbCoverSearchResult {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::frb::FrbCoverCandidate>>::sse_encode(self.candidates, serializer);
+        <Vec<crate::api::frb::FrbCoverSourceStatus>>::sse_encode(self.sources, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbCoverSourceStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.source, serializer);
+        <String>::sse_encode(self.state, serializer);
+        <Option<String>>::sse_encode(self.detail, serializer);
     }
 }
 
@@ -13288,6 +13394,16 @@ impl SseEncode for Vec<crate::api::frb::FrbCoverCandidate> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::frb::FrbCoverCandidate>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::frb::FrbCoverSourceStatus> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::frb::FrbCoverSourceStatus>::sse_encode(item, serializer);
         }
     }
 }

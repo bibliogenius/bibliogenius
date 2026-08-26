@@ -38,6 +38,41 @@ pub struct CoverCandidate {
     pub language: Option<String>,
 }
 
+/// What one source answered during a cover search.
+///
+/// Every source used to be folded into an `Option`, so "this source has no cover
+/// for your book" and "this source never answered" reached the picker as the
+/// same empty list, and the user was told no cover exists while four sources
+/// were down. The picker reports these four outcomes separately instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoverSourceOutcome {
+    /// The source answered with this many candidates.
+    Found(usize),
+    /// The source answered, and it has nothing for this book.
+    Empty,
+    /// Not queried: turned off in settings, or not applicable to this book
+    /// (BNF is only asked about French ISBNs).
+    Skipped,
+    /// The source did not answer. Carries a short reason (HTTP status,
+    /// transport error, saturated quota).
+    Unavailable(String),
+}
+
+/// One source's answer, named so the UI can say which source failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverSourceStatus {
+    pub source: String,
+    pub outcome: CoverSourceOutcome,
+}
+
+/// Cover candidates plus what each source answered, so an empty result can
+/// explain itself instead of reading as "no cover exists".
+#[derive(Debug, Clone, Default)]
+pub struct CoverSearchReport {
+    pub candidates: Vec<CoverCandidate>,
+    pub sources: Vec<CoverSourceStatus>,
+}
+
 /// Error type for service operations
 #[derive(Debug)]
 pub enum ServiceError {
@@ -985,12 +1020,13 @@ pub async fn search_cover_by_title(
 }
 
 /// Search ALL enabled cover sources in parallel for a given ISBN.
-/// Returns all found cover candidates (may be empty).
+/// Returns the candidates found (may be empty) alongside what each source
+/// answered, so the caller can tell an absence from an outage.
 /// Unlike `search_cover_for_book`, this does NOT stop at the first hit.
 pub async fn search_all_covers_for_book(
     db: &DatabaseConnection,
     isbn: &str,
-) -> Result<Vec<CoverCandidate>, ServiceError> {
+) -> Result<CoverSearchReport, ServiceError> {
     use crate::models::installation_profile::Entity as ProfileEntity;
 
     let (enable_inventaire, enable_google, enable_bnf) =
@@ -1010,45 +1046,37 @@ pub async fn search_all_covers_for_book(
     let clean_isbn = isbn.replace('-', "");
     let is_french = clean_isbn.starts_with("9782") || clean_isbn.starts_with("97910");
 
+    // Every branch answers with the candidate it found AND why it found none,
+    // so a source that is off, silent or empty stays distinguishable downstream.
     let inventaire_fut = async {
         if !enable_inventaire {
-            return None;
+            return (None, CoverSourceOutcome::Skipped);
         }
-        crate::modules::integrations::inventaire::fetch_inventaire_metadata(isbn)
-            .await
-            .ok()
-            .and_then(|m| m.cover_url)
-            .map(|url| CoverCandidate {
-                url,
-                source: "Inventaire".to_string(),
-                language: None,
-            })
+        classify_single(
+            crate::modules::integrations::inventaire::fetch_inventaire_cover(isbn).await,
+            "Inventaire",
+        )
     };
 
     let openlibrary_fut = async {
-        crate::modules::integrations::openlibrary::fetch_cover_url(isbn)
-            .await
-            .map(|url| CoverCandidate {
-                url,
-                source: "OpenLibrary".to_string(),
-                language: None,
-            })
+        classify_single(
+            crate::modules::integrations::openlibrary::try_fetch_cover_url(isbn).await,
+            "OpenLibrary",
+        )
     };
 
     let bnf_fut = async {
+        // BNF only catalogues French publishers, so asking it about a foreign
+        // ISBN is not a failure to report: it was never a candidate source.
         if !enable_bnf || !is_french {
-            return None;
+            return (None, CoverSourceOutcome::Skipped);
         }
-        crate::modules::integrations::bnf::lookup_bnf_isbn(isbn)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|b| b.cover_url)
-            .map(|url| CoverCandidate {
-                url,
-                source: "BNF".to_string(),
-                language: None,
-            })
+        classify_single(
+            crate::modules::integrations::bnf::lookup_bnf_isbn(isbn)
+                .await
+                .map(|b| b.and_then(|b| b.cover_url)),
+            "BNF",
+        )
     };
 
     let gb_api_key = if enable_google {
@@ -1059,41 +1087,69 @@ pub async fn search_all_covers_for_book(
 
     let google_fut = async {
         if !enable_google {
-            return None;
+            return (None, CoverSourceOutcome::Skipped);
         }
-        crate::modules::integrations::google_books::fetch_cover_url(isbn, gb_api_key.as_deref())
-            .await
-            .map(|url| CoverCandidate {
-                url,
-                source: "Google Books".to_string(),
-                language: None,
-            })
+        classify_single(
+            crate::modules::integrations::google_books::try_fetch_cover_url(
+                isbn,
+                gb_api_key.as_deref(),
+            )
+            .await,
+            "Google Books",
+        )
     };
 
     let (inv, ol, bnf, gb) = tokio::join!(inventaire_fut, openlibrary_fut, bnf_fut, google_fut);
 
     let mut candidates = Vec::new();
-    if let Some(c) = inv {
-        candidates.push(c);
-    }
-    if let Some(c) = ol {
-        candidates.push(c);
-    }
-    if let Some(c) = bnf {
-        candidates.push(c);
-    }
-    if let Some(c) = gb {
-        candidates.push(c);
+    let mut sources = Vec::new();
+    for (name, (candidate, outcome)) in [
+        ("Inventaire", inv),
+        ("OpenLibrary", ol),
+        ("BNF", bnf),
+        ("Google Books", gb),
+    ] {
+        if let Some(c) = candidate {
+            candidates.push(c);
+        }
+        sources.push(CoverSourceStatus {
+            source: name.to_string(),
+            outcome,
+        });
     }
 
     {
         let mut seen = std::collections::HashSet::new();
         candidates.retain(|c| seen.insert(c.url.clone()));
     }
-    Ok(candidates)
+    Ok(CoverSearchReport {
+        candidates,
+        sources,
+    })
 }
 
-/// Search ALL enabled sources by title in parallel, collecting all cover candidates.
+/// Turn one source's "here is a cover, or not, or I could not answer" into a
+/// candidate plus its outcome.
+fn classify_single(
+    result: Result<Option<String>, String>,
+    source: &str,
+) -> (Option<CoverCandidate>, CoverSourceOutcome) {
+    match result {
+        Ok(Some(url)) => (
+            Some(CoverCandidate {
+                url,
+                source: source.to_string(),
+                language: None,
+            }),
+            CoverSourceOutcome::Found(1),
+        ),
+        Ok(None) => (None, CoverSourceOutcome::Empty),
+        Err(reason) => (None, CoverSourceOutcome::Unavailable(reason)),
+    }
+}
+
+/// Search ALL enabled sources by title in parallel, collecting all cover
+/// candidates alongside what each source answered.
 /// Used as fallback when ISBN-based search returns too few results.
 pub async fn search_all_covers_by_title(
     db: &DatabaseConnection,
@@ -1101,7 +1157,7 @@ pub async fn search_all_covers_by_title(
     author: Option<&str>,
     enable_google: bool,
     google_api_key: Option<&str>,
-) -> Result<Vec<CoverCandidate>, ServiceError> {
+) -> Result<CoverSearchReport, ServiceError> {
     let author_lower = author.filter(|a| !a.is_empty()).map(|a| a.to_lowercase());
 
     // Resolve the book's language to bias both the Inventaire search and the
@@ -1154,12 +1210,16 @@ pub async fn search_all_covers_by_title(
             // filter on author here: this feeds a user-confirmed picker, and the
             // lightweight search results never carry author/description data anyway
             // (those fields are only populated by the heavier enrich step).
-            if let Ok(items) =
-                crate::modules::integrations::inventaire::search_inventaire_with_lang(
-                    &title,
-                    Some(&lang),
-                )
-                .await
+            let search = crate::modules::integrations::inventaire::search_inventaire_with_lang(
+                &title,
+                Some(&lang),
+            )
+            .await;
+            let items = match search {
+                Ok(items) => items,
+                // A silent Inventaire must not read as "Inventaire has no cover".
+                Err(reason) => return (results, CoverSourceOutcome::Unavailable(reason)),
+            };
             {
                 for item in &items {
                     // Relevance guard: Inventaire's fuzzy search appends popular
@@ -1194,7 +1254,12 @@ pub async fn search_all_covers_by_title(
                     }
                 }
             }
-            results
+            let outcome = if results.is_empty() {
+                CoverSourceOutcome::Empty
+            } else {
+                CoverSourceOutcome::Found(results.len())
+            };
+            (results, outcome)
         }
     };
 
@@ -1205,7 +1270,7 @@ pub async fn search_all_covers_by_title(
         let gb_key = google_api_key.map(|s| s.to_string());
         async move {
             if !enable_google {
-                return Vec::new();
+                return (Vec::new(), CoverSourceOutcome::Skipped);
             }
             let query = crate::api::search::SearchQuery {
                 q: None,
@@ -1219,10 +1284,13 @@ pub async fn search_all_covers_by_title(
                 sources: None,
                 autocomplete: Some(true),
             };
-            let books =
+            let search =
                 crate::modules::integrations::google_books::search_books(&query, gb_key.as_deref())
-                    .await
-                    .books;
+                    .await;
+            if let Some(reason) = search.failure {
+                return (Vec::new(), CoverSourceOutcome::Unavailable(reason));
+            }
+            let books = search.books;
             let mut results = Vec::new();
             for book in &books {
                 let Some(ref cover_url) = book.cover_url else {
@@ -1258,11 +1326,27 @@ pub async fn search_all_covers_by_title(
                     language: gb_lang,
                 });
             }
-            results
+            let outcome = if results.is_empty() {
+                CoverSourceOutcome::Empty
+            } else {
+                CoverSourceOutcome::Found(results.len())
+            };
+            (results, outcome)
         }
     };
 
-    let (inv_results, gb_results) = tokio::join!(inv_fut, gb_fut);
+    let ((inv_results, inv_outcome), (gb_results, gb_outcome)) = tokio::join!(inv_fut, gb_fut);
+
+    let sources = vec![
+        CoverSourceStatus {
+            source: "Inventaire".to_string(),
+            outcome: inv_outcome,
+        },
+        CoverSourceStatus {
+            source: "Google Books".to_string(),
+            outcome: gb_outcome,
+        },
+    ];
 
     let mut candidates = Vec::new();
     candidates.extend(inv_results);
@@ -1286,7 +1370,10 @@ pub async fn search_all_covers_by_title(
         None => 1,
     });
 
-    Ok(candidates)
+    Ok(CoverSearchReport {
+        candidates,
+        sources,
+    })
 }
 
 /// Try to find a cover URL for an ISBN from multiple sources.
