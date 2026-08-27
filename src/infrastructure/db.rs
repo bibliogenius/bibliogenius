@@ -2472,6 +2472,26 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 097: remember, per device, that a silent cover lookup came back
+    // conclusively empty. The startup sweep (`enrich_missing_covers`) selects on
+    // `books.cover_url IS NULL` and nothing else, so a book no source carries
+    // was re-asked at EVERY app launch, for ever: N coverless books cost 2N-3N
+    // external calls per start, on every device, which is what actually
+    // exhausts the per-IP budgets of Inventaire and Google Books.
+    //
+    // Lands on `book_local` rather than `books` because `books` is a cr-sqlite
+    // CRR and altering one is unsolved here; that also keeps the marker from
+    // replicating a stale "nothing found" to a device whose sources answer
+    // differently. Non-CRR table, so a plain additive ALTER is safe and the
+    // error is ignored once the column exists. `book_local` itself is created by
+    // migration 084 above, so this must stay ordered after it.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE book_local ADD COLUMN cover_lookup_failed_at TEXT".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
 

@@ -795,6 +795,18 @@ pub async fn count_books(db: &DatabaseConnection) -> Result<i64, ServiceError> {
 /// Uses `BookRepository` trait for data access (clean architecture).
 /// Profile lookup for module toggles still uses `DatabaseConnection` directly
 /// (installation_profile does not have its own repository yet).
+///
+/// This runs at every app start, and its only selection criterion is
+/// `cover_url IS NULL`. Without a memory of past failures a book no source
+/// carries is re-asked for ever, on every device: N coverless books cost 2N-3N
+/// external calls per launch, which is what exhausts the per-IP budgets of
+/// Inventaire and Google Books long before any hand search does.
+///
+/// So a lookup that comes back empty is recorded in `book_local`, and the book
+/// is left alone for [`COVER_LOOKUP_COOLDOWN_DAYS`]. Crucially, only a
+/// *conclusive* empty counts: if any source it asked failed to answer, nothing
+/// is recorded, because a passing DNS outage must not silence a month of
+/// retries for books whose covers exist.
 pub async fn enrich_missing_covers(
     db: &DatabaseConnection,
     book_repo: &dyn crate::domain::BookRepository,
@@ -829,11 +841,29 @@ pub async fn enrich_missing_covers(
 
     let gb_api_key = load_google_books_api_key(db).await;
 
+    // One query for the whole sweep rather than one per book.
+    let failures = crate::infrastructure::book_local::cover_lookup_failures(db)
+        .await
+        .unwrap_or_else(|e| {
+            // A marker we cannot read costs a redundant lookup, not a wrong
+            // one: fall back to asking, as this always did.
+            tracing::warn!("Cover enrichment: reading lookup markers failed: {e}");
+            std::collections::HashMap::new()
+        });
+    let now = chrono::Utc::now();
+
     let total = books.len();
     let mut enriched = 0i32;
+    let mut skipped = 0usize;
 
     for (book_id, isbn) in &books {
-        let mut found = find_cover_url(
+        if !cover_lookup_is_due(failures.get(book_id).map(String::as_str), now) {
+            skipped += 1;
+            // No network call was made, so nothing to throttle.
+            continue;
+        }
+
+        let mut lookup = find_cover_url(
             isbn,
             enable_inventaire,
             enable_google,
@@ -846,27 +876,73 @@ pub async fn enrich_missing_covers(
         // carry the cover). Look the title up in Inventaire's work index, but
         // accept a cover only when both the title and the author match — there is
         // no user confirmation on this path. Requires the book to have an author.
-        if found.is_none() && enable_inventaire {
+        if lookup.url.is_none() && enable_inventaire {
             let (title, author) = fetch_book_title_author(db, book_id).await;
             if let (Some(title), Some(author)) = (title, author) {
-                found = find_cover_by_title_for_author(&title, &author, isbn).await;
+                let by_title = find_cover_by_title_for_author(&title, &author, isbn).await;
+                lookup.conclusive &= by_title.conclusive;
+                lookup.url = by_title.url;
             }
         }
 
-        if let Some(url) = found {
+        if let Some(url) = lookup.url {
             book_repo
                 .update_cover_url(book_id, &url)
                 .await
                 .map_err(|e| ServiceError::Database(format!("{e}")))?;
+            // The book leaves the sweep's population anyway; clearing keeps a
+            // stale marker from suppressing the lookup if the cover is later
+            // removed.
+            let _ =
+                crate::infrastructure::book_local::clear_cover_lookup_failed_at(db, book_id).await;
             enriched += 1;
+        } else if lookup.conclusive
+            && let Err(e) = crate::infrastructure::book_local::set_cover_lookup_failed_at(
+                db,
+                book_id,
+                &now.to_rfc3339(),
+            )
+            .await
+        {
+            // Worst case we ask again next launch, exactly as before.
+            tracing::warn!("Cover enrichment: recording the empty lookup failed: {e}");
         }
 
         // Throttle: 500ms between books to avoid hammering APIs
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    tracing::info!("Cover enrichment: {enriched}/{total} covers found and persisted");
+    tracing::info!(
+        "Cover enrichment: {enriched}/{total} covers found and persisted, \
+         {skipped} skipped (no source had one within the last {COVER_LOOKUP_COOLDOWN_DAYS} days)"
+    );
     Ok(enriched)
+}
+
+/// How long a book whose cover no source carries is left alone before the
+/// startup sweep asks again.
+///
+/// Long enough that a daily user pays the lookup ~once a month instead of
+/// ~thirty times; short enough that a newly catalogued edition — the case that
+/// makes a re-ask worth anything at all — is picked up on its own.
+const COVER_LOOKUP_COOLDOWN_DAYS: i64 = 30;
+
+/// Whether the startup sweep should ask the sources about a book again.
+///
+/// `failed_at` is when a lookup last came back conclusively empty, RFC 3339.
+/// Absent, unparseable, or older than the cooldown: ask. An unparseable value is
+/// deliberately treated as "ask": it is a marker we do not understand, and the
+/// cost of asking is one lookup, while the cost of trusting it is a cover the
+/// reader never gets.
+fn cover_lookup_is_due(failed_at: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let Some(raw) = failed_at else {
+        return true;
+    };
+    let Ok(when) = chrono::DateTime::parse_from_rfc3339(raw) else {
+        return true;
+    };
+    now.signed_duration_since(when.with_timezone(&chrono::Utc))
+        >= chrono::Duration::days(COVER_LOOKUP_COOLDOWN_DAYS)
 }
 
 /// Search for a cover URL for a single ISBN from all available external sources.
@@ -1383,30 +1459,89 @@ async fn find_cover_url(
     enable_inventaire: bool,
     enable_google: bool,
     google_api_key: Option<&str>,
-) -> Option<String> {
-    // Inventaire (best coverage for non-English books)
-    if enable_inventaire
-        && let Ok(metadata) =
-            crate::modules::integrations::inventaire::fetch_inventaire_metadata(isbn).await
-        && metadata.cover_url.is_some()
-    {
-        return metadata.cover_url;
+) -> SilentCoverLookup {
+    let mut lookup = SilentCoverLookup::default();
+
+    // Inventaire (best coverage for non-English books).
+    //
+    // `fetch_inventaire_cover` rather than `fetch_inventaire_metadata`: both
+    // read the cover off the very same `by-uris` response for `isbn:<isbn>`, so
+    // this finds exactly what it found before, but the metadata call collapses
+    // "Inventaire does not know this ISBN" and "Inventaire did not answer" into
+    // one `Err` — and it walks the work and every author to build metadata the
+    // sweep throws away.
+    if enable_inventaire {
+        match crate::modules::integrations::inventaire::fetch_inventaire_cover(isbn).await {
+            Ok(Some(url)) => return lookup.found(url),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::debug!("Cover sweep: Inventaire unavailable for {isbn}: {e}");
+                lookup.conclusive = false;
+            }
+        }
     }
 
     // OpenLibrary (lightweight HEAD check)
-    if let Some(url) = crate::modules::integrations::openlibrary::fetch_cover_url(isbn).await {
-        return Some(url);
+    match crate::modules::integrations::openlibrary::try_fetch_cover_url(isbn).await {
+        Ok(Some(url)) => return lookup.found(url),
+        Ok(None) => {}
+        Err(e) => {
+            tracing::debug!("Cover sweep: OpenLibrary unavailable for {isbn}: {e}");
+            lookup.conclusive = false;
+        }
     }
 
-    // Google Books
-    if enable_google
-        && let Some(url) =
-            crate::modules::integrations::google_books::fetch_cover_url(isbn, google_api_key).await
-    {
-        return Some(url);
+    // Google Books. Background retry policy, as this path always used: a retry
+    // per failure is paid once per coverless book.
+    if enable_google {
+        match crate::modules::integrations::google_books::try_fetch_cover_url_background(
+            isbn,
+            google_api_key,
+        )
+        .await
+        {
+            Ok(Some(url)) => return lookup.found(url),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::debug!("Cover sweep: Google Books unavailable for {isbn}: {e}");
+                lookup.conclusive = false;
+            }
+        }
     }
 
-    None
+    lookup
+}
+
+/// What one unattended cover lookup learned.
+///
+/// The sweep needs more than "did you find a cover": it has to know whether an
+/// empty result is an answer. Every source saying "I have none" is a fact worth
+/// remembering; one source timing out is not, and recording it would keep the
+/// book from ever being asked about again during the cooldown.
+struct SilentCoverLookup {
+    url: Option<String>,
+    /// True while every source asked so far actually answered.
+    conclusive: bool,
+}
+
+impl Default for SilentCoverLookup {
+    fn default() -> Self {
+        Self {
+            url: None,
+            conclusive: true,
+        }
+    }
+}
+
+impl SilentCoverLookup {
+    /// A cover ends the search: whatever an earlier source failed to say no
+    /// longer matters.
+    fn found(self, url: String) -> Self {
+        Self {
+            url: Some(url),
+            ..self
+        }
+    }
 }
 
 /// Title-based cover fallback for silent/automatic paths. When the exact ISBN
@@ -1415,17 +1550,35 @@ async fn find_cover_url(
 /// when a work's normalized label matches the title AND its resolved author
 /// matches `author`. Returns `None` on any doubt: a path the user does not
 /// confirm must never guess a cover.
-async fn find_cover_by_title_for_author(title: &str, author: &str, isbn: &str) -> Option<String> {
+async fn find_cover_by_title_for_author(
+    title: &str,
+    author: &str,
+    isbn: &str,
+) -> SilentCoverLookup {
     // Search in the book's language (ADR-040 cascade → ISO 639-1) so a non-French
     // book's work is returned under a label that matches its title; a French search
     // would return a translated label and fail the title guard below.
     let lang = crate::utils::lang::target_summary_language(isbn, title, &[])
         .map(|c| crate::utils::lang::to_iso639_1(&c))
         .unwrap_or_else(|| "fr".to_string());
-    let results =
-        crate::modules::integrations::inventaire::search_inventaire_with_lang(title, Some(&lang))
-            .await
-            .ok()?;
+    let lookup = SilentCoverLookup::default();
+    let results = match crate::modules::integrations::inventaire::search_inventaire_with_lang(
+        title,
+        Some(&lang),
+    )
+    .await
+    {
+        Ok(results) => results,
+        Err(e) => {
+            // The work index never answered, so this book's absence stays
+            // unproven even though the ISBN pass concluded.
+            tracing::debug!("Cover sweep: Inventaire work search unavailable for {isbn}: {e}");
+            return SilentCoverLookup {
+                url: None,
+                conclusive: false,
+            };
+        }
+    };
     let wanted = normalize_title(title);
     for item in &results {
         // Strict on a silent path: exact normalized label (no subtitle leniency),
@@ -1438,10 +1591,10 @@ async fn find_cover_by_title_for_author(title: &str, author: &str, isbn: &str) -
         };
         let authors = crate::modules::integrations::inventaire::fetch_work_authors(&item.uri).await;
         if authors.iter().any(|ra| author_tokens_match(author, ra)) {
-            return Some(image_url.clone());
+            return lookup.found(image_url.clone());
         }
     }
-    None
+    lookup
 }
 
 /// Comma-joined author names linked to a book, or `None` when the book has no
@@ -1858,24 +2011,92 @@ mod tests {
         assert!(!title_label_relevant("Vaincre à Rome", ""));
     }
 
+    // ── the startup sweep stops re-asking about a book nothing carries ──
+
+    #[test]
+    fn a_book_never_looked_up_is_due() {
+        let now = chrono::Utc::now();
+        assert!(cover_lookup_is_due(None, now));
+    }
+
+    #[test]
+    fn a_book_whose_lookup_just_came_back_empty_is_not_due() {
+        let now = chrono::Utc::now();
+        let yesterday = (now - chrono::Duration::days(1)).to_rfc3339();
+        assert!(!cover_lookup_is_due(Some(&yesterday), now));
+    }
+
+    #[test]
+    fn the_marker_expires_so_a_newly_catalogued_edition_is_found() {
+        let now = chrono::Utc::now();
+        let long_ago = (now - chrono::Duration::days(COVER_LOOKUP_COOLDOWN_DAYS + 1)).to_rfc3339();
+        assert!(cover_lookup_is_due(Some(&long_ago), now));
+
+        // The boundary itself is due: the cooldown has elapsed.
+        let exactly = (now - chrono::Duration::days(COVER_LOOKUP_COOLDOWN_DAYS)).to_rfc3339();
+        assert!(cover_lookup_is_due(Some(&exactly), now));
+    }
+
+    #[test]
+    fn a_marker_we_cannot_read_never_silences_a_book() {
+        let now = chrono::Utc::now();
+        assert!(cover_lookup_is_due(Some("not a date"), now));
+        assert!(cover_lookup_is_due(Some(""), now));
+    }
+
+    #[test]
+    fn a_marker_written_in_another_timezone_still_counts() {
+        // `set_cover_lookup_failed_at` writes UTC, but a value restored from a
+        // backup or written by an older build may carry an offset. Comparing the
+        // strings would misjudge it; comparing the instants does not.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-26T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(!cover_lookup_is_due(Some("2026-08-25T23:00:00+02:00"), now));
+    }
+
+    #[test]
+    fn a_lookup_is_conclusive_until_a_source_goes_silent() {
+        let clean = SilentCoverLookup::default();
+        assert!(clean.conclusive, "nothing asked yet, nothing has failed");
+
+        let degraded = SilentCoverLookup {
+            conclusive: false,
+            ..Default::default()
+        };
+        // A cover found after an outage is still a cover: only the empty case
+        // ever reads `conclusive`.
+        assert_eq!(
+            degraded.found("https://example.org/c.jpg".to_string()).url,
+            Some("https://example.org/c.jpg".to_string())
+        );
+    }
+
     #[tokio::test]
     #[ignore] // Flaky in CI due to external network request
     async fn test_find_cover_by_title_for_author_recovers_sibling_edition() {
         // The owned edition 9782330153632 is not catalogued on Inventaire, but the
         // work "Vaincre à Rome" by Sylvain Coher is. Title + author must recover a
         // cover the exact-ISBN lookup misses.
-        let url =
+        let found =
             find_cover_by_title_for_author("Vaincre à Rome", "Sylvain Coher", "9782330153632")
                 .await;
-        assert!(url.is_some(), "expected a cover via work/title fallback");
+        assert!(
+            found.url.is_some(),
+            "expected a cover via work/title fallback"
+        );
 
         // A wrong author on the same title must be rejected: no silent mismatch
         // on the automatic path.
         let wrong =
             find_cover_by_title_for_author("Vaincre à Rome", "Victor Hugo", "9782330153632").await;
         assert!(
-            wrong.is_none(),
+            wrong.url.is_none(),
             "must not accept a cover for the wrong author"
+        );
+        assert!(
+            wrong.conclusive,
+            "the index answered, so the rejection is an absence, not an outage"
         );
     }
 

@@ -66,6 +66,34 @@ pub enum RetryPolicy {
     Background,
 }
 
+/// The `reason` Google put in an error body, for the log line that reports the
+/// status.
+///
+/// A bare "HTTP 503" cannot be acted on: Google spells throttling
+/// (`rateLimitExceeded`, `userRateLimitExceeded`) and a genuine outage
+/// (`backendError`) with the same status code, and only the body tells them
+/// apart. The envelope carries no credential — the API key travels in the query
+/// string, which is never echoed back — so this is safe to log.
+async fn error_reason(resp: reqwest::Response) -> String {
+    let Ok(body) = resp.text().await else {
+        return "body unreadable".to_string();
+    };
+    serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/error/errors/0/reason")
+                .and_then(|r| r.as_str())
+                .map(str::to_string)
+        })
+        // Truncated: an HTML error page from a proxy would otherwise fill the log.
+        .unwrap_or_else(|| {
+            format!(
+                "no reason field: {}",
+                body.chars().take(120).collect::<String>()
+            )
+        })
+}
+
 /// GET, retrying once on a 5xx when the policy allows it.
 ///
 /// Google answers 503 in bursts, and the code used to give up on the first one:
@@ -202,8 +230,22 @@ fn metadata_from_volume_info(info: &GoogleVolumeInfo) -> BookMetadata {
 const GOOGLE_BOOKS_VOLUMES_URL: &str = "https://www.googleapis.com/books/v1/volumes";
 
 pub async fn fetch_cover_url(isbn: &str, api_key: Option<&str>) -> Option<String> {
-    // Background: this is the startup sweep over every coverless book, where a
-    // retry per failure would add a fixed pause to each one.
+    try_fetch_cover_url_background(isbn, api_key)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Like [`fetch_cover_url`], and keeps "Google has no cover for this ISBN" apart
+/// from "Google did not answer", but stays on the background retry policy.
+///
+/// The startup sweep needs the distinction — it must not record an outage as
+/// "no cover exists" — without the retry: it walks every coverless book, so a
+/// fixed pause per failure is paid once per book.
+pub async fn try_fetch_cover_url_background(
+    isbn: &str,
+    api_key: Option<&str>,
+) -> Result<Option<String>, String> {
     try_fetch_cover_url_at(
         GOOGLE_BOOKS_VOLUMES_URL,
         isbn,
@@ -211,8 +253,6 @@ pub async fn fetch_cover_url(isbn: &str, api_key: Option<&str>) -> Option<String
         RetryPolicy::Background,
     )
     .await
-    .ok()
-    .flatten()
 }
 
 /// Like [`fetch_cover_url`], but keeps "Google has no cover for this ISBN" apart
@@ -274,9 +314,10 @@ async fn try_fetch_cover_url_at(
     }
     if !status.is_success() {
         tracing::warn!(
-            "Google Books cover fetch error for ISBN {}: HTTP {}",
+            "Google Books cover fetch error for ISBN {}: HTTP {} ({})",
             isbn,
-            status
+            status,
+            error_reason(resp).await
         );
         return Err(format!("HTTP {}", status));
     }
