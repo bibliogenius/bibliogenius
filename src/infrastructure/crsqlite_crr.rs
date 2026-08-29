@@ -161,12 +161,40 @@ pub async fn teardown_crrs(db: &DatabaseConnection) -> Result<(), DbErr> {
     Ok(())
 }
 
+/// An in-memory database on a pool pinned to ONE connection, for the cr-sqlite
+/// tests of this crate.
+///
+/// Every connection to `sqlite::memory:` opens its OWN empty database, so a
+/// multi-connection pool can run the migrations on one connection and
+/// `crsql_as_crr` on another that has never seen the tables. cr-sqlite reports
+/// that as `SqliteError code 7 "out of memory"`, which names neither the pool
+/// nor the missing table, and because it depends on how the pool hands out
+/// connections it comes and goes between runs rather than failing honestly
+/// every time. The two timeouts matter as much as the count: a recycled
+/// connection would take the in-memory database with it.
+///
+/// Shared rather than copied per test module, because the trap it documents is
+/// subtle enough that a second copy would drift. The dynamic harness in
+/// `services::crsqlite_engine` pins its own pool for the same reason.
+#[cfg(all(test, feature = "crsqlite-static"))]
+pub(crate) async fn connect_pinned() -> DatabaseConnection {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .min_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory");
+    sea_orm::SqlxSqliteConnector::from_sqlx_sqlite_pool(pool)
+}
+
 #[cfg(all(test, feature = "crsqlite-static"))]
 mod tests {
     use super::*;
     use crate::infrastructure::crsqlite_static;
     use crate::models::author;
-    use sea_orm::{ActiveModelTrait, Database, Set};
+    use sea_orm::{ActiveModelTrait, Set};
 
     // S5c: `crsql_as_crr` must succeed on the REAL uuid-PK, FK-free schema for
     // every replicated table, and a local edit must then surface in
@@ -175,9 +203,7 @@ mod tests {
     #[tokio::test]
     async fn crrs_set_up_on_the_real_schema_and_capture_local_edits() {
         crsqlite_static::register();
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory");
+        let db = connect_pinned().await;
         // Full production schema (uuid PK, FK removed, book_local extracted).
         crate::db::run_migrations(&db)
             .await
@@ -222,9 +248,7 @@ mod tests {
     #[tokio::test]
     async fn crr_teardown_demotes_to_plain_tables_and_writes_still_work() {
         crsqlite_static::register();
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory");
+        let db = connect_pinned().await;
         crate::db::run_migrations(&db)
             .await
             .expect("run_migrations");
@@ -268,9 +292,7 @@ mod tests {
     #[tokio::test]
     async fn setup_after_teardown_leaves_the_connection_usable() {
         crsqlite_static::register();
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory");
+        let db = connect_pinned().await;
         crate::db::run_migrations(&db)
             .await
             .expect("run_migrations");
@@ -311,9 +333,7 @@ mod tests {
     #[tokio::test]
     async fn crr_teardown_is_idempotent_and_safe_without_setup() {
         crsqlite_static::register();
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory");
+        let db = connect_pinned().await;
         crate::db::run_migrations(&db)
             .await
             .expect("run_migrations");

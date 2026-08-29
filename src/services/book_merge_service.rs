@@ -2151,10 +2151,10 @@ mod tests {
 #[cfg(all(test, feature = "crsqlite-static"))]
 mod crr_tests {
     use super::*;
-    use crate::infrastructure::crsqlite_crr::{finalize, setup_crrs};
+    use crate::infrastructure::crsqlite_crr::{connect_pinned, finalize, setup_crrs};
     use crate::infrastructure::crsqlite_static;
     use crate::models::collection;
-    use sea_orm::{ActiveModelTrait, Database, DatabaseBackend};
+    use sea_orm::{ActiveModelTrait, DatabaseBackend};
 
     async fn insert_book(db: &DatabaseConnection, id: &str, created_at: &str) {
         book::ActiveModel {
@@ -2173,9 +2173,7 @@ mod crr_tests {
     #[tokio::test]
     async fn merge_on_a_crr_schema_converges_and_is_captured_by_cr_sqlite() {
         crsqlite_static::register();
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory");
+        let db = connect_pinned().await;
         crate::db::run_migrations(&db)
             .await
             .expect("run_migrations");
