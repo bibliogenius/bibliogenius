@@ -104,6 +104,65 @@ fn server_start_lock() -> &'static tokio::sync::Mutex<()> {
     SERVER_START_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+/// Join handle of the serving task spawned by the last successful start, so a
+/// restart can stop a task still looping on a listener that no longer works.
+static SERVER_TASK: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>> =
+    std::sync::Mutex::new(None);
+
+fn remember_server_task(handle: tokio::task::JoinHandle<()>) {
+    if let Ok(mut slot) = SERVER_TASK.lock() {
+        *slot = Some(handle);
+    }
+}
+
+/// Stop the previous serving task and wait until it is gone. Called only once
+/// its listener has been found unresponsive: `axum::serve` treats an accept
+/// error as retryable and loops on it forever instead of returning, so nothing
+/// else would ever end that task.
+///
+/// Waiting matters: an abort only takes effect when the scheduler next reaches
+/// the task, and the listener it owns is released at that moment. Binding
+/// before that would find the port still taken and slide to the next one.
+async fn abort_stale_server_task() {
+    let handle = SERVER_TASK.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(handle) = handle {
+        handle.abort();
+        let _ = handle.await;
+    }
+}
+
+/// Whether the listener this process last spawned is still serving on `port`.
+///
+/// [`SERVER_LISTENING`] alone cannot answer this. iOS closes the listening
+/// socket while the app is suspended; the accept loop then fails with an error
+/// it considers retryable, so `axum::serve` never returns, the flag stays set,
+/// and the port it names refuses every connection. Asking the port itself is
+/// the only honest signal, and it also rules out a foreign process that grabbed
+/// the port after our socket went away.
+async fn listener_still_serves(port: u16) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        // Loopback must never be routed through a system proxy.
+        .no_proxy()
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!("Could not build the server liveness probe client: {e}");
+            return false;
+        }
+    };
+
+    let url = format!("http://127.0.0.1:{port}/api/health");
+    match client.get(&url).send().await {
+        Ok(response) => match response.json::<serde_json::Value>().await {
+            Ok(body) => body.get("service").and_then(|v| v.as_str()) == Some("bibliogenius"),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
 /// What a start attempt should do, given what this process already runs.
 #[derive(Debug, PartialEq, Eq)]
 enum ServerStartDecision {
@@ -115,15 +174,18 @@ enum ServerStartDecision {
 
 /// Decide between reusing the live listener and binding a new one.
 ///
-/// Kept free of globals so the policy is testable: the two traps it closes are
-/// a second bind while the first listener is alive, and a restart drifting off
-/// the port peers hold a URL for.
+/// Kept free of globals so the policy is testable: the three traps it closes
+/// are a second bind while the first listener is alive, a restart drifting off
+/// the port peers hold a URL for, and a "listening" flag that outlived the
+/// socket it describes. `listener_answers` carries the only proof of the last
+/// one, obtained from [`listener_still_serves`].
 fn decide_server_start(
     listening: bool,
+    listener_answers: bool,
     known_port: u16,
     requested_port: u16,
 ) -> ServerStartDecision {
-    if listening && known_port != 0 {
+    if listening && listener_answers && known_port != 0 {
         return ServerStartDecision::Reuse(known_port);
     }
     // A listener that died left its port free: come back on it rather than
@@ -188,11 +250,16 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
     // Held for the whole attempt: two callers must not bind two listeners.
     let _start_guard = server_start_lock().lock().await;
 
-    let preferred_port = match decide_server_start(
-        SERVER_LISTENING.load(Ordering::SeqCst),
-        SERVER_PORT.load(Ordering::SeqCst),
-        port,
-    ) {
+    let listening = SERVER_LISTENING.load(Ordering::SeqCst);
+    let known_port = SERVER_PORT.load(Ordering::SeqCst);
+    // Probed only when the flags claim a live listener, which is also the only
+    // case where the answer changes anything. It is what separates an Android
+    // activity restart, where the listener really is still serving, from an iOS
+    // resume, where the system closed the socket under a flag that stayed set.
+    let listener_answers =
+        listening && known_port != 0 && listener_still_serves(known_port).await;
+
+    let preferred_port = match decide_server_start(listening, listener_answers, known_port, port) {
         ServerStartDecision::Reuse(running_port) => {
             tracing::info!(
                 "FFI: HTTP server already listening on port {}, reusing it",
@@ -200,7 +267,17 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
             );
             return Ok(running_port);
         }
-        ServerStartDecision::Bind(preferred_port) => preferred_port,
+        ServerStartDecision::Bind(preferred_port) => {
+            if listening {
+                tracing::warn!(
+                    "FFI: the listener on port {} stopped answering, rebinding",
+                    known_port
+                );
+                abort_stale_server_task().await;
+                SERVER_LISTENING.store(false, Ordering::SeqCst);
+            }
+            preferred_port
+        }
     };
 
     let db = db().ok_or("Database not initialized")?.clone();
@@ -307,7 +384,7 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
 
                 // Spawn server in background with panic catching
                 let server_port = actual_port;
-                tokio::spawn(async move {
+                let serving_task = tokio::spawn(async move {
                     tracing::info!("🚀 FFI Server task starting on port {}", server_port);
                     // connect_info exposes the caller's SocketAddr in request
                     // extensions, which the LoopbackOnly guard on device
@@ -338,6 +415,7 @@ pub async fn start_server(port: u16) -> Result<u16, String> {
                         server_port
                     );
                 });
+                remember_server_task(serving_task);
 
                 if offset > 0 {
                     tracing::warn!(
@@ -381,7 +459,7 @@ mod server_start_decision_tests {
         // Android destroys the activity without killing the process: the relaunch
         // replays start_server against a listener that is still serving.
         assert_eq!(
-            decide_server_start(true, 8000, 8000),
+            decide_server_start(true, true, 8000, 8000),
             ServerStartDecision::Reuse(8000)
         );
     }
@@ -391,7 +469,7 @@ mod server_start_decision_tests {
         // A health-check driven restart passes the port it believes in: the live
         // one wins, so a flaky probe cannot move the server.
         assert_eq!(
-            decide_server_start(true, 8003, 8000),
+            decide_server_start(true, true, 8003, 8000),
             ServerStartDecision::Reuse(8003)
         );
     }
@@ -399,7 +477,7 @@ mod server_start_decision_tests {
     #[test]
     fn binds_the_requested_port_on_a_first_start() {
         assert_eq!(
-            decide_server_start(false, 0, 8000),
+            decide_server_start(false, false, 0, 8000),
             ServerStartDecision::Bind(8000)
         );
     }
@@ -409,7 +487,7 @@ mod server_start_decision_tests {
         // Peers store URLs built on the port we advertised: a restart that
         // silently moved would leave every one of them unable to reach us.
         assert_eq!(
-            decide_server_start(false, 8003, 8000),
+            decide_server_start(false, false, 8003, 8000),
             ServerStartDecision::Bind(8003)
         );
     }
@@ -417,8 +495,28 @@ mod server_start_decision_tests {
     #[test]
     fn a_zero_known_port_is_never_treated_as_a_live_listener() {
         assert_eq!(
-            decide_server_start(true, 0, 8000),
+            decide_server_start(true, false, 0, 8000),
             ServerStartDecision::Bind(8000)
+        );
+    }
+
+    #[test]
+    fn a_listener_that_stopped_answering_is_rebound_not_reused() {
+        // iOS closes the listening socket while the app is suspended. The
+        // accept loop retries that broken listener rather than returning, so
+        // the flag stays set on a port that refuses every connection: reusing
+        // it left the app talking to nobody until the process was killed.
+        assert_eq!(
+            decide_server_start(true, false, 8000, 8000),
+            ServerStartDecision::Bind(8000)
+        );
+    }
+
+    #[test]
+    fn an_unanswered_probe_still_aims_at_the_port_the_process_held() {
+        assert_eq!(
+            decide_server_start(true, false, 8003, 8000),
+            ServerStartDecision::Bind(8003)
         );
     }
 }
