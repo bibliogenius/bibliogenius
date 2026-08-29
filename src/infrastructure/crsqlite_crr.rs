@@ -46,9 +46,19 @@ pub async fn setup_crrs(db: &DatabaseConnection) -> Result<(), DbErr> {
     for table in CRR_TABLES {
         // `table` is a fixed name from CRR_TABLES (never user input); SQLite
         // cannot bind an identifier into `crsql_as_crr`, so it is interpolated.
+        //
+        // The schema is passed explicitly on purpose. With a single argument,
+        // cr-sqlite 0.16.3 substitutes the Rust literal "main" and hands its
+        // pointer to `CStr::from_ptr`, which reads past the literal (it carries
+        // no NUL) into whatever the linker placed next in .rodata. When those
+        // bytes are not valid UTF-8 the call fails with a bare SQLite code 7
+        // ("out of memory") that names nothing, and the outcome depends only on
+        // binary layout: an unrelated source change flipped a healthy build
+        // into one where no database could be opened. Two arguments make both
+        // strings come from SQLite's own NUL-terminated buffers.
         db.execute(Statement::from_string(
             db.get_database_backend(),
-            format!("SELECT crsql_as_crr('{table}')"),
+            format!("SELECT crsql_as_crr('main', '{table}')"),
         ))
         .await?;
     }
