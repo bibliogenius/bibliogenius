@@ -61,6 +61,10 @@ pub const ACCOUNT_SCHEMA_VERSION: u32 = 1;
 const HKDF_INFO_KWK: &[u8] = b"bg-acct-v1|key-wrap-passphrase";
 const HKDF_INFO_RWK: &[u8] = b"bg-acct-v1|key-wrap-recovery";
 const HKDF_INFO_AUTH_VERIFIER: &[u8] = b"bg-acct-v1|bundle-fetch";
+/// Recovery verifier label. Distinct from the recovery WRAP label above: the hub
+/// stores a hash of this value, so it must never be able to reconstruct the key that
+/// opens the `kind=recovery` copy (ADR-042 §16.3).
+const HKDF_INFO_RECOVERY_VERIFIER: &[u8] = b"bg-acct-v1|recovery-fetch";
 const HKDF_INFO_ENTITY_CONTENT: &[u8] = b"bg-acct-v1|entity-content";
 
 // --- AEAD additional-authenticated-data prefixes ---
@@ -357,6 +361,14 @@ pub fn derive_recovery_wrapping_key(rk: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>
 /// it to gate (rate-limit) trousseau download on the passphrase path (ADR-042 §5).
 pub fn derive_auth_verifier(mk: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
     hkdf32(mk, None, HKDF_INFO_AUTH_VERIFIER)
+}
+
+/// RecoveryVerifier derived from the recovery key. The hub stores only a hash of it, as
+/// the marker proving that a recovery attempt holds RK (ADR-042 §16.3). Holding it grants
+/// nothing but the right to download the `kind=recovery` blob, which stays AEAD-sealed
+/// under the wrapping key derived from the SAME RK under a different label.
+pub fn derive_recovery_verifier(rk: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    hkdf32(rk, None, HKDF_INFO_RECOVERY_VERIFIER)
 }
 
 /// Wrap a bundle under `wrapping_key` (KWK or RWK), producing `nonce || ciphertext`.
@@ -721,6 +733,28 @@ mod tests {
 
         // Right key, wrong kind label -> AAD mismatch -> failure.
         assert!(unwrap_bundle(&wrapped, &rwk, WrapKind::Passphrase).is_err());
+    }
+
+    /// The verifier posted to the hub and the key that actually opens the recovery blob
+    /// derive from the SAME RK: they must stay separated by their HKDF label, otherwise
+    /// the hub would hold a preimage of the unwrapping key (ADR-042 §14 L3, §16.3).
+    #[test]
+    fn recovery_verifier_is_deterministic_and_distinct_from_the_wrapping_key() {
+        let rk = generate_recovery_key();
+        let verifier = derive_recovery_verifier(&rk).unwrap();
+        assert_eq!(*verifier, *derive_recovery_verifier(&rk).unwrap());
+
+        let rwk = derive_recovery_wrapping_key(&rk).unwrap();
+        assert_ne!(*verifier, *rwk);
+
+        // A different recovery key yields a different marker.
+        let other = generate_recovery_key();
+        assert_ne!(*verifier, *derive_recovery_verifier(&other).unwrap());
+
+        // The recovery blob must not open under the verifier.
+        let bundle = AccountKeyBundle::generate();
+        let wrapped = wrap_bundle(&bundle, &rwk, WrapKind::Recovery).unwrap();
+        assert!(unwrap_bundle(&wrapped, &verifier, WrapKind::Recovery).is_err());
     }
 
     #[test]

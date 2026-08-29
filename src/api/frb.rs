@@ -49,3 +49,4 @@ include!("frb/wishlist.rs");
 include!("frb/hub_catalog_tests.rs");
 include!("frb/recommendations.rs");
 include!("frb/favorites.rs");
+include!("frb/book_merge.rs");

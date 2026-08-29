@@ -9,6 +9,7 @@ pub mod account_session_service;
 pub mod account_signup_service;
 pub mod account_sync_client;
 pub mod account_sync_engine;
+pub mod book_merge_service;
 pub mod book_service;
 pub mod catalog_events;
 pub mod catalog_notification;

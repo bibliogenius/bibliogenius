@@ -125,6 +125,12 @@ pub struct SignupRequest {
     pub descriptor_sig: String,
     /// Hex SHA-256 of the AuthVerifier (the HMAC key for the keybundle gate).
     pub auth_verifier_hash: String,
+    /// Hex SHA-256 of the RecoveryVerifier: the marker that will let a holder of the
+    /// recovery phrase reach the `kind=recovery` copy without the passphrase (ADR-042
+    /// §16.3). Posted from the first release that derives it, ahead of the flow that
+    /// consumes it, because an account created without it cannot be retrofitted server
+    /// side (§16.5). Older hubs ignore the unknown field.
+    pub recovery_verifier_hash: String,
     pub auth_method: String,
     pub aead_alg: String,
     /// Standard base64 of the opaque signed device registry.
@@ -228,10 +234,12 @@ struct DeletedResponse {
 // Auth crypto (pure, testable — no network)
 // ---------------------------------------------------------------------------
 
-/// Hex SHA-256 of the AuthVerifier — the value stored on the hub and used as the
-/// HMAC key for the keybundle gate. Sent verbatim at signup as `auth_verifier_hash`.
-pub fn auth_verifier_hash_hex(auth_verifier: &[u8; 32]) -> String {
-    let digest = Sha256::digest(auth_verifier);
+/// Hex SHA-256 of a 32-byte verifier: the value stored on the hub, never the verifier
+/// itself. Used for the AuthVerifier (also the HMAC key for the keybundle gate) and for
+/// the RecoveryVerifier (ADR-042 §16.3). A fast hash is sufficient: the input is a
+/// uniform HKDF output, not a low-entropy secret (§14 L5).
+pub fn verifier_hash_hex(verifier: &[u8; 32]) -> String {
+    let digest = Sha256::digest(verifier);
     hex::encode(digest)
 }
 
@@ -618,7 +626,7 @@ mod tests {
     #[test]
     fn auth_verifier_hash_is_sha256_hex() {
         // SHA-256 of 32 zero bytes, locked so client and hub agree on the HMAC key.
-        let hash = auth_verifier_hash_hex(&[0u8; 32]);
+        let hash = verifier_hash_hex(&[0u8; 32]);
         assert_eq!(
             hash,
             "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"
@@ -656,6 +664,7 @@ mod tests {
             account_auth_pk: "cGs".into(),
             descriptor_sig: "c2ln".into(),
             auth_verifier_hash: "deadbeef".into(),
+            recovery_verifier_hash: "feedface".into(),
             auth_method: "passphrase".into(),
             aead_alg: "AES-256-GCM".into(),
             device_registry_blob: "cmVn".into(),

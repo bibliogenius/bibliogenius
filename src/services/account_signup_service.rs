@@ -14,6 +14,10 @@
 //! - **Recovery kit** ([`SignupOutcome::recovery_phrase`]): a 256-bit recovery key, rendered
 //!   as a 24-word BIP39 mnemonic, double-wraps the trousseau (ADR-042 §8). It is returned to
 //!   be shown ONCE and never persisted; losing both passphrase and kit = permanent loss.
+//!   Signup also posts a `recovery_verifier_hash` (a hash of an HKDF of the recovery key
+//!   under its own label), the marker a later recovery attempt will present instead of the
+//!   passphrase (ADR-042 §16.3). It is written at creation time only: no server-side job
+//!   can add it afterwards, since the recovery key exists nowhere but on the user's paper.
 //!
 //! Account-id ordering: the hub assigns a random `account_id` only in the signup response,
 //! but the signed device registry embeds that id (for anti cross-account replay) and the
@@ -29,13 +33,13 @@ use zeroize::Zeroizing;
 use crate::crypto::account_keys::{
     ACCOUNT_SCHEMA_VERSION, AEAD_ALG_V1, AccountKeyBundle, Argon2Params, WrapKind,
     account_descriptor_canonical, derive_auth_verifier, derive_kwk, derive_master_key,
-    derive_recovery_wrapping_key, generate_recovery_key, wrap_bundle,
+    derive_recovery_verifier, derive_recovery_wrapping_key, generate_recovery_key, wrap_bundle,
 };
 use crate::crypto::device_registry::{DeviceEntry, DeviceRegistry};
 use crate::crypto::encryption::generate_salt;
 use crate::services::account_sync_client::{
     AccountSyncClient, AccountSyncError, KdfParams, SignupRequest, WrappedKeyDto,
-    auth_verifier_hash_hex, encode_blob_standard,
+    encode_blob_standard, verifier_hash_hex,
 };
 
 /// Argon2 version 0x13 as the integer the hub stores (`19`).
@@ -66,22 +70,83 @@ pub struct PassphraseStrength {
     pub length: usize,
     /// Whether it clears BOTH floors (score == 4 AND length >= 12).
     pub acceptable: bool,
-    /// zxcvbn's primary warning, if any (English; the UI may localize by score).
+    /// Stable translation slug for zxcvbn's primary warning, if any (see
+    /// [`warning_slug`]). NOT display text: the UI looks the slug up in its i18n
+    /// catalogue and shows nothing when the slug is unknown.
     pub warning: Option<String>,
-    /// zxcvbn's improvement suggestions (English).
+    /// Stable translation slugs for zxcvbn's improvement suggestions (see
+    /// [`suggestion_slug`]). Same contract as [`Self::warning`]: slugs, not prose.
     pub suggestions: Vec<String>,
+}
+
+/// Map a zxcvbn warning to a stable snake_case translation slug.
+///
+/// Slug convention: `zxcvbn_warning_<short_name>`. The slugs cross the FFI boundary and
+/// key the Flutter `.po` catalogues, so they are part of the app's public contract:
+/// **never rename a slug**, only add. The match is deliberately exhaustive (no `_` arm)
+/// so a new zxcvbn variant breaks the build instead of silently reaching the UI
+/// untranslated.
+fn warning_slug(warning: zxcvbn::feedback::Warning) -> &'static str {
+    use zxcvbn::feedback::Warning as W;
+    match warning {
+        W::StraightRowsOfKeysAreEasyToGuess => "zxcvbn_warning_straight_rows_of_keys",
+        W::ShortKeyboardPatternsAreEasyToGuess => "zxcvbn_warning_short_keyboard_patterns",
+        W::RepeatsLikeAaaAreEasyToGuess => "zxcvbn_warning_repeats_like_aaa",
+        W::RepeatsLikeAbcAbcAreOnlySlightlyHarderToGuess => "zxcvbn_warning_repeats_like_abcabc",
+        W::ThisIsATop10Password => "zxcvbn_warning_top10_password",
+        W::ThisIsATop100Password => "zxcvbn_warning_top100_password",
+        W::ThisIsACommonPassword => "zxcvbn_warning_common_password",
+        W::ThisIsSimilarToACommonlyUsedPassword => "zxcvbn_warning_similar_to_common_password",
+        W::SequencesLikeAbcAreEasyToGuess => "zxcvbn_warning_sequences_like_abc",
+        W::RecentYearsAreEasyToGuess => "zxcvbn_warning_recent_years",
+        W::AWordByItselfIsEasyToGuess => "zxcvbn_warning_a_word_by_itself",
+        W::DatesAreOftenEasyToGuess => "zxcvbn_warning_dates",
+        W::NamesAndSurnamesByThemselvesAreEasyToGuess => "zxcvbn_warning_names_by_themselves",
+        W::CommonNamesAndSurnamesAreEasyToGuess => "zxcvbn_warning_common_names",
+    }
+}
+
+/// Map a zxcvbn suggestion to a stable snake_case translation slug.
+///
+/// Slug convention: `zxcvbn_suggestion_<short_name>`. Same contract and same exhaustive
+/// match rationale as [`warning_slug`].
+fn suggestion_slug(suggestion: zxcvbn::feedback::Suggestion) -> &'static str {
+    use zxcvbn::feedback::Suggestion as S;
+    match suggestion {
+        S::UseAFewWordsAvoidCommonPhrases => "zxcvbn_suggestion_use_a_few_words",
+        S::NoNeedForSymbolsDigitsOrUppercaseLetters => "zxcvbn_suggestion_no_need_for_symbols",
+        S::AddAnotherWordOrTwo => "zxcvbn_suggestion_add_another_word",
+        S::CapitalizationDoesntHelpVeryMuch => "zxcvbn_suggestion_capitalization_doesnt_help",
+        S::AllUppercaseIsAlmostAsEasyToGuessAsAllLowercase => "zxcvbn_suggestion_all_uppercase",
+        S::ReversedWordsArentMuchHarderToGuess => "zxcvbn_suggestion_reversed_words",
+        S::PredictableSubstitutionsDontHelpVeryMuch => {
+            "zxcvbn_suggestion_predictable_substitutions"
+        }
+        S::UseALongerKeyboardPatternWithMoreTurns => "zxcvbn_suggestion_longer_keyboard_pattern",
+        S::AvoidRepeatedWordsAndCharacters => "zxcvbn_suggestion_avoid_repeats",
+        S::AvoidSequences => "zxcvbn_suggestion_avoid_sequences",
+        S::AvoidRecentYears => "zxcvbn_suggestion_avoid_recent_years",
+        S::AvoidYearsThatAreAssociatedWithYou => "zxcvbn_suggestion_avoid_personal_years",
+        S::AvoidDatesAndYearsThatAreAssociatedWithYou => "zxcvbn_suggestion_avoid_personal_dates",
+    }
 }
 
 /// Score and gate a candidate passphrase locally (no network). Used both for the live
 /// strength meter and as the hard gate inside [`signup`].
+///
+/// `warning` and `suggestions` carry translation slugs, not English prose: zxcvbn only
+/// speaks English, and the UI must speak the reader's language.
 pub fn check_passphrase(passphrase: &str) -> PassphraseStrength {
     let estimate = zxcvbn::zxcvbn(passphrase, &[]);
     let score = u8::from(estimate.score());
     let length = passphrase.chars().count();
     let (warning, suggestions) = match estimate.feedback() {
         Some(fb) => (
-            fb.warning().map(|w| w.to_string()),
-            fb.suggestions().iter().map(|s| s.to_string()).collect(),
+            fb.warning().map(|w| warning_slug(w).to_string()),
+            fb.suggestions()
+                .iter()
+                .map(|s| suggestion_slug(*s).to_string())
+                .collect(),
         ),
         None => (None, Vec::new()),
     };
@@ -186,6 +251,12 @@ pub async fn signup(
         .map_err(|e| SignupError::Crypto(e.to_string()))?;
     let auth_verifier =
         derive_auth_verifier(&mk).map_err(|e| SignupError::Crypto(e.to_string()))?;
+    // Marker for the future recovery-gated download: derived from RK under a label
+    // distinct from the wrap label, so the hash the hub keeps never opens the recovery
+    // copy (ADR-042 §16.3). It must be posted at creation time: an account created
+    // without it can only be retrofitted by its own user, from their phrase (§16.5).
+    let recovery_verifier =
+        derive_recovery_verifier(&recovery_key).map_err(|e| SignupError::Crypto(e.to_string()))?;
     let wrapped_passphrase = wrap_bundle(&bundle, &kwk, WrapKind::Passphrase)
         .map_err(|e| SignupError::Crypto(e.to_string()))?;
     let wrapped_recovery = wrap_bundle(&bundle, &rwk, WrapKind::Recovery)
@@ -223,7 +294,8 @@ pub async fn signup(
         account_salt: URL_SAFE_NO_PAD.encode(salt),
         account_auth_pk: URL_SAFE_NO_PAD.encode(bundle.account_auth_pk()),
         descriptor_sig: URL_SAFE_NO_PAD.encode(descriptor_sig),
-        auth_verifier_hash: auth_verifier_hash_hex(&auth_verifier),
+        auth_verifier_hash: verifier_hash_hex(&auth_verifier),
+        recovery_verifier_hash: verifier_hash_hex(&recovery_verifier),
         auth_method: AUTH_METHOD_PASSPHRASE.to_string(),
         aead_alg: AEAD_ALG_V1.to_string(),
         device_registry_blob: encode_blob_standard(&placeholder_blob),
@@ -314,6 +386,87 @@ mod tests {
         assert!(check_passphrase(STRONG).acceptable);
     }
 
+    /// Every slug must be a stable snake_case identifier under its documented prefix,
+    /// and no two variants may collide (a collision would silently merge two distinct
+    /// pieces of advice into one catalogue entry).
+    #[test]
+    fn feedback_slugs_are_unique_and_well_formed() {
+        use std::collections::HashSet;
+        use zxcvbn::feedback::{Suggestion as S, Warning as W};
+
+        let warnings = [
+            W::StraightRowsOfKeysAreEasyToGuess,
+            W::ShortKeyboardPatternsAreEasyToGuess,
+            W::RepeatsLikeAaaAreEasyToGuess,
+            W::RepeatsLikeAbcAbcAreOnlySlightlyHarderToGuess,
+            W::ThisIsATop10Password,
+            W::ThisIsATop100Password,
+            W::ThisIsACommonPassword,
+            W::ThisIsSimilarToACommonlyUsedPassword,
+            W::SequencesLikeAbcAreEasyToGuess,
+            W::RecentYearsAreEasyToGuess,
+            W::AWordByItselfIsEasyToGuess,
+            W::DatesAreOftenEasyToGuess,
+            W::NamesAndSurnamesByThemselvesAreEasyToGuess,
+            W::CommonNamesAndSurnamesAreEasyToGuess,
+        ];
+        let suggestions = [
+            S::UseAFewWordsAvoidCommonPhrases,
+            S::NoNeedForSymbolsDigitsOrUppercaseLetters,
+            S::AddAnotherWordOrTwo,
+            S::CapitalizationDoesntHelpVeryMuch,
+            S::AllUppercaseIsAlmostAsEasyToGuessAsAllLowercase,
+            S::ReversedWordsArentMuchHarderToGuess,
+            S::PredictableSubstitutionsDontHelpVeryMuch,
+            S::UseALongerKeyboardPatternWithMoreTurns,
+            S::AvoidRepeatedWordsAndCharacters,
+            S::AvoidSequences,
+            S::AvoidRecentYears,
+            S::AvoidYearsThatAreAssociatedWithYou,
+            S::AvoidDatesAndYearsThatAreAssociatedWithYou,
+        ];
+
+        let mut seen: HashSet<&'static str> = HashSet::new();
+        for w in warnings {
+            let slug = warning_slug(w);
+            assert!(slug.starts_with("zxcvbn_warning_"), "bad prefix: {slug}");
+            assert!(is_snake_case_slug(slug), "not snake_case: {slug}");
+            assert!(seen.insert(slug), "duplicate slug: {slug}");
+        }
+        for s in suggestions {
+            let slug = suggestion_slug(s);
+            assert!(slug.starts_with("zxcvbn_suggestion_"), "bad prefix: {slug}");
+            assert!(is_snake_case_slug(slug), "not snake_case: {slug}");
+            assert!(seen.insert(slug), "duplicate slug: {slug}");
+        }
+        assert_eq!(seen.len(), warnings.len() + suggestions.len());
+    }
+
+    fn is_snake_case_slug(s: &str) -> bool {
+        !s.is_empty()
+            && !s.starts_with('_')
+            && !s.ends_with('_')
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    }
+
+    /// A weak passphrase must surface slugs, never zxcvbn's raw English prose.
+    #[test]
+    fn feedback_carries_slugs_not_english_prose() {
+        let weak = check_passphrase("aaaaaaaaaaaa");
+        assert!(
+            weak.warning.is_some() || !weak.suggestions.is_empty(),
+            "expected zxcvbn feedback for a trivially weak passphrase"
+        );
+        for text in weak.warning.iter().chain(weak.suggestions.iter()) {
+            assert!(
+                text.starts_with("zxcvbn_warning_") || text.starts_with("zxcvbn_suggestion_"),
+                "not a slug: {text}"
+            );
+            assert!(!text.contains(' '), "prose leaked through: {text}");
+        }
+    }
+
     #[test]
     fn recovery_phrase_is_24_words() {
         let phrase = recovery_phrase(&[7u8; 32]).unwrap();
@@ -376,6 +529,12 @@ mod tests {
                 );
                 // Two wrapped copies (passphrase + recovery) are mandatory (F7).
                 assert_eq!(body["wrapped_keys"].as_array().unwrap().len(), 2);
+                // The recovery marker ships with every new account (ADR-042 §16.3): a
+                // 32-byte hash, and never the auth verifier's value (distinct labels).
+                let recovery_hash = body["recovery_verifier_hash"].as_str().unwrap();
+                assert_eq!(recovery_hash.len(), 64);
+                assert!(recovery_hash.chars().all(|c| c.is_ascii_hexdigit()));
+                assert_ne!(recovery_hash, body["auth_verifier_hash"].as_str().unwrap());
                 ResponseTemplate::new(201).set_body_json(serde_json::json!({
                     "account_id": "acct-new",
                 }))

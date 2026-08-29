@@ -38,8 +38,8 @@ use crate::crypto::account_keys::{
 };
 use crate::crypto::identity::NodeIdentity;
 use crate::services::account_sync_client::{
-    AccountDescriptor, AccountSyncClient, AccountSyncError, KdfParams, auth_verifier_hash_hex,
-    decode_blob_standard,
+    AccountDescriptor, AccountSyncClient, AccountSyncError, KdfParams, decode_blob_standard,
+    verifier_hash_hex,
 };
 
 /// Argon2 version 0x13 (the only version this client derives, V0x13). The hub publishes
@@ -162,7 +162,7 @@ pub async fn enroll_with_passphrase(
     //    passphrase, since a wrong MK yields a wrong verifier hash).
     let auth_verifier =
         derive_auth_verifier(&mk).map_err(|e| EnrollmentError::Crypto(e.to_string()))?;
-    let verifier_hash = auth_verifier_hash_hex(&auth_verifier);
+    let verifier_hash = verifier_hash_hex(&auth_verifier);
     let wrapped_keys = client
         .download_keybundle(email, &verifier_hash, &[WrapKind::Passphrase.wire_kind()])
         .await

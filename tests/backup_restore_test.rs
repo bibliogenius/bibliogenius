@@ -290,6 +290,50 @@ async fn replace_round_trip_keeps_books_and_creates_rollback() {
     live_after.close().await.unwrap();
 }
 
+/// Archives written before the export dialog grew a passphrase-length floor
+/// were unlocked by secrets as short as a single character. The floor is a
+/// WRITE-side guard only: the reader must keep accepting those archives
+/// forever, otherwise the update makes existing backups unrecoverable.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_accepts_a_legacy_short_secret() {
+    const SHORT_SECRET: &[u8] = b"a";
+
+    let tmp = TempDir::new().unwrap();
+    let archive = make_test_archive(
+        &tmp,
+        "short",
+        SHORT_SECRET,
+        TEST_LIBRARY_UUID,
+        None,
+        &["Of Mice and Men"],
+    )
+    .await;
+
+    // The manifest preview and the signature check must both accept it.
+    read_manifest(&archive).expect("read_manifest");
+    verify_signature(&archive, SHORT_SECRET).expect("a one-character secret must still verify");
+
+    let live_db_path = tmp.path().join("live.sqlite");
+    let live = make_live_db(&live_db_path).await;
+    live.close().await.unwrap();
+    let cover_dir = tmp.path().join("live-covers");
+    std::fs::create_dir_all(&cover_dir).unwrap();
+
+    let summary = restore_backup(
+        &archive,
+        SHORT_SECRET,
+        RestoreMode::Replace,
+        false,
+        None,
+        &live_db_path,
+        &cover_dir,
+    )
+    .await
+    .expect("a short secret must not block the restore path");
+
+    assert_eq!(summary.books_after, 2);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn replace_with_identity_repopulates_crypto_keys() {
     let tmp = TempDir::new().unwrap();
