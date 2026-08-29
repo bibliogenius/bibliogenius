@@ -16,8 +16,17 @@ static LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 /// re-base persisted cover paths after an iOS data-container UUID change.
 /// `None` in server-binary mode where no FFI init runs.
 static COVERS_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
-/// Global AppState - set once in `initBackend`, read by FFI handlers that need
-/// services not available as individual statics (e.g. catalog notifications).
+/// Global AppState, read by FFI handlers that need services not available as
+/// individual statics (e.g. catalog notifications).
+///
+/// Written in exactly one place, `start_server` in `frb/server_control.rs`, on
+/// the first successful bind. That has to stay the only writer: the state it
+/// registers carries the shared `IDENTITY_SERVICE`, which `init_identity_ffi`
+/// initializes later from Flutter. A second writer building its own AppState
+/// would hand the HTTP server a different IdentityService than the one Flutter
+/// keyed, and E2EE would fail with no visible error. `start_server` reuses this
+/// value on a restart rather than building a fresh one for the same reason,
+/// which a OnceLock would silently discard anyway.
 static GLOBAL_APP_STATE: OnceLock<crate::infrastructure::AppState> = OnceLock::new();
 #[allow(dead_code)]
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -70,7 +79,8 @@ fn db() -> Option<&'static DatabaseConnection> {
     DB.get()
 }
 
-/// Get the global AppState (must be initialized first via `initBackend`).
+/// Get the global AppState. `None` until `start_server` has bound once, so
+/// callers reached before the server starts must handle the absence.
 fn global_app_state() -> Option<&'static crate::infrastructure::AppState> {
     GLOBAL_APP_STATE.get()
 }
