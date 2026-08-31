@@ -44,6 +44,11 @@ This dynamic `.dylib` is the **dev/test path only**. The shipped app links cr-sq
 **statically** and registers it in-process (iOS forbids runtime extension loading) —
 see ADR-044 sections 2-3.
 
+**Known upstream bug (v0.16.3)**: `crsql_as_crr('<table>')` with ONE argument reads the
+Rust literal `"main"` as a C string (no NUL terminator) and fails with a bare code 7
+depending on binary layout. Always call `crsql_as_crr('main', '<table>')` (see
+`infrastructure/crsqlite_crr.rs::setup_crrs`). Re-check on any version bump.
+
 **Exception: Windows ships the DYNAMIC path.** The symbol-localization relink below
 is Unix-only (ld -r + objcopy, no proven COFF/MSVC equivalent), and Windows allows
 runtime extension loading. The Windows CI workflow (`bibliogenius-app`,
