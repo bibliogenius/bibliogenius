@@ -100,8 +100,13 @@ pub async fn list_contacts(
     let peer_names_with_book: HashSet<String> = match &params.book_isbn {
         None => HashSet::new(),
         Some(isbn) => {
+            // Same expansion as the wishlist join (`utils::isbn::lookup_forms`):
+            // an equality on the raw string alone missed every edition stored
+            // under the other length or with punctuation.
             let matching_books = peer_book::Entity::find()
-                .filter(peer_book::Column::Isbn.eq(isbn.as_str()))
+                .filter(
+                    peer_book::Column::Isbn.is_in(crate::utils::isbn::lookup_forms(isbn.as_str())),
+                )
                 .all(&db)
                 .await
                 .unwrap_or_default();

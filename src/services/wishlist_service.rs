@@ -150,7 +150,19 @@ async fn resolve_row_sources(
             .unwrap_or_else(|| source_ref_id.clone());
         let source = RowSource {
             peer_id: resolved_peer.map(|p| p.id).unwrap_or(row.peer_id),
-            node_id: row.node_id.clone(),
+            // Falls back to the resolved peer's library uuid, which is the
+            // same identifier under another name. A paired peer's cache rows
+            // carry no node_id (only directory rows do), and the dedup
+            // deliberately prefers the paired row, so the match used to come
+            // back without one. Everything keyed on the node id then went
+            // missing for exactly the peers one is closest to: in particular
+            // the shared contact card (ADR-067), so "Contact" never appeared
+            // beside "Borrow" for a paired library.
+            node_id: row
+                .node_id
+                .clone()
+                .filter(|n| !n.is_empty())
+                .or_else(|| resolved_peer.and_then(|p| p.library_uuid.clone())),
             source_ref_id,
             source_name,
             peer_url: resolved_peer.map(|p| p.url.clone()),
@@ -160,26 +172,21 @@ async fn resolve_row_sources(
     Ok(resolved)
 }
 
-/// Canonical comparison form of an ISBN: ISBN-13 when parseable, the raw
-/// string otherwise. Same convention as the hub catalog cache
-/// (api/frb/hub_catalog.rs): invalid values only ever match themselves.
-fn canonical_isbn(raw: &str) -> String {
-    crate::utils::isbn::to_isbn13(raw).unwrap_or_else(|| raw.to_string())
-}
-
-/// Expand a set of ISBNs with the alternate length form of each (10 ↔ 13),
-/// so the cache lookup also hits rows stored under the other form (the same
-/// edition circulates under both). 979-prefixed ISBN-13 values have no
-/// ISBN-10 form and invalid values expand to nothing; hyphenated stored
-/// values are out of scope (write paths store clean forms).
+/// Expand a set of ISBNs into every form an equality lookup should try, so the
+/// cache lookup also hits rows stored under another form: the same edition
+/// circulates as ISBN-10 and ISBN-13, and catalogues store both punctuated and
+/// plain.
+///
+/// The expansion itself lives in `utils::isbn::lookup_forms`, shared with the
+/// contact annotation so the two cannot cover different sets. This used to
+/// expand to the raw value plus the *other* length only, which missed a
+/// hyphenated wish against a cleanly stored row: neither set held the clean
+/// same-length form.
 fn expand_isbn_forms(isbns: &HashSet<String>) -> HashSet<String> {
-    let mut expanded = isbns.clone();
-    for isbn in isbns {
-        if let Some(alt) = crate::utils::isbn::alternate_isbn(isbn) {
-            expanded.insert(alt);
-        }
-    }
-    expanded
+    isbns
+        .iter()
+        .flat_map(|isbn| crate::utils::isbn::lookup_forms(isbn))
+        .collect()
 }
 
 /// Find owned cache rows matching the given ISBNs, with their source
@@ -213,7 +220,7 @@ pub async fn providers_for_isbns(
     // would break dedup and rejoin whenever the two differ.
     let requested_by_canonical: HashMap<String, String> = isbns
         .iter()
-        .map(|i| (canonical_isbn(i), i.clone()))
+        .map(|i| (crate::utils::isbn::canonical(i), i.clone()))
         .collect();
 
     let mut seen: HashSet<(String, String)> = HashSet::new();
@@ -223,7 +230,7 @@ pub async fn providers_for_isbns(
         let Some(row_isbn) = row.isbn.clone() else {
             continue;
         };
-        let canonical = canonical_isbn(&row_isbn);
+        let canonical = crate::utils::isbn::canonical(&row_isbn);
         let isbn = requested_by_canonical
             .get(&canonical)
             .cloned()
@@ -591,6 +598,26 @@ mod tests {
         assert!(set.contains("9780000000002"));
     }
 
+    /// Half of the shape that made the borrow offer vanish in the field. The
+    /// other half, a punctuated value in the CACHE, cannot be answered here:
+    /// no expansion can guess an arbitrary punctuation, so the cache is
+    /// normalised at its three write paths instead
+    /// (`upsert_peer_books_cache` and friends, plus migration 098 for rows
+    /// synced before that). What the lookup owes is this direction: the wish
+    /// itself carries the punctuation, so the set has to hold the clean
+    /// SAME-length form. The old expansion offered the raw value and the
+    /// other length only.
+    #[tokio::test]
+    async fn a_hyphenated_wish_still_matches_a_plain_cache_row() {
+        let db = test_db().await;
+        insert_wish(&db, "Rust in Action", "978-1-61729-455-6", false).await;
+        let peer_id = insert_peer(&db, "Federico", None).await;
+        insert_peer_book(&db, peer_id, None, "9781617294556", true).await;
+
+        let matches = matches_for_wishlist(&db, None).await.unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
     /// A cache row the peer does not own (they borrowed it themselves) is
     /// not borrowable and must not match.
     #[tokio::test]
@@ -602,6 +629,28 @@ mod tests {
 
         let matches = matches_for_wishlist(&db, None).await.unwrap();
         assert!(matches.is_empty(), "owned=false must never match");
+    }
+
+    /// A paired peer's match must still carry its node id, taken from the
+    /// peer record when the cache row has none. Everything keyed on that id
+    /// depends on it, starting with the shared contact card (ADR-067): the
+    /// "Contact" button beside "Borrow" was missing for precisely the
+    /// libraries one is paired with.
+    #[tokio::test]
+    async fn a_paired_peer_match_carries_its_node_id() {
+        let db = test_db().await;
+        insert_wish(&db, "Rust in Action", "9781617294556", false).await;
+        let peer_id = insert_peer(&db, "Federico", Some("node-uuid-33")).await;
+        // Paired rows are cached with an empty node_id, as production does.
+        insert_peer_book(&db, peer_id, Some(""), "9781617294556", true).await;
+
+        let matches = matches_for_wishlist(&db, None).await.unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].node_id.as_deref(),
+            Some("node-uuid-33"),
+            "the peer record knows the uuid the cache row lacks",
+        );
     }
 
     /// A library both paired and followed yields two cache rows for the

@@ -260,10 +260,14 @@ async fn upsert_peer_book_row(
         .one(db)
         .await?;
 
+    // Same rule as the full-sync path: the cache stores plain ISBNs so every
+    // equality lookup on it can find them.
+    let isbn = book.isbn.as_deref().map(crate::utils::isbn::plain);
+
     if let Some(row) = existing {
         let mut active: peer_book::ActiveModel = row.into();
         active.title = Set(book.title.clone());
-        active.isbn = Set(book.isbn.clone());
+        active.isbn = Set(isbn.clone());
         active.author = Set(book.author.clone());
         active.cover_url = Set(book.cover_url.clone());
         active.summary = Set(book.summary.clone());
@@ -285,7 +289,7 @@ async fn upsert_peer_book_row(
             peer_id: Set(peer_id),
             remote_book_id: Set(remote_id),
             title: Set(book.title.clone()),
-            isbn: Set(book.isbn.clone()),
+            isbn: Set(isbn),
             author: Set(book.author.clone()),
             cover_url: Set(book.cover_url.clone()),
             summary: Set(book.summary.clone()),

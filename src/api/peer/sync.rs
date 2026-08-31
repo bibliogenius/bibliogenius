@@ -93,9 +93,15 @@ pub(crate) async fn upsert_peer_books_cache(
     }
 
     // 2. Upsert each book
-    for book in books {
+    for mut book in books {
         let remote_id = book.id.unwrap_or_default();
         fresh_ids.insert(remote_id.clone());
+
+        // Store the ISBN punctuation-free. Peers send whatever their own
+        // catalogue holds, and a hyphenated value made every equality lookup
+        // on this cache miss it: the wishlist join and the "has this book"
+        // annotation both compare against plain forms.
+        book.isbn = book.isbn.map(|i| crate::utils::isbn::plain(&i));
 
         if let Some(existing_entry) = existing_map.get(&remote_id) {
             // UPDATE: refresh metadata. `added_at` from the peer overrides any
@@ -1291,6 +1297,34 @@ mod added_at_tests {
         assert_eq!(book.title, "Le Livre");
         assert_eq!(book.owned, Some(true));
         assert_eq!(book.available_copies, Some(2));
+    }
+
+    /// Peers send whatever their own catalogue holds, punctuation included.
+    /// The cache stores the plain form, because every equality lookup on it
+    /// compares against plain forms: a hyphenated row was invisible to the
+    /// wishlist join and to the contact "has this book" annotation, so the
+    /// borrow offer simply never appeared and said nothing about why.
+    #[tokio::test]
+    async fn upsert_peer_books_cache_stores_plain_isbns() {
+        let db = setup().await;
+        let peer_id = insert_peer(&db).await;
+
+        let books = vec![crate::models::Book {
+            id: Some("20".to_string()),
+            title: "Rust in Action".to_string(),
+            isbn: Some("978-1-61729-455-6".to_string()),
+            owned: Some(true),
+            ..Default::default()
+        }];
+        upsert_peer_books_cache(&db, peer_id, None, books, true).await;
+
+        let row = peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("the book was cached");
+        assert_eq!(row.isbn.as_deref(), Some("9781617294556"));
     }
 
     /// Loan status from the owner (owned=false, available_copies=Some(0))

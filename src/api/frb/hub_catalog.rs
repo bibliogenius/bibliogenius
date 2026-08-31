@@ -567,7 +567,7 @@ async fn upsert_directory_catalog_cache(
                          VALUES (0, '0', ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL)",
                     )
                     .bind(title.as_str())
-                    .bind(isbn.as_str())
+                    .bind(crate::utils::isbn::plain(isbn).as_str())
                     .bind(author.as_deref())
                     .bind(cover_url.as_deref())
                     .bind(now.as_str())

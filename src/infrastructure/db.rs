@@ -2492,6 +2492,34 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 098: strip punctuation from ISBNs already cached in
+    // `peer_books`. Peers send whatever their own catalogue holds, and the
+    // write paths only started normalising now, so rows synced earlier keep
+    // forms like `978-1-61729-455-6`. Every equality lookup on this cache
+    // compares against plain forms, so such a row was invisible to the
+    // wishlist join and to the contact "has this book" annotation: the borrow
+    // offer simply never appeared, with nothing to say why.
+    //
+    // A plain UPDATE is safe here precisely because `peer_books` is a local
+    // cache and NOT in `CRR_TABLES`: no cr-sqlite trigger fires, no
+    // replication clock is touched. Never do this on `books` or `copies`.
+    //
+    // Logged rather than ignored, unlike the additive ALTERs above: their
+    // expected error is "the column already exists", an UPDATE has no such
+    // excuse. A failure here leaves rows unreachable to every ISBN lookup,
+    // and the only visible symptom is a borrow offer that never appears.
+    if let Err(e) = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "UPDATE peer_books SET isbn = REPLACE(REPLACE(TRIM(isbn), '-', ''), ' ', '') \
+             WHERE isbn IS NOT NULL AND (isbn LIKE '%-%' OR isbn LIKE '% %')"
+                .to_owned(),
+        ))
+        .await
+    {
+        tracing::warn!("migration 098: peer_books ISBN cleanup failed: {e}");
+    }
+
     Ok(())
 }
 
