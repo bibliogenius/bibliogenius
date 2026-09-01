@@ -156,15 +156,67 @@ const INCOMPLETE_LIST_LIMIT: u64 = 300;
 
 /// All owned, incomplete books with their missing fields, closest-to-complete
 /// first, for the manual completion overview.
+/// `missing_field` / `no_isbn_only` mirror the overview's filters so the cap
+/// applies to the filtered set, not to the whole backlog.
 pub async fn incomplete_books(
     state: &AppState,
     limit: Option<u64>,
+    missing_field: Option<String>,
+    no_isbn_only: bool,
 ) -> Result<Vec<IncompleteBookDetail>, String> {
+    let field = validate_scope(missing_field)?;
     state
         .metadata_fill_repo
-        .list_incomplete(limit.unwrap_or(INCOMPLETE_LIST_LIMIT))
+        .list_incomplete(
+            limit.unwrap_or(INCOMPLETE_LIST_LIMIT),
+            field.as_deref(),
+            no_isbn_only,
+        )
         .await
         .map_err(err_to_string)
+}
+
+/// How many books a run started right now would process: owned, incomplete and
+/// with an ISBN, optionally narrowed to those missing `missing_field` (the run
+/// scope offered by the completeness filters). This is the number the start
+/// button announces, so it must come from the same predicate as the work-list
+/// rather than from the capped overview list.
+pub async fn processable_count(
+    state: &AppState,
+    missing_field: Option<String>,
+) -> Result<i64, String> {
+    let field = validate_scope(missing_field)?;
+    state
+        .metadata_fill_repo
+        .count_incomplete_with_isbn(field.as_deref())
+        .await
+        .map_err(err_to_string)
+}
+
+/// How many coverless owned books the sources have already been asked about,
+/// conclusively, without result. Surfaced under the "cover" filter so a reader
+/// staring at a stack of empty covers after a run knows the run is not at
+/// fault: the sources simply do not carry one.
+pub async fn covers_sources_have_not(state: &AppState) -> Result<i64, String> {
+    state
+        .metadata_fill_repo
+        .count_covers_sources_have_not()
+        .await
+        .map_err(err_to_string)
+}
+
+/// Reject a scope that is not a gap-fill field before it reaches SQL, and treat
+/// a blank one as "no scope".
+fn validate_scope(missing_field: Option<String>) -> Result<Option<String>, String> {
+    match missing_field
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+    {
+        Some(f) if !crate::domain::metadata_fill::is_fill_field(&f) => {
+            Err(format!("unknown gap-fill field: {f}"))
+        }
+        other => Ok(other),
+    }
 }
 
 /// Current/last run state of any status (drives the live progress, the resume
@@ -203,11 +255,21 @@ pub async fn recent(state: &AppState, limit: u64) -> Result<Vec<RecentFilledBook
 /// `total` stays the full backlog and the cursor advances across lots, so
 /// successive "Continuer" calls walk the backlog instead of re-attempting the
 /// same books. This is the "small batches" nudge (no migration, ADR-041).
+///
+/// `missing_field` scopes a *fresh* run to the owned books missing that one
+/// field, mirroring the completeness screen's filter pills. Scoping selects the
+/// books, not the values written: a scoped run still fills every gap it finds on
+/// the books it visits, since the ISBN lookup that answers for one field answers
+/// for all six. Unlike `lot_limit` the scope IS persisted with the run, because
+/// the resume cursor is only meaningful against the work-list it was built
+/// from; a resume therefore reuses the stored scope and ignores this argument.
 pub async fn start(
     state: &AppState,
     languages: Option<String>,
     lot_limit: Option<u64>,
+    missing_field: Option<String>,
 ) -> Result<String, String> {
+    let missing_field = validate_scope(missing_field)?;
     let repo = state.metadata_fill_repo.clone();
     let manager = state.metadata_fill.clone();
 
@@ -215,27 +277,30 @@ pub async fn start(
         return Ok(active);
     }
 
-    // Resume an interrupted/leftover run, else open a fresh one.
-    let (batch_id, start_cursor) = match repo.get_active_run().await.map_err(err_to_string)? {
-        Some(run) => {
-            repo.set_run_status(&run.batch_id, "running")
-                .await
-                .map_err(err_to_string)?;
-            (run.batch_id, run.cursor_book_id)
-        }
-        None => {
-            let total = repo
-                .count_incomplete_with_isbn()
-                .await
-                .map_err(err_to_string)?;
-            let batch_id = uuid::Uuid::new_v4().to_string();
-            repo.create_run(&batch_id, total)
-                .await
-                .map_err(err_to_string)?;
-            // Empty-string sentinel = start of the uuid-ordered work-list.
-            (batch_id, String::new())
-        }
-    };
+    // Resume an interrupted/leftover run, else open a fresh one. A resume keeps
+    // the scope the run was created with: its cursor only means anything against
+    // that work-list.
+    let (batch_id, start_cursor, scope) =
+        match repo.get_active_run().await.map_err(err_to_string)? {
+            Some(run) => {
+                repo.set_run_status(&run.batch_id, "running")
+                    .await
+                    .map_err(err_to_string)?;
+                (run.batch_id, run.cursor_book_id, run.missing_field)
+            }
+            None => {
+                let total = repo
+                    .count_incomplete_with_isbn(missing_field.as_deref())
+                    .await
+                    .map_err(err_to_string)?;
+                let batch_id = uuid::Uuid::new_v4().to_string();
+                repo.create_run(&batch_id, total, missing_field.as_deref())
+                    .await
+                    .map_err(err_to_string)?;
+                // Empty-string sentinel = start of the uuid-ordered work-list.
+                (batch_id, String::new(), missing_field)
+            }
+        };
 
     let cancel = match manager.try_begin(batch_id.clone()) {
         Some(flag) => flag,
@@ -255,6 +320,7 @@ pub async fn start(
             cancel,
             start_cursor,
             lot_limit,
+            scope,
         )
         .await;
     });
@@ -319,6 +385,7 @@ async fn run_fill_loop(
     cancel: Arc<AtomicBool>,
     start_cursor: String,
     lot_limit: Option<u64>,
+    missing_field: Option<String>,
 ) {
     // Reload counters so a resumed run keeps accumulating rather than resetting.
     let mut run = match repo.get_run(&batch_id).await {
@@ -338,7 +405,10 @@ async fn run_fill_loop(
             let _ = repo.set_run_status(&batch_id, "cancelled").await;
             break;
         }
-        let batch = match repo.list_incomplete_with_isbn(&cursor, PAGE).await {
+        let batch = match repo
+            .list_incomplete_with_isbn(&cursor, PAGE, missing_field.as_deref())
+            .await
+        {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!("metadata_fill: work-list query failed: {e}");

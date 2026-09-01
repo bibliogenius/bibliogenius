@@ -11,8 +11,9 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, Statement, TransactionTrait, 
 
 use crate::domain::DomainError;
 use crate::domain::metadata_fill::{
-    CompletenessStats, FillRun, FilledField, GapValues, IncompleteBook, IncompleteBookDetail,
-    MetadataFillRepository, RecentFilledBook, RecentFilledField, UndoOutcome,
+    CompletenessStats, FieldGap, FillRun, FilledField, GapValues, IncompleteBook,
+    IncompleteBookDetail, MetadataFillRepository, RecentFilledBook, RecentFilledField, UndoOutcome,
+    is_fill_field,
 };
 
 /// A book counts as "incomplete" when any gap-fill field is empty.
@@ -43,9 +44,29 @@ fn text_is_empty(v: &Option<String>) -> bool {
     v.as_deref().map(str::trim).unwrap_or("").is_empty()
 }
 
-/// Whitelist guard: only the known fill columns may be interpolated into SQL.
-fn is_fill_field(field: &str) -> bool {
-    crate::domain::metadata_fill::FILL_FIELDS.contains(&field)
+/// SQL fragment restricting a selection to the books missing one given field
+/// (the run scope), as ` AND (...)` ready to append. `None` yields an empty
+/// fragment. The field is whitelisted before interpolation; an unknown one is
+/// an error rather than a silently unscoped run.
+///
+/// The emptiness test per field type mirrors `INCOMPLETE_PRED` exactly, so a
+/// scoped run can never pick a book the unscoped one would consider complete.
+fn missing_field_pred(field: Option<&str>) -> Result<String, DomainError> {
+    let Some(field) = field else {
+        return Ok(String::new());
+    };
+    if !is_fill_field(field) {
+        return Err(DomainError::Validation(format!(
+            "unknown gap-fill field: {field}"
+        )));
+    }
+    Ok(if field == "title" {
+        " AND TRIM(title) = ''".to_string()
+    } else if is_int_field(field) {
+        format!(" AND {field} IS NULL")
+    } else {
+        format!(" AND ({field} IS NULL OR TRIM({field}) = '')")
+    })
 }
 
 fn now_rfc3339() -> String {
@@ -75,24 +96,37 @@ impl SeaOrmMetadataFillRepository {
         Ok(row.try_get::<i64>("", "cnt")?)
     }
 
-    /// Total number of empty gap-fill fields across all owned books. Sums the
-    /// per-book empty-field count using the same emptiness rules as
-    /// `INCOMPLETE_PRED` (text: NULL/blank; integer: NULL).
-    async fn count_empty_fields(&self) -> Result<i64, DomainError> {
-        let sql = "SELECT COALESCE(SUM(\
-             (CASE WHEN TRIM(title) = '' THEN 1 ELSE 0 END) \
-             + (CASE WHEN summary IS NULL OR TRIM(summary) = '' THEN 1 ELSE 0 END) \
-             + (CASE WHEN publisher IS NULL OR TRIM(publisher) = '' THEN 1 ELSE 0 END) \
-             + (CASE WHEN cover_url IS NULL OR TRIM(cover_url) = '' THEN 1 ELSE 0 END) \
-             + (CASE WHEN publication_year IS NULL THEN 1 ELSE 0 END) \
-             + (CASE WHEN page_count IS NULL THEN 1 ELSE 0 END)\
-             ), 0) AS empty_fields FROM books WHERE owned = 1";
+    /// Owned books still missing each gap-fill field, in `FILL_FIELDS` order,
+    /// using the same emptiness rules as `INCOMPLETE_PRED` (text: NULL/blank;
+    /// integer: NULL). One query: the total shown by the completeness teaser is
+    /// the sum of these, so the two can never disagree.
+    async fn field_gaps(&self) -> Result<Vec<FieldGap>, DomainError> {
+        let sql = "SELECT \
+             COALESCE(SUM(CASE WHEN TRIM(title) = '' THEN 1 ELSE 0 END), 0) AS title, \
+             COALESCE(SUM(CASE WHEN summary IS NULL OR TRIM(summary) = '' THEN 1 ELSE 0 END), 0) \
+                 AS summary, \
+             COALESCE(SUM(CASE WHEN publisher IS NULL OR TRIM(publisher) = '' THEN 1 ELSE 0 END), 0) \
+                 AS publisher, \
+             COALESCE(SUM(CASE WHEN page_count IS NULL THEN 1 ELSE 0 END), 0) AS page_count, \
+             COALESCE(SUM(CASE WHEN publication_year IS NULL THEN 1 ELSE 0 END), 0) \
+                 AS publication_year, \
+             COALESCE(SUM(CASE WHEN cover_url IS NULL OR TRIM(cover_url) = '' THEN 1 ELSE 0 END), 0) \
+                 AS cover_url \
+             FROM books WHERE owned = 1";
         let row = self
             .db
             .query_one(Statement::from_string(self.backend(), sql.to_owned()))
             .await?
-            .ok_or_else(|| DomainError::Database("empty_fields returned no row".into()))?;
-        Ok(row.try_get::<i64>("", "empty_fields")?)
+            .ok_or_else(|| DomainError::Database("field_gaps returned no row".into()))?;
+        crate::domain::metadata_fill::FILL_FIELDS
+            .iter()
+            .map(|field| {
+                Ok(FieldGap {
+                    field: (*field).to_string(),
+                    missing: row.try_get::<i64>("", field)?,
+                })
+            })
+            .collect()
     }
 }
 
@@ -115,6 +149,7 @@ fn row_to_run(row: &sea_orm::QueryResult) -> Result<FillRun, DomainError> {
         errored: row.try_get::<i64>("", "errored")?,
         cursor_book_id: row.try_get::<String>("", "cursor_book_id")?,
         current_title: row.try_get::<Option<String>>("", "current_title")?,
+        missing_field: row.try_get::<Option<String>>("", "missing_field")?,
     })
 }
 
@@ -130,13 +165,14 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
                 "owned = 1 AND {INCOMPLETE_PRED} AND {NO_ISBN_PRED}"
             ))
             .await?;
-        let empty_fields = self.count_empty_fields().await?;
+        let gaps = self.field_gaps().await?;
         Ok(CompletenessStats {
             owned_total,
             complete: owned_total - incomplete,
             incomplete,
             no_isbn,
-            empty_fields,
+            empty_fields: gaps.iter().map(|g| g.missing).sum(),
+            gaps,
         })
     }
 
@@ -144,10 +180,12 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
         &self,
         after_id: &str,
         limit: u64,
+        missing_field: Option<&str>,
     ) -> Result<Vec<IncompleteBook>, DomainError> {
+        let scope = missing_field_pred(missing_field)?;
         let sql = format!(
             "SELECT uuid AS id, title, isbn FROM books \
-             WHERE owned = 1 AND {INCOMPLETE_PRED} AND {HAS_ISBN_PRED} AND uuid > ? \
+             WHERE owned = 1 AND {INCOMPLETE_PRED} AND {HAS_ISBN_PRED}{scope} AND uuid > ? \
              ORDER BY uuid ASC LIMIT ?"
         );
         let rows = self
@@ -161,9 +199,30 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
         rows.iter().map(row_to_incomplete).collect()
     }
 
-    async fn count_incomplete_with_isbn(&self) -> Result<i64, DomainError> {
+    async fn count_covers_sources_have_not(&self) -> Result<i64, DomainError> {
+        // `book_local` is device-local and not a CRR: the marker says what THIS
+        // device's enabled sources answered, which is exactly the scope of the
+        // explanation shown to the reader.
+        let sql = "SELECT COUNT(*) AS cnt FROM books b \
+             JOIN book_local bl ON bl.book_uuid = b.uuid \
+             WHERE b.owned = 1 \
+               AND (b.cover_url IS NULL OR TRIM(b.cover_url) = '') \
+               AND bl.cover_lookup_failed_at IS NOT NULL";
+        let row = self
+            .db
+            .query_one(Statement::from_string(self.backend(), sql.to_owned()))
+            .await?
+            .ok_or_else(|| DomainError::Database("cover marker count returned no row".into()))?;
+        Ok(row.try_get::<i64>("", "cnt")?)
+    }
+
+    async fn count_incomplete_with_isbn(
+        &self,
+        missing_field: Option<&str>,
+    ) -> Result<i64, DomainError> {
+        let scope = missing_field_pred(missing_field)?;
         self.count(&format!(
-            "owned = 1 AND {INCOMPLETE_PRED} AND {HAS_ISBN_PRED}"
+            "owned = 1 AND {INCOMPLETE_PRED} AND {HAS_ISBN_PRED}{scope}"
         ))
         .await
     }
@@ -181,10 +240,21 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
         rows.iter().map(row_to_incomplete).collect()
     }
 
-    async fn list_incomplete(&self, limit: u64) -> Result<Vec<IncompleteBookDetail>, DomainError> {
+    async fn list_incomplete(
+        &self,
+        limit: u64,
+        missing_field: Option<&str>,
+        no_isbn_only: bool,
+    ) -> Result<Vec<IncompleteBookDetail>, DomainError> {
+        let scope = missing_field_pred(missing_field)?;
+        let isbn = if no_isbn_only {
+            format!(" AND {NO_ISBN_PRED}")
+        } else {
+            String::new()
+        };
         let sql = format!(
             "SELECT uuid AS id, title, isbn, cover_url, summary, publisher, publication_year, page_count \
-             FROM books WHERE owned = 1 AND {INCOMPLETE_PRED} ORDER BY title ASC LIMIT ?"
+             FROM books WHERE owned = 1 AND {INCOMPLETE_PRED}{scope}{isbn} ORDER BY title ASC LIMIT ?"
         );
         let rows = self
             .db
@@ -348,20 +418,33 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
         Ok(filled)
     }
 
-    async fn create_run(&self, batch_id: &str, total: i64) -> Result<(), DomainError> {
+    async fn create_run(
+        &self,
+        batch_id: &str,
+        total: i64,
+        missing_field: Option<&str>,
+    ) -> Result<(), DomainError> {
+        if let Some(field) = missing_field
+            && !is_fill_field(field)
+        {
+            return Err(DomainError::Validation(format!(
+                "unknown gap-fill field: {field}"
+            )));
+        }
         let now = now_rfc3339();
         self.db
             .execute(Statement::from_sql_and_values(
                 self.backend(),
                 "INSERT INTO metadata_fill_run \
                  (batch_id, status, total, done, filled, skipped, errored, cursor_book_id, \
-                  current_title, started_at, updated_at) \
-                 VALUES (?, 'running', ?, 0, 0, 0, 0, '', NULL, ?, ?)",
+                  current_title, started_at, updated_at, missing_field) \
+                 VALUES (?, 'running', ?, 0, 0, 0, 0, '', NULL, ?, ?, ?)",
                 [
                     Value::from(batch_id.to_string()),
                     Value::from(total),
                     Value::from(now.clone()),
                     Value::from(now),
+                    Value::from(missing_field.map(|f| f.to_string())),
                 ],
             ))
             .await?;
@@ -754,7 +837,7 @@ mod tests {
         assert_eq!(stats.no_isbn, 1);
         // empty fields: complete=0, incomplete(missing summary)=1, no-isbn(all 5)=5
         assert_eq!(stats.empty_fields, 6);
-        assert_eq!(repo.count_incomplete_with_isbn().await.unwrap(), 1);
+        assert_eq!(repo.count_incomplete_with_isbn(None).await.unwrap(), 1);
     }
 
     /// A book whose title is empty is incomplete even when every other field
@@ -782,12 +865,12 @@ mod tests {
         assert_eq!(stats.complete, 0);
         assert_eq!(stats.empty_fields, 1, "exactly one gap: the title");
 
-        let detail = repo.list_incomplete(50).await.unwrap();
+        let detail = repo.list_incomplete(50, None, false).await.unwrap();
         assert_eq!(detail.len(), 1);
         assert_eq!(detail[0].missing, vec!["title".to_string()]);
 
         // It has an ISBN, so the bulk run can look it up and repair it.
-        assert_eq!(repo.count_incomplete_with_isbn().await.unwrap(), 1);
+        assert_eq!(repo.count_incomplete_with_isbn(None).await.unwrap(), 1);
     }
 
     /// A whitespace-only title is a missing title, matching the creation gate
@@ -930,14 +1013,14 @@ mod tests {
             (id2.clone(), id1.clone())
         };
 
-        let with_isbn = repo.list_incomplete_with_isbn("", 50).await.unwrap();
+        let with_isbn = repo.list_incomplete_with_isbn("", 50, None).await.unwrap();
         assert_eq!(
             with_isbn.iter().map(|b| b.id.clone()).collect::<Vec<_>>(),
             vec![lo.clone(), hi.clone()]
         );
 
         // after_id cursor excludes already-processed ids (everything <= lo)
-        let after = repo.list_incomplete_with_isbn(&lo, 50).await.unwrap();
+        let after = repo.list_incomplete_with_isbn(&lo, 50, None).await.unwrap();
         assert_eq!(
             after.iter().map(|b| b.id.clone()).collect::<Vec<_>>(),
             vec![hi]
@@ -1005,7 +1088,7 @@ mod tests {
         )
         .await;
 
-        let list = repo.list_incomplete(50).await.unwrap();
+        let list = repo.list_incomplete(50, None, false).await.unwrap();
         assert_eq!(list.len(), 2);
         // closest-to-complete (fewest gaps) first
         assert_eq!(list[0].title, "OneGap");
@@ -1072,7 +1155,7 @@ mod tests {
 
         // After filling, the book is no longer incomplete (self-draining work-list).
         assert!(
-            repo.list_incomplete_with_isbn("", 50)
+            repo.list_incomplete_with_isbn("", 50, None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -1169,11 +1252,294 @@ mod tests {
         assert_eq!(recent[0].fields.len(), 2);
     }
 
+    /// The "the sources have no cover for these" count must key on the marker
+    /// AND on the cover still being empty: a book whose cover arrived later
+    /// carries a stale marker until the next sweep clears it, and counting it
+    /// would overstate the explanation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn covers_the_sources_have_not_counts_marked_and_still_empty_books() {
+        let db = db().await;
+        let repo = SeaOrmMetadataFillRepository::new(db.clone());
+        let marked_empty = seed_book(
+            &db,
+            "No cover",
+            Some("111"),
+            true,
+            Some("S"),
+            Some("P"),
+            Some(2001),
+            None,
+            Some(10),
+        )
+        .await;
+        let marked_but_covered = seed_book(
+            &db,
+            "Cover arrived since",
+            Some("222"),
+            true,
+            Some("S"),
+            Some("P"),
+            Some(2002),
+            Some("https://example.org/c.jpg"),
+            Some(20),
+        )
+        .await;
+        // Coverless but never asked: not part of the explanation.
+        seed_book(
+            &db,
+            "Never asked",
+            Some("333"),
+            true,
+            Some("S"),
+            Some("P"),
+            Some(2003),
+            None,
+            Some(30),
+        )
+        .await;
+        for id in [&marked_empty, &marked_but_covered] {
+            crate::infrastructure::book_local::set_cover_lookup_failed_at(
+                &db,
+                id,
+                "2026-08-01T00:00:00Z",
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(repo.count_covers_sources_have_not().await.unwrap(), 1);
+    }
+
+    /// The overview list is capped, so the cap must apply to the *filtered*
+    /// set: a filter that announces books the list cannot show is a filter that
+    /// looks broken.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_overview_list_takes_the_same_filters_as_the_pills() {
+        let db = db().await;
+        let repo = SeaOrmMetadataFillRepository::new(db.clone());
+        seed_book(
+            &db,
+            "Missing summary",
+            Some("111"),
+            true,
+            None,
+            Some("Pub"),
+            Some(2001),
+            Some("c"),
+            Some(100),
+        )
+        .await;
+        seed_book(
+            &db,
+            "Missing publisher, no isbn",
+            None,
+            true,
+            Some("S"),
+            None,
+            Some(2002),
+            Some("c"),
+            Some(120),
+        )
+        .await;
+
+        let all = repo.list_incomplete(50, None, false).await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        let scoped = repo
+            .list_incomplete(50, Some("summary"), false)
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].title, "Missing summary");
+
+        let no_isbn = repo.list_incomplete(50, None, true).await.unwrap();
+        assert_eq!(no_isbn.len(), 1);
+        assert_eq!(no_isbn[0].title, "Missing publisher, no isbn");
+
+        assert!(
+            repo.list_incomplete(50, Some("nope"), false).await.is_err(),
+            "an unknown field is refused here too"
+        );
+    }
+
+    /// The teaser reads its number from the per-field breakdown, so the
+    /// breakdown must be exact and its sum must be the total it replaces.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stats_break_the_empty_fields_down_per_field() {
+        let db = db().await;
+        let repo = SeaOrmMetadataFillRepository::new(db.clone());
+        // Missing summary + cover (blank counts as missing).
+        seed_book(
+            &db,
+            "A",
+            Some("111"),
+            true,
+            None,
+            Some("Pub"),
+            Some(2001),
+            Some("  "),
+            Some(100),
+        )
+        .await;
+        // Missing summary + year.
+        seed_book(
+            &db,
+            "B",
+            Some("222"),
+            true,
+            Some(""),
+            Some("Pub"),
+            None,
+            Some("c"),
+            Some(120),
+        )
+        .await;
+        // Not owned: out of every count.
+        seed_book(&db, "C", Some("333"), false, None, None, None, None, None).await;
+
+        let stats = repo.completeness_stats().await.unwrap();
+        let gap = |f: &str| {
+            stats
+                .gaps
+                .iter()
+                .find(|g| g.field == f)
+                .map(|g| g.missing)
+                .unwrap()
+        };
+        assert_eq!(gap("summary"), 2);
+        assert_eq!(gap("cover_url"), 1);
+        assert_eq!(gap("publication_year"), 1);
+        assert_eq!(gap("publisher"), 0);
+        assert_eq!(gap("title"), 0);
+        assert_eq!(
+            stats.empty_fields,
+            stats.gaps.iter().map(|g| g.missing).sum::<i64>(),
+            "the teaser total is the sum of the breakdown"
+        );
+    }
+
+    /// A scoped run walks only the books missing the field it was scoped to,
+    /// with the same "empty" definition as the unscoped work-list (a
+    /// whitespace-only value is a gap), and still skips the books with no ISBN.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn work_list_can_be_scoped_to_one_missing_field() {
+        let db = db().await;
+        let repo = SeaOrmMetadataFillRepository::new(db.clone());
+        // Missing only the summary (blank, not NULL: still a gap).
+        let no_summary = seed_book(
+            &db,
+            "No summary",
+            Some("111"),
+            true,
+            Some("   "),
+            Some("Pub"),
+            Some(2001),
+            Some("c"),
+            Some(100),
+        )
+        .await;
+        // Missing only the publisher: out of a summary-scoped run.
+        seed_book(
+            &db,
+            "No publisher",
+            Some("222"),
+            true,
+            Some("S"),
+            None,
+            Some(2002),
+            Some("c"),
+            Some(120),
+        )
+        .await;
+        // Missing the summary but with no ISBN: never processable.
+        seed_book(
+            &db,
+            "No isbn",
+            None,
+            true,
+            None,
+            Some("Pub"),
+            Some(2003),
+            Some("c"),
+            Some(90),
+        )
+        .await;
+        // Missing the publication year: exercises the integer-typed scope.
+        let no_year = seed_book(
+            &db,
+            "No year",
+            Some("333"),
+            true,
+            Some("S"),
+            Some("Pub"),
+            None,
+            Some("c"),
+            Some(80),
+        )
+        .await;
+
+        let unscoped = repo.list_incomplete_with_isbn("", 50, None).await.unwrap();
+        assert_eq!(unscoped.len(), 3, "three incomplete books have an ISBN");
+
+        let scoped = repo
+            .list_incomplete_with_isbn("", 50, Some("summary"))
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, no_summary);
+        assert_eq!(
+            repo.count_incomplete_with_isbn(Some("summary"))
+                .await
+                .unwrap(),
+            1,
+            "the announced count matches what the work-list will walk"
+        );
+
+        let scoped_year = repo
+            .list_incomplete_with_isbn("", 50, Some("publication_year"))
+            .await
+            .unwrap();
+        assert_eq!(scoped_year.len(), 1);
+        assert_eq!(scoped_year[0].id, no_year);
+    }
+
+    /// The scope reaches SQL by interpolation, so anything outside the
+    /// gap-fill whitelist must be refused rather than silently dropped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unknown_scope_is_refused_everywhere() {
+        let db = db().await;
+        let repo = SeaOrmMetadataFillRepository::new(db.clone());
+        let hostile = Some("summary) OR 1=1 --");
+        assert!(
+            repo.list_incomplete_with_isbn("", 50, hostile)
+                .await
+                .is_err()
+        );
+        assert!(repo.count_incomplete_with_isbn(hostile).await.is_err());
+        assert!(repo.create_run("bad", 0, hostile).await.is_err());
+    }
+
+    /// The scope is persisted with the run: the resume cursor only means
+    /// anything against the work-list it was built from.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_remembers_its_scope() {
+        let db = db().await;
+        let repo = SeaOrmMetadataFillRepository::new(db.clone());
+        repo.create_run("scoped", 7, Some("summary")).await.unwrap();
+        let run = repo.get_active_run().await.unwrap().unwrap();
+        assert_eq!(run.missing_field.as_deref(), Some("summary"));
+
+        repo.set_run_status("scoped", "done").await.unwrap();
+        repo.create_run("whole", 9, None).await.unwrap();
+        let run = repo.get_active_run().await.unwrap().unwrap();
+        assert_eq!(run.missing_field, None, "an unscoped run stores no field");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn run_lifecycle_and_interrupt() {
         let db = db().await;
         let repo = SeaOrmMetadataFillRepository::new(db.clone());
-        repo.create_run("b1", 5).await.unwrap();
+        repo.create_run("b1", 5, None).await.unwrap();
         let mut run = repo.get_run("b1").await.unwrap().unwrap();
         assert_eq!(run.status, "running");
         assert_eq!(run.total, 5);

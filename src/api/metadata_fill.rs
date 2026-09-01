@@ -5,7 +5,7 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -32,7 +32,40 @@ pub async fn get_stats(State(state): State<AppState>) -> impl IntoResponse {
                 "incomplete": s.incomplete,
                 "no_isbn": s.no_isbn,
                 "empty_fields": s.empty_fields,
+                "gaps": s.gaps.iter().map(|g| json!({
+                    "field": g.field,
+                    "missing": g.missing,
+                })).collect::<Vec<_>>(),
             })),
+        )
+            .into_response(),
+        Err(e) => err(e).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct ProcessableQuery {
+    /// Optional run scope: count only the books missing this gap-fill field.
+    pub missing_field: Option<String>,
+}
+
+pub async fn get_processable(
+    State(state): State<AppState>,
+    Query(q): Query<ProcessableQuery>,
+) -> impl IntoResponse {
+    match svc::processable_count(&state, q.missing_field).await {
+        Ok(count) => (StatusCode::OK, Json(json!({ "processable": count }))).into_response(),
+        Err(e) => err(e).into_response(),
+    }
+}
+
+/// Coverless books the sources have already answered empty about (see the
+/// service). Reported next to the completeness stat.
+pub async fn get_covers_sources_have_not(State(state): State<AppState>) -> impl IntoResponse {
+    match svc::covers_sources_have_not(&state).await {
+        Ok(count) => (
+            StatusCode::OK,
+            Json(json!({ "covers_sources_have_not": count })),
         )
             .into_response(),
         Err(e) => err(e).into_response(),
@@ -45,16 +78,19 @@ pub struct StartBody {
     pub languages: Option<String>,
     /// Per-invocation lot quota; `None` runs the whole backlog (ADR-041).
     pub lot_limit: Option<u64>,
+    /// Scope a fresh run to the books missing this one gap-fill field; a resume
+    /// reuses the scope stored on the run.
+    pub missing_field: Option<String>,
 }
 
 pub async fn start(
     State(state): State<AppState>,
     body: Option<Json<StartBody>>,
 ) -> impl IntoResponse {
-    let (languages, lot_limit) = body
-        .map(|b| (b.0.languages, b.0.lot_limit))
-        .unwrap_or((None, None));
-    match svc::start(&state, languages, lot_limit).await {
+    let (languages, lot_limit, missing_field) = body
+        .map(|b| (b.0.languages, b.0.lot_limit, b.0.missing_field))
+        .unwrap_or((None, None, None));
+    match svc::start(&state, languages, lot_limit, missing_field).await {
         Ok(batch_id) => (StatusCode::OK, Json(json!({ "batch_id": batch_id }))).into_response(),
         Err(e) => err(e).into_response(),
     }
@@ -70,6 +106,7 @@ fn run_json(run: &FillRun) -> serde_json::Value {
         "skipped": run.skipped,
         "errored": run.errored,
         "current_title": run.current_title,
+        "missing_field": run.missing_field,
     })
 }
 
@@ -141,13 +178,18 @@ pub async fn get_no_isbn(State(state): State<AppState>) -> impl IntoResponse {
 #[derive(serde::Deserialize)]
 pub struct IncompleteQuery {
     pub limit: Option<u64>,
+    /// Keep only the books missing this gap-fill field.
+    pub missing_field: Option<String>,
+    /// Keep only the books with no ISBN (the ones no fill can identify).
+    #[serde(default)]
+    pub no_isbn_only: bool,
 }
 
 pub async fn get_incomplete(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<IncompleteQuery>,
 ) -> impl IntoResponse {
-    match svc::incomplete_books(&state, q.limit).await {
+    match svc::incomplete_books(&state, q.limit, q.missing_field, q.no_isbn_only).await {
         Ok(books) => (
             StatusCode::OK,
             Json(json!(

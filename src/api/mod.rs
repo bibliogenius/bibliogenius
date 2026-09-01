@@ -382,6 +382,14 @@ fn owner_routes() -> Router<AppState> {
         .route("/lookup/:isbn", get(lookup::lookup_book))
         // Bulk metadata gap-fill (ADR-041)
         .route("/metadata-fill/stats", get(metadata_fill::get_stats))
+        .route(
+            "/metadata-fill/processable",
+            get(metadata_fill::get_processable),
+        )
+        .route(
+            "/metadata-fill/covers-unavailable",
+            get(metadata_fill::get_covers_sources_have_not),
+        )
         .route("/metadata-fill/start", post(metadata_fill::start))
         .route("/metadata-fill/progress", get(metadata_fill::get_progress))
         .route("/metadata-fill/cancel", post(metadata_fill::cancel))

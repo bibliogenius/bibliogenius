@@ -2520,6 +2520,23 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         tracing::warn!("migration 098: peer_books ISBN cleanup failed: {e}");
     }
 
+    // Migration 099: remember the scope of a gap-fill run. The completeness
+    // screen can start a run restricted to the books missing one given field
+    // ("only the books without a summary"), and the run walks its work-list
+    // with a uuid cursor. Resuming with a different scope than the cursor was
+    // built from would silently skip every matching book below it, so the
+    // scope is persisted with the run and a resume reuses it. NULL = the whole
+    // incomplete backlog, the shape every pre-existing row has.
+    //
+    // `metadata_fill_run` is device-local and not a CRR, so a plain additive
+    // ALTER is safe (no crsql_begin_alter dance).
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE metadata_fill_run ADD COLUMN missing_field TEXT".to_owned(),
+        ))
+        .await;
+
     Ok(())
 }
 

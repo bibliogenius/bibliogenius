@@ -34,6 +34,23 @@ pub const FILL_FIELDS: [&str; 6] = [
     "cover_url",
 ];
 
+/// Whitelist guard: `field` is one of the gap-fillable columns. The only
+/// gate before a field name reaches SQL interpolation (selection predicate,
+/// apply/undo statements), so every caller taking a field from the outside
+/// must go through it.
+pub fn is_fill_field(field: &str) -> bool {
+    FILL_FIELDS.contains(&field)
+}
+
+/// How many owned books are still missing one given gap-fill field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldGap {
+    /// One of [`FILL_FIELDS`].
+    pub field: String,
+    /// Owned books where that field is empty.
+    pub missing: i64,
+}
+
 /// Library completeness snapshot over **owned** books.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompletenessStats {
@@ -48,8 +65,13 @@ pub struct CompletenessStats {
     pub no_isbn: i64,
     /// Total empty gap-fill fields across all owned books (field-level progress,
     /// drops by exactly the number of fields filled). Max is
-    /// `owned_total * FILL_FIELDS.len()`.
+    /// `owned_total * FILL_FIELDS.len()`. Equal to the sum of [`Self::gaps`].
     pub empty_fields: i64,
+    /// Per-field breakdown of `empty_fields`, in [`FILL_FIELDS`] order. Exact
+    /// over the whole library: the completeness screen shows these next to a
+    /// field filter, where counting the (capped) overview list would
+    /// under-report a large library.
+    pub gaps: Vec<FieldGap>,
 }
 
 /// A minimal book projection for selection and the "no ISBN" list.
@@ -123,6 +145,11 @@ pub struct FillRun {
     /// past it). uuid v7 sorts ~chronologically so ordering still holds.
     pub cursor_book_id: String,
     pub current_title: Option<String>,
+    /// Scope of the run: when set, one of [`FILL_FIELDS`], and the run only
+    /// walks the owned books missing *that* field (it still fills every gap it
+    /// finds on them). `None` walks the whole incomplete backlog. Persisted so
+    /// a resume keeps the scope its cursor was built from.
+    pub missing_field: Option<String>,
 }
 
 /// A book in the "recently completed" list: the still-active (not undone)
@@ -165,14 +192,30 @@ pub trait MetadataFillRepository: Send + Sync {
     /// Owned, incomplete books that HAVE an ISBN, with `id > after_id`, ordered
     /// by `id`, capped at `limit`. Drives the self-draining work-list: once a
     /// book is filled it is no longer incomplete and drops out of this query.
+    ///
+    /// `missing_field` narrows the work-list to the books missing that one
+    /// field (the run scope); it must pass [`is_fill_field`].
     async fn list_incomplete_with_isbn(
         &self,
         after_id: &str,
         limit: u64,
+        missing_field: Option<&str>,
     ) -> Result<Vec<IncompleteBook>, DomainError>;
 
-    /// Count of owned, incomplete books that HAVE an ISBN (the run total).
-    async fn count_incomplete_with_isbn(&self) -> Result<i64, DomainError>;
+    /// Owned books with no cover for which a cover lookup already came back
+    /// *conclusively* empty (`book_local.cover_lookup_failed_at`, written by
+    /// the startup sweep when the sources answered and none of them carries a
+    /// cover). This is the honest answer to "why did the run leave my covers
+    /// empty": for these books there is nothing to fetch, and only a manual
+    /// cover or a new source will change that.
+    async fn count_covers_sources_have_not(&self) -> Result<i64, DomainError>;
+
+    /// Count of owned, incomplete books that HAVE an ISBN (the run total),
+    /// narrowed by `missing_field` the same way as the work-list.
+    async fn count_incomplete_with_isbn(
+        &self,
+        missing_field: Option<&str>,
+    ) -> Result<i64, DomainError>;
 
     /// Owned, incomplete books with NO ISBN (listed separately, not processed).
     async fn list_incomplete_without_isbn(&self) -> Result<Vec<IncompleteBook>, DomainError>;
@@ -180,7 +223,18 @@ pub trait MetadataFillRepository: Send + Sync {
     /// All owned, incomplete books with the exact fields still empty on each,
     /// ordered closest-to-complete first (fewest missing fields). For the manual
     /// completion overview. Capped at `limit`.
-    async fn list_incomplete(&self, limit: u64) -> Result<Vec<IncompleteBookDetail>, DomainError>;
+    ///
+    /// The same two narrowings the overview offers as filters, applied here so
+    /// the capped slice is drawn from the filtered set: `missing_field` (must
+    /// pass [`is_fill_field`]) keeps the books missing that field, and
+    /// `no_isbn_only` keeps the ones no automatic fill can identify. Without
+    /// them the cap could hide every book a filter announces.
+    async fn list_incomplete(
+        &self,
+        limit: u64,
+        missing_field: Option<&str>,
+        no_isbn_only: bool,
+    ) -> Result<Vec<IncompleteBookDetail>, DomainError>;
 
     /// Apply `candidate` to `book_id` `None`-only, in one transaction, writing a
     /// journal row per field actually written. Returns the fields written.
@@ -192,7 +246,12 @@ pub trait MetadataFillRepository: Send + Sync {
     ) -> Result<Vec<FilledField>, DomainError>;
 
     // ── Run lifecycle ──────────────────────────────────────────────────
-    async fn create_run(&self, batch_id: &str, total: i64) -> Result<(), DomainError>;
+    async fn create_run(
+        &self,
+        batch_id: &str,
+        total: i64,
+        missing_field: Option<&str>,
+    ) -> Result<(), DomainError>;
     /// The single run that is `running` or `interrupted`, if any.
     async fn get_active_run(&self) -> Result<Option<FillRun>, DomainError>;
     /// The most recent run of any status (for showing the last result).

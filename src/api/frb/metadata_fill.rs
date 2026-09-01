@@ -50,6 +50,13 @@ pub async fn lookup_book_metadata(
 
 // ============ Bulk metadata gap-fill (ADR-041) ============
 
+/// Owned books still missing one gap-fill field.
+#[frb(dart_metadata=("freezed"))]
+pub struct FrbFieldGap {
+    pub field: String,
+    pub missing: i64,
+}
+
 /// Library completeness snapshot over owned books.
 #[frb(dart_metadata=("freezed"))]
 pub struct FrbCompletenessStats {
@@ -58,6 +65,8 @@ pub struct FrbCompletenessStats {
     pub incomplete: i64,
     pub no_isbn: i64,
     pub empty_fields: i64,
+    /// Per-field breakdown of `empty_fields`, exact over the whole library.
+    pub gaps: Vec<FrbFieldGap>,
 }
 
 /// Live/last progress of a bulk fill run.
@@ -72,6 +81,9 @@ pub struct FrbFillProgress {
     pub skipped: i64,
     pub errored: i64,
     pub current_title: Option<String>,
+    /// Scope this run was started with: a gap-fill field name when it only
+    /// walks the books missing that field, `None` for the whole backlog.
+    pub missing_field: Option<String>,
 }
 
 /// One field added to a book by the bulk fill, for the undo list.
@@ -124,6 +136,14 @@ pub async fn metadata_fill_stats() -> Result<FrbCompletenessStats, String> {
         incomplete: s.incomplete,
         no_isbn: s.no_isbn,
         empty_fields: s.empty_fields,
+        gaps: s
+            .gaps
+            .into_iter()
+            .map(|g| FrbFieldGap {
+                field: g.field,
+                missing: g.missing,
+            })
+            .collect(),
     })
 }
 
@@ -131,16 +151,33 @@ pub async fn metadata_fill_stats() -> Result<FrbCompletenessStats, String> {
 /// user's reading-language config (comma-joined) for summary coherence.
 /// `lot_limit` caps how many books this invocation processes before pausing the
 /// run as resumable (the "small batches" nudge); `None` runs to completion.
+/// `missing_field` scopes a fresh run to the books missing that one field (the
+/// completeness filter pills); a resume reuses the scope stored on the run.
 pub async fn metadata_fill_start(
     languages: Option<String>,
     lot_limit: Option<u32>,
+    missing_field: Option<String>,
 ) -> Result<String, String> {
     crate::services::metadata_fill_service::start(
         fill_state()?,
         languages,
         lot_limit.map(|l| l as u64),
+        missing_field,
     )
     .await
+}
+
+/// How many books a run started now would process, for the start button's
+/// count. `missing_field` narrows it to the books missing that field.
+pub async fn metadata_fill_processable(missing_field: Option<String>) -> Result<i64, String> {
+    crate::services::metadata_fill_service::processable_count(fill_state()?, missing_field).await
+}
+
+/// Coverless owned books the active sources have already been asked about and
+/// answered empty (the startup sweep's conclusive marker). Explains, under the
+/// "cover" filter, why a run cannot fill them.
+pub async fn metadata_fill_covers_sources_have_not() -> Result<i64, String> {
+    crate::services::metadata_fill_service::covers_sources_have_not(fill_state()?).await
 }
 
 /// Current/last run progress (None if a run has never been started).
@@ -155,6 +192,7 @@ pub async fn metadata_fill_progress() -> Result<Option<FrbFillProgress>, String>
         skipped: r.skipped,
         errored: r.errored,
         current_title: r.current_title,
+        missing_field: r.missing_field,
     }))
 }
 
@@ -204,13 +242,19 @@ pub async fn metadata_fill_books_without_isbn() -> Result<Vec<FrbIncompleteBook>
 }
 
 /// All owned, incomplete books with their missing fields (closest-to-complete
-/// first), for the manual completion overview.
+/// first), for the manual completion overview. `missing_field` /
+/// `no_isbn_only` apply the overview's own filters, so the capped slice is
+/// drawn from the filtered set rather than from the head of the backlog.
 pub async fn metadata_fill_incomplete(
     limit: Option<u32>,
+    missing_field: Option<String>,
+    no_isbn_only: bool,
 ) -> Result<Vec<FrbIncompleteBookDetail>, String> {
     let books = crate::services::metadata_fill_service::incomplete_books(
         fill_state()?,
         limit.map(|l| l as u64),
+        missing_field,
+        no_isbn_only,
     )
     .await?;
     Ok(books
