@@ -141,6 +141,19 @@ impl CollectionRepository for SeaOrmCollectionRepository {
         Ok(())
     }
 
+    async fn rename(&self, id: &str, name: &str) -> Result<(), DomainError> {
+        let existing = CollectionEntity::find_by_id(id).one(&self.db).await?;
+        let Some(model) = existing else {
+            return Err(DomainError::NotFound);
+        };
+
+        let mut active: ActiveModel = model.into();
+        active.name = Set(name.to_owned());
+        active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        active.update(&self.db).await?;
+        Ok(())
+    }
+
     async fn get_books(&self, collection_id: &str) -> Result<Vec<CollectionBook>, DomainError> {
         // Get all collection_book entries for this collection, in reading order:
         // numbered volumes ascending, then unnumbered (NULL) by `added_at`. The

@@ -227,7 +227,9 @@ fn owner_routes() -> Router<AppState> {
         )
         .route(
             "/collections/:id",
-            get(collections::get_collection).delete(collections::delete_collection),
+            get(collections::get_collection)
+                .patch(collections::rename_collection)
+                .delete(collections::delete_collection),
         )
         .route(
             "/collections/:id/deletion-preview",

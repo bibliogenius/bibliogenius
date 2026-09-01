@@ -65,6 +65,47 @@ pub async fn create_collection(
     }
 }
 
+#[derive(Deserialize)]
+pub struct RenameCollectionRequest {
+    pub name: String,
+}
+
+/// Rename a collection. The name is trimmed, and a blank one, the favorites
+/// sentinel or the typed favorites collection itself are refused by the
+/// service (the FFI path carries the same rules).
+pub async fn rename_collection(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<RenameCollectionRequest>,
+) -> impl IntoResponse {
+    match collection_service::rename_collection(state.db(), &id, &payload.name).await {
+        Ok(()) => {
+            let _ = crate::sync::log_operation_with_str_id(
+                state.db(),
+                "collection",
+                &id,
+                "UPDATE",
+                None,
+            )
+            .await;
+            StatusCode::OK.into_response()
+        }
+        Err(crate::domain::DomainError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Collection not found"})),
+        )
+            .into_response(),
+        Err(crate::domain::DomainError::Validation(msg)) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 /// Get a single collection by ID
 pub async fn get_collection(
     State(state): State<AppState>,

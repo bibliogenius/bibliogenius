@@ -66,6 +66,13 @@ pub trait CollectionRepository: Send + Sync {
     /// Delete a collection by ID
     async fn delete(&self, id: &str) -> Result<(), DomainError>;
 
+    /// Rename a collection, refreshing `updated_at`.
+    ///
+    /// The name is stored as given: trimming, blank refusal and the
+    /// favorites guard live in `collection_service::rename_collection`, the
+    /// single entry point both the FFI and the HTTP handler go through.
+    async fn rename(&self, id: &str, name: &str) -> Result<(), DomainError>;
+
     /// Set (or clear, with `None`) a collection's `source`. Used to flip a
     /// plain collection to a series (`source = 'series'`) and back, and to
     /// adopt a manual collection as the typed favorites one (ADR-064).

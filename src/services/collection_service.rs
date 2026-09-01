@@ -11,6 +11,9 @@ use sea_orm::{
     TransactionTrait,
 };
 
+use crate::domain::DomainError;
+use crate::domain::collection_repository::CollectionRepository;
+use crate::infrastructure::repositories::collection_repository::SeaOrmCollectionRepository;
 use crate::models::{book_tags, collection, collection_book, copy};
 
 #[derive(Debug)]
@@ -77,6 +80,41 @@ pub async fn preview_deletion(
         to_delete,
         to_keep: total - to_delete,
     })
+}
+
+/// Rename a collection. Single entry point for both the FFI and the HTTP
+/// handler, so the rules below hold whichever door the rename comes through.
+///
+/// The name is trimmed, and two names are refused rather than stored:
+/// * a blank one, which would leave an unnamed collection on every screen;
+/// * the technical favorites sentinel, which the display layer maps to the
+///   translated "Favorites" label (ADR-064) and would therefore mislabel an
+///   ordinary collection.
+///
+/// Renaming the typed favorites collection itself is refused too, for the
+/// symmetrical reason: its label comes from the translations, so the write
+/// would be a silent no-op on screen.
+pub async fn rename_collection(
+    db: &DatabaseConnection,
+    collection_id: &str,
+    name: &str,
+) -> Result<(), DomainError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(DomainError::Validation(
+            "a collection name cannot be empty".to_string(),
+        ));
+    }
+    if name == crate::services::favorites_service::FAVORITES_SENTINEL_NAME {
+        return Err(DomainError::Validation(
+            "this name is reserved for the favorites collection".to_string(),
+        ));
+    }
+    crate::services::favorites_service::ensure_renamable(db, collection_id).await?;
+
+    SeaOrmCollectionRepository::new(db.clone())
+        .rename(collection_id, name)
+        .await
 }
 
 /// Delete a collection. When `delete_books` is true, also delete every book
@@ -252,6 +290,30 @@ mod tests {
         .insert(db)
         .await
         .unwrap();
+    }
+
+    async fn insert_typed_collection(db: &DatabaseConnection, id: &str, name: &str, source: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        collection::ActiveModel {
+            id: Set(id.to_owned()),
+            name: Set(name.to_owned()),
+            description: Set(None),
+            source: Set(source.to_owned()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+        }
+        .insert(db)
+        .await
+        .unwrap();
+    }
+
+    async fn collection_name(db: &DatabaseConnection, id: &str) -> String {
+        collection::Entity::find_by_id(id)
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap()
+            .name
     }
 
     async fn attach_book(db: &DatabaseConnection, collection_id: &str, book_id: &str) {
@@ -513,5 +575,105 @@ mod tests {
 
         let err2 = delete_collection(&db, "ghost", true).await.unwrap_err();
         assert!(matches!(err2, CollectionServiceError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn rename_stores_the_trimmed_name_and_touches_updated_at() {
+        let db = setup_db().await;
+        insert_collection(&db, "c1", "Polars").await;
+        let before = collection::Entity::find_by_id("c1")
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .updated_at;
+
+        rename_collection(&db, "c1", "  Romans noirs  ")
+            .await
+            .unwrap();
+
+        assert_eq!(collection_name(&db, "c1").await, "Romans noirs");
+        let after = collection::Entity::find_by_id("c1")
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(after.updated_at >= before, "updated_at must be refreshed");
+    }
+
+    #[tokio::test]
+    async fn rename_refuses_a_blank_name() {
+        let db = setup_db().await;
+        insert_collection(&db, "c1", "Polars").await;
+
+        assert!(matches!(
+            rename_collection(&db, "c1", "   ").await,
+            Err(DomainError::Validation(_))
+        ));
+        assert_eq!(collection_name(&db, "c1").await, "Polars");
+    }
+
+    #[tokio::test]
+    async fn rename_refuses_the_favorites_sentinel_as_a_name() {
+        // The display layer maps this technical name to the translated
+        // "Favorites" label, so storing it would mislabel the collection.
+        let db = setup_db().await;
+        insert_collection(&db, "c1", "Polars").await;
+
+        assert!(matches!(
+            rename_collection(
+                &db,
+                "c1",
+                crate::services::favorites_service::FAVORITES_SENTINEL_NAME
+            )
+            .await,
+            Err(DomainError::Validation(_))
+        ));
+        assert_eq!(collection_name(&db, "c1").await, "Polars");
+    }
+
+    #[tokio::test]
+    async fn rename_is_refused_on_the_favorites_collection() {
+        // Its label comes from the translations (ADR-064): the write would
+        // be invisible on screen. The UI hides the action, this covers the
+        // other callers.
+        let db = setup_db().await;
+        insert_typed_collection(
+            &db,
+            "fav",
+            crate::services::favorites_service::FAVORITES_SENTINEL_NAME,
+            "favorites",
+        )
+        .await;
+
+        assert!(matches!(
+            rename_collection(&db, "fav", "Mes chouchous").await,
+            Err(DomainError::Validation(_))
+        ));
+        assert_eq!(
+            collection_name(&db, "fav").await,
+            crate::services::favorites_service::FAVORITES_SENTINEL_NAME
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_a_series_collection_is_allowed() {
+        // Only the favorites collection derives its label from the i18n
+        // catalogue; a series is a plain user-named list.
+        let db = setup_db().await;
+        insert_typed_collection(&db, "s1", "Harry Poter", "series").await;
+
+        rename_collection(&db, "s1", "Harry Potter").await.unwrap();
+
+        assert_eq!(collection_name(&db, "s1").await, "Harry Potter");
+    }
+
+    #[tokio::test]
+    async fn rename_an_unknown_collection_is_not_found() {
+        let db = setup_db().await;
+        assert!(matches!(
+            rename_collection(&db, "missing", "Whatever").await,
+            Err(DomainError::NotFound)
+        ));
     }
 }

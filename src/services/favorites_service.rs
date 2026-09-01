@@ -67,14 +67,41 @@ pub async fn ensure_not_favorites(
     db: &DatabaseConnection,
     collection_id: &str,
 ) -> Result<(), DomainError> {
-    if let Some(c) = repo(db).find_by_id(collection_id).await?
-        && c.source == FAVORITES_SOURCE
-    {
+    if is_typed_favorites(db, collection_id).await? {
         return Err(DomainError::Validation(
             "the favorites collection cannot be flipped to or from a series".to_string(),
         ));
     }
     Ok(())
+}
+
+/// Refuse a rename on the typed favorites collection: its displayed label
+/// comes from the i18n catalogue, never from `collections.name` (ADR-064),
+/// so a stored name would be invisible on every screen and in all 11
+/// languages. Called by the rename entry point; the UI hides the action.
+pub async fn ensure_renamable(
+    db: &DatabaseConnection,
+    collection_id: &str,
+) -> Result<(), DomainError> {
+    if is_typed_favorites(db, collection_id).await? {
+        return Err(DomainError::Validation(
+            "the favorites collection cannot be renamed: its label comes from the translations"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `collection_id` is THE typed favorites collection. An unknown id
+/// is not: reporting it is the calling handler's job, not the guard's.
+async fn is_typed_favorites(
+    db: &DatabaseConnection,
+    collection_id: &str,
+) -> Result<bool, DomainError> {
+    Ok(repo(db)
+        .find_by_id(collection_id)
+        .await?
+        .is_some_and(|c| c.source == FAVORITES_SOURCE))
 }
 
 /// Resolve the canonical favorites collection, merging duplicates first.

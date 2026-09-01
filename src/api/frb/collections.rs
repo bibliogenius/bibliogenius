@@ -125,6 +125,16 @@ pub async fn create_collection(
         .map_err(|e| format!("{e:?}"))
 }
 
+/// Renames a collection. The name is trimmed; a blank one, the technical
+/// favorites sentinel, and any rename of the typed favorites collection
+/// itself are refused (see `collection_service::rename_collection`).
+pub async fn rename_collection(id: String, name: String) -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+    crate::services::collection_service::rename_collection(db, &id, &name)
+        .await
+        .map_err(|e| format!("{e:?}"))
+}
+
 /// Deletes a collection by ID. Books are left orphaned (current behaviour).
 pub async fn delete_collection(id: String) -> Result<(), String> {
     let db = db().ok_or("Database not initialized")?;
