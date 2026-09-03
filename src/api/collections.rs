@@ -447,6 +447,10 @@ pub async fn import_collection(
                         } else {
                             None
                         };
+                        // Authors are linked on creation only: a book the
+                        // library already holds keeps the authors its owner
+                        // curated, whatever the imported file claims.
+                        let is_new_book = existing.is_none();
                         let book_result = if let Some(existing_book) = existing {
                             // Book already exists - reuse it
                             if import_as_owned && !existing_book.owned {
@@ -480,6 +484,26 @@ pub async fn import_collection(
                                     None,
                                 )
                                 .await;
+
+                                if is_new_book
+                                    && let Some(ref author_name) = req.author
+                                    && let Err(e) =
+                                        crate::services::book_service::create_or_link_author(
+                                            db,
+                                            &created_book.id,
+                                            author_name,
+                                        )
+                                        .await
+                                {
+                                    // The book is in and linked to the
+                                    // collection: an unlinked author is a gap in
+                                    // the shelf, not a failed import.
+                                    tracing::warn!(
+                                        "Collection import: could not link author for {}: {:?}",
+                                        created_book.id,
+                                        e
+                                    );
+                                }
 
                                 // 2. Link to Collection via repository
                                 if let Err(e) =

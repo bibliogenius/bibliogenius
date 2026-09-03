@@ -121,15 +121,19 @@ pub async fn populate_available_copies(
     Ok(())
 }
 
-/// Strip formatting from ISBN (hyphens, spaces). Keeps digits and X.
+/// Keep the digits and the ISBN-10 check character, nothing else.
+///
+/// A value with none of those is an absence, not an ISBN: a Goodreads cell
+/// `=""` used to be stored as `=`, published to the hub and matched against
+/// nothing. No length check here: the edit form warns about a mistyped ISBN
+/// without refusing it, and the imports validate the length before calling.
 fn normalize_isbn(isbn: Option<String>) -> Option<String> {
     isbn.map(|s| {
-        let cleaned: String = s
-            .chars()
+        s.chars()
             .filter(|c| c.is_ascii_digit() || *c == 'X' || *c == 'x')
-            .collect();
-        if cleaned.is_empty() { s } else { cleaned }
+            .collect::<String>()
     })
+    .filter(|s| !s.is_empty())
 }
 
 /// List all books with optional filters
@@ -1734,7 +1738,7 @@ async fn load_google_books_api_key(db: &DatabaseConnection) -> Option<String> {
 }
 
 // Helper: Create or link author to book
-async fn create_or_link_author(
+pub(crate) async fn create_or_link_author(
     db: &DatabaseConnection,
     book_id: &str,
     author_name: &str,
@@ -1846,6 +1850,34 @@ fn title_label_relevant(query_title: &str, work_label: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── isbn normalisation ──────────────────────────────────────────────
+
+    #[test]
+    fn normalize_isbn_keeps_digits_and_check_character() {
+        assert_eq!(
+            normalize_isbn(Some("978-2-264-02484-8".into())).as_deref(),
+            Some("9782264024848")
+        );
+        assert_eq!(
+            normalize_isbn(Some("=2264024844".into())).as_deref(),
+            Some("2264024844")
+        );
+        assert_eq!(
+            normalize_isbn(Some("226402484X".into())).as_deref(),
+            Some("226402484X")
+        );
+    }
+
+    #[test]
+    fn a_value_without_any_digit_is_an_absence() {
+        // Goodreads writes `=""` for a book without ISBN; the CSV parser
+        // leaves `=`, which must not be stored as an ISBN.
+        assert_eq!(normalize_isbn(Some("=".into())), None);
+        assert_eq!(normalize_isbn(Some("".into())), None);
+        assert_eq!(normalize_isbn(Some("  ".into())), None);
+        assert_eq!(normalize_isbn(None), None);
+    }
 
     // ── reading status vocabulary ───────────────────────────────────────
     //

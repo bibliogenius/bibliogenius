@@ -46,7 +46,31 @@ pub async fn import_file(
                             ..Default::default()
                         };
                         match new_book.insert(&db).await {
-                            Ok(_) => count += 1,
+                            Ok(created) => {
+                                // The source named an author: link it, so an
+                                // imported shelf is browsable by author like
+                                // any hand-entered book.
+                                if let Some(ref author_name) = req.author
+                                    && let Err(e) =
+                                        crate::services::book_service::create_or_link_author(
+                                            &db,
+                                            &created.id,
+                                            author_name,
+                                        )
+                                        .await
+                                {
+                                    // The book is in: an unlinked author is a
+                                    // gap in the shelf, not a failed import, so
+                                    // it is reported here rather than counted
+                                    // as an error the user cannot act on.
+                                    tracing::warn!(
+                                        "Import: could not link author for {}: {:?}",
+                                        created.id,
+                                        e
+                                    );
+                                }
+                                count += 1;
+                            }
                             Err(e) => errors.push(format!("{}: {}", req.title, e)),
                         }
                     }
