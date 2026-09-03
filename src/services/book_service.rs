@@ -127,7 +127,7 @@ pub async fn populate_available_copies(
 /// `=""` used to be stored as `=`, published to the hub and matched against
 /// nothing. No length check here: the edit form warns about a mistyped ISBN
 /// without refusing it, and the imports validate the length before calling.
-fn normalize_isbn(isbn: Option<String>) -> Option<String> {
+pub(crate) fn normalize_isbn(isbn: Option<String>) -> Option<String> {
     isbn.map(|s| {
         s.chars()
             .filter(|c| c.is_ascii_digit() || *c == 'X' || *c == 'x')

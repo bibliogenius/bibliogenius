@@ -112,6 +112,9 @@ fn gap_values_from(meta: BookMetadata) -> GapValues {
         page_count: meta.page_count.and_then(|p| i32::try_from(p).ok()),
         publication_year: meta.publication_year.as_deref().and_then(parse_year),
         cover_url: meta.cover_url,
+        // The lookup is keyed on the ISBN: it can only ever return the one it
+        // was given. Only a reimport (ADR-071) fills this field.
+        isbn: None,
     }
 }
 

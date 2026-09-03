@@ -35,7 +35,7 @@ use sea_orm::{
 };
 
 use crate::domain::DomainError;
-use crate::models::{author, book, book_authors, collection_book, copy, loan, sale};
+use crate::models::{book, collection_book, copy, loan, sale};
 use crate::utils::cover_url::{is_local_cover, local_cover_filename, own_local_cover_path};
 use crate::utils::dedup_key::book_dedup_key;
 
@@ -311,29 +311,7 @@ async fn load_groups(db: &DatabaseConnection) -> Result<Vec<DuplicateGroup>, Dom
 /// so insertion order would differ between two devices holding the same book.
 /// Picking the minimum name is the only choice that agrees everywhere.
 async fn primary_authors(db: &DatabaseConnection) -> Result<HashMap<String, String>, DomainError> {
-    let names: HashMap<String, String> = author::Entity::find()
-        .all(db)
-        .await
-        .map_err(db_err)?
-        .into_iter()
-        .map(|a| (a.id, a.name))
-        .collect();
-
-    let mut primary: HashMap<String, String> = HashMap::new();
-    for link in book_authors::Entity::find().all(db).await.map_err(db_err)? {
-        let Some(name) = names.get(&link.author_id) else {
-            continue;
-        };
-        primary
-            .entry(link.book_id)
-            .and_modify(|current| {
-                if name < current {
-                    *current = name.clone();
-                }
-            })
-            .or_insert_with(|| name.clone());
-    }
-    Ok(primary)
+    crate::services::author_names::primary_authors(db).await
 }
 
 // -----------------------------------------------------------------------------
@@ -1006,7 +984,7 @@ fn copy_signature(c: &copy::Model) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{collection, tag};
+    use crate::models::{author, book_authors, collection, tag};
     use sea_orm::{ActiveModelTrait, DatabaseBackend};
 
     async fn setup_db() -> DatabaseConnection {

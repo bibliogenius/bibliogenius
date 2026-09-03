@@ -42,6 +42,22 @@ pub fn is_fill_field(field: &str) -> bool {
     FILL_FIELDS.contains(&field)
 }
 
+/// The one column the journal may name that is NOT a gap-fill field: the ISBN.
+///
+/// It is filled by the "reimport to complete" mode (ADR-071), which reads it
+/// off the file the library was imported from rather than from a lookup. It is
+/// deliberately kept out of [`FILL_FIELDS`]: that list also defines what an
+/// incomplete book is, and an ISBN-less book is not incomplete, it is
+/// unidentifiable. `CompletenessStats::no_isbn` reports those on its own axis.
+pub const JOURNAL_ONLY_FIELDS: [&str; 1] = ["isbn"];
+
+/// Whitelist guard for the undo journal: every gap-fill field, plus the fields
+/// only a reimport writes. Wider than [`is_fill_field`] on purpose, and applied
+/// at the same place: before a field name reaches SQL interpolation.
+pub fn is_journal_field(field: &str) -> bool {
+    is_fill_field(field) || JOURNAL_ONLY_FIELDS.contains(&field)
+}
+
 /// How many owned books are still missing one given gap-fill field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldGap {
@@ -104,6 +120,11 @@ pub struct GapValues {
     pub page_count: Option<i32>,
     pub publication_year: Option<i32>,
     pub cover_url: Option<String>,
+    /// Only a reimport (ADR-071) ever carries one: an ISBN lookup is keyed on
+    /// the ISBN, so it has nothing to say about it. Journalled and undoable
+    /// like the others, but not part of [`FILL_FIELDS`] (see
+    /// [`JOURNAL_ONLY_FIELDS`]).
+    pub isbn: Option<String>,
 }
 
 impl GapValues {
@@ -115,6 +136,7 @@ impl GapValues {
             && self.page_count.is_none()
             && self.publication_year.is_none()
             && self.cover_url.is_none()
+            && self.isbn.is_none()
     }
 }
 
