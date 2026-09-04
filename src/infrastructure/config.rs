@@ -11,15 +11,20 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let profile = env::var("PROFILE").unwrap_or_else(|_| "default".to_string());
+        Self::from_env_with_profile(None)
+    }
 
-        let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
-            if profile == "default" {
-                "sqlite://bibliogenius.db?mode=rwc".to_string()
-            } else {
-                format!("sqlite://bibliogenius_{}.db?mode=rwc", profile)
-            }
-        });
+    /// Build the config from the environment, with `profile` (the `--profile`
+    /// CLI flag) taking precedence over the `PROFILE` variable. The database
+    /// URL follows the profile unless `DATABASE_URL` is set explicitly.
+    pub fn from_env_with_profile(profile: Option<&str>) -> Self {
+        let profile = profile
+            .map(str::to_owned)
+            .or_else(|| env::var("PROFILE").ok())
+            .unwrap_or_else(|| "default".to_string());
+
+        let database_url =
+            env::var("DATABASE_URL").unwrap_or_else(|_| Self::default_database_url(&profile));
 
         Self {
             database_url,
@@ -34,5 +39,36 @@ impl Config {
                 .unwrap_or_default(),
             profile,
         }
+    }
+
+    fn default_database_url(profile: &str) -> String {
+        if profile == "default" {
+            "sqlite://bibliogenius.db?mode=rwc".to_string()
+        } else {
+            format!("sqlite://bibliogenius_{}.db?mode=rwc", profile)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_argument_overrides_the_environment() {
+        let config = Config::from_env_with_profile(Some("qa"));
+        assert_eq!(config.profile, "qa");
+    }
+
+    #[test]
+    fn database_url_follows_the_profile() {
+        assert_eq!(
+            Config::default_database_url("default"),
+            "sqlite://bibliogenius.db?mode=rwc"
+        );
+        assert_eq!(
+            Config::default_database_url("qa"),
+            "sqlite://bibliogenius_qa.db?mode=rwc"
+        );
     }
 }
