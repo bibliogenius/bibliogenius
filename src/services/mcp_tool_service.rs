@@ -1,8 +1,8 @@
 //! The MCP tool contract v1: six read-only tools over the owner's library.
 //!
 //! The schemas, the invariants, and the reasoning behind them are specified in
-//! `bibliogenius-docs/docs/technical/mcp-tool-contract-v1.md` (decision record:
-//! ADR-048). That document is the single reference. Change it first.
+//! ADR-048 (MCP Tool Contract v1), section "Tool contract v1".
+//! That document is the single reference. Change it first.
 //!
 //! Two properties of this module are load-bearing:
 //!
