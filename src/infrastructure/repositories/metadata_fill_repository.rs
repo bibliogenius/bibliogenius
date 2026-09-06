@@ -216,6 +216,18 @@ impl MetadataFillRepository for SeaOrmMetadataFillRepository {
         Ok(row.try_get::<i64>("", "cnt")?)
     }
 
+    async fn count_books_without_author(&self) -> Result<i64, DomainError> {
+        // `books` PK is the `uuid` column, and `book_authors` was rewritten to
+        // hold book uuids by the uuid rebuild (mode B, composite PK). A row
+        // left behind with a legacy integer `book_id` would make its book look
+        // authorless here: that over-reports the count, it never writes.
+        self.count(
+            "owned = 1 AND NOT EXISTS \
+             (SELECT 1 FROM book_authors ba WHERE ba.book_id = books.uuid)",
+        )
+        .await
+    }
+
     async fn count_incomplete_with_isbn(
         &self,
         missing_field: Option<&str>,
@@ -856,6 +868,97 @@ mod tests {
         // empty fields: complete=0, incomplete(missing summary)=1, no-isbn(all 5)=5
         assert_eq!(stats.empty_fields, 6);
         assert_eq!(repo.count_incomplete_with_isbn(None).await.unwrap(), 1);
+    }
+
+    /// The authorless count is its own axis, and it has to be, because nothing
+    /// else reports these books: `seed_book` links no author, yet the fully
+    /// filled book above is counted `complete`. The assertion on that line is
+    /// the whole reason this counter exists.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn count_books_without_author_ignores_gap_fields_and_unowned_rows() {
+        let db = db().await;
+        let repo = SeaOrmMetadataFillRepository::new(db.clone());
+
+        // Owned, every gap-fill field filled, but no author: the blind spot.
+        let complete_but_authorless = seed_book(
+            &db,
+            "Complete",
+            Some("111"),
+            true,
+            Some("s"),
+            Some("p"),
+            Some(2000),
+            Some("c"),
+            Some(100),
+        )
+        .await;
+        // Owned and authored: must not be counted.
+        let authored = seed_book(
+            &db,
+            "Authored",
+            Some("222"),
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        // Not owned and authorless: must not be counted either.
+        seed_book(
+            &db,
+            "Borrowed",
+            Some("333"),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        link_author(&db, &authored, "Calvino, Italo").await;
+
+        assert_eq!(repo.count_books_without_author().await.unwrap(), 1);
+
+        // A book counted `complete` can still be authorless: that is the defect
+        // this axis surfaces, not a contradiction to fix in INCOMPLETE_PRED.
+        let stats = repo.completeness_stats().await.unwrap();
+        assert_eq!(stats.complete, 1);
+
+        // Linking an author to it empties the bucket, so the count really does
+        // follow `book_authors` and not some proxy.
+        link_author(&db, &complete_but_authorless, "Levi, Primo").await;
+        assert_eq!(repo.count_books_without_author().await.unwrap(), 0);
+    }
+
+    /// Insert an author and link it to `book_uuid`. Both tables carry uuid keys
+    /// after the rebuild (`authors` drops its integer id entirely), and foreign
+    /// keys are ON once migrations have run, so the author row has to be real.
+    async fn link_author(db: &DatabaseConnection, book_uuid: &str, name: &str) {
+        let now = now_rfc3339();
+        let author_uuid = crate::utils::uuid_gen::new_uuid_v7();
+        db.execute(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "INSERT INTO authors (uuid, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            [
+                Value::from(author_uuid.clone()),
+                Value::from(name.to_string()),
+                Value::from(now.clone()),
+                Value::from(now),
+            ],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "INSERT INTO book_authors (book_id, author_id) VALUES (?, ?)",
+            [Value::from(book_uuid.to_string()), Value::from(author_uuid)],
+        ))
+        .await
+        .unwrap();
     }
 
     /// A book whose title is empty is incomplete even when every other field

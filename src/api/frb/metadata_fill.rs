@@ -180,6 +180,14 @@ pub async fn metadata_fill_covers_sources_have_not() -> Result<i64, String> {
     crate::services::metadata_fill_service::covers_sources_have_not(fill_state()?).await
 }
 
+/// Owned books with no author at all. Reported on its own, next to the "no
+/// ISBN" bucket, because the fill campaign cannot write an author: without
+/// this number they are counted as complete and nothing in the app says
+/// otherwise.
+pub async fn metadata_fill_books_without_author() -> Result<i64, String> {
+    crate::services::metadata_fill_service::books_without_author(fill_state()?).await
+}
+
 /// Current/last run progress (None if a run has never been started).
 pub async fn metadata_fill_progress() -> Result<Option<FrbFillProgress>, String> {
     let run = crate::services::metadata_fill_service::progress(fill_state()?).await?;

@@ -232,6 +232,29 @@ pub trait MetadataFillRepository: Send + Sync {
     /// cover or a new source will change that.
     async fn count_covers_sources_have_not(&self) -> Result<i64, DomainError>;
 
+    /// Owned books carrying no author at all (no row in `book_authors`).
+    ///
+    /// Deliberately its own axis rather than a [`FILL_FIELDS`] entry, for the
+    /// same reason as [`CompletenessStats::no_isbn`]: the gap-fill campaign
+    /// cannot write it. `apply_fill` interpolates a whitelisted *column* name
+    /// into SQL and journals one undo row per field, whereas an author is a
+    /// many-to-many through `book_authors`. Adding it to `FILL_FIELDS` would
+    /// also break the `field_gaps` invariant (its columns sum to
+    /// `empty_fields`) and pull these books into a run that would leave every
+    /// one of them untouched.
+    ///
+    /// Counting them is still worth it: without this, a book with no author is
+    /// reported as *complete*, which is what let a 461-book library sit with
+    /// 180 authorless entries and no signal anywhere.
+    ///
+    /// The parallel with `no_isbn` stops at the shape. That bucket is scoped to
+    /// the *incomplete* set, because it explains a subset of the campaign
+    /// backlog; this one is `owned = 1` alone, deliberately. A book with no
+    /// author can have all six gap-fill fields filled, and those are exactly
+    /// the ones nothing else reports, so scoping to `INCOMPLETE_PRED` would
+    /// drop the books the count exists for.
+    async fn count_books_without_author(&self) -> Result<i64, DomainError>;
+
     /// Count of owned, incomplete books that HAVE an ISBN (the run total),
     /// narrowed by `missing_field` the same way as the work-list.
     async fn count_incomplete_with_isbn(

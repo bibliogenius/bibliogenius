@@ -208,6 +208,18 @@ pub async fn covers_sources_have_not(state: &AppState) -> Result<i64, String> {
         .map_err(err_to_string)
 }
 
+/// How many owned books carry no author at all. Its own axis, like the "no
+/// ISBN" bucket: the fill campaign cannot write an author, so counting these
+/// says "here is a gap you have to close by hand" instead of leaving them
+/// silently counted as complete.
+pub async fn books_without_author(state: &AppState) -> Result<i64, String> {
+    state
+        .metadata_fill_repo
+        .count_books_without_author()
+        .await
+        .map_err(err_to_string)
+}
+
 /// Reject a scope that is not a gap-fill field before it reaches SQL, and treat
 /// a blank one as "no scope".
 fn validate_scope(missing_field: Option<String>) -> Result<Option<String>, String> {
