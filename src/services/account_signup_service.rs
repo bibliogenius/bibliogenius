@@ -42,12 +42,13 @@ use crate::services::account_sync_client::{
     encode_blob_standard, verifier_hash_hex,
 };
 
-/// Argon2 version 0x13 as the integer the hub stores (`19`).
-const ARGON2_VERSION_0X13: u32 = 0x13;
+/// Argon2 version 0x13 as the integer the hub stores (`19`). Shared with the passphrase
+/// rotation, which re-signs the descriptor with the same labels.
+pub(crate) const ARGON2_VERSION_0X13: u32 = 0x13;
 /// The account KDF algorithm label.
-const KDF_ALGO_ARGON2ID: &str = "argon2id";
+pub(crate) const KDF_ALGO_ARGON2ID: &str = "argon2id";
 /// The auth method this signup creates (passphrase-derived Master Key).
-const AUTH_METHOD_PASSPHRASE: &str = "passphrase";
+pub(crate) const AUTH_METHOD_PASSPHRASE: &str = "passphrase";
 
 /// Minimum passphrase length at account creation (SECURITY_GUIDELINES F7 / ADR-042 §14 H4).
 pub const MIN_PASSPHRASE_LEN: usize = 12;

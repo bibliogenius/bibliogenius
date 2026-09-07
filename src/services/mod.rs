@@ -5,6 +5,7 @@
 
 pub mod account_enrollment;
 pub mod account_pairing;
+pub mod account_passphrase_rotation;
 pub mod account_session_service;
 pub mod account_signup_service;
 pub mod account_sync_client;

@@ -725,3 +725,33 @@ pub async fn account_signup_ffi(
     store_account_session(outcome.bundle, client, outcome.account_id, device_id, email).await;
     Ok(status)
 }
+
+/// Change the account passphrase from this already-enrolled device (ADR-042 section 7
+/// and 16.2, lot B). The OLD passphrase is not needed: the device holds the unlocked
+/// trousseau, re-wraps it under the new passphrase, and the hub authenticates the change
+/// with a fresh challenge signed by the account key. Nothing changes locally, no entity
+/// blob is re-encrypted, the recovery copy is untouched, and the other enrolled devices
+/// keep working. The section 12 strength floor applies (`E_WEAK_PASSPHRASE` prefix on
+/// refusal, a backstop to the live meter). Returns JSON `{"rotated": true}`.
+pub async fn account_change_passphrase_ffi(new_passphrase: String) -> Result<String, String> {
+    let mut guard = ACCOUNT_SESSION.lock().await;
+    let session = ensure_account_session(&mut guard).await?;
+    let pass = secrecy::SecretString::new(new_passphrase);
+    match crate::services::account_passphrase_rotation::rotate_passphrase(
+        &session.client,
+        &session.email,
+        &session.bundle,
+        &pass,
+    )
+    .await
+    {
+        Ok(()) => Ok(serde_json::json!({ "rotated": true }).to_string()),
+        Err(crate::services::account_passphrase_rotation::RotationError::WeakPassphrase(_)) => {
+            Err(format!(
+                "{}: passphrase does not meet the strength floor",
+                crate::services::account_signup_service::E_WEAK_PASSPHRASE
+            ))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}

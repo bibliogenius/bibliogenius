@@ -37,6 +37,10 @@ use crate::crypto::account_keys::AccountKeyBundle;
 /// Challenge purposes accepted by the hub (`AccountAuthChallenge::PURPOSES`).
 pub const PURPOSE_LOGIN: &str = "login";
 pub const PURPOSE_KEYBUNDLE: &str = "keybundle";
+/// Step-up challenge for a passphrase rotation (ADR-042 section 16.2): signed with
+/// `account_auth_sk` like a login, but under its own purpose so a login nonce can never
+/// authorize a rotation, nor the reverse.
+pub const PURPOSE_ROTATE: &str = "rotate";
 
 // ---------------------------------------------------------------------------
 // Error type (mirrors the HubDirectoryError shape used elsewhere)
@@ -143,6 +147,33 @@ pub struct SignupRequest {
 #[derive(Debug, Clone, serde::Deserialize)]
 struct SignupResponse {
     account_id: String,
+}
+
+/// The passphrase-side material a rotation replaces on the hub (ADR-042 section 7 and
+/// 16.2): a fresh salt and KDF profile, the verifier hash of the NEW Master Key, the
+/// descriptor re-signed over the new salt/params, and the SAME trousseau re-wrapped
+/// under the new KWK. The `kind=recovery` copy is deliberately not part of it: the
+/// endpoint only ever touches the `kind=passphrase` row.
+#[derive(Debug, Clone, Serialize)]
+pub struct PassphraseRotationRequest {
+    /// base64url(32B) new account salt.
+    pub account_salt: String,
+    pub kdf_params: KdfParams,
+    /// Hex SHA-256 of the new AuthVerifier (the new keybundle-gate HMAC key).
+    pub auth_verifier_hash: String,
+    /// base64url(64B) signature over the canonical descriptor rebuilt with the new salt/params.
+    pub descriptor_sig: String,
+    /// Standard base64 of the trousseau wrapped under the new passphrase KWK.
+    pub wrapped_key: String,
+}
+
+/// Wire body of `POST /passphrase`: the step-up challenge-response plus the material.
+#[derive(Serialize)]
+struct RotatePassphraseBody<'a> {
+    challenge: &'a str,
+    signature: &'a str,
+    #[serde(flatten)]
+    material: &'a PassphraseRotationRequest,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -348,6 +379,13 @@ impl AccountSyncClient {
         *self.token.write().unwrap_or_else(|e| e.into_inner()) = Some(SecretString::new(token));
     }
 
+    /// Install a bearer token without a login round-trip, for tests in other modules
+    /// that need "a client holding a session" (e.g. a stolen-token scenario).
+    #[cfg(test)]
+    pub(crate) fn set_token_for_test(&self, token: &str) {
+        self.set_token(token.to_string());
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)
     }
@@ -451,6 +489,34 @@ impl AccountSyncClient {
             ))
             .await?;
         Ok(resp.wrapped_keys)
+    }
+
+    /// `POST /passphrase` - rotate the passphrase copy of the trousseau from an already
+    /// enrolled device (ADR-042 section 16.2, lot B). Bearer-protected AND gated on a
+    /// fresh `rotate` challenge signed with `account_auth_sk`: a credential change is a
+    /// step-up operation, so a leaked 30-minute session token alone must not be enough.
+    /// Never gated on the old AuthVerifier, which the user may have lost.
+    pub async fn rotate_passphrase(
+        &self,
+        email: &str,
+        bundle: &AccountKeyBundle,
+        material: &PassphraseRotationRequest,
+    ) -> Result<()> {
+        let challenge = self.request_challenge(email, PURPOSE_ROTATE).await?;
+        let signature = build_login_signature(bundle, &challenge)?;
+        let body = RotatePassphraseBody {
+            challenge: &challenge,
+            signature: &signature,
+            material,
+        };
+        let _: serde_json::Value = self
+            .send_authed(|| {
+                self.http
+                    .post(self.url("/api/account/passphrase"))
+                    .json(&body)
+            })
+            .await?;
+        Ok(())
     }
 
     // --- sync (bearer-protected) ---
@@ -867,6 +933,73 @@ mod tests {
             AccountSyncError::Hub(code, _) => assert_eq!(code, 401),
             other => panic!("expected Hub 401, got {other:?}"),
         }
+    }
+
+    /// A rotation asks for a `rotate` challenge (never a login one), signs it with the
+    /// trousseau, and posts the new material under the bearer session: the old
+    /// AuthVerifier appears nowhere in the exchange.
+    #[tokio::test]
+    async fn rotate_passphrase_signs_a_rotate_challenge_under_the_bearer_session() {
+        let server = MockServer::start().await;
+        let bundle = AccountKeyBundle::generate();
+        let raw_challenge = [6u8; 32];
+        let challenge_b64 = URL_SAFE_NO_PAD.encode(raw_challenge);
+
+        Mock::given(method("POST"))
+            .and(path("/api/account/challenge"))
+            .and(body_partial_json(
+                serde_json::json!({ "email": "a@b.co", "purpose": "rotate" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "challenge": challenge_b64,
+                "expires_at": "2026-01-01T00:00:00Z",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let pk = bundle.verifying_key();
+        Mock::given(method("POST"))
+            .and(path("/api/account/passphrase"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer sess-rot",
+            ))
+            .and(body_partial_json(serde_json::json!({
+                "challenge": challenge_b64,
+                "account_salt": "c2FsdA",
+                "auth_verifier_hash": "abcd",
+                "descriptor_sig": "c2ln",
+                "wrapped_key": "d3JhcA==",
+                "kdf_params": {"algo":"argon2id","version":19,"m":65536,"t":3,"p":1},
+            })))
+            .respond_with(move |req: &wiremock::Request| {
+                // The signature must be the trousseau's, over the raw challenge bytes,
+                // exactly as the hub verifies a login.
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let sig = URL_SAFE_NO_PAD
+                    .decode(body["signature"].as_str().unwrap())
+                    .unwrap();
+                let sig = ed25519_dalek::Signature::from_slice(&sig).unwrap();
+                assert!(pk.verify(&raw_challenge, &sig).is_ok());
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "rotated"}))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = AccountSyncClient::with_base_url(server.uri());
+        client.set_token("sess-rot".to_string());
+        let material = PassphraseRotationRequest {
+            account_salt: "c2FsdA".into(),
+            kdf_params: kdf_params(),
+            auth_verifier_hash: "abcd".into(),
+            descriptor_sig: "c2ln".into(),
+            wrapped_key: "d3JhcA==".into(),
+        };
+        client
+            .rotate_passphrase("a@b.co", &bundle, &material)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
