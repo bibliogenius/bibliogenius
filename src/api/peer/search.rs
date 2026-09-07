@@ -26,6 +26,13 @@ pub async fn search_local(
 
     let books = book::Entity::find()
         .filter(book::Column::Private.eq(false))
+        // Books the user does not own (wishes, borrowed copies, books read at
+        // someone else's place) are never shared with peers. The full-catalogue
+        // path (`owned_only=true`), the delta path and the directory push all
+        // filter them out; this receiver is the one a peer calls directly, so it
+        // has to hold the same line or the search answers what the catalogue
+        // refuses to show.
+        .filter(book::Column::Owned.eq(true))
         .filter(
             Condition::any()
                 .add(book::Column::Title.contains(&payload.query))
