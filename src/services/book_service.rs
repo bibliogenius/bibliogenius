@@ -6,7 +6,7 @@
 
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter,
-    QueryOrder, Set, TransactionTrait,
+    QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use std::collections::HashMap;
 
@@ -634,6 +634,241 @@ pub async fn update_book(
     }
 
     Ok(Book::from(model))
+}
+
+/// What recording a reading changed in the library.
+pub struct ReadRecord {
+    pub book: Book,
+    /// The book was not in the library and has just been created, not owned.
+    pub created: bool,
+    /// The row already carried the `read` status, so nothing was written.
+    pub was_already_read: bool,
+}
+
+/// The library row a reading refers to, when the library already holds it.
+///
+/// Both sides of the comparison are normalised, and that dissymmetry is the
+/// whole point. The query side expands through `utils::isbn::lookup_forms` (the
+/// single home for "the same ISBN written differently", shared with the wishlist
+/// join), which covers the ISBN-10 / ISBN-13 equivalence. The stored side is
+/// stripped in SQL, because rows written outside `create_book` keep the
+/// punctuation they arrived with: a borrowed copy stores the lender's string
+/// verbatim. An equality filter alone misses those rows and the reading would
+/// create a duplicate of a book the reader already has.
+///
+/// Falls back to an exact title match when there is no ISBN, exactly like the
+/// borrowed-copy path does with a lender's payload: without an ISBN the title is
+/// the only handle on offer, and a duplicate row is worse than a rare collision
+/// between two books that really are named alike.
+/// `books.isbn` equals one of `forms`, comparing punctuation-free and in upper
+/// case on BOTH sides.
+///
+/// The stored side has to be stripped in SQL because rows written outside
+/// `create_book` keep the punctuation they arrived with: a borrowed copy stores
+/// the lender's string verbatim. Callers pass the query side through
+/// `utils::isbn::lookup_forms`, which covers the ISBN-10 / ISBN-13 equivalence
+/// that no amount of stripping can produce.
+fn stored_isbn_matches(forms: impl IntoIterator<Item = String>) -> sea_orm::sea_query::SimpleExpr {
+    use sea_orm::sea_query::Expr;
+
+    let forms: Vec<String> = forms.into_iter().map(|form| form.to_uppercase()).collect();
+    Expr::expr(Expr::cust(
+        "UPPER(REPLACE(REPLACE(isbn, '-', ''), ' ', ''))",
+    ))
+    .is_in(forms)
+}
+
+async fn find_book_for_reading(
+    db: &DatabaseConnection,
+    book: &Book,
+) -> Result<Option<crate::models::book::Model>, ServiceError> {
+    use crate::models::book::Column;
+
+    if let Some(isbn) = normalize_isbn(book.isbn.clone()) {
+        return Ok(BookEntity::find()
+            .filter(stored_isbn_matches(crate::utils::isbn::lookup_forms(&isbn)))
+            .one(db)
+            .await?);
+    }
+
+    let title = book.title.trim();
+    if title.is_empty() {
+        return Ok(None);
+    }
+    Ok(BookEntity::find()
+        .filter(Column::Title.eq(title))
+        .one(db)
+        .await?)
+}
+
+/// Record that the reader has read a book, whoever owns it.
+///
+/// The case this exists for: a book seen in someone else's catalogue, read but
+/// never bought, and which the reader does not want to buy precisely because it
+/// is already reachable. `owned = false` with `reading_status = 'read'` is
+/// already a valid combination and ADR-063 gave it its filter and its treatment;
+/// what was missing was a way to reach it in one gesture.
+///
+/// **Possession is never touched.** A book already in the library keeps the
+/// possession state it has: the reader is stating what they read, not what they
+/// own, and a book they own and have now read must not silently become
+/// not-owned. A book absent from the library is created NOT owned, which is also
+/// what keeps it out of every outbound lane: `public_catalog_condition`, the
+/// peer catalogue and its delta all filter on `owned`.
+///
+/// Idempotent: recording the same reading twice writes nothing the second time,
+/// so a double tap cannot bump `updated_at` or emit a second sync operation.
+pub async fn record_read_book(
+    db: &DatabaseConnection,
+    book: Book,
+) -> Result<ReadRecord, ServiceError> {
+    const READ: &str = "read";
+
+    let Some(model) = find_book_for_reading(db, &book).await? else {
+        let created = create_book(
+            db,
+            Book {
+                owned: Some(false),
+                reading_status: Some(READ.to_owned()),
+                ..book
+            },
+        )
+        .await?;
+        return Ok(ReadRecord {
+            book: created,
+            created: true,
+            was_already_read: false,
+        });
+    };
+
+    if model.reading_status == READ {
+        return Ok(ReadRecord {
+            book: Book::from(model),
+            created: false,
+            was_already_read: true,
+        });
+    }
+
+    // A targeted update, not `update_book`: the caller holds the OTHER library's
+    // metadata for this book, and passing it through the full update would
+    // overwrite the reader's own title, cover, rating and price with it.
+    let mut active: BookActiveModel = model.into();
+    active.reading_status = Set(READ.to_owned());
+    active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+    let updated = active.update(db).await?;
+
+    let _ = crate::sync::log_operation(db, "book", &updated.id, "UPDATE", None).await;
+
+    Ok(ReadRecord {
+        book: Book::from(updated),
+        created: false,
+        was_already_read: false,
+    })
+}
+
+/// What the reader's own library holds for one ISBN.
+///
+/// Deliberately raw: the possession flag and the reading status as stored, with
+/// no verdict computed for the caller. The wording a peer's catalogue shows
+/// ("you own it", "you have read it", "it is on your wishlist") is a UI
+/// decision, and the same three fields serve all of them.
+pub struct LibraryIsbnStatus {
+    /// The ISBN in the form the CALLER asked about, not the form stored, so a
+    /// client can index its own list with it.
+    pub isbn: String,
+    pub owned: bool,
+    pub reading_status: String,
+}
+
+/// What the library holds for each of `isbns`, for the ISBNs it holds at all.
+///
+/// Answers the question a reader browsing someone else's shelves keeps asking:
+/// do I already have this one, and have I already read it. Bounded on purpose -
+/// callers pass the ISBNs of the page they are displaying, never the whole
+/// catalogue - so the cost stays one query per page.
+///
+/// A library holding several rows for the same ISBN (duplicates happen, they
+/// have their own merge path) answers once, with the strongest state: a copy the
+/// reader owns outranks one they do not, and a book read outranks one unread.
+/// Reporting the weakest would tell a reader they do not own a book they own.
+pub async fn library_status_for_isbns(
+    db: &DatabaseConnection,
+    isbns: &[String],
+) -> Result<Vec<LibraryIsbnStatus>, ServiceError> {
+    use crate::utils::isbn::{canonical, lookup_forms};
+
+    let asked: Vec<String> = isbns
+        .iter()
+        .filter_map(|isbn| normalize_isbn(Some(isbn.clone())).map(|_| isbn.clone()))
+        .collect();
+    if asked.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let forms: Vec<String> = asked
+        .iter()
+        .flat_map(|isbn| lookup_forms(isbn))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    // Three columns, not whole rows: a book carries its summary, its MARC
+    // record and its source payload, and none of that is an answer to "do I
+    // already have this one". The call runs on every page of someone else's
+    // catalogue, on devices where that matters.
+    let rows: Vec<(Option<String>, bool, String)> = BookEntity::find()
+        .select_only()
+        .column(crate::models::book::Column::Isbn)
+        .column(crate::models::book::Column::Owned)
+        .column(crate::models::book::Column::ReadingStatus)
+        .filter(stored_isbn_matches(forms))
+        .into_tuple()
+        .all(db)
+        .await?;
+
+    // The caller indexes its list by the string it sent, which may be neither
+    // the stored form nor the canonical one.
+    let asked_by_canonical: HashMap<String, String> = asked
+        .iter()
+        .map(|isbn| (canonical(isbn), isbn.clone()))
+        .collect();
+
+    let mut strongest: HashMap<String, LibraryIsbnStatus> = HashMap::new();
+    for (row_isbn, owned, reading_status) in rows {
+        let Some(row_isbn) = row_isbn else {
+            continue;
+        };
+        let Some(asked_form) = asked_by_canonical.get(&canonical(&row_isbn)) else {
+            // A row matched by a length-variant form the caller never asked
+            // about. Reporting it under a key the caller cannot index is worse
+            // than staying silent.
+            continue;
+        };
+        let candidate = LibraryIsbnStatus {
+            isbn: asked_form.clone(),
+            owned,
+            reading_status,
+        };
+        match strongest.get(asked_form) {
+            Some(kept) if !outranks(&candidate, kept) => {}
+            _ => {
+                strongest.insert(asked_form.clone(), candidate);
+            }
+        }
+    }
+
+    let mut out: Vec<LibraryIsbnStatus> = strongest.into_values().collect();
+    out.sort_by(|a, b| a.isbn.cmp(&b.isbn));
+    Ok(out)
+}
+
+/// Possession first, then having read it. Used only to pick between two rows
+/// carrying the same ISBN.
+fn outranks(candidate: &LibraryIsbnStatus, kept: &LibraryIsbnStatus) -> bool {
+    if candidate.owned != kept.owned {
+        return candidate.owned;
+    }
+    candidate.reading_status == "read" && kept.reading_status != "read"
 }
 
 /// Delete a book by ID.
@@ -2629,5 +2864,241 @@ mod tests {
             stored.reading_status, "read",
             "clearing the date must not change the reading status",
         );
+    }
+
+    // ── recording a reading of a book one does not own ──────────────────
+
+    async fn stored_book(db: &DatabaseConnection, id: &str) -> crate::models::book::Model {
+        crate::models::book::Entity::find_by_id(id.to_owned())
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    fn a_reading_of(title: &str, isbn: Option<&str>) -> Book {
+        Book {
+            title: title.to_owned(),
+            isbn: isbn.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    /// A book read at someone else's place enters the library not owned, so it
+    /// stays out of the shelf and out of every outbound lane, and it carries no
+    /// copy: the reader holds nothing.
+    #[tokio::test]
+    async fn recording_a_reading_of_an_absent_book_creates_it_not_owned() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+
+        let record = record_read_book(&db, a_reading_of("Martin Eden", Some("9782264024848")))
+            .await
+            .unwrap();
+
+        assert!(record.created);
+        assert!(!record.was_already_read);
+        assert_eq!(record.book.owned, Some(false));
+        assert_eq!(record.book.reading_status.as_deref(), Some("read"));
+
+        let copies = crate::models::copy::Entity::find()
+            .filter(crate::models::copy::Column::BookId.eq(record.book.id.clone().unwrap()))
+            .all(&db)
+            .await
+            .unwrap();
+        assert!(
+            copies.is_empty(),
+            "a book the reader does not own must not get a copy",
+        );
+    }
+
+    /// The reader is stating what they read, never what they own: a book they
+    /// already own must come out of this still owned.
+    #[tokio::test]
+    async fn recording_a_reading_never_touches_possession() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+
+        let created = create_book(
+            &db,
+            Book {
+                title: "Martin Eden".to_owned(),
+                isbn: Some("9782264024848".to_owned()),
+                owned: Some(true),
+                reading_status: Some("to_read".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let id = created.id.unwrap();
+
+        let record = record_read_book(&db, a_reading_of("Martin Eden", Some("9782264024848")))
+            .await
+            .unwrap();
+
+        assert!(!record.created, "the library already held this book");
+        assert!(!record.was_already_read);
+        assert_eq!(record.book.id.as_deref(), Some(id.as_str()));
+
+        let stored = stored_book(&db, &id).await;
+        assert!(stored.owned, "possession must survive the reading");
+        assert_eq!(stored.reading_status, "read");
+    }
+
+    /// Rows written before ISBNs were normalised still carry their hyphens. An
+    /// equality filter on the raw string would miss them and create a duplicate.
+    #[tokio::test]
+    async fn a_hyphenated_isbn_already_in_the_library_still_matches() {
+        use crate::db;
+        use crate::models::book;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let legacy = book::ActiveModel {
+            id: Set(uuid::Uuid::new_v4().to_string()),
+            title: Set("Martin Eden".to_owned()),
+            isbn: Set(Some("978-2-264-02484-8".to_owned())),
+            reading_status: Set("to_read".to_owned()),
+            owned: Set(true),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        let record = record_read_book(&db, a_reading_of("Martin Eden", Some("9782264024848")))
+            .await
+            .unwrap();
+
+        assert!(!record.created);
+        assert_eq!(record.book.id.as_deref(), Some(legacy.id.as_str()));
+        assert_eq!(
+            book::Entity::find().all(&db).await.unwrap().len(),
+            1,
+            "the reading must land on the existing row, not duplicate it",
+        );
+    }
+
+    /// A double tap writes nothing the second time: no bumped timestamp, no
+    /// second sync operation for peers to replay.
+    #[tokio::test]
+    async fn recording_the_same_reading_twice_writes_nothing() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+
+        let first = record_read_book(&db, a_reading_of("Martin Eden", Some("9782264024848")))
+            .await
+            .unwrap();
+        let id = first.book.id.clone().unwrap();
+        let after_first = stored_book(&db, &id).await.updated_at;
+
+        let second = record_read_book(&db, a_reading_of("Martin Eden", Some("9782264024848")))
+            .await
+            .unwrap();
+
+        assert!(!second.created);
+        assert!(second.was_already_read);
+        assert_eq!(
+            stored_book(&db, &id).await.updated_at,
+            after_first,
+            "an unchanged reading must not bump updated_at",
+        );
+    }
+
+    // ── what my own library holds, seen from someone else's shelves ────
+
+    /// The reader browsing a peer's catalogue asks in the peer's ISBN form,
+    /// which need not be the form their own row stores. The answer comes back
+    /// keyed on what they asked, or they cannot index their list with it.
+    #[tokio::test]
+    async fn library_status_answers_in_the_form_the_caller_asked() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+
+        create_book(
+            &db,
+            Book {
+                title: "Martin Eden".to_owned(),
+                isbn: Some("9782264024848".to_owned()),
+                owned: Some(true),
+                reading_status: Some("read".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let asked = vec!["978-2-264-02484-8".to_owned()];
+        let status = library_status_for_isbns(&db, &asked).await.unwrap();
+
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].isbn, "978-2-264-02484-8");
+        assert!(status[0].owned);
+        assert_eq!(status[0].reading_status, "read");
+    }
+
+    /// A book the library does not hold is absent from the answer rather than
+    /// reported with false flags: absence and "owned = false" are different
+    /// statements, and the second one is a wish or a borrowed copy.
+    #[tokio::test]
+    async fn library_status_stays_silent_on_books_it_does_not_hold() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+
+        let asked = vec!["9782264024848".to_owned(), "".to_owned()];
+        let status = library_status_for_isbns(&db, &asked).await.unwrap();
+
+        assert!(status.is_empty());
+    }
+
+    /// Duplicates exist and have their own merge path. Until they are merged,
+    /// the answer must be the strongest state, or a reader is told they do not
+    /// own a book they own.
+    #[tokio::test]
+    async fn library_status_reports_the_strongest_of_two_duplicate_rows() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+
+        for owned in [false, true] {
+            create_book(
+                &db,
+                Book {
+                    title: "Martin Eden".to_owned(),
+                    isbn: Some("9782264024848".to_owned()),
+                    owned: Some(owned),
+                    reading_status: Some("to_read".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let asked = vec!["9782264024848".to_owned()];
+        let status = library_status_for_isbns(&db, &asked).await.unwrap();
+
+        assert_eq!(status.len(), 1, "one answer per ISBN asked about");
+        assert!(status[0].owned);
+    }
+
+    /// Without an ISBN the title is the only handle, on the same rule the
+    /// borrowed-copy path follows.
+    #[tokio::test]
+    async fn a_reading_without_isbn_matches_on_the_title() {
+        use crate::db;
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+
+        let id = insert_test_book_with_status(&db, "Sans ISBN", "to_read").await;
+
+        let record = record_read_book(&db, a_reading_of("Sans ISBN", None))
+            .await
+            .unwrap();
+
+        assert!(!record.created);
+        assert_eq!(record.book.id.as_deref(), Some(id.as_str()));
+        assert_eq!(stored_book(&db, &id).await.reading_status, "read");
     }
 }
