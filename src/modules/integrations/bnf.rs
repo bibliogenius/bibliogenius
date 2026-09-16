@@ -578,7 +578,9 @@ fn parse_bnf_sru_record(
                     in_subfield = false;
                     let text = current_text.trim().to_string();
                     match (current_tag.as_str(), current_code.as_str()) {
-                        ("200", "a") => builder.title = text,
+                        // Only the first $a: an edition that bundles several works
+                        // repeats $a for each of them ("X, suivi de Y").
+                        ("200", "a") if builder.title.is_empty() => builder.title = text,
                         ("200", "f") if builder.responsibility_200f.is_none() => {
                             builder.responsibility_200f = Some(text)
                         }
@@ -802,7 +804,7 @@ pub async fn search_bnf_sru(
                     in_subfield = false;
                     let text = current_text.trim().to_string();
                     match (current_tag.as_str(), current_code.as_str()) {
-                        ("200", "a") => current_book.title = text,
+                        ("200", "a") if current_book.title.is_empty() => current_book.title = text,
                         ("200", "f") if current_book.responsibility_200f.is_none() => {
                             current_book.responsibility_200f = Some(text)
                         }
@@ -982,6 +984,37 @@ mod tests {
             .expect("record found");
 
         assert_eq!(parsed.0.title, "Orgueil & préjugés");
+    }
+
+    /// An edition that bundles two works carries two `200 $a` (UNIMARC
+    /// convention, e.g. SUDOC PPN 067830994 for ISBN 9782246639718). The title
+    /// is the first one; the parser used to let the second overwrite it.
+    #[test]
+    fn sru_keeps_the_first_200a_when_the_edition_bundles_two_works() {
+        let xml = r##"<?xml version="1.0" encoding="UTF-8"?>
+<srw:searchRetrieveResponse xmlns:srw="http://www.loc.gov/zing/srw/">
+<srw:records><srw:record><srw:recordData>
+<mxc:record xmlns:mxc="info:lc/xmlns/marcxchange-v2">
+  <mxc:datafield tag="200" ind1="1" ind2=" ">
+    <mxc:subfield code="a">Lettres à un jeune poète</mxc:subfield>
+    <mxc:subfield code="f">Rainer Maria Rilke</mxc:subfield>
+    <mxc:subfield code="g">traduit de l'allemand par Bernard Grasset et Rainer Biemel</mxc:subfield>
+    <mxc:subfield code="a">suivies de Réflexions sur la vie créatrice</mxc:subfield>
+    <mxc:subfield code="f">par Bernard Grasset</mxc:subfield>
+  </mxc:datafield>
+  <mxc:datafield tag="700" ind1="#" ind2="1">
+    <mxc:subfield code="a">Rilke</mxc:subfield>
+    <mxc:subfield code="b">Rainer Maria</mxc:subfield>
+  </mxc:datafield>
+</mxc:record>
+</srw:recordData></srw:record></srw:records>
+</srw:searchRetrieveResponse>"##;
+
+        let (book, _) = parse_bnf_sru_record(xml, "9782246639718")
+            .expect("record parses")
+            .expect("record found");
+        assert_eq!(book.title, "Lettres à un jeune poète");
+        assert_eq!(book.author.as_deref(), Some("Rainer Maria Rilke"));
     }
 
     #[test]

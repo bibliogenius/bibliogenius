@@ -193,7 +193,9 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
                 in_subfield = false;
                 let text = current_text.trim().to_string();
                 match (current_tag.as_str(), current_code.as_str()) {
-                    ("200", "a") => title = text,
+                    // Only the first $a: an edition that bundles several works
+                    // repeats $a for each of them ("X, suivi de Y").
+                    ("200", "a") if title.is_empty() => title = text,
                     ("200", "f") if responsibility_200f.is_none() => {
                         responsibility_200f = Some(text)
                     }
@@ -310,6 +312,21 @@ mod tests {
         let book = parse_sudoc_xml(xml, "001896431").expect("record parses");
 
         assert_eq!(book.title, "L'etranger");
+    }
+
+    /// Real SUDOC UNIMARC record for ISBN 9782246639718 (Lettres à un jeune
+    /// poète, Rilke, Grasset 2002). The edition bundles two works, so its
+    /// `200` carries two `$a`: the main title, then "suivies de Réflexions sur
+    /// la vie créatrice". The title is the first `$a`; the parser used to let
+    /// the second one overwrite it.
+    const SUDOC_RILKE_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/sudoc_9782246639718.xml");
+
+    #[test]
+    fn keeps_the_first_200a_when_the_edition_bundles_two_works() {
+        let book = parse_sudoc_xml(SUDOC_RILKE_FIXTURE, "067830994").unwrap();
+        assert_eq!(book.title, "Lettres à un jeune poète");
+        assert_eq!(book.author.as_deref(), Some("Rainer Maria Rilke"));
     }
 
     #[test]
