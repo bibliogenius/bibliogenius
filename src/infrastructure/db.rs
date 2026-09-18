@@ -2537,7 +2537,126 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         ))
         .await;
 
+    // Migration 100: restore the default copy of owned books created before the
+    // `libraries` row existed (see `backfill_owned_copies_created_before_library`).
+    // Idempotent via `_migration_log`.
+    let backfill_done = db
+        .query_one(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT name FROM _migration_log WHERE name = '100_backfill_owned_copies'".to_owned(),
+        ))
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if !backfill_done {
+        // The marker is only written once the sweep completed; a failed run is
+        // retried at the next launch, and the deterministic copy ids make a
+        // partial run resume where it stopped.
+        match backfill_owned_copies_created_before_library(db).await {
+            Ok(n) => {
+                if n > 0 {
+                    tracing::info!("Migration 100: restored {n} missing default copies");
+                }
+                let _ = db
+                    .execute(Statement::from_string(
+                        db.get_database_backend(),
+                        "INSERT INTO _migration_log (name, applied_at) \
+                         VALUES ('100_backfill_owned_copies', datetime('now'))"
+                            .to_owned(),
+                    ))
+                    .await;
+            }
+            Err(e) => tracing::warn!("Migration 100: copy backfill failed: {e}"),
+        }
+    }
+
     Ok(())
+}
+
+/// Migration 100: give their default copy back to the owned books created before
+/// the `libraries` row existed.
+///
+/// `book_service::create_book` used to skip the default copy when no library row
+/// was found instead of bootstrapping one, so every book created on a fresh device
+/// before the first row appeared (typically a CSV import) ended with `owned = 1`
+/// and no copy, which peers read as "not available for loan".
+///
+/// The scope is the exact signature of that defect: owned, no copy at all, created
+/// before the oldest library row. A copy the user deleted on purpose was deleted
+/// after the library existed, so it is never resurrected. The copy id is derived
+/// from the book id so that several devices of one account converge on the same
+/// row instead of each adding one.
+pub async fn backfill_owned_copies_created_before_library(
+    db: &DatabaseConnection,
+) -> Result<usize, DbErr> {
+    // `created_at` is compared as text. Rows written by chrono read
+    // `2026-09-17T13:23:52+00:00`, the seeded library row reads
+    // `2026-05-01 21:05:50`; on the same day 'T' sorts after ' ', so a mixed
+    // comparison only ever errs towards repairing less, never more.
+    let rows = db
+        .query_all(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT b.uuid AS uuid FROM books b \
+             WHERE b.owned = 1 \
+               AND NOT EXISTS (SELECT 1 FROM copies c WHERE c.book_id = b.uuid) \
+               AND b.created_at < (SELECT MIN(created_at) FROM libraries)"
+                .to_owned(),
+        ))
+        .await?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let library_id = crate::utils::library_helpers::resolve_library_id(db).await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut restored = 0;
+    for row in rows {
+        let book_id: String = row.try_get("", "uuid")?;
+        let copy_id = deterministic_backfill_copy_id(&book_id);
+        let copy = crate::models::copy::ActiveModel {
+            id: sea_orm::Set(copy_id.clone()),
+            book_id: sea_orm::Set(book_id.clone()),
+            library_id: sea_orm::Set(library_id),
+            status: sea_orm::Set("available".to_string()),
+            is_temporary: sea_orm::Set(false),
+            created_at: sea_orm::Set(now.clone()),
+            updated_at: sea_orm::Set(now.clone()),
+            ..Default::default()
+        };
+        match sea_orm::ActiveModelTrait::insert(copy, db).await {
+            Ok(_) => {
+                let _ = crate::sync::log_operation(
+                    db,
+                    "copy",
+                    &copy_id,
+                    "INSERT",
+                    Some(serde_json::json!({ "book_id": book_id })),
+                )
+                .await;
+                restored += 1;
+            }
+            Err(e) => {
+                tracing::warn!("Migration 100: could not restore copy for book {book_id}: {e}")
+            }
+        }
+    }
+    Ok(restored)
+}
+
+/// Stable copy id for a backfilled default copy: a UUID carved out of
+/// `SHA-256("bibliogenius-copy-backfill:" + book uuid)`, so the same book yields
+/// the same id on every device.
+fn deterministic_backfill_copy_id(book_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("bibliogenius-copy-backfill:{book_id}").as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_bytes(bytes)
+        .with_variant(uuid::Variant::RFC4122)
+        .with_version(uuid::Version::Random)
+        .into_uuid()
+        .hyphenated()
+        .to_string()
 }
 
 /// Migration 092: force a single full re-push of every entity per device (ADR-056).
@@ -4511,5 +4630,127 @@ mod tests {
         .await
         .expect("insert account_session");
         assert!(detect_sync_mode(&db).await.expect("detect_sync_mode"));
+    }
+}
+
+#[cfg(test)]
+mod owned_copy_backfill_tests {
+    use super::*;
+    use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
+
+    async fn owned_book(db: &DatabaseConnection, title: &str) -> String {
+        crate::services::book_service::create_book(
+            db,
+            crate::models::Book {
+                title: title.to_string(),
+                owned: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create book")
+        .id
+        .expect("book id")
+    }
+
+    async fn exec(db: &DatabaseConnection, sql: String) {
+        db.execute(Statement::from_string(db.get_database_backend(), sql))
+            .await
+            .expect("sql");
+    }
+
+    async fn copy_count(db: &DatabaseConnection, book_id: &str) -> u64 {
+        crate::models::copy::Entity::find()
+            .filter(crate::models::copy::Column::BookId.eq(book_id))
+            .count(db)
+            .await
+            .expect("count copies")
+    }
+
+    #[tokio::test]
+    async fn restores_only_the_books_that_predate_the_library_row() {
+        let db = init_db("sqlite::memory:").await.expect("init db");
+        // The first owned book bootstraps the library row; every book below is
+        // then reshaped by hand into the states the migration must tell apart.
+        let imported = owned_book(&db, "imported before the library").await;
+        let intact = owned_book(&db, "imported with its copy").await;
+        let pruned_later = owned_book(&db, "copy deleted on purpose").await;
+        let wish = owned_book(&db, "not owned").await;
+
+        exec(
+            &db,
+            "UPDATE libraries SET created_at = '2026-09-18T12:10:45+00:00'".into(),
+        )
+        .await;
+        for id in [&imported, &intact, &wish] {
+            exec(
+                &db,
+                format!(
+                    "UPDATE books SET created_at = '2026-09-17T13:23:52+00:00' WHERE uuid = '{id}'"
+                ),
+            )
+            .await;
+        }
+        exec(
+            &db,
+            format!("UPDATE books SET created_at = '2026-09-18T15:00:00+00:00' WHERE uuid = '{pruned_later}'"),
+        )
+        .await;
+        exec(
+            &db,
+            format!("UPDATE books SET owned = 0 WHERE uuid = '{wish}'"),
+        )
+        .await;
+        for id in [&imported, &pruned_later, &wish] {
+            exec(&db, format!("DELETE FROM copies WHERE book_id = '{id}'")).await;
+        }
+
+        let restored = backfill_owned_copies_created_before_library(&db)
+            .await
+            .expect("backfill");
+        assert_eq!(restored, 1, "only the pre-library owned book is repaired");
+        assert_eq!(copy_count(&db, &imported).await, 1);
+        assert_eq!(copy_count(&db, &intact).await, 1, "untouched");
+        assert_eq!(
+            copy_count(&db, &pruned_later).await,
+            0,
+            "deliberate deletion respected"
+        );
+        assert_eq!(copy_count(&db, &wish).await, 0, "not owned, no copy");
+
+        let restored_copy = crate::models::copy::Entity::find()
+            .filter(crate::models::copy::Column::BookId.eq(imported.as_str()))
+            .one(&db)
+            .await
+            .expect("query")
+            .expect("copy");
+        assert_eq!(restored_copy.id, deterministic_backfill_copy_id(&imported));
+        assert_eq!(restored_copy.status, "available");
+
+        let again = backfill_owned_copies_created_before_library(&db)
+            .await
+            .expect("backfill again");
+        assert_eq!(again, 0, "idempotent");
+        assert_eq!(copy_count(&db, &imported).await, 1);
+    }
+
+    #[tokio::test]
+    async fn no_library_row_means_nothing_to_repair() {
+        let db = init_db("sqlite::memory:").await.expect("init db");
+        assert_eq!(
+            backfill_owned_copies_created_before_library(&db)
+                .await
+                .expect("backfill"),
+            0
+        );
+    }
+
+    #[test]
+    fn backfill_copy_id_is_stable_and_uuid_shaped() {
+        let a = deterministic_backfill_copy_id("01a0af89-b39f-7183-ac35-fe7c9af4e3f7");
+        let b = deterministic_backfill_copy_id("01a0af89-b39f-7183-ac35-fe7c9af4e3f7");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 36);
+        assert_ne!(a, deterministic_backfill_copy_id("other"));
     }
 }

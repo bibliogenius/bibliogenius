@@ -367,26 +367,210 @@ pub async fn connect(
 
 #[derive(Deserialize)]
 pub struct IncomingConnectionRequest {
-    name: String,
-    url: String,
+    pub(crate) name: String,
+    pub(crate) url: String,
     /// Stable library UUID for P2P peer deduplication
     #[serde(default)]
-    library_uuid: Option<String>,
+    pub(crate) library_uuid: Option<String>,
     /// Ed25519 public key (hex) from the requesting peer - for E2EE
     #[serde(default)]
-    ed25519_public_key: Option<String>,
+    pub(crate) ed25519_public_key: Option<String>,
     /// X25519 public key (hex) from the requesting peer - for E2EE
     #[serde(default)]
-    x25519_public_key: Option<String>,
+    pub(crate) x25519_public_key: Option<String>,
     /// Peer's relay hub URL
     #[serde(default)]
-    relay_url: Option<String>,
+    pub(crate) relay_url: Option<String>,
     /// Peer's relay mailbox UUID
     #[serde(default)]
-    mailbox_id: Option<String>,
+    pub(crate) mailbox_id: Option<String>,
     /// Token to write to peer's relay mailbox
     #[serde(default)]
-    relay_write_token: Option<String>,
+    pub(crate) relay_write_token: Option<String>,
+}
+
+/// Which stored peer a LAN connection request refers to, identity first.
+///
+/// `library_uuid`, then the ed25519 key, then the URL. Two libraries can take
+/// turns on one `host:port` (a development build and an installed build of the
+/// desktop app), and matching on the URL first renamed one into the other and
+/// left it with the wrong keys. A URL match is therefore only accepted when the
+/// stored row carries no identity that contradicts the request.
+async fn find_peer_for_connection(
+    db: &DatabaseConnection,
+    payload: &IncomingConnectionRequest,
+) -> Result<Option<peer::Model>, sea_orm::DbErr> {
+    if let Some(uuid) = &payload.library_uuid
+        && let Some(found) = peer::Entity::find()
+            .filter(peer::Column::LibraryUuid.eq(uuid))
+            .one(db)
+            .await?
+    {
+        return Ok(Some(found));
+    }
+    if let Some(key) = &payload.ed25519_public_key
+        && let Some(found) = peer::Entity::find()
+            .filter(peer::Column::PublicKey.eq(key))
+            .one(db)
+            .await?
+    {
+        return Ok(Some(found));
+    }
+    let by_url = peer::Entity::find()
+        .filter(peer::Column::Url.eq(&payload.url))
+        .one(db)
+        .await?;
+    Ok(by_url.filter(|found| !contradicts_identity(found, payload)))
+}
+
+/// The peers other than `keep` currently stored under `url`.
+async fn other_holders(
+    db: &DatabaseConnection,
+    url: &str,
+    keep: Option<i32>,
+) -> Result<Vec<peer::Model>, sea_orm::DbErr> {
+    Ok(peer::Entity::find()
+        .filter(peer::Column::Url.eq(url))
+        .all(db)
+        .await?
+        .into_iter()
+        .filter(|holder| Some(holder.id) != keep)
+        .collect())
+}
+
+/// Take `url` away from its previous holders. `peers.url` is UNIQUE, and an
+/// address changes hands when two libraries take turns on one `host:port`. The
+/// previous holder keeps its identity and relay credentials under the
+/// `relay://` placeholder already used for relay-only peers, so it stays
+/// reachable through the hub and gets a LAN address back on its next
+/// discovery. Nothing is deleted.
+async fn release_holders(
+    db: &DatabaseConnection,
+    url: &str,
+    holders: Vec<peer::Model>,
+) -> Result<(), sea_orm::DbErr> {
+    for holder in holders {
+        let placeholder = format!(
+            "relay://{}",
+            holder
+                .library_uuid
+                .clone()
+                .or_else(|| holder.public_key.clone())
+                .unwrap_or_else(|| format!("peer-{}", holder.id))
+        );
+        tracing::info!(
+            "register_peer: address {} now belongs to another library, moving peer {} to {}",
+            url,
+            holder.id,
+            placeholder
+        );
+        let mut active: peer::ActiveModel = holder.into();
+        active.url = Set(placeholder);
+        active.updated_at = Set(Utc::now().to_rfc3339());
+        active.update(db).await?;
+    }
+    Ok(())
+}
+
+/// True when the address in the request serves the ed25519 key it claims.
+///
+/// This endpoint is unauthenticated and a peer's public keys are public (the
+/// hub publishes them), so a request is only allowed to move or refresh a
+/// trusted peer once its address has answered `/api/config` with that key.
+async fn address_hosts_identity<F, Fut>(probe: &F, payload: &IncomingConnectionRequest) -> bool
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    let Some(claimed) = payload.ed25519_public_key.as_deref() else {
+        return false;
+    };
+    probe(payload.url.clone()).await.as_deref() == Some(claimed)
+}
+
+/// Give the request's address to the peer being registered. A free address is
+/// taken as is; one held by another trusted identity only once the address
+/// proved it hosts the claimed identity (`already_proven` skips a second probe).
+/// Returns false when the holder keeps it.
+async fn claim_address<F, Fut>(
+    db: &DatabaseConnection,
+    payload: &IncomingConnectionRequest,
+    probe: &F,
+    keep: Option<i32>,
+    already_proven: bool,
+) -> bool
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    let holders = match other_holders(db, &payload.url, keep).await {
+        Ok(holders) => holders,
+        Err(e) => {
+            tracing::warn!("register_peer: could not look up {}: {e}", payload.url);
+            return false;
+        }
+    };
+    if holders.is_empty() {
+        return true;
+    }
+    if !already_proven && !address_hosts_identity(probe, payload).await {
+        tracing::warn!(
+            "register_peer: {} did not prove it hosts the claimed identity, its holder keeps it",
+            payload.url
+        );
+        return false;
+    }
+    match release_holders(db, &payload.url, holders).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("register_peer: could not release {}: {e}", payload.url);
+            false
+        }
+    }
+}
+
+/// Ask the library at `url` who it is: its `/api/config` carries its ed25519 key.
+async fn probe_ed25519_at(url: String) -> Option<String> {
+    let config_url = format!("{}/api/config", url.trim_end_matches('/'));
+    let response = get_safe_client()
+        .get(&config_url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response
+        .json::<crate::api::setup::ConfigResponse>()
+        .await
+        .ok()?
+        .ed25519_public_key
+}
+
+/// True when the stored row and the request both declare an identity and they
+/// differ: another library behind the same address, never the same peer.
+fn contradicts_identity(existing: &peer::Model, payload: &IncomingConnectionRequest) -> bool {
+    let uuid_conflict = matches!(
+        (&existing.library_uuid, &payload.library_uuid),
+        (Some(a), Some(b)) if a != b
+    );
+    let key_conflict = matches!(
+        (&existing.public_key, &payload.ed25519_public_key),
+        (Some(a), Some(b)) if a != b
+    );
+    uuid_conflict || key_conflict
+}
+
+/// True when the request carries exactly the keys already stored for the peer.
+fn declares_same_identity(existing: &peer::Model, payload: &IncomingConnectionRequest) -> bool {
+    matches!(
+        (&existing.public_key, &payload.ed25519_public_key),
+        (Some(a), Some(b)) if a == b
+    ) && matches!(
+        (&existing.x25519_public_key, &payload.x25519_public_key),
+        (Some(a), Some(b)) if a == b
+    )
 }
 
 /// Receive an incoming connection request from a remote peer.
@@ -396,6 +580,24 @@ pub async fn receive_connection_request(
     State(db): State<DatabaseConnection>,
     Json(payload): Json<IncomingConnectionRequest>,
 ) -> impl IntoResponse {
+    register_connection_request(db, payload, probe_ed25519_at).await
+}
+
+/// Body of [`receive_connection_request`]. `probe` answers with the ed25519 key
+/// served at a URL's `/api/config`, or `None` when nothing trustworthy answers;
+/// it is injected so the tests run without a network.
+pub(crate) async fn register_connection_request<F, Fut>(
+    db: DatabaseConnection,
+    payload: IncomingConnectionRequest,
+    probe: F,
+) -> axum::response::Response
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    if let Err(e) = validate_url(&payload.url) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
+    }
     tracing::info!(
         "Peer: Received connection_request from '{}' (url='{}', e2ee={}, relay={}, library_uuid={:?})",
         payload.name,
@@ -422,20 +624,7 @@ pub async fn receive_connection_request(
     }
 
     // Always handle locally: create/update peer in SQLite + return our E2EE keys
-    // Find by URL first, then by library_uuid (handles port changes)
-    let mut existing = peer::Entity::find()
-        .filter(peer::Column::Url.eq(&payload.url))
-        .one(&db)
-        .await;
-
-    if matches!(&existing, Ok(None))
-        && let Some(ref uuid) = payload.library_uuid
-    {
-        existing = peer::Entity::find()
-            .filter(peer::Column::LibraryUuid.eq(uuid))
-            .one(&db)
-            .await;
-    }
+    let existing = find_peer_for_connection(&db, &payload).await;
 
     // Load our own public keys to include in the response
     let (my_ed25519, my_x25519) = crate::api::setup::load_public_keys_from_db(&db).await;
@@ -471,28 +660,91 @@ pub async fn receive_connection_request(
                 );
             }
 
+            let same_identity = declares_same_identity(&existing_peer, &payload);
+            let address_changes = existing_peer.url != payload.url;
             if key_exchange_done && !existing_peer.key_exchange_done {
+                let takes_address = !address_changes
+                    || claim_address(&db, &payload, &probe, Some(peer_id), false).await;
+                if !takes_address {
+                    tracing::warn!(
+                        "register_peer: peer {} keeps its stored address, {} was refused",
+                        peer_id,
+                        payload.url
+                    );
+                }
                 let mut active: peer::ActiveModel = existing_peer.into();
-                active.url = Set(payload.url.clone()); // Update URL (port may have changed)
+                if takes_address {
+                    active.url = Set(payload.url.clone()); // Update URL (port may have changed)
+                }
                 if payload.library_uuid.is_some() {
                     active.library_uuid = Set(payload.library_uuid.clone());
                 }
-                active.public_key = Set(payload.ed25519_public_key);
-                active.x25519_public_key = Set(payload.x25519_public_key);
+                active.public_key = Set(payload.ed25519_public_key.clone());
+                active.x25519_public_key = Set(payload.x25519_public_key.clone());
                 active.key_exchange_done = Set(true);
                 if payload.relay_url.is_some() {
-                    active.relay_url = Set(payload.relay_url);
+                    active.relay_url = Set(payload.relay_url.clone());
                 }
                 if payload.mailbox_id.is_some() {
-                    active.mailbox_id = Set(payload.mailbox_id);
+                    active.mailbox_id = Set(payload.mailbox_id.clone());
                 }
                 if payload.relay_write_token.is_some() {
-                    active.relay_write_token = Set(payload.relay_write_token);
+                    active.relay_write_token = Set(payload.relay_write_token.clone());
                     // ADR-032: fresh invitation clears any stale-token gate.
                     active.relay_write_token_invalid_at = Set(None);
                 }
                 active.updated_at = Set(Utc::now().to_rfc3339());
-                let _ = active.update(&db).await;
+                if let Err(e) = active.update(&db).await {
+                    tracing::warn!("register_peer: could not update peer {}: {e}", peer_id);
+                }
+            } else if key_exchange_done && same_identity {
+                // The same library pairs again: its address or relay mailbox may
+                // have changed (reset device, recreated mailbox, new LAN port).
+                // The block above never ran for a peer already exchanged, so the
+                // stale credentials survived every re-pairing and the peer's
+                // messages died on a dead mailbox. Keys stay as stored: this
+                // endpoint is unauthenticated, a rotation must come through a
+                // verified channel (ADR-026).
+                if !address_hosts_identity(&probe, &payload).await {
+                    tracing::warn!(
+                        "register_peer: {} did not prove it hosts peer {}, refresh refused",
+                        payload.url,
+                        peer_id
+                    );
+                } else {
+                    let takes_address = !address_changes
+                        || claim_address(&db, &payload, &probe, Some(peer_id), true).await;
+                    let mut active: peer::ActiveModel = existing_peer.into();
+                    if takes_address {
+                        active.url = Set(payload.url.clone());
+                    }
+                    if payload.relay_url.is_some() {
+                        active.relay_url = Set(payload.relay_url.clone());
+                    }
+                    if payload.mailbox_id.is_some() {
+                        active.mailbox_id = Set(payload.mailbox_id.clone());
+                    }
+                    if payload.relay_write_token.is_some() {
+                        active.relay_write_token = Set(payload.relay_write_token.clone());
+                        // ADR-032: fresh invitation clears any stale-token gate.
+                        active.relay_write_token_invalid_at = Set(None);
+                    }
+                    active.updated_at = Set(Utc::now().to_rfc3339());
+                    match active.update(&db).await {
+                        Ok(_) => tracing::info!(
+                            "register_peer: refreshed address and relay credentials of peer {}",
+                            peer_id
+                        ),
+                        Err(e) => {
+                            tracing::warn!("register_peer: could not refresh peer {}: {e}", peer_id)
+                        }
+                    }
+                }
+            } else if key_exchange_done {
+                tracing::warn!(
+                    "register_peer: peer {} presented different keys, keeping the stored identity",
+                    peer_id
+                );
             }
             // If library_uuid changed (peer was reset), update it and clear cached books
             if let Some(new_uuid) = &payload.library_uuid
@@ -537,6 +789,18 @@ pub async fn receive_connection_request(
                 .into_response()
         }
         Ok(None) => {
+            // A trusted row may still hold this address with another identity
+            // (two libraries taking turns on one host:port). The address is
+            // theirs no more once it proved it hosts the newcomer, see
+            // `claim_address`; otherwise the holder keeps it, as
+            // `update_peer_url` already answers for a taken address.
+            if !claim_address(&db, &payload, &probe, None, false).await {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "URL already in use by another trusted peer" })),
+                )
+                    .into_response();
+            }
             // Check if connection_validation module is enabled
             let connection_status = if is_connection_validation_enabled(&db).await {
                 "pending"

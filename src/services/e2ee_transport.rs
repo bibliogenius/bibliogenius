@@ -50,6 +50,15 @@ impl E2eeTransportError {
     pub fn is_wrong_server_response(&self) -> bool {
         matches!(self, Self::PeerError(404 | 405 | 501, _))
     }
+
+    /// The host answered as a BiblioGenius library that does not know us:
+    /// `403 unknown sender` is what the E2EE endpoint returns before touching
+    /// the envelope, so nothing was delivered and a relay retry cannot
+    /// duplicate anything. Happens when two libraries take turns on one
+    /// `host:port` (a development build and an installed build on one machine).
+    pub fn is_unknown_sender_rejection(&self) -> bool {
+        matches!(self, Self::PeerError(403, body) if body.contains("unknown sender"))
+    }
 }
 
 /// reqwest's `Display` only prints "error sending request for url (X)" and
@@ -229,5 +238,29 @@ mod tests {
         assert!(!E2eeTransportError::Crypto("x".into()).is_wrong_server_response());
         assert!(!E2eeTransportError::Network("x".into()).is_wrong_server_response());
         assert!(!E2eeTransportError::PeerInviteStale.is_wrong_server_response());
+    }
+
+    #[test]
+    fn unknown_sender_403_is_fallback_eligible_but_other_403s_are_not() {
+        let rejected = E2eeTransportError::PeerError(403, r#"{"error":"unknown sender"}"#.into());
+        assert!(rejected.is_unknown_sender_rejection());
+        assert!(
+            !rejected.is_wrong_server_response(),
+            "still not a squatted port"
+        );
+
+        let loan_guard = E2eeTransportError::PeerError(
+            403,
+            r#"{"error":"This loan belongs to another peer"}"#.into(),
+        );
+        assert!(
+            !loan_guard.is_unknown_sender_rejection(),
+            "processed by the peer, no relay"
+        );
+        assert!(!E2eeTransportError::PeerError(403, String::new()).is_unknown_sender_rejection());
+        assert!(
+            !E2eeTransportError::PeerError(400, "unknown sender".into())
+                .is_unknown_sender_rejection()
+        );
     }
 }

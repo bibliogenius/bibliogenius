@@ -18,6 +18,8 @@ mod search;
 mod sync;
 
 #[cfg(test)]
+mod connection_tests;
+#[cfg(test)]
 mod loan_flow_tests;
 
 pub use admin::*;

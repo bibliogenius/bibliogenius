@@ -148,13 +148,16 @@ pub async fn try_send_e2ee_with_timeout(
             if matches!(
                 direct_err,
                 crate::services::e2ee_transport::E2eeTransportError::Network(_)
-            ) || direct_err.is_wrong_server_response() =>
+            ) || direct_err.is_wrong_server_response()
+                || direct_err.is_unknown_sender_rejection() =>
         {
             let net_err = direct_err.to_string();
             // Mark peer as unreachable so subsequent calls skip direct.
             // Wrong-server responses (404/405/501: another service squats the
             // peer's host:port) count as unreachable too: the envelope never
-            // reached a peer, so the relay fallback is duplicate-safe.
+            // reached a peer, so the relay fallback is duplicate-safe. So does
+            // a `403 unknown sender`: another library answered on that port and
+            // refused the envelope before opening it.
             if !skip_direct {
                 state.mark_peer_direct_failed(peer.id);
             }

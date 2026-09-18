@@ -399,12 +399,16 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
     // Log sync operation (minimal payload, no sensitive data)
     let _ = crate::sync::log_operation(db, "book", &model.id, "INSERT", None).await;
 
-    // Create default copy if book is owned (wishlist items with owned=false skip this)
+    // Create default copy if book is owned (wishlist items with owned=false skip this).
+    // The library row is resolved through `resolve_library_id`, which bootstraps it
+    // on a fresh install: a plain lookup silently skipped the copy for every book
+    // created before the first row existed (a CSV import on a new device), and those
+    // books then showed as unlendable to peers (`available_copies == 0`).
     if model.owned {
-        if let Ok(Some(library)) = crate::models::library::Entity::find().one(db).await {
+        if let Ok(library_id) = crate::utils::library_helpers::resolve_library_id(db).await {
             let copy = crate::models::copy::ActiveModel {
                 book_id: Set(model.id.clone()),
-                library_id: Set(library.id),
+                library_id: Set(library_id),
                 status: Set("available".to_string()),
                 is_temporary: Set(false),
                 created_at: Set(now.to_rfc3339()),
@@ -423,7 +427,7 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
             }
         } else {
             tracing::warn!(
-                "Skipping auto-copy creation: no library found for book {}",
+                "Skipping auto-copy creation: no library could be resolved for book {}",
                 model.id
             );
         }
@@ -3301,5 +3305,76 @@ mod tests {
         assert!(!record.created);
         assert_eq!(record.book.id.as_deref(), Some(id.as_str()));
         assert_eq!(stored_book(&db, &id).await.reading_status, "read");
+    }
+}
+
+#[cfg(test)]
+mod owned_copy_bootstrap_tests {
+    use super::*;
+    use crate::db;
+    use sea_orm::{EntityTrait, PaginatorTrait};
+
+    /// A fresh install has no `libraries` row until something creates it. The
+    /// first owned book must still get its copy (and bootstrap the row), or a
+    /// whole CSV import lands unlendable.
+    #[tokio::test]
+    async fn owned_book_created_before_any_library_row_gets_its_copy() {
+        let db = db::init_db("sqlite::memory:").await.expect("init db");
+        assert_eq!(
+            crate::models::library::Entity::find()
+                .count(&db)
+                .await
+                .expect("count libraries"),
+            0,
+            "precondition: a fresh database has no library row"
+        );
+
+        let created = create_book(
+            &db,
+            Book {
+                title: "Pro Drupal development".to_string(),
+                owned: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create book");
+
+        let copies = crate::models::copy::Entity::find()
+            .filter(crate::models::copy::Column::BookId.eq(created.id.clone().unwrap()))
+            .all(&db)
+            .await
+            .expect("list copies");
+        assert_eq!(copies.len(), 1, "one default copy for an owned book");
+        assert_eq!(copies[0].status, "available");
+        assert_eq!(
+            crate::models::library::Entity::find()
+                .count(&db)
+                .await
+                .expect("count libraries"),
+            1,
+            "the library row was bootstrapped on the way"
+        );
+    }
+
+    #[tokio::test]
+    async fn not_owned_book_still_gets_no_copy() {
+        let db = db::init_db("sqlite::memory:").await.expect("init db");
+        let created = create_book(
+            &db,
+            Book {
+                title: "Wish".to_string(),
+                owned: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create book");
+        let copies = crate::models::copy::Entity::find()
+            .filter(crate::models::copy::Column::BookId.eq(created.id.clone().unwrap()))
+            .count(&db)
+            .await
+            .expect("count copies");
+        assert_eq!(copies, 0);
     }
 }
