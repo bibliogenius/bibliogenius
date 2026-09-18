@@ -81,47 +81,23 @@ pub async fn delete_tag(
     State(db): State<DatabaseConnection>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    // Cascade the tag's book links and re-parent its children in one
-    // transaction: the database no longer cascades these since the replicated
-    // tables lost their foreign keys (ADR-044).
-    let txn = match db.begin().await {
-        Ok(txn) => txn,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
-    match crate::infrastructure::referential_integrity::delete_tag_cascade(&txn, &id).await {
-        Ok(true) => {
-            if let Err(e) = txn.commit().await {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": e.to_string() })),
-                )
-                    .into_response();
-            }
+    use crate::services::book_service::{ServiceError, delete_shelf};
+
+    match delete_shelf(&db, &id).await {
+        Ok(()) => {
             let _ = crate::sync::log_operation(&db, "tag", &id, "DELETE", None).await;
             (StatusCode::OK, Json(json!({ "message": "Tag deleted" }))).into_response()
         }
-        Ok(false) => {
-            txn.rollback().await.ok();
-            (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "Tag not found" })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            txn.rollback().await.ok();
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response()
-        }
+        Err(ServiceError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Tag not found" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("{e:?}") })),
+        )
+            .into_response(),
     }
 }
 

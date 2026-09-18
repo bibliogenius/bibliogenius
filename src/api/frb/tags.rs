@@ -203,17 +203,25 @@ async fn rename_subject_in_books(db: &sea_orm::DatabaseConnection, old_name: &st
 /// Delete a tag
 pub async fn delete_tag(id: String) -> Result<(), String> {
     let db = db().ok_or("Database not initialized")?;
-    use sea_orm::TransactionTrait;
+    match crate::services::book_service::delete_shelf(db, &id).await {
+        Ok(()) => {
+            let _ = crate::sync::log_operation(db, "tag", &id, "DELETE", None).await;
+            Ok(())
+        }
+        Err(crate::services::book_service::ServiceError::NotFound) => {
+            Err("Tag not found".to_string())
+        }
+        Err(e) => Err(format!("{e:?}")),
+    }
+}
 
-    // Cascade the tag's book links and re-parent its children in one
-    // transaction: the database no longer cascades these since the replicated
-    // tables lost their foreign keys (ADR-044).
-    let txn = db.begin().await.map_err(|e| format!("{e:?}"))?;
-    crate::infrastructure::referential_integrity::delete_tag_cascade(&txn, &id)
+/// Delete a shelf that has no `tags` row: a name that only lives in the
+/// books' subjects (a synthetic orphan on the shelves screen). Same outcome
+/// as `delete_tag` for the books, with nothing to cascade.
+pub async fn remove_subject(name: String) -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+    crate::services::book_service::remove_subject_from_books(db, &name)
         .await
-        .map_err(|e| format!("{e:?}"))?;
-    txn.commit().await.map_err(|e| format!("{e:?}"))?;
-
-    let _ = crate::sync::log_operation(db, "tag", &id, "DELETE", None).await;
-    Ok(())
+        .map(|_| ())
+        .map_err(|e| format!("{e:?}"))
 }

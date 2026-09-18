@@ -947,6 +947,73 @@ pub async fn subject_counts(
     })))
 }
 
+/// Drop `name` from every book's `subjects`, returning how many books were
+/// rewritten.
+///
+/// Deleting a shelf must go through here: the `tags` row is only the registry
+/// entry, membership lives in the books. Left in place, the name comes back
+/// on the next listing as a synthetic orphan (see `get_all_tags`), which is a
+/// shelf the user cannot delete and did not ask to keep. The counterpart of
+/// the rename that `update_tag` performs. Exact, case-sensitive match: a
+/// shelf named "Roman" leaves "Roman classique" untouched.
+pub async fn remove_subject_from_books<C>(db: &C, name: &str) -> Result<usize, ServiceError>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    use crate::models::book::Column as BookColumn;
+
+    // `contains` is a LIKE prefilter; the exact match happens on the parsed
+    // array below, so wildcard characters in a name only widen the candidates.
+    let books = BookEntity::find()
+        .filter(BookColumn::Subjects.contains(name))
+        .all(db)
+        .await?;
+
+    let mut touched = 0;
+    for book in books {
+        let Some(subjects_str) = book.subjects.as_deref() else {
+            continue;
+        };
+        let Ok(subjects) = serde_json::from_str::<Vec<String>>(subjects_str) else {
+            continue;
+        };
+        let kept: Vec<&String> = subjects.iter().filter(|s| *s != name).collect();
+        if kept.len() == subjects.len() {
+            continue;
+        }
+        let mut active: BookActiveModel = book.into();
+        active.subjects = Set(Some(serde_json::to_string(&kept).unwrap_or_default()));
+        active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        active.update(db).await?;
+        touched += 1;
+    }
+    Ok(touched)
+}
+
+/// Delete a shelf as the user sees it: the `tags` row, its book links, its
+/// children re-parented to the root, and its name out of every book's
+/// subjects, in ONE transaction.
+///
+/// The name has to be resolved before the row goes, and the two halves must
+/// commit together: a row dropped while the name stayed in the books is the
+/// undeletable orphan this exists to prevent. `NotFound` when no row carries
+/// `id`, so callers keep their 404 semantics.
+pub async fn delete_shelf(db: &DatabaseConnection, id: &str) -> Result<(), ServiceError> {
+    use crate::models::tag;
+
+    let txn = db.begin().await?;
+    let Some(tag_model) = tag::Entity::find_by_id(id.to_owned()).one(&txn).await? else {
+        txn.rollback().await.ok();
+        return Err(ServiceError::NotFound);
+    };
+    // The database no longer cascades these since the replicated tables lost
+    // their foreign keys (ADR-044).
+    crate::infrastructure::referential_integrity::delete_tag_cascade(&txn, id).await?;
+    remove_subject_from_books(&txn, &tag_model.name).await?;
+    txn.commit().await?;
+    Ok(())
+}
+
 /// The counting itself, over `(subjects JSON, is in the default view)` rows.
 ///
 /// Split out of [`subject_counts`] so the rule can be tested without a
@@ -2392,6 +2459,140 @@ mod tests {
         // An unknown uuid is a clean NotFound, never a silent wrong row.
         assert!(matches!(
             get_book_by_uuid(&db, "00000000-0000-0000-0000-000000000000").await,
+            Err(ServiceError::NotFound)
+        ));
+    }
+
+    // ── shelf deletion (subjects are the shelf membership) ──────────────
+    //
+    // The `tags` row is only the registry entry: membership lives in
+    // `books.subjects`. A delete that leaves the name in the books brings the
+    // shelf straight back on the next listing, as a synthetic orphan nothing
+    // can delete.
+
+    #[tokio::test]
+    async fn remove_subject_from_books_strips_the_name_and_keeps_the_others() {
+        use crate::db;
+        use crate::models::book;
+        use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+        let filed = insert_test_book(&db, "Filed on two shelves").await;
+        let elsewhere = insert_test_book(&db, "Filed elsewhere").await;
+        let bare = insert_test_book(&db, "No shelf at all").await;
+        for (id, subjects) in [
+            (&filed, r#"["Roman","Roman classique"]"#),
+            (&elsewhere, r#"["Polar"]"#),
+        ] {
+            let mut active: book::ActiveModel = book::Entity::find_by_id(id.clone())
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .into();
+            active.subjects = Set(Some(subjects.to_owned()));
+            active.update(&db).await.unwrap();
+        }
+
+        let touched = remove_subject_from_books(&db, "Roman").await.unwrap();
+        assert_eq!(
+            touched, 1,
+            "only the book that carried the shelf is rewritten"
+        );
+
+        let subjects_of = |id: &String| {
+            let id = id.clone();
+            let db = &db;
+            async move {
+                book::Entity::find_by_id(id)
+                    .one(db)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .subjects
+            }
+        };
+        // Exact match only: "Roman classique" stays, and so does the book.
+        assert_eq!(
+            subjects_of(&filed).await.as_deref(),
+            Some(r#"["Roman classique"]"#)
+        );
+        assert_eq!(
+            subjects_of(&elsewhere).await.as_deref(),
+            Some(r#"["Polar"]"#)
+        );
+        assert_eq!(subjects_of(&bare).await, None);
+
+        // The tally no longer lists the shelf, so it cannot come back.
+        let counts = subject_counts(&db).await.unwrap();
+        assert!(!counts.contains_key("Roman"));
+        assert!(counts.contains_key("Roman classique"));
+    }
+
+    #[tokio::test]
+    async fn delete_shelf_drops_the_row_and_the_name_together() {
+        use crate::db;
+        use crate::models::{book, tag};
+        use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let shelf = tag::ActiveModel {
+            name: Set("Roman".to_owned()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let child = tag::ActiveModel {
+            name: Set("Roman classique".to_owned()),
+            parent_id: Set(Some(shelf.id.clone())),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let filed = insert_test_book(&db, "Filed").await;
+        let mut active: book::ActiveModel = book::Entity::find_by_id(filed.clone())
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+        active.subjects = Set(Some(r#"["Roman","Roman classique"]"#.to_owned()));
+        active.update(&db).await.unwrap();
+
+        delete_shelf(&db, &shelf.id).await.unwrap();
+
+        assert!(
+            tag::Entity::find_by_id(shelf.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // The child climbs to the root rather than pointing at a vanished parent.
+        let child = tag::Entity::find_by_id(child.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(child.parent_id, None);
+        let subjects = book::Entity::find_by_id(filed)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .subjects;
+        assert_eq!(subjects.as_deref(), Some(r#"["Roman classique"]"#));
+
+        // An unknown id is a clean NotFound, never a silent success.
+        assert!(matches!(
+            delete_shelf(&db, "00000000-0000-0000-0000-000000000000").await,
             Err(ServiceError::NotFound)
         ));
     }
