@@ -644,58 +644,7 @@ pub async fn search_unified(
 
     // Process Inventaire Results
     if let Ok(ref enriched) = inv_res {
-        for item in enriched {
-            let authors = item.authors.clone();
-            let author_name = authors.as_ref().map(|a| a.join(", "));
-
-            let book = book::Book {
-                id: None,
-                title: item.label.clone(),
-                isbn: item.isbn.clone(), // Now populated by enrichment
-                publisher: item.publisher.clone(), // Resolved from Wikidata URI
-                publication_year: None,
-                summary: item.description.clone(),
-                dewey_decimal: None,
-                lcc: None,
-                subjects: None,
-                marc_record: None,
-                cataloguing_notes: None,
-                source_data: Some(
-                    serde_json::json!({
-                        "source": "inventaire",
-                        "uri": item.uri,
-                        "image_url": item.image
-                    })
-                    .to_string(),
-                ),
-                shelf_position: None,
-                reading_status: Some("to_read".to_string()),
-                source: Some("Inventaire".to_string()),
-                author: author_name,
-                authors,
-                cover_url: item.image.clone(),
-                large_cover_url: None,
-                finished_reading_at: None,
-                started_reading_at: None,
-                user_rating: None,
-                owned: Some(true),
-                price: None,
-                language: item.language.clone(), // Language from Wikidata
-                digital_formats: None,
-                available_copies: None,
-                private: None,
-                page_count: None,
-                loan_duration_days: None,
-                added_at: None,
-                updated_at: None,
-                hub_cover_upload_failed_at: None,
-                // A search result is not in the library: it has no copies.
-                is_borrowed: None,
-                is_lent: None,
-                wanted: None,
-            };
-            results.push(book);
-        }
+        results.extend(enriched.iter().map(book_from_inventaire_search));
     } else if let Err(_e) = inv_res {
     }
 
@@ -1235,6 +1184,69 @@ pub async fn search_unified(
 }
 
 /// Extract edition_count from a book's source_data JSON (OpenLibrary popularity signal).
+/// Project an enriched Inventaire search hit onto the search result shape.
+///
+/// `description` is deliberately not carried as the summary: it is the
+/// one-line Wikidata description ("livre de Jack London"), not prose, and the
+/// add form stores a picked suggestion's summary verbatim. Same rule as the
+/// ISBN lookup (`lookup_service::metadata_from_inventaire`).
+fn book_from_inventaire_search(
+    item: &crate::inventaire_client::InventaireSearchResult,
+) -> book::Book {
+    let authors = item.authors.clone();
+    let author_name = authors.as_ref().map(|a| a.join(", "));
+
+    book::Book {
+        id: None,
+        title: item.label.clone(),
+        isbn: item.isbn.clone(),           // Now populated by enrichment
+        publisher: item.publisher.clone(), // Resolved from Wikidata URI
+        publication_year: item
+            .publication_year
+            .as_deref()
+            .and_then(|y| y.parse::<i32>().ok()),
+        summary: None,
+        dewey_decimal: None,
+        lcc: None,
+        subjects: None,
+        marc_record: None,
+        cataloguing_notes: None,
+        source_data: Some(
+            serde_json::json!({
+                "source": "inventaire",
+                "uri": item.uri,
+                "image_url": item.image
+            })
+            .to_string(),
+        ),
+        shelf_position: None,
+        reading_status: Some("to_read".to_string()),
+        source: Some("Inventaire".to_string()),
+        author: author_name,
+        authors,
+        cover_url: item.image.clone(),
+        large_cover_url: None,
+        finished_reading_at: None,
+        started_reading_at: None,
+        user_rating: None,
+        owned: Some(true),
+        price: None,
+        language: item.language.clone(), // Language from Wikidata
+        digital_formats: None,
+        available_copies: None,
+        private: None,
+        page_count: item.page_count.and_then(|p| i32::try_from(p).ok()),
+        loan_duration_days: None,
+        added_at: None,
+        updated_at: None,
+        hub_cover_upload_failed_at: None,
+        // A search result is not in the library: it has no copies.
+        is_borrowed: None,
+        is_lent: None,
+        wanted: None,
+    }
+}
+
 fn get_edition_count(book: &book::Book) -> i32 {
     book.source_data
         .as_deref()
@@ -1697,6 +1709,45 @@ pub async fn mcp_config(_guard: LoopbackNoBrowser) -> impl IntoResponse {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    /// Inventaire's `description` is the one-line Wikidata description ("livre
+    /// de Jack London"), never prose. The search result used to expose it as
+    /// the summary, so picking a suggestion in the add form stored it as the
+    /// book's summary, exactly what the ISBN lookup already refuses to do.
+    #[test]
+    fn inventaire_search_hit_never_carries_the_description_as_summary() {
+        let item = crate::inventaire_client::InventaireSearchResult {
+            uri: "inv:93e87ab63d462358611bd3f73081494d".to_string(),
+            label: "Martin Eden".to_string(),
+            description: Some("livre de Jack London".to_string()),
+            image: Some("https://inventaire.io/img/entities/4176800b".to_string()),
+            authors: Some(vec!["Jack London".to_string()]),
+            isbn: Some("978-2-7529-0553-6".to_string()),
+            publisher: Some("Phébus".to_string()),
+            language: Some("fr".to_string()),
+            publication_year: Some("2010".to_string()),
+            page_count: Some(462),
+        };
+
+        let book = book_from_inventaire_search(&item);
+
+        assert_eq!(book.summary, None);
+        // The other fields survive the projection.
+        assert_eq!(book.title, "Martin Eden");
+        assert_eq!(book.isbn.as_deref(), Some("978-2-7529-0553-6"));
+        assert_eq!(book.publisher.as_deref(), Some("Phébus"));
+        assert_eq!(book.author.as_deref(), Some("Jack London"));
+        assert_eq!(
+            book.cover_url.as_deref(),
+            Some("https://inventaire.io/img/entities/4176800b")
+        );
+        assert_eq!(book.language.as_deref(), Some("fr"));
+        assert_eq!(book.source.as_deref(), Some("Inventaire"));
+        // The edition's year and page count used to be dropped here, so the
+        // add form showed neither for a picked suggestion.
+        assert_eq!(book.publication_year, Some(2010));
+        assert_eq!(book.page_count, Some(462));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

@@ -119,12 +119,7 @@ pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<InventaireMetadata,
         .and_then(|v| v.first().cloned())
         .unwrap_or_else(|| "Unknown Title".to_string());
 
-    let publication_year = edition_entity
-        .claims
-        .publication_date
-        .as_ref()
-        .and_then(|v| v.first().cloned())
-        .and_then(|d| crate::utils::year::normalize_year(&d));
+    let (publication_year, page_count) = edition_year_and_pages(&edition_entity.claims);
 
     let cover_url = get_entity_image_url(&edition_entity);
 
@@ -218,13 +213,6 @@ pub async fn fetch_inventaire_metadata(isbn: &str) -> Result<InventaireMetadata,
     } else {
         None
     };
-
-    let page_count = edition_entity
-        .claims
-        .page_count
-        .as_ref()
-        .and_then(|v| v.first())
-        .and_then(|s| s.parse::<u32>().ok());
 
     Ok(InventaireMetadata {
         title,
@@ -322,6 +310,47 @@ async fn fetch_inventaire_cover_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── edition claims → year and page count (no network) ───────────────
+
+    fn claims(json: serde_json::Value) -> Claims {
+        serde_json::from_value(json).expect("claims fixture should deserialize")
+    }
+
+    /// Shape measured on the Phébus edition of Martin Eden
+    /// (inv:93e87ab63d462358611bd3f73081494d): a full date and an integer.
+    #[test]
+    fn edition_claims_yield_the_year_and_the_page_count() {
+        let c = claims(serde_json::json!({
+            "wdt:P577": ["2010-11-17"],
+            "wdt:P1104": [462],
+            "wdt:P212": ["978-2-7529-0553-6"]
+        }));
+
+        assert_eq!(
+            edition_year_and_pages(&c),
+            (Some("2010".to_string()), Some(462))
+        );
+    }
+
+    #[test]
+    fn edition_claims_without_date_or_pages_yield_none() {
+        let c = claims(serde_json::json!({ "wdt:P212": ["978-2-7529-0553-6"] }));
+
+        assert_eq!(edition_year_and_pages(&c), (None, None));
+    }
+
+    /// A bare year is already a year; an unparsable page value is dropped, not
+    /// turned into a failure.
+    #[test]
+    fn edition_claims_tolerate_a_bare_year_and_a_bad_page_value() {
+        let c = claims(serde_json::json!({
+            "wdt:P577": ["1985"],
+            "wdt:P1104": ["n/a"]
+        }));
+
+        assert_eq!(edition_year_and_pages(&c), (Some("1985".to_string()), None));
+    }
 
     // ── cover lookup: absence and outage are different answers ──────────
 
@@ -494,6 +523,28 @@ pub struct InventaireSearchResult {
     pub isbn: Option<String>,         // ISBN from first edition
     pub publisher: Option<String>,    // Publisher name (resolved from Wikidata URI)
     pub language: Option<String>,     // Language code (e.g., "fr", "en")
+    /// Four-digit year of the edition (`wdt:P577`), set per edition by the
+    /// enrichment; the search API itself answers works, which carry none.
+    pub publication_year: Option<String>,
+    /// Page count of the edition (`wdt:P1104`), same origin.
+    pub page_count: Option<u32>,
+}
+
+/// Year and page count of an edition, from the claims the enrichment already
+/// holds: no extra request. The date is reduced to its year through the shared
+/// normaliser; the page count is the first value that parses.
+pub fn edition_year_and_pages(claims: &Claims) -> (Option<String>, Option<u32>) {
+    let year = claims
+        .publication_date
+        .as_ref()
+        .and_then(|v| v.first())
+        .and_then(|d| crate::utils::year::normalize_year(d));
+    let pages = claims
+        .page_count
+        .as_ref()
+        .and_then(|v| v.first())
+        .and_then(|s| s.parse::<u32>().ok());
+    (year, pages)
 }
 
 pub async fn search_inventaire(query: &str) -> Result<Vec<InventaireSearchResult>, String> {
@@ -771,6 +822,8 @@ pub async fn enrich_search_results(
 
                                                 // Get edition cover image
                                                 let edition_image = get_entity_image_url(entity);
+                                                let (publication_year, page_count) =
+                                                    edition_year_and_pages(&entity.claims);
 
                                                 let edition_result = InventaireSearchResult {
                                                     uri: edition_uri.clone(),
@@ -781,6 +834,8 @@ pub async fn enrich_search_results(
                                                     isbn: isbn.clone(),
                                                     publisher: publisher.clone(),
                                                     language,
+                                                    publication_year,
+                                                    page_count,
                                                 };
 
                                                 // Quality Filter: Only include if it has at least one of (ISBN, Cover, Publisher)
