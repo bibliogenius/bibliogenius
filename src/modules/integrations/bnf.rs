@@ -37,6 +37,10 @@ pub struct BnfBook {
     pub cover_url: Option<String>,
     pub bnf_uri: String,
     pub description: Option<String>,
+    /// Page count read from the UNIMARC `215 $a` extent (SRU records only;
+    /// the SPARQL endpoint does not expose it).
+    #[serde(default)]
+    pub page_count: Option<u32>,
 }
 
 /// SPARQL response structures
@@ -219,6 +223,7 @@ LIMIT 30
             cover_url,
             bnf_uri: uri,
             description: binding.description.map(|d| d.value),
+            page_count: None,
         };
 
         books.push(book);
@@ -412,6 +417,7 @@ LIMIT 1
             cover_url,
             bnf_uri: uri,
             description: binding.description.as_ref().map(|d| d.value.clone()),
+            page_count: None,
         }))
     } else {
         Ok(None)
@@ -612,6 +618,9 @@ fn parse_bnf_sru_record(
                                 .and_then(|y| y.parse::<i32>().ok());
                         }
                         ("330", "a") => builder.description = Some(text),
+                        ("215", "a") if builder.page_count.is_none() => {
+                            builder.page_count = super::unimarc::page_count_from_extent(&text)
+                        }
                         _ => {}
                     }
                     current_code.clear();
@@ -843,6 +852,9 @@ pub async fn search_bnf_sru(
                             }
                         }
                         ("330", "a") => current_book.description = Some(text),
+                        ("215", "a") if current_book.page_count.is_none() => {
+                            current_book.page_count = super::unimarc::page_count_from_extent(&text)
+                        }
                         _ => {}
                     }
                     current_code.clear();
@@ -903,6 +915,8 @@ struct BnfBookBuilder {
     year: Option<i32>,
     isbn: Option<String>,
     description: Option<String>,
+    /// From the `215 $a` extent, first occurrence that carries a page number.
+    page_count: Option<u32>,
     ark_id: Option<String>,
 }
 
@@ -940,6 +954,7 @@ impl BnfBookBuilder {
                     .map(|a| format!("https://catalogue.bnf.fr/{}", a))
                     .unwrap_or_default(),
                 description: self.description,
+                page_count: self.page_count,
             },
             pending_cover_url,
         ))
@@ -949,6 +964,22 @@ impl BnfBookBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real BNF SRU record for ISBN 9782752905536 (Martin Eden, Phébus): the
+    /// `215 $a` extent reads "1 volume 438 p" and there is no `330` abstract.
+    const BNF_SRU_MARTIN_EDEN_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/bnf_sru_9782752905536.xml");
+
+    #[test]
+    fn sru_reads_the_page_count_from_215() {
+        let (book, _) = parse_bnf_sru_record(BNF_SRU_MARTIN_EDEN_FIXTURE, "9782752905536")
+            .expect("record parses")
+            .expect("record found");
+
+        assert_eq!(book.title, "Martin Eden");
+        assert_eq!(book.page_count, Some(438));
+        assert_eq!(book.description, None);
+    }
 
     /// Real BNF SRU UNIMARC record for ISBN 9782367321257
     /// (Le voyage de Magellan, Pigafetta / Castro).

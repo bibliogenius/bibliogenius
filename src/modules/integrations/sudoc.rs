@@ -27,6 +27,9 @@ pub struct SudocBook {
     pub dewey: Option<String>,
     pub subjects: Vec<String>,
     pub summary: Option<String>,
+    /// Page count read from the `215 $a` extent statement, when it carries one.
+    #[serde(default)]
+    pub page_count: Option<u32>,
     pub ppn: String,
     pub raw_data: Option<String>,
 }
@@ -122,6 +125,7 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
     let mut dewey = None;
     let mut subjects = Vec::new();
     let mut summary = None;
+    let mut page_count = None;
 
     // UNIMARC author candidates, in priority order.
     // 700 = main author, 701 = alternative, 702 = secondary (translator/editor).
@@ -219,6 +223,11 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
                         }
                     }
                     ("330", "a") => summary = Some(text),
+                    // Only the first extent that carries a page count: a
+                    // multi-volume record may repeat 215.
+                    ("215", "a") if page_count.is_none() => {
+                        page_count = super::unimarc::page_count_from_extent(&text)
+                    }
                     ("676", "a") => dewey = Some(text),
                     ("606", "a") => subjects.push(text),
                     _ => {}
@@ -250,6 +259,7 @@ fn parse_sudoc_xml(xml: &str, ppn: &str) -> Result<SudocBook, String> {
         dewey,
         subjects,
         summary,
+        page_count,
         ppn: ppn.to_string(),
         raw_data: Some(xml.to_string()),
     })
@@ -327,6 +337,37 @@ mod tests {
         let book = parse_sudoc_xml(SUDOC_RILKE_FIXTURE, "067830994").unwrap();
         assert_eq!(book.title, "Lettres à un jeune poète");
         assert_eq!(book.author.as_deref(), Some("Rainer Maria Rilke"));
+    }
+
+    /// Real SUDOC record for ISBN 9782752905536 (Martin Eden, Phébus 2012).
+    /// It carries both a French back-cover abstract (`330 $a`) and an extent
+    /// with a page count (`215 $a` = "1 volume (456 pages)"). Both used to be
+    /// lost: the parser ignored 215, and the lookup mapping dropped 330.
+    const SUDOC_MARTIN_EDEN_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/sudoc_9782752905536.xml");
+
+    #[test]
+    fn parses_page_count_from_215_and_summary_from_330() {
+        let book = parse_sudoc_xml(SUDOC_MARTIN_EDEN_FIXTURE, "166408476").unwrap();
+        assert_eq!(book.title, "Martin Eden");
+        assert_eq!(book.page_count, Some(456));
+        let summary = book.summary.expect("330 $a is parsed as the summary");
+        assert!(
+            summary.starts_with("La quatrième de couverture indique"),
+            "unexpected summary: {summary}"
+        );
+    }
+
+    #[test]
+    fn page_count_is_none_when_215_carries_no_page_number() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<record>
+  <datafield tag="200" ind1="1" ind2=" "><subfield code="a">Sans pages</subfield></datafield>
+  <datafield tag="215" ind1=" " ind2=" "><subfield code="a">1 vol. (non paginé)</subfield><subfield code="d">24 cm</subfield></datafield>
+</record>"#;
+        let book = parse_sudoc_xml(xml, "000000000").unwrap();
+        assert_eq!(book.title, "Sans pages");
+        assert_eq!(book.page_count, None);
     }
 
     #[test]

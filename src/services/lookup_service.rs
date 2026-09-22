@@ -281,12 +281,12 @@ fn fill_empty_fields(primary: &mut BookMetadata, gap: GapFields) {
 /// secondary sources (Inventaire / OpenLibrary / Google), in a single bounded
 /// parallel round. None-only fill, so the primary's values are never overwritten.
 ///
-/// SUDOC is deliberately excluded from this round: it never returns a summary
-/// (the field driving the user reports), is a slow two-call lookup that would
-/// dominate the parallel round's latency, and the publication year it could add
-/// is already covered by the faster trio. Covers are already maximised on the
-/// primary by `enrich_cover`, so the only practical gains here are summary /
-/// page count / year.
+/// SUDOC is deliberately excluded from this round: it is a slow two-call lookup
+/// that would dominate the parallel round's latency, and for the French ISBNs it
+/// serves it is already queried as a primary candidate (where its `330` abstract
+/// and `215` page count are kept, see `metadata_from_sudoc`). Covers are already
+/// maximised on the primary by `enrich_cover`, so the only practical gains here
+/// are summary / page count / year.
 ///
 /// `target_lang` gates recovered summaries: an OpenLibrary/Google summary is only
 /// accepted when its detected language matches the target (ADR-040). It does NOT
@@ -461,26 +461,18 @@ async fn try_bnf_sparql(
 ) -> Option<BookMetadata> {
     tracing::debug!("Trying BNF SPARQL for ISBN {}", isbn);
     match crate::modules::integrations::bnf::lookup_bnf_isbn(clean_isbn).await {
-        Ok(Some(bnf_book)) => {
+        Ok(Some(mut bnf_book)) => {
             tracing::info!("BNF found book for ISBN {}: {}", isbn, bnf_book.title);
             let cover_url = enrich_cover(
                 isbn,
-                bnf_book.cover_url,
+                bnf_book.cover_url.take(),
                 enable_openlibrary,
                 enable_google,
                 enable_inventaire,
                 google_api_key,
             )
             .await;
-            Some(BookMetadata {
-                title: bnf_book.title,
-                authors: make_authors_from_name(bnf_book.author),
-                publisher: bnf_book.publisher,
-                publication_year: bnf_book.publication_year.map(|y| y.to_string()),
-                cover_url,
-                summary: bnf_book.description,
-                page_count: None,
-            })
+            Some(metadata_from_bnf_book(bnf_book, cover_url))
         }
         Ok(None) => {
             tracing::debug!("BNF returned no result for ISBN {}", isbn);
@@ -514,20 +506,32 @@ async fn try_sudoc(
                 google_api_key,
             )
             .await;
-            Some(BookMetadata {
-                title: sudoc_book.title,
-                authors: make_authors_from_name(sudoc_book.author),
-                publisher: sudoc_book.publisher,
-                publication_year: sudoc_book.publication_year.map(|y| y.to_string()),
-                cover_url,
-                summary: None,
-                page_count: None,
-            })
+            Some(metadata_from_sudoc(sudoc_book, cover_url))
         }
         Err(e) => {
             tracing::debug!("SUDOC lookup failed for {}: {}", isbn, e);
             None
         }
+    }
+}
+
+/// Map a SUDOC record onto the lookup result. The `330 $a` abstract is the
+/// summary and the `215 $a` extent the page count: both are catalogued in the
+/// language of the edition, which for the French ISBNs SUDOC serves is the
+/// reader's target language. The mapping used to drop both, so a scanned French
+/// book came back with neither even though the record carried them.
+fn metadata_from_sudoc(
+    sudoc_book: crate::modules::integrations::sudoc::SudocBook,
+    cover_url: Option<String>,
+) -> BookMetadata {
+    BookMetadata {
+        title: sudoc_book.title,
+        authors: make_authors_from_name(sudoc_book.author),
+        publisher: sudoc_book.publisher,
+        publication_year: sudoc_book.publication_year.map(|y| y.to_string()),
+        cover_url,
+        summary: sudoc_book.summary.filter(|s| !s.trim().is_empty()),
+        page_count: sudoc_book.page_count,
     }
 }
 
@@ -555,15 +559,7 @@ async fn try_bnf_sru(
                 google_api_key,
             )
             .await;
-            Some(BookMetadata {
-                title: bnf_book.title,
-                authors: make_authors_from_name(bnf_book.author),
-                publisher: bnf_book.publisher,
-                publication_year: bnf_book.publication_year.map(|y| y.to_string()),
-                cover_url,
-                summary: bnf_book.description,
-                page_count: None,
-            })
+            Some(metadata_from_bnf_book(bnf_book, cover_url))
         }
         Ok(None) => {
             tracing::debug!("BNF SRU returned no result for ISBN {}", isbn);
@@ -576,6 +572,24 @@ async fn try_bnf_sru(
     }
 }
 
+/// Map a BnF record (SPARQL or SRU) onto the lookup result. Shared by both
+/// paths so a field cannot be carried by one and dropped by the other, which
+/// is how the page count went missing on both for a while.
+fn metadata_from_bnf_book(
+    bnf_book: crate::modules::integrations::bnf::BnfBook,
+    cover_url: Option<String>,
+) -> BookMetadata {
+    BookMetadata {
+        title: bnf_book.title,
+        authors: make_authors_from_name(bnf_book.author),
+        publisher: bnf_book.publisher,
+        publication_year: bnf_book.publication_year.map(|y| y.to_string()),
+        cover_url,
+        summary: bnf_book.description,
+        page_count: bnf_book.page_count,
+    }
+}
+
 async fn try_inventaire(
     isbn: &str,
     enable_openlibrary: bool,
@@ -584,7 +598,7 @@ async fn try_inventaire(
 ) -> Option<BookMetadata> {
     tracing::debug!("Trying Inventaire for ISBN {}", isbn);
     match crate::inventaire_client::fetch_inventaire_metadata(isbn).await {
-        Ok(inv_metadata) => {
+        Ok(mut inv_metadata) => {
             tracing::info!(
                 "Inventaire found book for ISBN {}: {}",
                 isbn,
@@ -592,27 +606,42 @@ async fn try_inventaire(
             );
             let cover_url = enrich_cover(
                 isbn,
-                inv_metadata.cover_url,
+                inv_metadata.cover_url.take(),
                 enable_openlibrary,
                 enable_google,
                 false, // Inventaire is the source, no need to re-query its cover
                 google_api_key,
             )
             .await;
-            Some(BookMetadata {
-                title: inv_metadata.title,
-                authors: inv_metadata.authors,
-                publisher: inv_metadata.publisher,
-                publication_year: inv_metadata.publication_year,
-                cover_url,
-                summary: inv_metadata.summary,
-                page_count: inv_metadata.page_count,
-            })
+            Some(metadata_from_inventaire(inv_metadata, cover_url))
         }
         Err(e) => {
             tracing::debug!("Inventaire lookup failed for {}: {}", isbn, e);
             None
         }
+    }
+}
+
+/// Map an Inventaire record onto the lookup result when Inventaire is the
+/// primary source.
+///
+/// Inventaire is deliberately NOT a summary source here either: its `summary`
+/// is the one-line Wikidata *description* ("roman d'Albert Camus"), not prose.
+/// Storing it filled the field with a non-summary and, the field no longer
+/// being empty, kept the gap-fill round from recovering a real one from
+/// OpenLibrary or Google. Same rule as `gap_from_inventaire`.
+fn metadata_from_inventaire(
+    inv_metadata: crate::inventaire_client::InventaireMetadata,
+    cover_url: Option<String>,
+) -> BookMetadata {
+    BookMetadata {
+        title: inv_metadata.title,
+        authors: inv_metadata.authors,
+        publisher: inv_metadata.publisher,
+        publication_year: inv_metadata.publication_year,
+        cover_url,
+        summary: None,
+        page_count: inv_metadata.page_count,
     }
 }
 
@@ -669,6 +698,89 @@ mod tests {
             summary: summary.map(str::to_string),
             page_count,
         }
+    }
+
+    fn sudoc_book(
+        summary: Option<&str>,
+        page_count: Option<u32>,
+    ) -> crate::modules::integrations::sudoc::SudocBook {
+        crate::modules::integrations::sudoc::SudocBook {
+            title: "Martin Eden".to_string(),
+            author: Some("Jack London".to_string()),
+            publisher: Some("Phébus".to_string()),
+            publication_year: Some(2012),
+            dewey: None,
+            subjects: vec![],
+            summary: summary.map(str::to_string),
+            page_count,
+            ppn: "166408476".to_string(),
+            raw_data: None,
+        }
+    }
+
+    /// The SUDOC mapping used to hard-code both fields to `None`, so a French
+    /// book whose record carried a back-cover abstract and an extent came back
+    /// with neither.
+    #[test]
+    fn sudoc_mapping_keeps_the_summary_and_the_page_count() {
+        let meta = metadata_from_sudoc(
+            sudoc_book(Some("La quatrième de couverture indique : ..."), Some(456)),
+            Some("https://covers.example/1.jpg".to_string()),
+        );
+
+        assert_eq!(meta.title, "Martin Eden");
+        assert_eq!(meta.authors.len(), 1);
+        assert_eq!(meta.authors[0].name, "Jack London");
+        assert_eq!(meta.publisher.as_deref(), Some("Phébus"));
+        assert_eq!(meta.publication_year.as_deref(), Some("2012"));
+        assert_eq!(
+            meta.cover_url.as_deref(),
+            Some("https://covers.example/1.jpg")
+        );
+        assert_eq!(
+            meta.summary.as_deref(),
+            Some("La quatrième de couverture indique : ...")
+        );
+        assert_eq!(meta.page_count, Some(456));
+    }
+
+    #[test]
+    fn bnf_mapping_carries_every_field_of_the_record() {
+        let meta = metadata_from_bnf_book(
+            crate::modules::integrations::bnf::BnfBook {
+                title: "Martin Eden".to_string(),
+                author: Some("Jack London".to_string()),
+                publisher: Some("Phébus".to_string()),
+                publication_year: Some(2001),
+                isbn: Some("9782752905536".to_string()),
+                cover_url: None,
+                bnf_uri: "https://catalogue.bnf.fr/ark:/12148/cb372207481".to_string(),
+                description: Some("Roman.".to_string()),
+                page_count: Some(438),
+            },
+            Some("https://covers.example/2.jpg".to_string()),
+        );
+
+        assert_eq!(meta.title, "Martin Eden");
+        assert_eq!(meta.authors.len(), 1);
+        assert_eq!(meta.authors[0].name, "Jack London");
+        assert_eq!(meta.publisher.as_deref(), Some("Phébus"));
+        assert_eq!(meta.publication_year.as_deref(), Some("2001"));
+        assert_eq!(
+            meta.cover_url.as_deref(),
+            Some("https://covers.example/2.jpg")
+        );
+        assert_eq!(meta.summary.as_deref(), Some("Roman."));
+        assert_eq!(meta.page_count, Some(438));
+    }
+
+    /// A blank abstract must stay `None` so the gap-fill round can still
+    /// recover a summary from the secondary sources.
+    #[test]
+    fn sudoc_mapping_treats_a_blank_summary_as_absent() {
+        let meta = metadata_from_sudoc(sudoc_book(Some("   "), None), None);
+        assert_eq!(meta.summary, None);
+        assert_eq!(meta.page_count, None);
     }
 
     #[test]
@@ -842,18 +954,49 @@ mod tests {
         assert!(gap.unwrap().summary.is_some());
     }
 
-    #[test]
-    fn inventaire_gap_never_carries_summary() {
-        let inv = crate::inventaire_client::InventaireMetadata {
+    fn inventaire_record() -> crate::inventaire_client::InventaireMetadata {
+        crate::inventaire_client::InventaireMetadata {
             title: "L'Étranger".to_string(),
-            authors: vec![],
+            authors: vec![crate::inventaire_client::AuthorMetadata {
+                name: "Albert Camus".to_string(),
+                birth_year: Some("1913".to_string()),
+                death_year: Some("1960".to_string()),
+                image_url: None,
+                bio: None,
+            }],
             publisher: Some("Gallimard".to_string()),
             publication_year: Some("1942".to_string()),
             cover_url: Some("http://cover".to_string()),
             inventaire_uri: "wd:Q163297".to_string(),
             summary: Some("roman d'Albert Camus".to_string()),
             page_count: Some(159),
-        };
+        }
+    }
+
+    /// Inventaire's `summary` is the one-line Wikidata description ("roman
+    /// d'Albert Camus", "livre de Roald Dahl"), never prose. The primary path
+    /// used to store it as the book's summary, which both showed a non-summary
+    /// to the reader and, the field being filled, stopped the gap-fill round
+    /// from recovering a real one. Same rule as `gap_from_inventaire`.
+    #[test]
+    fn inventaire_primary_never_carries_summary() {
+        let meta = metadata_from_inventaire(inventaire_record(), Some("http://cover".to_string()));
+
+        assert_eq!(meta.summary, None);
+        // The other fields survive, author details included.
+        assert_eq!(meta.title, "L'Étranger");
+        assert_eq!(meta.authors.len(), 1);
+        assert_eq!(meta.authors[0].name, "Albert Camus");
+        assert_eq!(meta.authors[0].birth_year.as_deref(), Some("1913"));
+        assert_eq!(meta.publisher.as_deref(), Some("Gallimard"));
+        assert_eq!(meta.publication_year.as_deref(), Some("1942"));
+        assert_eq!(meta.cover_url.as_deref(), Some("http://cover"));
+        assert_eq!(meta.page_count, Some(159));
+    }
+
+    #[test]
+    fn inventaire_gap_never_carries_summary() {
+        let inv = inventaire_record();
         let gap = gap_from_inventaire(inv);
         assert_eq!(gap.summary, None);
         // But the other fields survive for gap-fill (publisher label included).

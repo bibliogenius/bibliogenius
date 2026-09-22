@@ -18,10 +18,35 @@ pub struct BookMetadata {
     pub page_count: Option<u32>,
 }
 
+const OPENLIBRARY_BASE_URL: &str = "https://openlibrary.org";
+
+/// Envelope of the Read API (`/api/volumes/brief/isbn/{isbn}.json`).
+///
+/// A known ISBN answers `{ "records": { "/books/OL…M": { "isbns": […],
+/// "data": {…} } }, "items": […] }`; an unknown one answers a bare `[]` with
+/// HTTP 200. The `data` object is the same record the legacy Books API
+/// (`/api/books?bibkeys=ISBN:…&jscmd=data`) used to serve. That legacy route
+/// answers 404 for every key since 2026-09 (openlibrary issue #13669) and its
+/// documentation already flagged it as "may be phased out", hence the move.
 #[derive(Debug, Deserialize)]
-struct OpenLibraryResponse {
-    #[serde(flatten)]
-    books: HashMap<String, OpenLibraryBook>,
+#[serde(untagged)]
+enum ReadApiResponse {
+    Found {
+        records: HashMap<String, ReadApiRecord>,
+    },
+    /// The bare `[]`: OpenLibrary does not know this ISBN. The elements are
+    /// never read; the variant only has to deserialize from a JSON array.
+    Absent(#[allow(dead_code)] Vec<serde_json::Value>),
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadApiRecord {
+    /// Every ISBN the matched edition carries, in whichever forms OpenLibrary
+    /// stores them (an ISBN-10 query is answered with an edition that may list
+    /// only its ISBN-13).
+    #[serde(default)]
+    isbns: Vec<String>,
+    data: OpenLibraryBook,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,10 +75,33 @@ struct OpenLibraryCover {
     large: Option<String>,
 }
 
+/// Resolve an ISBN through OpenLibrary. `Err` covers both "OpenLibrary did not
+/// answer" and "OpenLibrary does not know this ISBN" (`"Book not found"`), the
+/// contract every caller in the lookup chain already relies on.
 pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
+    let Some(book) = fetch_book_record_at(OPENLIBRARY_BASE_URL, isbn).await? else {
+        return Err("Book not found".to_string());
+    };
+    // Fetch description from edition/work API
+    let summary = fetch_description(isbn).await;
+    Ok(metadata_from_book(&book, summary))
+}
+
+/// Fetch the edition record for `isbn` from the Read API, with an injectable
+/// endpoint so the found / absent / outage branches run against a mock server.
+///
+/// `Ok(None)` is OpenLibrary's own answer that the ISBN is unknown; `Err` is a
+/// transport, HTTP or parse failure.
+async fn fetch_book_record_at(
+    base_url: &str,
+    isbn: &str,
+) -> Result<Option<OpenLibraryBook>, String> {
+    // Encoded for the same reason as the cover lookup: the ISBN column has no
+    // validator, so a hand-typed "/" or "?" would otherwise alter the path.
     let url = format!(
-        "https://openlibrary.org/api/books?bibkeys=ISBN:{}&format=json&jscmd=data",
-        isbn
+        "{}/api/volumes/brief/isbn/{}.json",
+        base_url,
+        urlencoding::encode(isbn)
     );
 
     let client = reqwest::Client::builder()
@@ -79,17 +127,44 @@ pub async fn fetch_book_metadata(isbn: &str) -> Result<BookMetadata, String> {
         .await
         .map_err(|e| format!("Failed to read response body: {}", e))?;
 
-    let parsed: OpenLibraryResponse =
+    let parsed: ReadApiResponse =
         serde_json::from_str(&body).map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
-    let key = format!("ISBN:{}", isbn);
-    if let Some(book) = parsed.books.get(&key) {
-        // Fetch description from edition/work API
-        let summary = fetch_description(isbn).await;
-        Ok(metadata_from_book(book, summary))
-    } else {
-        Err("Book not found".to_string())
+    match parsed {
+        ReadApiResponse::Found { records } => Ok(select_record(records, isbn)),
+        ReadApiResponse::Absent(_) => Ok(None),
     }
+}
+
+/// Pick the record to trust for `isbn` among those the Read API returned.
+///
+/// The API only returns records for the queried key, so this is a guard, not a
+/// search: a record that lists ISBNs must list one form of the queried ISBN
+/// (see [`crate::utils::isbn::lookup_forms`]), otherwise it is discarded rather
+/// than filed under a scan it does not belong to. A record without any ISBN
+/// cannot be checked and is kept. Records are visited in key order so the
+/// same ISBN always resolves to the same edition.
+fn select_record(records: HashMap<String, ReadApiRecord>, isbn: &str) -> Option<OpenLibraryBook> {
+    let wanted = crate::utils::isbn::lookup_forms(isbn);
+    let mut records: Vec<(String, ReadApiRecord)> = records.into_iter().collect();
+    records.sort_by(|a, b| a.0.cmp(&b.0));
+    for (key, record) in records {
+        let listed = record
+            .isbns
+            .iter()
+            .map(|i| crate::utils::isbn::plain(i))
+            .collect::<Vec<_>>();
+        if listed.is_empty() || listed.iter().any(|i| wanted.contains(i)) {
+            return Some(record.data);
+        }
+        tracing::debug!(
+            "OpenLibrary record {} lists {:?}, none of which is {}: discarded",
+            key,
+            listed,
+            isbn
+        );
+    }
+    None
 }
 
 /// Project an OpenLibrary record onto the shared metadata shape.
@@ -340,6 +415,200 @@ mod tests {
         let result = try_fetch_cover_url_at(&server.uri(), "9782073087768").await;
 
         assert!(result.is_err(), "503 must not read as \"no cover\"");
+    }
+
+    // ── ISBN lookup through the Read API ─────────────────────────────────
+
+    /// Real `/api/volumes/brief/isbn/9782752905536.json` answer (Martin Eden,
+    /// Phébus 2001 edition OL62528389M), captured 2026-09-22.
+    const READ_API_MARTIN_EDEN: &str =
+        include_str!("../../../tests/fixtures/openlibrary_volumes_9782752905536.json");
+
+    async fn read_api_server(path: &str, status: u16, body: &str) -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(
+                wiremock::ResponseTemplate::new(status)
+                    .set_body_raw(body.to_string(), "application/json"),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn a_known_isbn_yields_its_edition_record() {
+        let server = read_api_server(
+            "/api/volumes/brief/isbn/9782752905536.json",
+            200,
+            READ_API_MARTIN_EDEN,
+        )
+        .await;
+
+        let book = fetch_book_record_at(&server.uri(), "9782752905536")
+            .await
+            .expect("the server answered")
+            .expect("the ISBN is known");
+
+        assert_eq!(book.title, "Martin Eden");
+        assert_eq!(book.number_of_pages, Some(454));
+        let metadata = metadata_from_book(&book, None);
+        assert_eq!(metadata.authors.len(), 1);
+        assert_eq!(metadata.authors[0].name, "Jack London");
+        assert_eq!(metadata.publisher.as_deref(), Some("Phébus"));
+        assert_eq!(metadata.publication_year.as_deref(), Some("2001"));
+        assert_eq!(
+            metadata.cover_url.as_deref(),
+            Some("https://covers.openlibrary.org/b/id/15252384-L.jpg")
+        );
+    }
+
+    /// OpenLibrary answers an unknown ISBN with a bare `[]` and HTTP 200: that
+    /// is an absence, not a failure.
+    #[tokio::test]
+    async fn an_unknown_isbn_is_an_absence_not_a_failure() {
+        let server = read_api_server("/api/volumes/brief/isbn/9791234567894.json", 200, "[]").await;
+
+        let result = fetch_book_record_at(&server.uri(), "9791234567894").await;
+
+        assert!(matches!(result, Ok(None)), "got {result:?}");
+    }
+
+    /// An ISBN-10 query is answered with an edition that lists only its
+    /// ISBN-13 (measured on 275290553X): the guard must accept the other form.
+    #[tokio::test]
+    async fn an_isbn10_query_matches_an_edition_listing_only_its_isbn13() {
+        let server = read_api_server(
+            "/api/volumes/brief/isbn/275290553X.json",
+            200,
+            READ_API_MARTIN_EDEN,
+        )
+        .await;
+
+        let book = fetch_book_record_at(&server.uri(), "275290553X")
+            .await
+            .expect("the server answered");
+
+        assert_eq!(book.map(|b| b.title).as_deref(), Some("Martin Eden"));
+    }
+
+    /// The ISBN is sent as typed (hyphens included, encoded) and matched
+    /// against the record in its plain form.
+    #[tokio::test]
+    async fn a_hyphenated_isbn_is_sent_as_typed_and_still_matches() {
+        let server = read_api_server(
+            "/api/volumes/brief/isbn/978-2-7529-0553-6.json",
+            200,
+            READ_API_MARTIN_EDEN,
+        )
+        .await;
+
+        let book = fetch_book_record_at(&server.uri(), "978-2-7529-0553-6")
+            .await
+            .expect("the server answered");
+
+        assert_eq!(book.map(|b| b.title).as_deref(), Some("Martin Eden"));
+    }
+
+    #[tokio::test]
+    async fn a_record_listing_other_isbns_is_discarded() {
+        let body = json!({
+            "records": {
+                "/books/OL1M": {
+                    "isbns": ["9780140328721"],
+                    "data": { "title": "Fantastic Mr Fox" }
+                }
+            },
+            "items": []
+        })
+        .to_string();
+        let server =
+            read_api_server("/api/volumes/brief/isbn/9782752905536.json", 200, &body).await;
+
+        let result = fetch_book_record_at(&server.uri(), "9782752905536").await;
+
+        assert!(matches!(result, Ok(None)), "got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_record_without_isbns_cannot_be_checked_and_is_kept() {
+        let body = json!({
+            "records": {
+                "/books/OL1M": { "data": { "title": "Untagged edition" } }
+            },
+            "items": []
+        })
+        .to_string();
+        let server =
+            read_api_server("/api/volumes/brief/isbn/9782752905536.json", 200, &body).await;
+
+        let book = fetch_book_record_at(&server.uri(), "9782752905536")
+            .await
+            .expect("the server answered");
+
+        assert_eq!(book.map(|b| b.title).as_deref(), Some("Untagged edition"));
+    }
+
+    /// Two editions under the same ISBN: the choice is stable across calls.
+    #[test]
+    fn select_record_is_deterministic_across_hash_orders() {
+        let record = |title: &str| {
+            serde_json::from_value::<ReadApiRecord>(json!({
+                "isbns": ["9782752905536"],
+                "data": { "title": title },
+            }))
+            .expect("fixture should deserialize")
+        };
+        // Same key → title mapping, inserted in both orders.
+        let mut forward = HashMap::new();
+        forward.insert("/books/OL1M".to_string(), record("A"));
+        forward.insert("/books/OL2M".to_string(), record("B"));
+        let mut backward = HashMap::new();
+        backward.insert("/books/OL2M".to_string(), record("B"));
+        backward.insert("/books/OL1M".to_string(), record("A"));
+
+        let a = select_record(forward, "9782752905536").map(|r| r.title);
+        let b = select_record(backward, "9782752905536").map(|r| r.title);
+
+        assert_eq!(a.as_deref(), Some("A"), "lowest key wins");
+        assert_eq!(a, b);
+    }
+
+    #[tokio::test]
+    async fn a_404_from_the_read_api_is_a_failure_not_an_absence() {
+        let server = read_api_server("/api/volumes/brief/isbn/9782752905536.json", 404, "").await;
+
+        let result = fetch_book_record_at(&server.uri(), "9782752905536").await;
+
+        assert!(result.is_err(), "404 must not read as \"unknown ISBN\"");
+    }
+
+    #[tokio::test]
+    async fn a_503_from_the_read_api_is_a_failure() {
+        let server = read_api_server("/api/volumes/brief/isbn/9782752905536.json", 503, "").await;
+
+        assert!(
+            fetch_book_record_at(&server.uri(), "9782752905536")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_that_is_not_the_envelope_is_a_failure() {
+        let server = read_api_server(
+            "/api/volumes/brief/isbn/9782752905536.json",
+            200,
+            "<html>maintenance</html>",
+        )
+        .await;
+
+        assert!(
+            fetch_book_record_at(&server.uri(), "9782752905536")
+                .await
+                .is_err()
+        );
     }
 
     #[test]
