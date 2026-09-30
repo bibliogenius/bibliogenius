@@ -81,11 +81,17 @@ impl BookRepository for SeaOrmBookRepository {
     async fn find_all(&self, filter: BookFilter) -> Result<PaginatedBooks, DomainError> {
         let mut query = BookEntity::find();
 
-        // Apply filters
+        // Apply filters. The status is the current household reader's when this
+        // device has one (see `infrastructure::household`).
         if let Some(status) = &filter.status
             && !status.is_empty()
         {
-            query = query.filter(Column::ReadingStatus.eq(status));
+            query = match crate::infrastructure::household::current_reader(&self.db).await? {
+                Some(reader) => query.filter(crate::infrastructure::household::status_condition(
+                    &reader.id, status,
+                )),
+                None => query.filter(Column::ReadingStatus.eq(status)),
+            };
         }
 
         if let Some(title) = &filter.title

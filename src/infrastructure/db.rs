@@ -2571,6 +2571,41 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         }
     }
 
+    // Migration 101: household readers (see `infrastructure::household`). Two
+    // people sharing one library through account sync each keep their own
+    // reading state. `readers` and `book_readings` are CRRs (listed in
+    // `crsqlite_crr::CRR_TABLES`), created CRR-ready from the start: text PKs,
+    // no FOREIGN KEY, a DEFAULT on every NOT NULL non-PK column, no UNIQUE
+    // index. `reader_local` records who reads on THIS device and is
+    // deliberately NOT a CRR. All three are additive and gateless.
+    for sql in [
+        r#"CREATE TABLE IF NOT EXISTS readers (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT ''
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS book_readings (
+            book_uuid TEXT NOT NULL,
+            reader_id TEXT NOT NULL,
+            reading_status TEXT NOT NULL DEFAULT '',
+            started_reading_at TEXT,
+            finished_reading_at TEXT,
+            user_rating INTEGER,
+            updated_at TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (book_uuid, reader_id)
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS reader_local (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            reader_id TEXT NOT NULL
+        )"#,
+    ] {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            sql.to_owned(),
+        ))
+        .await?;
+    }
+
     Ok(())
 }
 

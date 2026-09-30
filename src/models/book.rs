@@ -671,10 +671,23 @@ impl Book {
             }
         }
 
+        // The current household reader's state, when this device has one. Laid
+        // before the copy overlay below, which must keep the last word.
+        let reader_view =
+            crate::infrastructure::household::current_view(db, Some(book_ids.as_slice()))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("household overlay skipped: {e}");
+                    None
+                });
+
         let mut dtos = Vec::with_capacity(models.len());
         for model in models {
             let book_id = model.id.clone();
             let mut dto = Book::from(model.clone());
+            if let Some(view) = &reader_view {
+                view.apply(&mut dto);
+            }
             if let Ok(authors) = model.find_related(super::author::Entity).all(db).await
                 && !authors.is_empty()
             {

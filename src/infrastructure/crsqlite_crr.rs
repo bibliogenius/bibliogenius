@@ -25,6 +25,10 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement};
 /// schema was not made CRR-ready would abort in `crsql_as_crr`; the
 /// `crrs_set_up_*` test guards the coupling by running `setup_crrs` over this
 /// list against the real migrated schema.
+///
+/// The two household tables (`readers`, `book_readings`, migration 101) are the
+/// exception: they were born after the uuid rebuild and are created CRR-ready,
+/// so they have no rebuild spec.
 pub const CRR_TABLES: &[&str] = &[
     "books",
     "authors",
@@ -36,6 +40,8 @@ pub const CRR_TABLES: &[&str] = &[
     "book_authors",
     "book_tags",
     "collection_books",
+    "readers",
+    "book_readings",
 ];
 
 /// Promote every replicated table to a cr-sqlite CRR. Idempotent: calling

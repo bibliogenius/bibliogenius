@@ -150,11 +150,21 @@ pub async fn list_books(
 
     let mut query = BookEntity::find();
 
+    // The reading state this device shows, when it belongs to a household
+    // reader (see `infrastructure::household`). `None` keeps the book columns.
+    let reader_view = crate::infrastructure::household::current_view(db, None).await?;
+
     // Apply DB-level filters
     if let Some(status) = &filter.status
         && !status.is_empty()
     {
-        query = query.filter(crate::models::book::Column::ReadingStatus.eq(status));
+        query = match &reader_view {
+            Some(view) => query.filter(crate::infrastructure::household::status_condition(
+                &view.reader_id,
+                status,
+            )),
+            None => query.filter(crate::models::book::Column::ReadingStatus.eq(status)),
+        };
     }
 
     if let Some(title) = &filter.title
@@ -220,6 +230,9 @@ pub async fn list_books(
 
     for (book_model, authors) in books_with_authors {
         let mut book_dto = Book::from(book_model);
+        if let Some(view) = &reader_view {
+            view.apply(&mut book_dto);
+        }
 
         if let Some(id) = book_dto.id.as_deref() {
             book_dto.hub_cover_upload_failed_at = cover_failed_map.get(id).cloned();
@@ -306,6 +319,7 @@ async fn enrich_book(
     book_model: crate::models::book::Model,
 ) -> Result<Book, ServiceError> {
     let mut book_dto = Book::from(book_model.clone());
+    crate::infrastructure::household::overlay(db, std::slice::from_mut(&mut book_dto)).await;
 
     // The hub-cover-upload retry flag is device-local: it lives in `book_local`,
     // not on the `books` CRR (ADR-044). Populate it for the owner's badge;
@@ -345,6 +359,10 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         .clone()
         .unwrap_or_else(|| "to_read".to_string());
     validate_reading_status(&reading_status)?;
+    let reading_change = crate::infrastructure::household::ReadingChange {
+        reading_status: Some(reading_status.clone()),
+        ..crate::infrastructure::household::ReadingChange::from_book(&book)
+    };
 
     let subjects_json = book
         .subjects
@@ -396,6 +414,9 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         let _ = create_or_link_author(db, &model.id, &author_name).await;
     }
 
+    // The creator's own reading state, when this device has a household reader.
+    crate::infrastructure::household::record(db, &model.id, reading_change).await?;
+
     // Log sync operation (minimal payload, no sensitive data)
     let _ = crate::sync::log_operation(db, "book", &model.id, "INSERT", None).await;
 
@@ -445,7 +466,9 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         crate::services::wishlist_service::notify_providers_for_wish(db, isbn, &model.title).await;
     }
 
-    Ok(Book::from(model))
+    let mut created = Book::from(model);
+    crate::infrastructure::household::overlay(db, std::slice::from_mut(&mut created)).await;
+    Ok(created)
 }
 
 /// Validates that the reading status is one of the allowed values
@@ -503,6 +526,7 @@ pub async fn update_book(
         .ok_or(ServiceError::NotFound)?;
 
     let previous_reading_status = book_model.reading_status.clone();
+    let reading_change = crate::infrastructure::household::ReadingChange::from_book(&book_data);
     let mut book: BookActiveModel = book_model.into();
 
     book.title = Set(book_data.title);
@@ -541,6 +565,7 @@ pub async fn update_book(
     book.updated_at = Set(now.to_rfc3339());
 
     let model = book.update(db).await?;
+    crate::infrastructure::household::record(db, id, reading_change).await?;
 
     let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
 
@@ -637,7 +662,9 @@ pub async fn update_book(
         }
     }
 
-    Ok(Book::from(model))
+    let mut updated = Book::from(model);
+    crate::infrastructure::household::overlay(db, std::slice::from_mut(&mut updated)).await;
+    Ok(updated)
 }
 
 /// What recording a reading changed in the library.
@@ -745,9 +772,13 @@ pub async fn record_read_book(
         });
     };
 
-    if model.reading_status == READ {
+    // "Already read" is the current household reader's answer when there is one:
+    // the other reader having read it says nothing about this one.
+    let mut current = Book::from(model.clone());
+    crate::infrastructure::household::overlay(db, std::slice::from_mut(&mut current)).await;
+    if current.reading_status.as_deref() == Some(READ) {
         return Ok(ReadRecord {
-            book: Book::from(model),
+            book: current,
             created: false,
             was_already_read: true,
         });
@@ -760,11 +791,22 @@ pub async fn record_read_book(
     active.reading_status = Set(READ.to_owned());
     active.updated_at = Set(chrono::Utc::now().to_rfc3339());
     let updated = active.update(db).await?;
+    crate::infrastructure::household::record(
+        db,
+        &updated.id,
+        crate::infrastructure::household::ReadingChange {
+            reading_status: Some(READ.to_owned()),
+            ..Default::default()
+        },
+    )
+    .await?;
 
     let _ = crate::sync::log_operation(db, "book", &updated.id, "UPDATE", None).await;
 
+    let mut book = Book::from(updated);
+    crate::infrastructure::household::overlay(db, std::slice::from_mut(&mut book)).await;
     Ok(ReadRecord {
-        book: Book::from(updated),
+        book,
         created: false,
         was_already_read: false,
     })
@@ -820,8 +862,9 @@ pub async fn library_status_for_isbns(
     // record and its source payload, and none of that is an answer to "do I
     // already have this one". The call runs on every page of someone else's
     // catalogue, on devices where that matters.
-    let rows: Vec<(Option<String>, bool, String)> = BookEntity::find()
+    let rows: Vec<(String, Option<String>, bool, String)> = BookEntity::find()
         .select_only()
+        .column(crate::models::book::Column::Id)
         .column(crate::models::book::Column::Isbn)
         .column(crate::models::book::Column::Owned)
         .column(crate::models::book::Column::ReadingStatus)
@@ -829,6 +872,10 @@ pub async fn library_status_for_isbns(
         .into_tuple()
         .all(db)
         .await?;
+
+    // "Have I read it" is the current household reader's answer, when there is one.
+    let book_ids: Vec<String> = rows.iter().map(|(id, ..)| id.clone()).collect();
+    let reader_view = crate::infrastructure::household::current_view(db, Some(&book_ids)).await?;
 
     // The caller indexes its list by the string it sent, which may be neither
     // the stored form nor the canonical one.
@@ -838,9 +885,21 @@ pub async fn library_status_for_isbns(
         .collect();
 
     let mut strongest: HashMap<String, LibraryIsbnStatus> = HashMap::new();
-    for (row_isbn, owned, reading_status) in rows {
+    for (book_id, row_isbn, owned, reading_status) in rows {
         let Some(row_isbn) = row_isbn else {
             continue;
+        };
+        let reading_status = match &reader_view {
+            Some(view) => {
+                let mut book = Book {
+                    id: Some(book_id),
+                    reading_status: Some(reading_status),
+                    ..Default::default()
+                };
+                view.apply(&mut book);
+                book.reading_status.unwrap_or_default()
+            }
+            None => reading_status,
         };
         let Some(asked_form) = asked_by_canonical.get(&canonical(&row_isbn)) else {
             // A row matched by a length-variant form the caller never asked
