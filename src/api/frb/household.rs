@@ -68,6 +68,42 @@ pub async fn clear_current_household_reader() -> Result<(), String> {
         .map_err(|e| format!("{e:?}"))
 }
 
+/// What "import my readings" did, for the summary shown to the reader.
+pub struct FrbReadingImportReport {
+    pub matched: u32,
+    pub created: u32,
+    pub ambiguous: u32,
+    pub ambiguous_titles: Vec<String>,
+    pub skipped: u32,
+}
+
+/// Merge the readings of a catalogue export (the JSON "Exporter mon catalogue"
+/// writes) into the shared library, for the reader of this device. Adds and
+/// records only: unlike the catalogue restore, nothing is wiped.
+pub async fn import_household_readings(json: String) -> Result<FrbReadingImportReport, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let report = crate::services::household_import::import_readings(db, &json)
+        .await
+        .map_err(|e| match e {
+            crate::services::book_service::ServiceError::InvalidInput(msg) => msg,
+            other => format!("{other:?}"),
+        })?;
+    if report.created > 0
+        && let Some(state) = global_app_state()
+    {
+        crate::services::catalog_notification::schedule_catalog_changed_notification(
+            state.clone(),
+        );
+    }
+    Ok(FrbReadingImportReport {
+        matched: report.matched as u32,
+        created: report.created as u32,
+        ambiguous: report.ambiguous as u32,
+        ambiguous_titles: report.ambiguous_titles,
+        skipped: report.skipped as u32,
+    })
+}
+
 pub async fn rename_household_reader(reader_id: String, name: String) -> Result<(), String> {
     let db = db().ok_or("Database not initialized")?;
     crate::infrastructure::household::rename_reader(db, &reader_id, &name)

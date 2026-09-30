@@ -699,7 +699,9 @@ pub struct ReadRecord {
 /// the lender's string verbatim. Callers pass the query side through
 /// `utils::isbn::lookup_forms`, which covers the ISBN-10 / ISBN-13 equivalence
 /// that no amount of stripping can produce.
-fn stored_isbn_matches(forms: impl IntoIterator<Item = String>) -> sea_orm::sea_query::SimpleExpr {
+pub(crate) fn stored_isbn_matches(
+    forms: impl IntoIterator<Item = String>,
+) -> sea_orm::sea_query::SimpleExpr {
     use sea_orm::sea_query::Expr;
 
     let forms: Vec<String> = forms.into_iter().map(|form| form.to_uppercase()).collect();
