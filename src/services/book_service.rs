@@ -526,6 +526,7 @@ pub async fn update_book(
         .ok_or(ServiceError::NotFound)?;
 
     let previous_reading_status = book_model.reading_status.clone();
+    let owned_after = book_data.owned.unwrap_or(book_model.owned);
     let reading_change = crate::infrastructure::household::ReadingChange::from_book(&book_data);
     let mut book: BookActiveModel = book_model.into();
 
@@ -536,7 +537,16 @@ pub async fn update_book(
     book.publication_year = Set(book_data.publication_year);
     if let Some(status) = book_data.reading_status {
         validate_reading_status(&status)?;
-        book.reading_status = Set(status);
+        // A household reader moving their own reading leaves the shared wish
+        // on the book row (see `household::keeps_wish`). An owned book is no
+        // longer wished for, whoever records the acquisition.
+        let keeps_wish = previous_reading_status == "wanting"
+            && status != "wanting"
+            && !owned_after
+            && crate::infrastructure::household::keeps_wish(db, id).await?;
+        if !keeps_wish {
+            book.reading_status = Set(status);
+        }
     }
     if let Some(finished_at) = book_data.finished_reading_at {
         book.finished_reading_at = Set(finished_at);
@@ -787,8 +797,13 @@ pub async fn record_read_book(
     // A targeted update, not `update_book`: the caller holds the OTHER library's
     // metadata for this book, and passing it through the full update would
     // overwrite the reader's own title, cover, rating and price with it.
+    let keeps_wish = model.reading_status == "wanting"
+        && !model.owned
+        && crate::infrastructure::household::keeps_wish(db, &model.id).await?;
     let mut active: BookActiveModel = model.into();
-    active.reading_status = Set(READ.to_owned());
+    if !keeps_wish {
+        active.reading_status = Set(READ.to_owned());
+    }
     active.updated_at = Set(chrono::Utc::now().to_rfc3339());
     let updated = active.update(db).await?;
     crate::infrastructure::household::record(
