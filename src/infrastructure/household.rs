@@ -35,6 +35,11 @@ use crate::models::Book;
 /// The status shared by the whole household (see the module docs).
 const WANTING: &str = "wanting";
 
+/// Longest reader name accepted, in characters. `readers` is replicated, and
+/// the hub rejects a sync block over 64 KB: an unbounded name could make the
+/// block impossible to push.
+pub const MAX_READER_NAME_CHARS: usize = 50;
+
 /// A person of the household.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reader {
@@ -168,6 +173,20 @@ pub async fn list_readers<C: ConnectionTrait>(db: &C) -> Result<Vec<Reader>, DbE
         .collect()
 }
 
+/// The name as stored: trimmed, not empty, within [`MAX_READER_NAME_CHARS`].
+fn valid_reader_name(name: &str) -> Result<&str, DbErr> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(DbErr::Custom("Reader name is required".to_owned()));
+    }
+    if name.chars().count() > MAX_READER_NAME_CHARS {
+        return Err(DbErr::Custom(format!(
+            "Reader name is longer than {MAX_READER_NAME_CHARS} characters"
+        )));
+    }
+    Ok(name)
+}
+
 /// Add a reader to the household and make it the reader of this device.
 ///
 /// The FIRST reader of a household inherits the reading state already recorded
@@ -178,10 +197,7 @@ pub async fn create_reader<C>(db: &C, name: &str) -> Result<Reader, DbErr>
 where
     C: ConnectionTrait + TransactionTrait,
 {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(DbErr::Custom("Reader name is required".to_owned()));
-    }
+    let name = valid_reader_name(name)?;
     let reader = Reader {
         id: crate::utils::uuid_gen::new_uuid_v7(),
         name: name.to_owned(),
@@ -258,10 +274,7 @@ pub async fn rename_reader<C: ConnectionTrait>(
     reader_id: &str,
     name: &str,
 ) -> Result<(), DbErr> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(DbErr::Custom("Reader name is required".to_owned()));
-    }
+    let name = valid_reader_name(name)?;
     db.execute(Statement::from_sql_and_values(
         db.get_database_backend(),
         "UPDATE readers SET name = ? WHERE id = ?",
@@ -615,5 +628,25 @@ mod tests {
             .unwrap();
         let view = current_view(&db, None).await.unwrap().unwrap();
         assert!(view.readings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_reader_name_is_bounded_on_create_and_rename() {
+        let db = migrated_db().await;
+        // Counted in characters, not bytes: accented names get the full length.
+        let longest = "é".repeat(MAX_READER_NAME_CHARS);
+        let too_long = "é".repeat(MAX_READER_NAME_CHARS + 1);
+
+        assert!(create_reader(&db, &too_long).await.is_err());
+        assert!(list_readers(&db).await.unwrap().is_empty());
+
+        // Surrounding whitespace is trimmed before the length is judged.
+        let reader = create_reader(&db, &format!("  {longest}  ")).await.unwrap();
+        assert_eq!(reader.name, longest);
+
+        assert!(rename_reader(&db, &reader.id, &too_long).await.is_err());
+        assert_eq!(list_readers(&db).await.unwrap()[0].name, longest);
+        rename_reader(&db, &reader.id, "Claire").await.unwrap();
+        assert_eq!(list_readers(&db).await.unwrap()[0].name, "Claire");
     }
 }
