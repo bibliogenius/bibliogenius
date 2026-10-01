@@ -192,7 +192,7 @@ pub async fn dispatch_clear_message(
 
         "status_update" => handle_status_update(db, clear_message, sender_peer).await,
 
-        "peer_disconnect" => handle_peer_disconnect(db, sender_peer, our_library_uuid).await,
+        "peer_disconnect" => handle_peer_disconnect(state, sender_peer, our_library_uuid).await,
 
         // ── Library sync via relay (ADR-012) ─────────────────────────
         "library_manifest_request" => {
@@ -1318,10 +1318,11 @@ async fn handle_status_update(
 /// For relay-only peers the re-handshake will timeout, which is acceptable since
 /// E2EE authentication is already sufficient.
 async fn handle_peer_disconnect(
-    db: &DatabaseConnection,
+    state: &AppState,
     sender_peer: &peer::Model,
     our_library_uuid: Option<&str>,
 ) -> axum::response::Response {
+    let db = state.db();
     let peer_name = sender_peer.name.clone();
     let peer_id = sender_peer.id;
 
@@ -1352,6 +1353,7 @@ async fn handle_peer_disconnect(
                 peer_name,
                 peer_id
             );
+            crate::api::peer::revoke_hub_follow_for_peer(state, sender_peer);
             (
                 StatusCode::OK,
                 Json(json!({ "message": "Disconnect acknowledged" })),

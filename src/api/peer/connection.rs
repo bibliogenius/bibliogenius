@@ -1265,6 +1265,7 @@ pub async fn receive_disconnect_notification(
                 "Peer {} ({}) removed via authenticated disconnect (uuid={})",
                 peer_name, peer_id, library_uuid
             );
+            revoke_hub_follow_for_peer(&state, &peer_model);
             (
                 StatusCode::OK,
                 Json(json!({ "message": "Disconnect acknowledged" })),

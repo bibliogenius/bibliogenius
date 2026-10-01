@@ -328,6 +328,38 @@ pub async fn update_peer_url(
 /// Removes cached hub directory catalog entries (peer_id = 0 sentinel) for a
 /// given library_uuid. See ADR-024: the cache is owned by the peer relationship,
 /// so deletion must invalidate it to prevent stale reads on re-add.
+/// ADR-053 follow-up: the hub follow that materialised the pairing is revoked
+/// once the local `peers` row is gone, on every path that removes it (own
+/// deletion here, and both disconnect receivers). Fire-and-forget, like the
+/// disconnect notification: a hub outage never blocks the local removal.
+pub(crate) fn revoke_hub_follow_for_peer(
+    state: &crate::infrastructure::AppState,
+    peer_model: &peer::Model,
+) {
+    use crate::services::hub_directory_service::FollowRevocation;
+
+    let state = state.clone();
+    let library_uuid = peer_model.library_uuid.clone();
+    let peer_id = peer_model.id;
+    tokio::spawn(async move {
+        match state
+            .hub_directory
+            .revoke_follow_for_peer(state.db(), library_uuid.as_deref())
+            .await
+        {
+            FollowRevocation::Revoked => {
+                tracing::info!("Hub follow revoked for removed peer {}", peer_id)
+            }
+            FollowRevocation::Skipped => {}
+            FollowRevocation::Failed(e) => tracing::warn!(
+                "Hub follow revocation failed for removed peer {}: {}",
+                peer_id,
+                e
+            ),
+        }
+    });
+}
+
 async fn purge_hub_catalog_cache(db: &DatabaseConnection, library_uuid: &str) {
     use crate::models::peer_book;
     match peer_book::Entity::delete_many()
@@ -406,6 +438,7 @@ pub async fn delete_peer(
             if let Some(ref uuid) = peer_model.library_uuid {
                 purge_hub_catalog_cache(db, uuid).await;
             }
+            revoke_hub_follow_for_peer(&state, &peer_model);
             tracing::info!("🗑️ Peer {} ({}) deleted", peer_id, peer_model.name);
             (StatusCode::OK, Json(json!({ "message": "Peer deleted" }))).into_response()
         }

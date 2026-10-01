@@ -466,6 +466,18 @@ pub enum CoverUpload {
     Missing,
 }
 
+/// Outcome of [`HubDirectoryService::revoke_follow_for_peer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowRevocation {
+    /// Nothing to revoke: no hub identity on either side.
+    Skipped,
+    /// The hub removed the follow (active or still pending).
+    Revoked,
+    /// The hub call failed. Nothing retries it: the follow stays on the hub
+    /// until the user unfollows the library from the directory.
+    Failed(String),
+}
+
 pub struct HubDirectoryService {
     http_client: Client,
     /// Covers already uploaded during this run, keyed by book id.
@@ -1785,6 +1797,36 @@ impl HubDirectoryService {
         Ok(())
     }
 
+    /// Revokes the hub follow this library holds toward a peer whose pairing
+    /// just ended, whichever side ended it (ADR-053 follow-up).
+    ///
+    /// Only our own follow is in reach: the hub has no route to revoke a
+    /// follower, so the counterpart revokes its own follow when it learns
+    /// of the disconnect. The hub answers 204 whether the follow was active,
+    /// still pending, or already gone, so the call is idempotent.
+    ///
+    /// Callers run it after the local `peers` row is gone and never block on
+    /// it: a hub outage must not keep a pairing alive locally. There is no
+    /// retry either: the reconciliation only follows peers still paired, so
+    /// a failed revocation leaves an orphan follow on the hub.
+    pub async fn revoke_follow_for_peer(
+        &self,
+        db: &DatabaseConnection,
+        library_uuid: Option<&str>,
+    ) -> FollowRevocation {
+        let node_id = match library_uuid.map(str::trim) {
+            Some(uuid) if !uuid.is_empty() => uuid,
+            // The peer never carried a hub identity: nothing to revoke.
+            _ => return FollowRevocation::Skipped,
+        };
+        match self.unfollow(db, node_id).await {
+            Ok(()) => FollowRevocation::Revoked,
+            // Not registered on the hub: no follow could exist.
+            Err(HubDirectoryError::NotRegistered) => FollowRevocation::Skipped,
+            Err(e) => FollowRevocation::Failed(e.to_string()),
+        }
+    }
+
     /// Batch-updates encrypted contact blobs for all active followers.
     /// Called when the library owner changes their contact info.
     pub async fn sync_follow_contacts(
@@ -2203,7 +2245,7 @@ mod catalog_push_state_tests {
     /// the base CREATE TABLE plus migrations 055 (allow_borrowing),
     /// 064 (recovery_code), 068 (last_catalog_hash) and
     /// 086 (last_catalog_pushed_at), seeded with the singleton row.
-    async fn db_with_config() -> DatabaseConnection {
+    pub(super) async fn db_with_config() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         db.execute_unprepared(
             "CREATE TABLE hub_directory_config (
@@ -2405,5 +2447,111 @@ mod catalog_parse_tests {
             !json.contains("\"book_id\""),
             "never writes book_id: {json}"
         );
+    }
+}
+
+#[cfg(test)]
+mod follow_revocation_tests {
+    //! ADR-053 follow-up: ending a pairing revokes the hub follow this
+    //! library holds toward the peer. The decision (skip, revoke, fail) is
+    //! locked here against a mock hub; callers run it fire-and-forget.
+
+    use serial_test::serial;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use sea_orm::{ConnectionTrait, Database};
+
+    use super::catalog_push_state_tests::db_with_config;
+    use super::*;
+
+    fn point_hub_at(server: &MockServer) {
+        // SAFETY: tests touching HUB_URL are serialised with #[serial].
+        unsafe { std::env::set_var("HUB_URL", server.uri()) };
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn skips_without_a_hub_identity_and_never_calls_the_hub() {
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = db_with_config().await;
+        let svc = HubDirectoryService::new();
+
+        assert_eq!(
+            svc.revoke_follow_for_peer(&db, None).await,
+            FollowRevocation::Skipped
+        );
+        assert_eq!(
+            svc.revoke_follow_for_peer(&db, Some("  ")).await,
+            FollowRevocation::Skipped
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn revokes_through_the_authenticated_unfollow_route() {
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        Mock::given(method("DELETE"))
+            .and(path("/api/directory/follows/peer-uuid-1"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let db = db_with_config().await;
+        let svc = HubDirectoryService::new();
+
+        assert_eq!(
+            svc.revoke_follow_for_peer(&db, Some("peer-uuid-1")).await,
+            FollowRevocation::Revoked
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn reports_a_hub_failure_without_panicking() {
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let db = db_with_config().await;
+        let svc = HubDirectoryService::new();
+
+        assert!(matches!(
+            svc.revoke_follow_for_peer(&db, Some("peer-uuid-1")).await,
+            FollowRevocation::Failed(_)
+        ));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn skips_when_this_library_is_not_registered() {
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE hub_directory_config (
+                id INTEGER PRIMARY KEY DEFAULT 1, node_id TEXT NOT NULL,
+                write_token TEXT NOT NULL, is_listed INTEGER NOT NULL DEFAULT 0,
+                requires_approval INTEGER NOT NULL DEFAULT 1,
+                accept_from TEXT NOT NULL DEFAULT 'everyone',
+                allow_borrowing INTEGER NOT NULL DEFAULT 1, recovery_code TEXT,
+                last_catalog_hash TEXT, last_catalog_pushed_at TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .await
+        .unwrap();
+        let svc = HubDirectoryService::new();
+
+        assert_eq!(
+            svc.revoke_follow_for_peer(&db, Some("peer-uuid-1")).await,
+            FollowRevocation::Skipped
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }
