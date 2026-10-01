@@ -67,6 +67,9 @@ pub struct CrSqliteMergeEngine {
     /// changeset must carry to materialize a row that is not silently defaulted.
     /// `None` for the junction tables, whose primary key covers every column.
     row_specs: Mutex<HashMap<String, Option<RowSpec>>>,
+    /// The tables this build replicates: `CRR_TABLES`, plus whatever a test adds to
+    /// stand in for an upgrade (see [`MergeEngine::knows`]).
+    replicated: Vec<&'static str>,
 }
 
 /// What a complete changeset must carry for one table (see [`CrSqliteMergeEngine`]).
@@ -98,7 +101,15 @@ impl CrSqliteMergeEngine {
         Self {
             db,
             row_specs: Mutex::new(HashMap::new()),
+            replicated: crate::infrastructure::crsqlite_crr::CRR_TABLES.to_vec(),
         }
+    }
+
+    /// Test helper: replicate one more table, as a later build would.
+    #[cfg(test)]
+    pub fn replicating(mut self, table: &'static str) -> Self {
+        self.replicated.push(table);
+        self
     }
 
     /// The completeness spec of `table`, read once and cached. Returns `None` for a
@@ -384,6 +395,17 @@ impl MergeEngine for CrSqliteMergeEngine {
         .await
         .map(|_| ())
         .map_err(|e| MergeEngineError(e.to_string()))
+    }
+
+    /// A lane's entity type is the CRR it came from (see `changes_since`).
+    fn knows(&self, entity_type: &str) -> bool {
+        self.replicated.contains(&entity_type)
+    }
+
+    fn replicated_set_fingerprint(&self) -> Option<i64> {
+        Some(crate::infrastructure::crsqlite_crr::tables_fingerprint(
+            &self.replicated,
+        ))
     }
 }
 

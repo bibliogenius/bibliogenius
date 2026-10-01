@@ -38,6 +38,30 @@ pub const CRR_TABLES: &[&str] = &[
     "collection_books",
 ];
 
+/// A stable fingerprint of a set of replicated tables ([`CRR_TABLES`] in a
+/// build), recorded by account sync at each pull.
+///
+/// When an upgrade adds a replicated table, the fingerprint changes and the next
+/// sync replays its pull from the start once: the lanes of that table, skipped
+/// while this build did not have it, are applied then. Order-independent, never
+/// 0 (0 means "never recorded"), and stable across Rust releases (FNV-1a, not
+/// `DefaultHasher`), since it is persisted.
+pub fn tables_fingerprint(tables: &[&str]) -> i64 {
+    let mut names: Vec<&str> = tables.to_vec();
+    names.sort_unstable();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for name in names {
+        for byte in name.bytes().chain(std::iter::once(b'\n')) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    match hash as i64 {
+        0 => 1,
+        fingerprint => fingerprint,
+    }
+}
+
 /// Promote every replicated table to a cr-sqlite CRR. Idempotent: calling
 /// `crsql_as_crr` on an already-promoted table is a no-op. Must run on a
 /// cr-sqlite-loaded connection, after the schema migrations (so each table
@@ -365,5 +389,24 @@ mod tests {
         // Teardown no longer finalizes, so do it here before the connection is
         // dropped (the static extension is loaded process-wide).
         finalize(&db).await.expect("crsql_finalize");
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+
+    #[test]
+    fn the_fingerprint_follows_the_set_of_tables_not_their_order() {
+        assert_eq!(
+            tables_fingerprint(&["books", "authors"]),
+            tables_fingerprint(&["authors", "books"])
+        );
+        assert_ne!(
+            tables_fingerprint(&["books"]),
+            tables_fingerprint(&["books", "authors"]),
+            "adding a replicated table must change the fingerprint"
+        );
+        assert_ne!(tables_fingerprint(CRR_TABLES), 0, "0 means never recorded");
     }
 }
