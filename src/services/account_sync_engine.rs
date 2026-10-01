@@ -3358,4 +3358,84 @@ mod tests {
         eng_a.finalize().await.unwrap();
         eng_b.finalize().await.unwrap();
     }
+
+    // Two people, one library: the book replicates, each keeps their own reading
+    // state (`infrastructure::household`), on the real cr-sqlite engine.
+    #[cfg(feature = "crsqlite")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_crsqlite_household_readers_keep_their_own_reading() {
+        use crate::infrastructure::household;
+        use crate::services::book_service;
+        use crate::services::crsqlite_engine::CrSqliteMergeEngine;
+
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        let eng_a = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap();
+        let eng_b = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap();
+        let state_a = MemState::default();
+        let state_b = MemState::default();
+        let sync_both = || async {
+            for _ in 0..2 {
+                sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
+                    .await
+                    .unwrap();
+                sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+                    .await
+                    .unwrap();
+            }
+        };
+
+        // Device A: a book already read, then its owner becomes the first reader.
+        let book_id = book_service::create_book(
+            eng_a.db(),
+            crate::models::Book {
+                title: "Dune".to_owned(),
+                reading_status: Some("read".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .id
+        .unwrap();
+        household::create_reader(eng_a.db(), "Matthieu")
+            .await
+            .unwrap();
+        sync_both().await;
+
+        // Device B got the book and the first reader, and joins as a new reader.
+        household::create_reader(eng_b.db(), "Claire")
+            .await
+            .unwrap();
+        let mut book = book_service::get_book(eng_b.db(), &book_id).await.unwrap();
+        assert_eq!(book.reading_status.as_deref(), Some(""));
+        book.reading_status = Some("reading".to_owned());
+        book_service::update_book(eng_b.db(), &book_id, book)
+            .await
+            .unwrap();
+        sync_both().await;
+
+        let status = |eng: &CrSqliteMergeEngine| {
+            let db = eng.db().clone();
+            let id = book_id.clone();
+            async move {
+                book_service::get_book(&db, &id)
+                    .await
+                    .unwrap()
+                    .reading_status
+                    .unwrap()
+            }
+        };
+        assert_eq!(status(&eng_a).await, "read", "Matthieu keeps his reading");
+        assert_eq!(status(&eng_b).await, "reading", "Claire keeps hers");
+        assert_eq!(household::list_readers(eng_a.db()).await.unwrap().len(), 2);
+        assert_eq!(household::list_readers(eng_b.db()).await.unwrap().len(), 2);
+
+        eng_a.finalize().await.unwrap();
+        eng_b.finalize().await.unwrap();
+    }
 }
