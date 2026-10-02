@@ -125,6 +125,10 @@ impl ReaderView {
             return;
         };
         let stored_status = book.reading_status.take().unwrap_or_default();
+        // The wish stays readable when the reader's own status takes its place.
+        if stored_status == WANTING {
+            book.wanted = Some(true);
+        }
         let reading = self.reading_of(id, &stored_status);
         book.reading_status = Some(reading.reading_status);
         book.started_reading_at = Some(reading.started_reading_at);

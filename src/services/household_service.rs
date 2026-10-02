@@ -341,8 +341,9 @@ mod tests {
             .unwrap();
         assert_eq!(list.len(), 1);
 
-        // A reader with a reading of their own files the book under that
-        // reading, not under the wishlist.
+        // A reader with a reading of their own finds the book under that
+        // reading AND on the wishlist, which is the household's: the book
+        // carries their status plus the wish flag.
         let partner = create_reader(&db, "Alice").await.unwrap();
         set_current_reader(&db, &owner.id).await.unwrap();
         set_status(&db, &id, "reading").await;
@@ -359,10 +360,97 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(reading.len(), 1);
+        assert_eq!(reading[0].wanted, Some(true));
         let list = crate::services::book_service::list_books(&db, wished())
             .await
             .unwrap();
-        assert!(list.is_empty());
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].reading_status.as_deref(), Some("reading"));
+        assert_eq!(list[0].wanted, Some(true));
+    }
+
+    #[tokio::test]
+    async fn peers_still_see_the_wish_from_a_reader_with_a_status() {
+        let db = migrated_db().await;
+        let id = insert_unowned_book(&db, "Dune", "read").await;
+        let owner = create_reader(&db, "Bruno").await.unwrap();
+        create_reader(&db, "Alice").await.unwrap();
+        set_status(&db, &id, "wanting").await;
+
+        // On Bruno's device the book reads "read": the wish must still reach
+        // the peers, who learn it from the flag once the status is stripped.
+        set_current_reader(&db, &owner.id).await.unwrap();
+        let mut book = crate::services::book_service::get_book(&db, &id)
+            .await
+            .unwrap();
+        assert_eq!(book.reading_status.as_deref(), Some("read"));
+        assert!(book.is_wished());
+        book.redact_for_peer();
+        assert_eq!(book.reading_status, None);
+        assert_eq!(book.wanted, Some(true));
+    }
+
+    /// The HTTP update handler fires the "a wish is available" scan on the
+    /// transition INTO the wish, judged on the books it gets from the
+    /// repository before and after. Those carry the reader view, so the
+    /// judgement must rest on the wish itself (`Book::is_wished`), not on the
+    /// status shown.
+    #[tokio::test]
+    async fn the_wish_transition_is_judged_on_the_wish_itself() {
+        use crate::domain::BookRepository;
+        use crate::infrastructure::repositories::SeaOrmBookRepository;
+
+        let db = migrated_db().await;
+        let repo = SeaOrmBookRepository::new(db.clone());
+        let id = insert_unowned_book(&db, "Dune", "read").await;
+        let owner = create_reader(&db, "Bruno").await.unwrap();
+        create_reader(&db, "Alice").await.unwrap();
+        set_status(&db, &id, "wanting").await;
+
+        // Bruno, shown "read", picks the wish on a book already wished for:
+        // no transition, the scan must not run again.
+        set_current_reader(&db, &owner.id).await.unwrap();
+        let current = repo.find_by_id(&id).await.unwrap().unwrap();
+        assert_eq!(current.reading_status.as_deref(), Some("read"));
+        let mut change = current.clone();
+        change.reading_status = Some("wanting".to_owned());
+        let updated = repo.update(&id, change).await.unwrap();
+        assert!(!(updated.is_wished() && !current.is_wished()));
+
+        // A first wish on another book: the transition is seen.
+        let fresh = insert_unowned_book(&db, "Hyperion", "to_read").await;
+        let current = repo.find_by_id(&fresh).await.unwrap().unwrap();
+        let mut change = current.clone();
+        change.reading_status = Some("wanting".to_owned());
+        let updated = repo.update(&fresh, change).await.unwrap();
+        assert!(updated.is_wished() && !current.is_wished());
+    }
+
+    #[tokio::test]
+    async fn a_reader_with_a_status_can_take_a_book_off_the_wishlist() {
+        let db = migrated_db().await;
+        let id = insert_unowned_book(&db, "Dune", "read").await;
+        let owner = create_reader(&db, "Bruno").await.unwrap();
+        let partner = create_reader(&db, "Alice").await.unwrap();
+        set_status(&db, &id, "wanting").await;
+
+        set_current_reader(&db, &owner.id).await.unwrap();
+        let book = crate::services::book_service::remove_wish(&db, &id)
+            .await
+            .unwrap();
+        // Bruno keeps his reading, the wish is gone for both.
+        assert_eq!(book.reading_status.as_deref(), Some("read"));
+        assert!(!book.is_wished());
+        assert_eq!(stored_status(&db, &id).await, "");
+        set_current_reader(&db, &partner.id).await.unwrap();
+        assert_eq!(status_seen(&db, &id).await, "");
+
+        // Nothing to remove: the book is left alone.
+        let read = insert_book(&db, "Hyperion", "read").await;
+        crate::services::book_service::remove_wish(&db, &read)
+            .await
+            .unwrap();
+        assert_eq!(stored_status(&db, &read).await, "read");
     }
 
     #[tokio::test]

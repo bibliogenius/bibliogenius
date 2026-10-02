@@ -693,8 +693,10 @@ pub async fn update_book(
 
             // Reverse wishlist trigger, on the transition INTO 'wanting'
             // only (same rule as book_service::update_book on the FFI door).
-            if updated_book.reading_status.as_deref() == Some("wanting")
-                && current_book.reading_status.as_deref() != Some("wanting")
+            // Judged on the wish itself: a household reader's own status may
+            // stand in front of it on either side of the update.
+            if updated_book.is_wished()
+                && !current_book.is_wished()
                 && !updated_book.private.unwrap_or(false)
                 && let Some(ref isbn) = updated_book.isbn
             {

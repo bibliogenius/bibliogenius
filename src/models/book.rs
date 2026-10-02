@@ -490,6 +490,13 @@ impl Book {
         }
     }
 
+    /// Whether the library wants this book. The stored `wanting` status says
+    /// so, and so does the flag a household reader view sets when it shows the
+    /// reader's own status in place of the wish.
+    pub fn is_wished(&self) -> bool {
+        self.wanted == Some(true) || self.reading_status.as_deref() == Some("wanting")
+    }
+
     /// Strip fields that must not leak to unauthenticated peer callers.
     ///
     /// The HTTP catalog endpoints (`/api/books`, `/api/books/:id`) are
@@ -515,7 +522,7 @@ impl Book {
         // wish is deliberately shared (it is what lets a peer offer the
         // book), the rest of the reading state is not. Emitted only when
         // true so non-wanted books keep their payload unchanged.
-        self.wanted = (self.reading_status.as_deref() == Some("wanting")).then_some(true);
+        self.wanted = self.is_wished().then_some(true);
         self.cataloguing_notes = None;
         self.source_data = None;
         self.shelf_position = None;

@@ -274,15 +274,17 @@ pub async fn list_books(
         book_dto.is_borrowed = Some(borrowed_set.contains(book_id));
         book_dto.is_lent = Some(lent_set.contains(book_id));
 
-        // In-memory status filter (safety net)
+        // In-memory status filter (safety net). The wishlist matches on the
+        // wish, which a household reader's own status may stand in front of.
         if let Some(status_filter) = &filter.status
             && !status_filter.is_empty()
         {
-            if let Some(book_status) = &book_dto.reading_status {
-                if book_status != status_filter {
-                    continue;
-                }
+            let matches = if status_filter == "wanting" {
+                book_dto.is_wished()
             } else {
+                book_dto.reading_status.as_deref() == Some(status_filter.as_str())
+            };
+            if !matches {
                 continue;
             }
         }
@@ -859,6 +861,26 @@ pub async fn record_read_book(
         created: false,
         was_already_read: false,
     })
+}
+
+/// Take a book off the wishlist without touching anyone's reading.
+///
+/// For a household reader whose own status shows in place of the wish: the
+/// status picker cannot reach the wish for them, so the wish gets its own
+/// gesture. A book that is not wished for is returned unchanged.
+pub async fn remove_wish(db: &DatabaseConnection, id: &str) -> Result<Book, ServiceError> {
+    let model = BookEntity::find_by_id(id.to_owned())
+        .one(db)
+        .await?
+        .ok_or(ServiceError::NotFound)?;
+    if model.reading_status == "wanting" {
+        let mut active: BookActiveModel = model.into();
+        active.reading_status = Set(String::new());
+        active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        active.update(db).await?;
+        let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
+    }
+    get_book(db, id).await
 }
 
 /// What the reader's own library holds for one ISBN.

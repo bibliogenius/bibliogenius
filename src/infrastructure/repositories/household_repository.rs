@@ -238,9 +238,9 @@ impl<C: ConnectionTrait> HouseholdRepository for SeaOrmHouseholdRepository<'_, C
 }
 
 /// The SQL condition on `books` matching `status` for `reader_id`, standing in
-/// for `reading_status = ?` when the device has a reader. It answers with the
-/// status `ReaderView::apply` shows: the reader's own first, the household's
-/// wish for a book the reader has no status for.
+/// for `reading_status = ?` when the device has a reader. A reading status
+/// matches the reader's own; `wanting` matches the household's wish, whatever
+/// the reader's status.
 ///
 /// Columns are qualified with `books.`: the callers join the authors, whose
 /// table has a `uuid` column too.
@@ -251,11 +251,10 @@ pub fn status_condition(reader_id: &str, status: &str) -> sea_orm::sea_query::Si
          (SELECT book_uuid FROM book_readings \
           WHERE reader_id = ? AND reading_status != '')";
 
+    // The wishlist is the household's: every reader finds the wished books
+    // there, including the ones they hold a status of their own for.
     if status == crate::domain::WANTING {
-        return Expr::cust_with_values(
-            format!("(books.reading_status = 'wanting' AND {NO_OWN_STATUS})"),
-            [reader_id.to_owned()],
-        );
+        return Expr::cust_with_values("books.reading_status = ?", [status.to_owned()]);
     }
     if status.is_empty() {
         return Expr::cust_with_values(

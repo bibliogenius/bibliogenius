@@ -141,6 +141,22 @@ pub async fn record_read_book(book: FrbBook) -> Result<FrbReadRecord, String> {
     })
 }
 
+/// Take a book off the wishlist without touching anyone's reading. The gesture
+/// of a household reader whose own status shows in place of the wish.
+pub async fn remove_book_from_wishlist(book_id: String) -> Result<FrbBook, String> {
+    let db = db().ok_or("Database not initialized")?;
+    let book = crate::services::book_service::remove_wish(db, &book_id)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+
+    // The wish is the one reading state peers see.
+    if let Some(state) = global_app_state() {
+        crate::services::catalog_notification::schedule_catalog_changed_notification(state.clone());
+    }
+
+    Ok(FrbBook::from(book))
+}
+
 /// What the reader's own library holds for one ISBN of someone else's shelf.
 #[frb(dart_metadata=("freezed"))]
 pub struct FrbLibraryIsbnStatus {
