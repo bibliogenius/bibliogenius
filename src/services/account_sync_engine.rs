@@ -3402,15 +3402,11 @@ mod tests {
         .unwrap()
         .id
         .unwrap();
-        household::create_reader(eng_a.db(), "Matthieu")
-            .await
-            .unwrap();
+        household::create_reader(eng_a.db(), "Bruno").await.unwrap();
         sync_both().await;
 
         // Device B got the book and the first reader, and joins as a new reader.
-        household::create_reader(eng_b.db(), "Claire")
-            .await
-            .unwrap();
+        household::create_reader(eng_b.db(), "Alice").await.unwrap();
         let mut book = book_service::get_book(eng_b.db(), &book_id).await.unwrap();
         assert_eq!(book.reading_status.as_deref(), Some(""));
         book.reading_status = Some("reading".to_owned());
@@ -3430,8 +3426,8 @@ mod tests {
                     .unwrap()
             }
         };
-        assert_eq!(status(&eng_a).await, "read", "Matthieu keeps his reading");
-        assert_eq!(status(&eng_b).await, "reading", "Claire keeps hers");
+        assert_eq!(status(&eng_a).await, "read", "Bruno keeps his reading");
+        assert_eq!(status(&eng_b).await, "reading", "Alice keeps hers");
         assert_eq!(household::list_readers(eng_a.db()).await.unwrap().len(), 2);
         assert_eq!(household::list_readers(eng_b.db()).await.unwrap().len(), 2);
 

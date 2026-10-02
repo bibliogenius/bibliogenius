@@ -11,6 +11,7 @@ use crate::domain::{
     DomainError, GamificationConfigRow, GamificationConfigUpdate, GamificationRepository,
     PeerGamificationStatsRow,
 };
+use crate::infrastructure::household;
 use crate::models::{
     book, gamification_achievements, gamification_config, gamification_streaks,
     installation_profile, library_config, loan, peer_gamification_stats, user,
@@ -33,7 +34,13 @@ impl GamificationRepository for SeaOrmGamificationRepository {
         Ok(book::Entity::find().count(&self.db).await? as i64)
     }
 
+    // The two reading counters are the current household reader's when this
+    // device has one (see `infrastructure::household`): what one reader has
+    // read is not the other's achievement.
     async fn count_books_read(&self) -> Result<i64, DomainError> {
+        if let Some(reader) = household::current_reader(&self.db).await? {
+            return Ok(household::count_read(&self.db, &reader.id, None).await?);
+        }
         Ok(book::Entity::find()
             .filter(book::Column::ReadingStatus.eq("read"))
             .count(&self.db)
@@ -41,6 +48,9 @@ impl GamificationRepository for SeaOrmGamificationRepository {
     }
 
     async fn count_books_read_in_year(&self, year: &str) -> Result<i64, DomainError> {
+        if let Some(reader) = household::current_reader(&self.db).await? {
+            return Ok(household::count_read(&self.db, &reader.id, Some(year)).await?);
+        }
         Ok(book::Entity::find()
             .filter(book::Column::FinishedReadingAt.like(format!("{}%", year)))
             .count(&self.db)

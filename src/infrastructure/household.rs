@@ -118,16 +118,22 @@ impl ReaderView {
         let Some(id) = book.id.as_deref() else {
             return;
         };
-        let wanted = book.reading_status.as_deref() == Some(WANTING);
-        let reading = self.readings.get(id).cloned().unwrap_or_default();
-        book.reading_status = Some(if reading.reading_status.is_empty() && wanted {
-            WANTING.to_owned()
-        } else {
-            reading.reading_status
-        });
+        let stored_status = book.reading_status.take().unwrap_or_default();
+        let reading = self.reading_of(id, &stored_status);
+        book.reading_status = Some(reading.reading_status);
         book.started_reading_at = Some(reading.started_reading_at);
         book.finished_reading_at = Some(reading.finished_reading_at);
         book.user_rating = reading.user_rating;
+    }
+
+    /// The current reader's state for one book, given the status stored on
+    /// its row. For the read paths that do not go through a `Book` DTO.
+    pub fn reading_of(&self, book_uuid: &str, stored_status: &str) -> Reading {
+        let mut reading = self.readings.get(book_uuid).cloned().unwrap_or_default();
+        if reading.reading_status.is_empty() && stored_status == WANTING {
+            reading.reading_status = WANTING.to_owned();
+        }
+        reading
     }
 
     pub fn apply_all(&self, books: &mut [Book]) {
@@ -381,12 +387,26 @@ pub fn status_condition(reader_id: &str, status: &str) -> sea_orm::sea_query::Si
     )
 }
 
-/// Whether the current reader's status change must leave the household's wish
-/// on the book row. True when the device has a reader holding a status of
-/// their own for the book: they were not looking at the wish, so moving their
-/// reading says nothing about it. A reader with no status of their own was
-/// shown the wish, and replacing it takes the book off the wishlist for all.
-pub async fn keeps_wish<C: ConnectionTrait>(db: &C, book_uuid: &str) -> Result<bool, DbErr> {
+/// Whether a status change must leave the household's wish on the book row
+/// instead of writing `new_status` over it. `stored_status` is the row's
+/// current status, `owned_after` whether the book is owned once the change is
+/// applied.
+///
+/// True when the device has a reader holding a status of their own for a
+/// wished book: they were not looking at the wish, so moving their reading says
+/// nothing about it. A reader with no status of their own was shown the wish,
+/// and replacing it takes the book off the wishlist for all. So does anyone
+/// recording that the book is now owned.
+pub async fn keeps_wish<C: ConnectionTrait>(
+    db: &C,
+    book_uuid: &str,
+    stored_status: &str,
+    new_status: &str,
+    owned_after: bool,
+) -> Result<bool, DbErr> {
+    if stored_status != WANTING || new_status == WANTING || owned_after {
+        return Ok(false);
+    }
     let Some(reader_id) = current_reader(db).await?.map(|r| r.id) else {
         return Ok(false);
     };
@@ -399,6 +419,32 @@ pub async fn keeps_wish<C: ConnectionTrait>(db: &C, book_uuid: &str) -> Result<b
         ))
         .await?;
     Ok(row.is_some())
+}
+
+/// How many books `reader_id` has read, and, with `year`, finished that year
+/// (`finished_reading_at` starting with it). Readings of a book this device no
+/// longer holds are left out.
+pub async fn count_read<C: ConnectionTrait>(
+    db: &C,
+    reader_id: &str,
+    year: Option<&str>,
+) -> Result<i64, DbErr> {
+    let (condition, value) = match year {
+        Some(year) => ("finished_reading_at LIKE ?", format!("{year}%")),
+        None => ("reading_status = ?", "read".to_owned()),
+    };
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            format!(
+                "SELECT count(*) AS n FROM book_readings \
+                 WHERE reader_id = ? AND {condition} \
+                   AND book_uuid IN (SELECT uuid FROM books)"
+            ),
+            [reader_id.into(), value.into()],
+        ))
+        .await?;
+    row.map_or(Ok(0), |r| r.try_get("", "n"))
 }
 
 /// Lay the current reader's state over `books`, when this device has one.
@@ -541,11 +587,11 @@ mod tests {
         let read = insert_book(&db, "Dune", "read").await;
         let wished = insert_book(&db, "Hyperion", "wanting").await;
 
-        let owner = create_reader(&db, "Matthieu").await.unwrap();
+        let owner = create_reader(&db, "Bruno").await.unwrap();
         assert_eq!(status_seen(&db, &read).await, "read");
         assert_eq!(status_seen(&db, &wished).await, "wanting");
 
-        let partner = create_reader(&db, "Claire").await.unwrap();
+        let partner = create_reader(&db, "Alice").await.unwrap();
         assert_eq!(current_reader_id(&db).await.unwrap(), Some(partner.id));
         assert_eq!(status_seen(&db, &read).await, "");
         // The wishlist is the household's.
@@ -559,10 +605,10 @@ mod tests {
     async fn each_reader_keeps_their_own_status_dates_and_rating() {
         let db = migrated_db().await;
         let id = insert_book(&db, "Dune", "to_read").await;
-        let owner = create_reader(&db, "Matthieu").await.unwrap();
-        let partner = create_reader(&db, "Claire").await.unwrap();
+        let owner = create_reader(&db, "Bruno").await.unwrap();
+        let partner = create_reader(&db, "Alice").await.unwrap();
 
-        // Claire (current) finishes it and rates it.
+        // Alice (current) finishes it and rates it.
         let mut book = crate::services::book_service::get_book(&db, &id)
             .await
             .unwrap();
@@ -621,17 +667,17 @@ mod tests {
     async fn the_wishlist_is_shared_and_leaving_it_is_too() {
         let db = migrated_db().await;
         let id = insert_book(&db, "Dune", "").await;
-        let owner = create_reader(&db, "Matthieu").await.unwrap();
-        let partner = create_reader(&db, "Claire").await.unwrap();
+        let owner = create_reader(&db, "Bruno").await.unwrap();
+        let partner = create_reader(&db, "Alice").await.unwrap();
 
-        // Claire wishes for it: Matthieu, who has no reading of his own for
+        // Alice wishes for it: Bruno, who has no reading of his own for
         // it, sees it wished too.
         set_status(&db, &id, "wanting").await;
         set_current_reader(&db, &owner.id).await.unwrap();
         assert_eq!(status_seen(&db, &id).await, "wanting");
 
-        // Matthieu, looking at a wished book, starts reading it: it leaves
-        // the wishlist for both, and Claire keeps her own status (none).
+        // Bruno, looking at a wished book, starts reading it: it leaves
+        // the wishlist for both, and Alice keeps her own status (none).
         set_status(&db, &id, "reading").await;
         assert_eq!(status_seen(&db, &id).await, "reading");
         assert_eq!(stored_status(&db, &id).await, "reading");
@@ -660,11 +706,11 @@ mod tests {
     async fn acquiring_a_wished_book_ends_the_wish_whoever_does_it() {
         let db = migrated_db().await;
         let id = insert_unowned_book(&db, "Dune", "read").await;
-        let owner = create_reader(&db, "Matthieu").await.unwrap();
-        let partner = create_reader(&db, "Claire").await.unwrap();
+        let owner = create_reader(&db, "Bruno").await.unwrap();
+        let partner = create_reader(&db, "Alice").await.unwrap();
         set_status(&db, &id, "wanting").await;
 
-        // Matthieu, who has his own reading of it, records that the household
+        // Bruno, who has his own reading of it, records that the household
         // now owns it: an owned book must not stay on the wishlist.
         set_current_reader(&db, &owner.id).await.unwrap();
         let mut book = crate::services::book_service::get_book(&db, &id)
@@ -685,8 +731,8 @@ mod tests {
     async fn recording_a_reading_leaves_the_wish_of_a_reader_with_a_status() {
         let db = migrated_db().await;
         let id = insert_unowned_book(&db, "Dune", "reading").await;
-        let owner = create_reader(&db, "Matthieu").await.unwrap();
-        let partner = create_reader(&db, "Claire").await.unwrap();
+        let owner = create_reader(&db, "Bruno").await.unwrap();
+        let partner = create_reader(&db, "Alice").await.unwrap();
         set_status(&db, &id, "wanting").await;
 
         set_current_reader(&db, &owner.id).await.unwrap();
@@ -710,18 +756,18 @@ mod tests {
     async fn a_wish_does_not_mask_another_readers_reading() {
         let db = migrated_db().await;
         let id = insert_unowned_book(&db, "Dune", "read").await;
-        let owner = create_reader(&db, "Matthieu").await.unwrap();
-        let partner = create_reader(&db, "Claire").await.unwrap();
+        let owner = create_reader(&db, "Bruno").await.unwrap();
+        let partner = create_reader(&db, "Alice").await.unwrap();
 
-        // Claire (current, no reading of her own) wishes for it.
+        // Alice (current, no reading of her own) wishes for it.
         set_status(&db, &id, "wanting").await;
         assert_eq!(status_seen(&db, &id).await, "wanting");
 
-        // Matthieu read it: his reading shows, the wish does not replace it.
+        // Bruno read it: his reading shows, the wish does not replace it.
         set_current_reader(&db, &owner.id).await.unwrap();
         assert_eq!(status_seen(&db, &id).await, "read");
 
-        // Matthieu moving his own reading leaves the household's wish alone.
+        // Bruno moving his own reading leaves the household's wish alone.
         set_status(&db, &id, "reading").await;
         assert_eq!(status_seen(&db, &id).await, "reading");
         assert_eq!(stored_status(&db, &id).await, "wanting");
@@ -733,7 +779,7 @@ mod tests {
     async fn wishing_replaces_the_readers_own_status() {
         let db = migrated_db().await;
         let id = insert_book(&db, "Dune", "to_read").await;
-        let owner = create_reader(&db, "Matthieu").await.unwrap();
+        let owner = create_reader(&db, "Bruno").await.unwrap();
 
         // The status picker holds one value: choosing the wish gives up the
         // reader's own status, or the choice would not show.
@@ -752,7 +798,7 @@ mod tests {
 
         // A reader with a reading of their own files the book under that
         // reading, not under the wishlist.
-        let partner = create_reader(&db, "Claire").await.unwrap();
+        let partner = create_reader(&db, "Alice").await.unwrap();
         set_current_reader(&db, &owner.id).await.unwrap();
         set_status(&db, &id, "reading").await;
         set_current_reader(&db, &partner.id).await.unwrap();
@@ -778,8 +824,8 @@ mod tests {
     async fn the_status_filter_follows_the_current_reader() {
         let db = migrated_db().await;
         let id = insert_book(&db, "Dune", "read").await;
-        create_reader(&db, "Matthieu").await.unwrap();
-        create_reader(&db, "Claire").await.unwrap();
+        create_reader(&db, "Bruno").await.unwrap();
+        create_reader(&db, "Alice").await.unwrap();
 
         let read_filter = || crate::services::book_service::BookFilter {
             status: Some("read".to_owned()),
@@ -788,7 +834,7 @@ mod tests {
         let read = crate::services::book_service::list_books(&db, read_filter())
             .await
             .unwrap();
-        assert!(read.is_empty(), "Claire has not read it");
+        assert!(read.is_empty(), "Alice has not read it");
 
         let owner = list_readers(&db).await.unwrap().remove(0);
         set_current_reader(&db, &owner.id).await.unwrap();
@@ -802,13 +848,139 @@ mod tests {
     async fn deleting_a_book_deletes_every_readers_state() {
         let db = migrated_db().await;
         let id = insert_book(&db, "Dune", "read").await;
-        create_reader(&db, "Matthieu").await.unwrap();
+        create_reader(&db, "Bruno").await.unwrap();
 
         crate::services::book_service::delete_book(&db, &id)
             .await
             .unwrap();
         let view = current_view(&db, None).await.unwrap().unwrap();
         assert!(view.readings.is_empty());
+    }
+
+    /// Bruno (first reader) has read "Dune" in 2026; Alice has not. Leaves
+    /// Alice as the reader of the device.
+    async fn one_reader_has_read_dune(db: &DatabaseConnection) -> (String, Reader, Reader) {
+        let id = insert_book(db, "Dune", "to_read").await;
+        let owner = create_reader(db, "Bruno").await.unwrap();
+        let mut book = crate::services::book_service::get_book(db, &id)
+            .await
+            .unwrap();
+        book.reading_status = Some("read".to_owned());
+        book.finished_reading_at = Some(Some("2026-09-01".to_owned()));
+        book.user_rating = Some(9);
+        crate::services::book_service::update_book(db, &id, book)
+            .await
+            .unwrap();
+        let partner = create_reader(db, "Alice").await.unwrap();
+        (id, owner, partner)
+    }
+
+    #[tokio::test]
+    async fn the_reading_counters_follow_the_current_reader() {
+        use crate::domain::GamificationRepository;
+        use crate::infrastructure::repositories::SeaOrmGamificationRepository;
+
+        let db = migrated_db().await;
+        let (_, owner, _) = one_reader_has_read_dune(&db).await;
+        let repo = SeaOrmGamificationRepository::new(db.clone());
+
+        assert_eq!(repo.count_books_read().await.unwrap(), 0);
+        assert_eq!(repo.count_books_read_in_year("2026").await.unwrap(), 0);
+        // The library itself is shared.
+        assert_eq!(repo.count_books().await.unwrap(), 1);
+
+        set_current_reader(&db, &owner.id).await.unwrap();
+        assert_eq!(repo.count_books_read().await.unwrap(), 1);
+        assert_eq!(repo.count_books_read_in_year("2026").await.unwrap(), 1);
+        assert_eq!(repo.count_books_read_in_year("2025").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_collection_shows_the_current_readers_status() {
+        use crate::domain::{CollectionRepository, CreateCollectionInput};
+        use crate::infrastructure::repositories::SeaOrmCollectionRepository;
+
+        let db = migrated_db().await;
+        let (id, owner, _) = one_reader_has_read_dune(&db).await;
+        let repo = SeaOrmCollectionRepository::new(db.clone());
+        let collection = repo
+            .create(CreateCollectionInput {
+                name: "Cycle".to_owned(),
+                description: None,
+                source: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        repo.add_book(&collection, &id).await.unwrap();
+
+        let books = repo.get_books(&collection).await.unwrap();
+        assert_eq!(books[0].reading_status.as_deref(), Some(""));
+
+        set_current_reader(&db, &owner.id).await.unwrap();
+        let books = repo.get_books(&collection).await.unwrap();
+        assert_eq!(books[0].reading_status.as_deref(), Some("read"));
+    }
+
+    #[tokio::test]
+    async fn the_recommendations_score_the_current_readers_readings() {
+        let db = migrated_db().await;
+        let (_, owner, _) = one_reader_has_read_dune(&db).await;
+
+        let rows = crate::services::recommendation_service::load_scoring_books(&db)
+            .await
+            .unwrap();
+        assert_eq!(rows[0].raw_status, "");
+        assert_eq!(rows[0].book.user_rating, None);
+
+        set_current_reader(&db, &owner.id).await.unwrap();
+        let rows = crate::services::recommendation_service::load_scoring_books(&db)
+            .await
+            .unwrap();
+        assert_eq!(rows[0].raw_status, "read");
+        assert_eq!(rows[0].book.user_rating, Some(9));
+    }
+
+    #[tokio::test]
+    async fn the_repository_write_path_records_the_current_readers_reading() {
+        use crate::domain::BookRepository;
+        use crate::infrastructure::repositories::SeaOrmBookRepository;
+
+        let db = migrated_db().await;
+        let id = insert_unowned_book(&db, "Dune", "reading").await;
+        let owner = create_reader(&db, "Bruno").await.unwrap();
+        let partner = create_reader(&db, "Alice").await.unwrap();
+        set_status(&db, &id, "wanting").await;
+        let repo = SeaOrmBookRepository::new(db.clone());
+
+        // Bruno finishes it through the repository (the HTTP write path):
+        // his reading is recorded, the returned book shows it, and the wish
+        // stays on the book row.
+        set_current_reader(&db, &owner.id).await.unwrap();
+        let mut book = repo.find_by_id(&id).await.unwrap().unwrap();
+        assert_eq!(book.reading_status.as_deref(), Some("reading"));
+        book.reading_status = Some("read".to_owned());
+        let updated = repo.update(&id, book).await.unwrap();
+        assert_eq!(updated.reading_status.as_deref(), Some("read"));
+        assert_eq!(status_seen(&db, &id).await, "read");
+        assert_eq!(stored_status(&db, &id).await, "wanting");
+        set_current_reader(&db, &partner.id).await.unwrap();
+        assert_eq!(status_seen(&db, &id).await, "wanting");
+
+        // A book created through the repository starts with the creator's
+        // reading, and blank for the other reader.
+        let created = repo
+            .create(Book {
+                title: "Hyperion".to_owned(),
+                reading_status: Some("read".to_owned()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let created_id = created.id.unwrap();
+        assert_eq!(status_seen(&db, &created_id).await, "read");
+        set_current_reader(&db, &owner.id).await.unwrap();
+        assert_eq!(status_seen(&db, &created_id).await, "");
     }
 
     #[tokio::test]
@@ -827,7 +999,7 @@ mod tests {
 
         assert!(rename_reader(&db, &reader.id, &too_long).await.is_err());
         assert_eq!(list_readers(&db).await.unwrap()[0].name, longest);
-        rename_reader(&db, &reader.id, "Claire").await.unwrap();
-        assert_eq!(list_readers(&db).await.unwrap()[0].name, "Claire");
+        rename_reader(&db, &reader.id, "Alice").await.unwrap();
+        assert_eq!(list_readers(&db).await.unwrap()[0].name, "Alice");
     }
 }

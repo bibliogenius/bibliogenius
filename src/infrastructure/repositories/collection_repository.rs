@@ -227,6 +227,12 @@ impl CollectionRepository for SeaOrmCollectionRepository {
 
         let authors_by_book = group_author_names(&author_links, &author_names);
 
+        // The status shown is the current household reader's, when this
+        // device has one (see `infrastructure::household`). Loaded whole, not
+        // for `ids`: a large collection would bind them all in one `IN` list,
+        // past the variable ceiling the chunks above stay under.
+        let reader_view = crate::infrastructure::household::current_view(&self.db, None).await?;
+
         let mut result = Vec::new();
         for cb in collection_books {
             // Both `isbn` and `author` feed the shared-list export, where an
@@ -234,6 +240,13 @@ impl CollectionRepository for SeaOrmCollectionRepository {
             // without them a shared list is empty or names its books after
             // nobody.
             if let Some(book) = books_by_id.remove(&cb.book_id) {
+                let reading_status = match &reader_view {
+                    Some(view) => {
+                        view.reading_of(&book.id, &book.reading_status)
+                            .reading_status
+                    }
+                    None => book.reading_status,
+                };
                 result.push(CollectionBook {
                     author: authors_by_book.get(&book.id).cloned(),
                     book_id: book.id,
@@ -247,7 +260,7 @@ impl CollectionRepository for SeaOrmCollectionRepository {
                     digital_formats: book
                         .digital_formats
                         .and_then(|s| serde_json::from_str(&s).ok()),
-                    reading_status: Some(book.reading_status),
+                    reading_status: Some(reading_status),
                     volume_number: cb.volume_number,
                 });
             }

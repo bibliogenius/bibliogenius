@@ -3,10 +3,11 @@
 use async_trait::async_trait;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, Set,
+    QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 
 use crate::domain::{BookFilter, BookRepository, DomainError, PaginatedBooks};
+use crate::infrastructure::household;
 use crate::models::Book;
 use crate::models::book::{ActiveModel, Column, Entity as BookEntity};
 
@@ -230,6 +231,10 @@ impl BookRepository for SeaOrmBookRepository {
             .clone()
             .unwrap_or_else(|| "to_read".to_string());
         let owned = book.owned.unwrap_or_else(|| reading_status != "wanting");
+        let reading_change = household::ReadingChange {
+            reading_status: Some(reading_status.clone()),
+            ..household::ReadingChange::from_book(&book)
+        };
 
         let new_book = ActiveModel {
             title: Set(book.title.clone()),
@@ -258,8 +263,15 @@ impl BookRepository for SeaOrmBookRepository {
             ..Default::default()
         };
 
-        let result = new_book.insert(&self.db).await?;
-        Ok(Book::from(result))
+        // The creator's own reading, when this device has a household reader.
+        let txn = self.db.begin().await?;
+        let result = new_book.insert(&txn).await?;
+        household::record(&txn, &result.id, reading_change).await?;
+        txn.commit().await?;
+
+        let mut created = Book::from(result);
+        household::overlay(&self.db, std::slice::from_mut(&mut created)).await;
+        Ok(created)
     }
 
     async fn update(&self, id: &str, book: Book) -> Result<Book, DomainError> {
@@ -280,6 +292,28 @@ impl BookRepository for SeaOrmBookRepository {
             .as_ref()
             .map(|s| serde_json::to_string(s).unwrap_or_else(|_| "[]".to_string()));
 
+        let reading_status = book
+            .reading_status
+            .clone()
+            .unwrap_or_else(|| "to_read".to_string());
+        let owned = book.owned.unwrap_or(true);
+        // This path replaces every reading field, so the reader's reading is
+        // replaced whole too.
+        let reading_change = household::ReadingChange {
+            reading_status: Some(reading_status.clone()),
+            started_reading_at: Some(book.started_reading_at.clone().flatten()),
+            finished_reading_at: Some(book.finished_reading_at.clone().flatten()),
+            user_rating: Some(book.user_rating),
+        };
+        let keeps_wish = household::keeps_wish(
+            &self.db,
+            id,
+            &existing.reading_status,
+            &reading_status,
+            owned,
+        )
+        .await?;
+
         let mut active: ActiveModel = existing.into();
         active.title = Set(book.title);
         active.isbn = Set(normalize_isbn(book.isbn));
@@ -292,10 +326,12 @@ impl BookRepository for SeaOrmBookRepository {
         active.subjects = Set(subjects_json);
         active.marc_record = Set(book.marc_record);
         active.cataloguing_notes = Set(book.cataloguing_notes);
-        active.reading_status = Set(book.reading_status.unwrap_or_else(|| "to_read".to_string()));
+        if !keeps_wish {
+            active.reading_status = Set(reading_status);
+        }
         active.shelf_position = Set(book.shelf_position);
         active.user_rating = Set(book.user_rating);
-        active.owned = Set(book.owned.unwrap_or(true));
+        active.owned = Set(owned);
         active.price = Set(book.price);
         active.digital_formats = Set(digital_formats_json);
         active.finished_reading_at = Set(book.finished_reading_at.flatten());
@@ -303,8 +339,14 @@ impl BookRepository for SeaOrmBookRepository {
         active.private = Set(book.private.unwrap_or(false));
         active.updated_at = Set(now.to_rfc3339());
 
-        let result = active.update(&self.db).await?;
-        Ok(Book::from(result))
+        let txn = self.db.begin().await?;
+        let result = active.update(&txn).await?;
+        household::record(&txn, id, reading_change).await?;
+        txn.commit().await?;
+
+        let mut updated = Book::from(result);
+        household::overlay(&self.db, std::slice::from_mut(&mut updated)).await;
+        Ok(updated)
     }
 
     async fn delete(&self, id: &str) -> Result<(), DomainError> {

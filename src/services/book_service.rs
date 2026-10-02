@@ -537,13 +537,14 @@ pub async fn update_book(
     book.publication_year = Set(book_data.publication_year);
     if let Some(status) = book_data.reading_status {
         validate_reading_status(&status)?;
-        // A household reader moving their own reading leaves the shared wish
-        // on the book row (see `household::keeps_wish`). An owned book is no
-        // longer wished for, whoever records the acquisition.
-        let keeps_wish = previous_reading_status == "wanting"
-            && status != "wanting"
-            && !owned_after
-            && crate::infrastructure::household::keeps_wish(db, id).await?;
+        let keeps_wish = crate::infrastructure::household::keeps_wish(
+            db,
+            id,
+            &previous_reading_status,
+            &status,
+            owned_after,
+        )
+        .await?;
         if !keeps_wish {
             book.reading_status = Set(status);
         }
@@ -574,8 +575,12 @@ pub async fn update_book(
 
     book.updated_at = Set(now.to_rfc3339());
 
-    let model = book.update(db).await?;
-    crate::infrastructure::household::record(db, id, reading_change).await?;
+    // One transaction: a book row updated without the reader's reading would
+    // show the reader a status they never set.
+    let txn = db.begin().await?;
+    let model = book.update(&txn).await?;
+    crate::infrastructure::household::record(&txn, id, reading_change).await?;
+    txn.commit().await?;
 
     let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
 
@@ -797,17 +802,23 @@ pub async fn record_read_book(
     // A targeted update, not `update_book`: the caller holds the OTHER library's
     // metadata for this book, and passing it through the full update would
     // overwrite the reader's own title, cover, rating and price with it.
-    let keeps_wish = model.reading_status == "wanting"
-        && !model.owned
-        && crate::infrastructure::household::keeps_wish(db, &model.id).await?;
+    let keeps_wish = crate::infrastructure::household::keeps_wish(
+        db,
+        &model.id,
+        &model.reading_status,
+        READ,
+        model.owned,
+    )
+    .await?;
     let mut active: BookActiveModel = model.into();
     if !keeps_wish {
         active.reading_status = Set(READ.to_owned());
     }
     active.updated_at = Set(chrono::Utc::now().to_rfc3339());
-    let updated = active.update(db).await?;
+    let txn = db.begin().await?;
+    let updated = active.update(&txn).await?;
     crate::infrastructure::household::record(
-        db,
+        &txn,
         &updated.id,
         crate::infrastructure::household::ReadingChange {
             reading_status: Some(READ.to_owned()),
@@ -815,6 +826,7 @@ pub async fn record_read_book(
         },
     )
     .await?;
+    txn.commit().await?;
 
     let _ = crate::sync::log_operation(db, "book", &updated.id, "UPDATE", None).await;
 
