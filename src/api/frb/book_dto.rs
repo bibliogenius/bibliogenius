@@ -53,6 +53,9 @@ pub struct FrbBook {
     /// shared wish. `None` everywhere else, where the `wanting` status itself
     /// says it.
     pub wanted: Option<bool>,
+    /// Names of the readers who put the book on the wishlist, when the device
+    /// has a reader and the book is wished for. See the Book DTO.
+    pub wished_by: Option<Vec<String>>,
 }
 
 /// Convert domain Book to FFI-safe FrbBook
@@ -88,6 +91,7 @@ impl From<crate::models::Book> for FrbBook {
             is_borrowed: book.is_borrowed,
             is_lent: book.is_lent,
             wanted: book.wanted,
+            wished_by: book.wished_by,
         }
     }
 }

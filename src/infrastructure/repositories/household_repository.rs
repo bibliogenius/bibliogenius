@@ -216,6 +216,53 @@ impl<C: ConnectionTrait> HouseholdRepository for SeaOrmHouseholdRepository<'_, C
             .await?)
     }
 
+    async fn wishers_of(
+        &self,
+        book_ids: Option<&[String]>,
+    ) -> Result<HashMap<String, Vec<String>>, DomainError> {
+        let mut sql = "SELECT br.book_uuid, r.name FROM book_readings br \
+                       JOIN readers r ON r.id = br.reader_id \
+                       WHERE br.reading_status = 'wanting'"
+            .to_owned();
+        let mut values: Vec<sea_orm::Value> = Vec::new();
+        if let Some(ids) = book_ids {
+            if ids.is_empty() {
+                return Ok(HashMap::new());
+            }
+            sql.push_str(&format!(
+                " AND br.book_uuid IN ({})",
+                vec!["?"; ids.len()].join(", ")
+            ));
+            values.extend(ids.iter().map(|id| id.clone().into()));
+        }
+        sql.push_str(" ORDER BY r.created_at, r.id");
+        let rows = self
+            .db
+            .query_all(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                &sql,
+                values,
+            ))
+            .await?;
+        let mut wishers: HashMap<String, Vec<String>> = HashMap::new();
+        for row in &rows {
+            let book_uuid: String = row.try_get("", "book_uuid")?;
+            let name: String = row.try_get("", "name")?;
+            wishers.entry(book_uuid).or_default().push(name);
+        }
+        Ok(wishers)
+    }
+
+    async fn clear_wish_claims(&self, book_uuid: &str) -> Result<(), DomainError> {
+        Ok(self
+            .execute(
+                "UPDATE book_readings SET reading_status = '', updated_at = ? \
+                 WHERE book_uuid = ? AND reading_status = 'wanting'",
+                vec![now().into(), book_uuid.into()],
+            )
+            .await?)
+    }
+
     async fn count_read(&self, reader_id: &str, year: Option<&str>) -> Result<i64, DomainError> {
         let (condition, value) = match year {
             Some(year) => ("finished_reading_at LIKE ?", format!("{year}%")),
@@ -247,9 +294,10 @@ impl<C: ConnectionTrait> HouseholdRepository for SeaOrmHouseholdRepository<'_, C
 pub fn status_condition(reader_id: &str, status: &str) -> sea_orm::sea_query::SimpleExpr {
     use sea_orm::sea_query::Expr;
 
+    // A `wanting` row only names a wisher: it is no reading of their own.
     const NO_OWN_STATUS: &str = "books.uuid NOT IN \
          (SELECT book_uuid FROM book_readings \
-          WHERE reader_id = ? AND reading_status != '')";
+          WHERE reader_id = ? AND reading_status NOT IN ('', 'wanting'))";
 
     // The wishlist is the household's: every reader finds the wished books
     // there, including the ones they hold a status of their own for.

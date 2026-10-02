@@ -72,6 +72,13 @@ pub struct ReadingChange {
     pub started_reading_at: Option<Option<String>>,
     pub finished_reading_at: Option<Option<String>>,
     pub user_rating: Option<Option<i32>>,
+    /// The change puts the book on the wishlist (the row's status was not
+    /// `wanting` and becomes it): the reader is named as the wisher. An edit
+    /// that merely carries the shown `wanting` along claims nothing.
+    pub wish_claimed: bool,
+    /// The change takes the book off the wishlist: every reader's claim on
+    /// it goes with it, or a later wish would name them again.
+    pub wish_withdrawn: bool,
 }
 
 impl ReadingChange {
@@ -82,18 +89,38 @@ impl ReadingChange {
             started_reading_at: book.started_reading_at.clone(),
             finished_reading_at: book.finished_reading_at.clone(),
             user_rating: Some(book.user_rating),
+            wish_claimed: false,
+            wish_withdrawn: false,
         }
     }
 
+    /// Set the wish flags from what the change does to the book row:
+    /// `stored_status` before, `new_status` after, `keeps_wish` whether the
+    /// row keeps `wanting` regardless (see `HouseholdRepository::keeps_wish`).
+    pub fn with_wish_transition(
+        mut self,
+        stored_status: &str,
+        new_status: &str,
+        keeps_wish: bool,
+    ) -> Self {
+        self.wish_claimed = stored_status != WANTING && new_status == WANTING;
+        self.wish_withdrawn = stored_status == WANTING && new_status != WANTING && !keeps_wish;
+        self
+    }
+
     fn apply_to(self, reading: &mut Reading) {
-        // `wanting` is the household's, and lives on the book row only. The
-        // status picker holds one value, so choosing the wish gives up the
-        // reader's own status: kept, it would show in place of the wish.
+        // The status picker holds one value, so choosing the wish gives up
+        // the reader's own status: kept, it would show in place of the wish.
+        // The reader's row then says `wanting` when they made the wish (so
+        // the household knows who wants the book) and nothing otherwise; the
+        // wish itself lives on the book row.
         if let Some(status) = self.reading_status {
-            reading.reading_status = if status == WANTING {
-                String::new()
-            } else {
+            reading.reading_status = if status != WANTING {
                 status
+            } else if self.wish_claimed || reading.reading_status == WANTING {
+                WANTING.to_owned()
+            } else {
+                String::new()
             };
         }
         if let Some(started) = self.started_reading_at {
@@ -108,11 +135,19 @@ impl ReadingChange {
     }
 }
 
+/// Whether a reader's row holds a reading of their own. A `wanting` row only
+/// names them as the wisher: the wish itself is the book row's.
+fn is_own_status(status: &str) -> bool {
+    !status.is_empty() && status != WANTING
+}
+
 /// The current reader's state for a set of books, ready to lay over `Book` DTOs.
 #[derive(Debug, Clone)]
 pub struct ReaderView {
     pub reader_id: String,
     readings: HashMap<String, Reading>,
+    /// Names of the readers whose row says `wanting`, by book.
+    wishers: HashMap<String, Vec<String>>,
 }
 
 impl ReaderView {
@@ -125,9 +160,11 @@ impl ReaderView {
             return;
         };
         let stored_status = book.reading_status.take().unwrap_or_default();
-        // The wish stays readable when the reader's own status takes its place.
+        // The wish stays readable when the reader's own status takes its
+        // place, and says who made it when the rows know.
         if stored_status == WANTING {
             book.wanted = Some(true);
+            book.wished_by = self.wishers.get(id).filter(|w| !w.is_empty()).cloned();
         }
         let reading = self.reading_of(id, &stored_status);
         book.reading_status = Some(reading.reading_status);
@@ -140,8 +177,14 @@ impl ReaderView {
     /// its row. For the read paths that do not go through a `Book` DTO.
     pub fn reading_of(&self, book_uuid: &str, stored_status: &str) -> Reading {
         let mut reading = self.readings.get(book_uuid).cloned().unwrap_or_default();
-        if reading.reading_status.is_empty() && stored_status == WANTING {
-            reading.reading_status = WANTING.to_owned();
+        if !is_own_status(&reading.reading_status) {
+            // No reading of their own: the household's wish shows, or nothing.
+            // A `wanting` row left behind by a wish since withdrawn says nothing.
+            reading.reading_status = if stored_status == WANTING {
+                WANTING.to_owned()
+            } else {
+                String::new()
+            };
         }
         reading
     }
@@ -217,6 +260,17 @@ pub trait HouseholdRepository: Send + Sync {
     /// year. Readings of a book this device no longer holds are left out.
     async fn count_read(&self, reader_id: &str, year: Option<&str>) -> Result<i64, DomainError>;
 
+    /// Forget who wished for `book_uuid`: every `wanting` row of the book
+    /// goes back to no status.
+    async fn clear_wish_claims(&self, book_uuid: &str) -> Result<(), DomainError>;
+
+    /// Names of the readers whose row says `wanting`, by book, oldest reader
+    /// first, for `book_ids` or for every book when `None`.
+    async fn wishers_of(
+        &self,
+        book_ids: Option<&[String]>,
+    ) -> Result<HashMap<String, Vec<String>>, DomainError>;
+
     // ── Rules ────────────────────────────────────────────────────────────
 
     /// The current reader, resolved against the readers. A reader deleted on
@@ -276,9 +330,11 @@ pub trait HouseholdRepository: Send + Sync {
             return Ok(None);
         };
         let readings = self.readings_of(&reader_id, book_ids).await?;
+        let wishers = self.wishers_of(book_ids).await?;
         Ok(Some(ReaderView {
             reader_id,
             readings,
+            wishers,
         }))
     }
 
@@ -291,9 +347,13 @@ pub trait HouseholdRepository: Send + Sync {
         Ok(())
     }
 
-    /// Record `change` as the current reader's state for `book_uuid`. A no-op
-    /// on a device with no reader.
+    /// Record `change` as the current reader's state for `book_uuid`. With no
+    /// reader on the device only the withdrawal of the wish, which is the
+    /// household's, leaves a trace.
     async fn record(&self, book_uuid: &str, change: ReadingChange) -> Result<(), DomainError> {
+        if change.wish_withdrawn {
+            self.clear_wish_claims(book_uuid).await?;
+        }
         let Some(reader_id) = self.current_reader().await?.map(|r| r.id) else {
             return Ok(());
         };
@@ -336,7 +396,7 @@ pub trait HouseholdRepository: Send + Sync {
         Ok(view
             .readings
             .get(book_uuid)
-            .is_some_and(|reading| !reading.reading_status.is_empty()))
+            .is_some_and(|reading| is_own_status(&reading.reading_status)))
     }
 
     /// How many books the current reader has read (finished in `year`, when

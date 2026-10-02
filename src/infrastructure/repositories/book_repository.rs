@@ -240,7 +240,8 @@ impl BookRepository for SeaOrmBookRepository {
         let reading_change = crate::domain::ReadingChange {
             reading_status: Some(reading_status.clone()),
             ..crate::domain::ReadingChange::from_book(&book)
-        };
+        }
+        .with_wish_transition("", &reading_status, false);
 
         let new_book = ActiveModel {
             title: Set(book.title.clone()),
@@ -314,10 +315,16 @@ impl BookRepository for SeaOrmBookRepository {
             started_reading_at: Some(book.started_reading_at.clone().flatten()),
             finished_reading_at: Some(book.finished_reading_at.clone().flatten()),
             user_rating: Some(book.user_rating),
+            ..Default::default()
         };
         let keeps_wish = SeaOrmHouseholdRepository::new(&self.db)
             .keeps_wish(id, &existing.reading_status, &reading_status, owned)
             .await?;
+        let reading_change = reading_change.with_wish_transition(
+            &existing.reading_status,
+            &reading_status,
+            keeps_wish,
+        );
 
         let mut active: ActiveModel = existing.into();
         active.title = Set(book.title);

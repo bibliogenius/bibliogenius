@@ -8883,6 +8883,7 @@ impl SseDecode for crate::api::frb::FrbBook {
         let mut var_isBorrowed = <Option<bool>>::sse_decode(deserializer);
         let mut var_isLent = <Option<bool>>::sse_decode(deserializer);
         let mut var_wanted = <Option<bool>>::sse_decode(deserializer);
+        let mut var_wishedBy = <Option<Vec<String>>>::sse_decode(deserializer);
         return crate::api::frb::FrbBook {
             id: var_id,
             title: var_title,
@@ -8911,6 +8912,7 @@ impl SseDecode for crate::api::frb::FrbBook {
             is_borrowed: var_isBorrowed,
             is_lent: var_isLent,
             wanted: var_wanted,
+            wished_by: var_wishedBy,
         };
     }
 }
@@ -12020,6 +12022,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbBook {
             self.is_borrowed.into_into_dart().into_dart(),
             self.is_lent.into_into_dart().into_dart(),
             self.wanted.into_into_dart().into_dart(),
+            self.wished_by.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -13973,6 +13976,7 @@ impl SseEncode for crate::api::frb::FrbBook {
         <Option<bool>>::sse_encode(self.is_borrowed, serializer);
         <Option<bool>>::sse_encode(self.is_lent, serializer);
         <Option<bool>>::sse_encode(self.wanted, serializer);
+        <Option<Vec<String>>>::sse_encode(self.wished_by, serializer);
     }
 }
 

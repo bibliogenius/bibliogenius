@@ -107,6 +107,8 @@ impl From<Model> for super::Book {
             is_borrowed: None,
             is_lent: None,
             wanted: pb.wanted,
+            // Household names never travel with a peer catalog.
+            wished_by: None,
         }
     }
 }

@@ -243,6 +243,12 @@ pub struct Book {
     /// false`, which also covers books the sender merely borrowed.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub wanted: Option<bool>,
+    /// Names of the household readers who put the book on the wishlist, set
+    /// by the reader view when the book is wished for. `None` when the device
+    /// has no reader, when the book is not wished for, or when the wish
+    /// predates the names. Never sent to peers.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub wished_by: Option<Vec<String>>,
 }
 
 /// Read the book's language code out of the raw `source_data` JSON.
@@ -316,6 +322,7 @@ impl From<Model> for Book {
             is_lent: None,
             // Peer-facing only; set by `redact_for_peer`.
             wanted: None,
+            wished_by: None,
         }
     }
 }
@@ -523,6 +530,7 @@ impl Book {
         // book), the rest of the reading state is not. Emitted only when
         // true so non-wanted books keep their payload unchanged.
         self.wanted = self.is_wished().then_some(true);
+        self.wished_by = None;
         self.cataloguing_notes = None;
         self.source_data = None;
         self.shelf_position = None;

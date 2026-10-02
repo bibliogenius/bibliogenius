@@ -370,6 +370,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_wish_names_the_reader_who_made_it() {
+        let db = migrated_db().await;
+        let id = insert_unowned_book(&db, "Dune", "read").await;
+        let owner = create_reader(&db, "Bruno").await.unwrap();
+        let partner = create_reader(&db, "Alice").await.unwrap();
+
+        // Alice wishes for it: the wish carries her name, for everyone.
+        set_status(&db, &id, "wanting").await;
+        let seen = crate::services::book_service::get_book(&db, &id)
+            .await
+            .unwrap();
+        assert_eq!(seen.wished_by.as_deref(), Some(&["Alice".to_owned()][..]));
+        set_current_reader(&db, &owner.id).await.unwrap();
+        let seen = crate::services::book_service::get_book(&db, &id)
+            .await
+            .unwrap();
+        assert_eq!(seen.reading_status.as_deref(), Some("read"));
+        assert_eq!(seen.wished_by.as_deref(), Some(&["Alice".to_owned()][..]));
+
+        // Editing the book does not make Bruno a wisher, nor drop Alice.
+        let mut book = seen.clone();
+        book.title = "Dune (1965)".to_owned();
+        crate::services::book_service::update_book(&db, &id, book)
+            .await
+            .unwrap();
+        set_current_reader(&db, &partner.id).await.unwrap();
+        let mut book = crate::services::book_service::get_book(&db, &id)
+            .await
+            .unwrap();
+        book.title = "Dune".to_owned();
+        let seen = crate::services::book_service::update_book(&db, &id, book)
+            .await
+            .unwrap();
+        assert_eq!(seen.wished_by.as_deref(), Some(&["Alice".to_owned()][..]));
+
+        // The wish gone, nobody is named, and Alice is back to no status.
+        set_current_reader(&db, &owner.id).await.unwrap();
+        crate::services::book_service::remove_wish(&db, &id)
+            .await
+            .unwrap();
+        set_current_reader(&db, &partner.id).await.unwrap();
+        let seen = crate::services::book_service::get_book(&db, &id)
+            .await
+            .unwrap();
+        assert_eq!(seen.wished_by, None);
+        assert_eq!(seen.reading_status.as_deref(), Some(""));
+
+        // Wished for again, by Bruno this time: only he is named. Alice's
+        // old claim went with the wish it belonged to.
+        set_current_reader(&db, &owner.id).await.unwrap();
+        set_status(&db, &id, "wanting").await;
+        let seen = crate::services::book_service::get_book(&db, &id)
+            .await
+            .unwrap();
+        assert_eq!(seen.wished_by.as_deref(), Some(&["Bruno".to_owned()][..]));
+
+        // A wish that predates the names (written on the row with no reader
+        // claiming it) stays anonymous.
+        let old = insert_unowned_book(&db, "Hyperion", "").await;
+        db.execute(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "UPDATE books SET reading_status = 'wanting' WHERE uuid = ?",
+            [old.clone().into()],
+        ))
+        .await
+        .unwrap();
+        let seen = crate::services::book_service::get_book(&db, &old)
+            .await
+            .unwrap();
+        assert_eq!(seen.reading_status.as_deref(), Some("wanting"));
+        assert_eq!(seen.wished_by, None);
+    }
+
+    #[tokio::test]
+    async fn a_wisher_moving_on_takes_the_book_off_the_wishlist() {
+        let db = migrated_db().await;
+        let id = insert_unowned_book(&db, "Dune", "").await;
+        let owner = create_reader(&db, "Bruno").await.unwrap();
+        let partner = create_reader(&db, "Alice").await.unwrap();
+        set_status(&db, &id, "wanting").await;
+        assert_eq!(stored_status(&db, &id).await, "wanting");
+
+        // Bruno, shown the wish (he has no reading of his own), replaces it:
+        // the book leaves the wishlist, and the wish filter and the
+        // empty-status filter agree.
+        set_current_reader(&db, &owner.id).await.unwrap();
+        set_status(&db, &id, "reading").await;
+        assert_eq!(stored_status(&db, &id).await, "reading");
+
+        // Alice's claim went with the wish she made: wished for again by
+        // Bruno, the book names him alone.
+        set_status(&db, &id, "wanting").await;
+        let seen = crate::services::book_service::get_book(&db, &id)
+            .await
+            .unwrap();
+        assert_eq!(seen.wished_by.as_deref(), Some(&["Bruno".to_owned()][..]));
+        set_current_reader(&db, &partner.id).await.unwrap();
+        set_status(&db, &id, "to_read").await;
+        set_current_reader(&db, &owner.id).await.unwrap();
+        set_status(&db, &id, "reading").await;
+        let reading = crate::services::book_service::list_books(
+            &db,
+            crate::services::book_service::BookFilter {
+                status: Some("reading".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reading.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn peers_never_learn_who_wished() {
+        let db = migrated_db().await;
+        let id = insert_unowned_book(&db, "Dune", "").await;
+        create_reader(&db, "Bruno").await.unwrap();
+        set_status(&db, &id, "wanting").await;
+
+        let mut book = crate::services::book_service::get_book(&db, &id)
+            .await
+            .unwrap();
+        assert!(book.wished_by.is_some());
+        book.redact_for_peer();
+        assert_eq!(book.wanted, Some(true));
+        assert_eq!(book.wished_by, None);
+    }
+
+    #[tokio::test]
     async fn peers_still_see_the_wish_from_a_reader_with_a_status() {
         let db = migrated_db().await;
         let id = insert_unowned_book(&db, "Dune", "read").await;
@@ -415,7 +544,7 @@ mod tests {
         let mut change = current.clone();
         change.reading_status = Some("wanting".to_owned());
         let updated = repo.update(&id, change).await.unwrap();
-        assert!(!(updated.is_wished() && !current.is_wished()));
+        assert!(!updated.is_wished() || current.is_wished());
 
         // A first wish on another book: the transition is seen.
         let fresh = insert_unowned_book(&db, "Hyperion", "to_read").await;

@@ -384,7 +384,8 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
     let reading_change = crate::domain::ReadingChange {
         reading_status: Some(reading_status.clone()),
         ..crate::domain::ReadingChange::from_book(&book)
-    };
+    }
+    .with_wish_transition("", &reading_status, false);
 
     let subjects_json = book
         .subjects
@@ -553,7 +554,7 @@ pub async fn update_book(
 
     let previous_reading_status = book_model.reading_status.clone();
     let owned_after = book_data.owned.unwrap_or(book_model.owned);
-    let reading_change = crate::domain::ReadingChange::from_book(&book_data);
+    let mut reading_change = crate::domain::ReadingChange::from_book(&book_data);
     let mut book: BookActiveModel = book_model.into();
 
     book.title = Set(book_data.title);
@@ -566,6 +567,8 @@ pub async fn update_book(
         let keeps_wish = SeaOrmHouseholdRepository::new(db)
             .keeps_wish(id, &previous_reading_status, &status, owned_after)
             .await?;
+        reading_change =
+            reading_change.with_wish_transition(&previous_reading_status, &status, keeps_wish);
         if !keeps_wish {
             book.reading_status = Set(status);
         }
@@ -832,6 +835,11 @@ pub async fn record_read_book(
     let keeps_wish = SeaOrmHouseholdRepository::new(db)
         .keeps_wish(&model.id, &model.reading_status, READ, model.owned)
         .await?;
+    let reading_change = crate::domain::ReadingChange {
+        reading_status: Some(READ.to_owned()),
+        ..Default::default()
+    }
+    .with_wish_transition(&model.reading_status, READ, keeps_wish);
     let mut active: BookActiveModel = model.into();
     if !keeps_wish {
         active.reading_status = Set(READ.to_owned());
@@ -840,13 +848,7 @@ pub async fn record_read_book(
     let txn = db.begin().await?;
     let updated = active.update(&txn).await?;
     SeaOrmHouseholdRepository::new(&txn)
-        .record(
-            &updated.id,
-            crate::domain::ReadingChange {
-                reading_status: Some(READ.to_owned()),
-                ..Default::default()
-            },
-        )
+        .record(&updated.id, reading_change)
         .await?;
     txn.commit().await?;
 
@@ -877,7 +879,12 @@ pub async fn remove_wish(db: &DatabaseConnection, id: &str) -> Result<Book, Serv
         let mut active: BookActiveModel = model.into();
         active.reading_status = Set(String::new());
         active.updated_at = Set(chrono::Utc::now().to_rfc3339());
-        active.update(db).await?;
+        let txn = db.begin().await?;
+        active.update(&txn).await?;
+        SeaOrmHouseholdRepository::new(&txn)
+            .clear_wish_claims(id)
+            .await?;
+        txn.commit().await?;
         let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
     }
     get_book(db, id).await
