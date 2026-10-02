@@ -3360,13 +3360,13 @@ mod tests {
     }
 
     // Two people, one library: the book replicates, each keeps their own reading
-    // state (`infrastructure::household`), on the real cr-sqlite engine.
+    // state (`domain::household`), on the real cr-sqlite engine.
     #[cfg(feature = "crsqlite")]
     #[tokio::test(flavor = "multi_thread")]
     async fn real_crsqlite_household_readers_keep_their_own_reading() {
-        use crate::infrastructure::household;
         use crate::services::book_service;
         use crate::services::crsqlite_engine::CrSqliteMergeEngine;
+        use crate::services::household_service as household;
 
         let bundle = Arc::new(AccountKeyBundle::generate());
         let hub = Arc::new(MemHub::default());

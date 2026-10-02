@@ -1,5 +1,5 @@
 // Household readers: one shared library, one reading state per person.
-// Everything delegates to infrastructure::household.
+// Everything delegates to services::household_service.
 // Included by api/frb.rs (include!, not a module): items must stay in
 // crate::api::frb so the generated bindings keep their names, and file order
 // mirrors the include! order because the generated Dart facade follows
@@ -13,8 +13,8 @@ pub struct FrbReader {
     pub name: String,
 }
 
-impl From<crate::infrastructure::household::Reader> for FrbReader {
-    fn from(reader: crate::infrastructure::household::Reader) -> Self {
+impl From<crate::domain::Reader> for FrbReader {
+    fn from(reader: crate::domain::Reader) -> Self {
         Self {
             id: reader.id,
             name: reader.name,
@@ -25,7 +25,7 @@ impl From<crate::infrastructure::household::Reader> for FrbReader {
 /// Every reader of the household, oldest first. Empty until someone opts in.
 pub async fn list_household_readers() -> Result<Vec<FrbReader>, String> {
     let db = db().ok_or("Database not initialized")?;
-    crate::infrastructure::household::list_readers(db)
+    crate::services::household_service::list_readers(db)
         .await
         .map(|readers| readers.into_iter().map(FrbReader::from).collect())
         .map_err(|e| format!("{e:?}"))
@@ -35,7 +35,7 @@ pub async fn list_household_readers() -> Result<Vec<FrbReader>, String> {
 /// exactly as before households existed.
 pub async fn get_current_household_reader() -> Result<Option<FrbReader>, String> {
     let db = db().ok_or("Database not initialized")?;
-    crate::infrastructure::household::current_reader(db)
+    crate::services::household_service::current_reader(db)
         .await
         .map(|reader| reader.map(FrbReader::from))
         .map_err(|e| format!("{e:?}"))
@@ -45,7 +45,7 @@ pub async fn get_current_household_reader() -> Result<Option<FrbReader>, String>
 /// first reader of a household inherits the reading state already on the books.
 pub async fn create_household_reader(name: String) -> Result<FrbReader, String> {
     let db = db().ok_or("Database not initialized")?;
-    crate::infrastructure::household::create_reader(db, &name)
+    crate::services::household_service::create_reader(db, &name)
         .await
         .map(FrbReader::from)
         .map_err(|e| format!("{e:?}"))
@@ -54,7 +54,7 @@ pub async fn create_household_reader(name: String) -> Result<FrbReader, String> 
 /// Make an existing reader the reader of this device.
 pub async fn set_current_household_reader(reader_id: String) -> Result<(), String> {
     let db = db().ok_or("Database not initialized")?;
-    crate::infrastructure::household::set_current_reader(db, &reader_id)
+    crate::services::household_service::set_current_reader(db, &reader_id)
         .await
         .map_err(|e| format!("{e:?}"))
 }
@@ -63,14 +63,14 @@ pub async fn set_current_household_reader(reader_id: String) -> Result<(), Strin
 /// readings are kept.
 pub async fn clear_current_household_reader() -> Result<(), String> {
     let db = db().ok_or("Database not initialized")?;
-    crate::infrastructure::household::clear_current_reader(db)
+    crate::services::household_service::clear_current_reader(db)
         .await
         .map_err(|e| format!("{e:?}"))
 }
 
 pub async fn rename_household_reader(reader_id: String, name: String) -> Result<(), String> {
     let db = db().ok_or("Database not initialized")?;
-    crate::infrastructure::household::rename_reader(db, &reader_id, &name)
+    crate::services::household_service::rename_reader(db, &reader_id, &name)
         .await
         .map_err(|e| format!("{e:?}"))
 }

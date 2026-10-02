@@ -7,9 +7,11 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+use crate::domain::HouseholdRepository;
 use crate::domain::{
     Collection, CollectionBook, CollectionRepository, CreateCollectionInput, DomainError,
 };
+use crate::infrastructure::repositories::SeaOrmHouseholdRepository;
 use std::collections::HashMap;
 
 use crate::models::book::{self, Entity as BookEntity};
@@ -228,10 +230,12 @@ impl CollectionRepository for SeaOrmCollectionRepository {
         let authors_by_book = group_author_names(&author_links, &author_names);
 
         // The status shown is the current household reader's, when this
-        // device has one (see `infrastructure::household`). Loaded whole, not
+        // device has one (see `domain::household`). Loaded whole, not
         // for `ids`: a large collection would bind them all in one `IN` list,
         // past the variable ceiling the chunks above stay under.
-        let reader_view = crate::infrastructure::household::current_view(&self.db, None).await?;
+        let reader_view = SeaOrmHouseholdRepository::new(&self.db)
+            .current_view(None)
+            .await?;
 
         let mut result = Vec::new();
         for cb in collection_books {

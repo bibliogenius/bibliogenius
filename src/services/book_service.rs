@@ -10,6 +10,8 @@ use sea_orm::{
 };
 use std::collections::HashMap;
 
+use crate::domain::HouseholdRepository;
+use crate::infrastructure::repositories::SeaOrmHouseholdRepository;
 use crate::models::Book;
 use crate::models::book::{ActiveModel as BookActiveModel, Entity as BookEntity};
 
@@ -87,6 +89,18 @@ impl From<sea_orm::DbErr> for ServiceError {
     }
 }
 
+impl From<crate::domain::DomainError> for ServiceError {
+    fn from(e: crate::domain::DomainError) -> Self {
+        use crate::domain::DomainError;
+        match e {
+            DomainError::NotFound => ServiceError::NotFound,
+            DomainError::Validation(msg) => ServiceError::InvalidInput(msg),
+            DomainError::Database(msg) => ServiceError::Database(msg),
+            other => ServiceError::Database(other.to_string()),
+        }
+    }
+}
+
 /// Populate `Book.available_copies` from the `copies` table for a batch of
 /// books. Must run before serving any `/api/books*` response so peers can
 /// tell which books are actually borrowable — without it, the iPhone-side
@@ -151,18 +165,22 @@ pub async fn list_books(
     let mut query = BookEntity::find();
 
     // The reading state this device shows, when it belongs to a household
-    // reader (see `infrastructure::household`). `None` keeps the book columns.
-    let reader_view = crate::infrastructure::household::current_view(db, None).await?;
+    // reader (see `domain::household`). `None` keeps the book columns.
+    let reader_view = SeaOrmHouseholdRepository::new(db)
+        .current_view(None)
+        .await?;
 
     // Apply DB-level filters
     if let Some(status) = &filter.status
         && !status.is_empty()
     {
         query = match &reader_view {
-            Some(view) => query.filter(crate::infrastructure::household::status_condition(
-                &view.reader_id,
-                status,
-            )),
+            Some(view) => query.filter(
+                crate::infrastructure::repositories::household_repository::status_condition(
+                    &view.reader_id,
+                    status,
+                ),
+            ),
             None => query.filter(crate::models::book::Column::ReadingStatus.eq(status)),
         };
     }
@@ -319,7 +337,9 @@ async fn enrich_book(
     book_model: crate::models::book::Model,
 ) -> Result<Book, ServiceError> {
     let mut book_dto = Book::from(book_model.clone());
-    crate::infrastructure::household::overlay(db, std::slice::from_mut(&mut book_dto)).await;
+    SeaOrmHouseholdRepository::new(db)
+        .overlay_or_stored(std::slice::from_mut(&mut book_dto))
+        .await;
 
     // The hub-cover-upload retry flag is device-local: it lives in `book_local`,
     // not on the `books` CRR (ADR-044). Populate it for the owner's badge;
@@ -359,9 +379,9 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         .clone()
         .unwrap_or_else(|| "to_read".to_string());
     validate_reading_status(&reading_status)?;
-    let reading_change = crate::infrastructure::household::ReadingChange {
+    let reading_change = crate::domain::ReadingChange {
         reading_status: Some(reading_status.clone()),
-        ..crate::infrastructure::household::ReadingChange::from_book(&book)
+        ..crate::domain::ReadingChange::from_book(&book)
     };
 
     let subjects_json = book
@@ -415,7 +435,9 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
     }
 
     // The creator's own reading state, when this device has a household reader.
-    crate::infrastructure::household::record(db, &model.id, reading_change).await?;
+    SeaOrmHouseholdRepository::new(db)
+        .record(&model.id, reading_change)
+        .await?;
 
     // Log sync operation (minimal payload, no sensitive data)
     let _ = crate::sync::log_operation(db, "book", &model.id, "INSERT", None).await;
@@ -467,7 +489,9 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
     }
 
     let mut created = Book::from(model);
-    crate::infrastructure::household::overlay(db, std::slice::from_mut(&mut created)).await;
+    SeaOrmHouseholdRepository::new(db)
+        .overlay_or_stored(std::slice::from_mut(&mut created))
+        .await;
     Ok(created)
 }
 
@@ -527,7 +551,7 @@ pub async fn update_book(
 
     let previous_reading_status = book_model.reading_status.clone();
     let owned_after = book_data.owned.unwrap_or(book_model.owned);
-    let reading_change = crate::infrastructure::household::ReadingChange::from_book(&book_data);
+    let reading_change = crate::domain::ReadingChange::from_book(&book_data);
     let mut book: BookActiveModel = book_model.into();
 
     book.title = Set(book_data.title);
@@ -537,14 +561,9 @@ pub async fn update_book(
     book.publication_year = Set(book_data.publication_year);
     if let Some(status) = book_data.reading_status {
         validate_reading_status(&status)?;
-        let keeps_wish = crate::infrastructure::household::keeps_wish(
-            db,
-            id,
-            &previous_reading_status,
-            &status,
-            owned_after,
-        )
-        .await?;
+        let keeps_wish = SeaOrmHouseholdRepository::new(db)
+            .keeps_wish(id, &previous_reading_status, &status, owned_after)
+            .await?;
         if !keeps_wish {
             book.reading_status = Set(status);
         }
@@ -579,7 +598,9 @@ pub async fn update_book(
     // show the reader a status they never set.
     let txn = db.begin().await?;
     let model = book.update(&txn).await?;
-    crate::infrastructure::household::record(&txn, id, reading_change).await?;
+    SeaOrmHouseholdRepository::new(&txn)
+        .record(id, reading_change)
+        .await?;
     txn.commit().await?;
 
     let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
@@ -678,7 +699,9 @@ pub async fn update_book(
     }
 
     let mut updated = Book::from(model);
-    crate::infrastructure::household::overlay(db, std::slice::from_mut(&mut updated)).await;
+    SeaOrmHouseholdRepository::new(db)
+        .overlay_or_stored(std::slice::from_mut(&mut updated))
+        .await;
     Ok(updated)
 }
 
@@ -790,7 +813,9 @@ pub async fn record_read_book(
     // "Already read" is the current household reader's answer when there is one:
     // the other reader having read it says nothing about this one.
     let mut current = Book::from(model.clone());
-    crate::infrastructure::household::overlay(db, std::slice::from_mut(&mut current)).await;
+    SeaOrmHouseholdRepository::new(db)
+        .overlay_or_stored(std::slice::from_mut(&mut current))
+        .await;
     if current.reading_status.as_deref() == Some(READ) {
         return Ok(ReadRecord {
             book: current,
@@ -802,14 +827,9 @@ pub async fn record_read_book(
     // A targeted update, not `update_book`: the caller holds the OTHER library's
     // metadata for this book, and passing it through the full update would
     // overwrite the reader's own title, cover, rating and price with it.
-    let keeps_wish = crate::infrastructure::household::keeps_wish(
-        db,
-        &model.id,
-        &model.reading_status,
-        READ,
-        model.owned,
-    )
-    .await?;
+    let keeps_wish = SeaOrmHouseholdRepository::new(db)
+        .keeps_wish(&model.id, &model.reading_status, READ, model.owned)
+        .await?;
     let mut active: BookActiveModel = model.into();
     if !keeps_wish {
         active.reading_status = Set(READ.to_owned());
@@ -817,21 +837,23 @@ pub async fn record_read_book(
     active.updated_at = Set(chrono::Utc::now().to_rfc3339());
     let txn = db.begin().await?;
     let updated = active.update(&txn).await?;
-    crate::infrastructure::household::record(
-        &txn,
-        &updated.id,
-        crate::infrastructure::household::ReadingChange {
-            reading_status: Some(READ.to_owned()),
-            ..Default::default()
-        },
-    )
-    .await?;
+    SeaOrmHouseholdRepository::new(&txn)
+        .record(
+            &updated.id,
+            crate::domain::ReadingChange {
+                reading_status: Some(READ.to_owned()),
+                ..Default::default()
+            },
+        )
+        .await?;
     txn.commit().await?;
 
     let _ = crate::sync::log_operation(db, "book", &updated.id, "UPDATE", None).await;
 
     let mut book = Book::from(updated);
-    crate::infrastructure::household::overlay(db, std::slice::from_mut(&mut book)).await;
+    SeaOrmHouseholdRepository::new(db)
+        .overlay_or_stored(std::slice::from_mut(&mut book))
+        .await;
     Ok(ReadRecord {
         book,
         created: false,
@@ -902,7 +924,9 @@ pub async fn library_status_for_isbns(
 
     // "Have I read it" is the current household reader's answer, when there is one.
     let book_ids: Vec<String> = rows.iter().map(|(id, ..)| id.clone()).collect();
-    let reader_view = crate::infrastructure::household::current_view(db, Some(&book_ids)).await?;
+    let reader_view = SeaOrmHouseholdRepository::new(db)
+        .current_view(Some(&book_ids))
+        .await?;
 
     // The caller indexes its list by the string it sent, which may be neither
     // the stored form nor the canonical one.

@@ -29,7 +29,9 @@ use std::collections::{HashMap, HashSet};
 
 use sea_orm::{DatabaseConnection, EntityTrait};
 
+use crate::domain::HouseholdRepository;
 use crate::domain::recommendations::{RecommendationReason, ScoredRecommendation, TasteProfile};
+use crate::infrastructure::repositories::SeaOrmHouseholdRepository;
 use crate::models::Book;
 use crate::services::book_service::ServiceError;
 
@@ -256,7 +258,9 @@ pub async fn load_scoring_books(db: &DatabaseConnection) -> Result<Vec<ScoringBo
     // The taste profile is the current household reader's, when this device
     // has one: the view swaps in their status, dates and rating, still as raw
     // stored values.
-    let reader_view = crate::infrastructure::household::current_view(db, None).await?;
+    let reader_view = SeaOrmHouseholdRepository::new(db)
+        .current_view(None)
+        .await?;
 
     Ok(models
         .into_iter()

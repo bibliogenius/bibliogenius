@@ -2,6 +2,8 @@ use sea_orm::entity::prelude::*;
 use sea_orm::{ConnectionTrait, ModelTrait, NotSet, Set};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::HouseholdRepository;
+use crate::infrastructure::repositories::SeaOrmHouseholdRepository;
 use crate::utils::cover_url::{self, ResolveScope};
 
 /// Backward-compatible alias so existing callers and tests that name the
@@ -673,13 +675,13 @@ impl Book {
 
         // The current household reader's state, when this device has one. Laid
         // before the copy overlay below, which must keep the last word.
-        let reader_view =
-            crate::infrastructure::household::current_view(db, Some(book_ids.as_slice()))
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!("household overlay skipped: {e}");
-                    None
-                });
+        let reader_view = SeaOrmHouseholdRepository::new(db)
+            .current_view(Some(book_ids.as_slice()))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("household overlay skipped: {e}");
+                None
+            });
 
         let mut dtos = Vec::with_capacity(models.len());
         for model in models {

@@ -7,11 +7,12 @@ use sea_orm::{
     QueryOrder, Set,
 };
 
+use crate::domain::HouseholdRepository;
 use crate::domain::{
     DomainError, GamificationConfigRow, GamificationConfigUpdate, GamificationRepository,
     PeerGamificationStatsRow,
 };
-use crate::infrastructure::household;
+use crate::infrastructure::repositories::SeaOrmHouseholdRepository;
 use crate::models::{
     book, gamification_achievements, gamification_config, gamification_streaks,
     installation_profile, library_config, loan, peer_gamification_stats, user,
@@ -35,11 +36,14 @@ impl GamificationRepository for SeaOrmGamificationRepository {
     }
 
     // The two reading counters are the current household reader's when this
-    // device has one (see `infrastructure::household`): what one reader has
+    // device has one (see `domain::household`): what one reader has
     // read is not the other's achievement.
     async fn count_books_read(&self) -> Result<i64, DomainError> {
-        if let Some(reader) = household::current_reader(&self.db).await? {
-            return Ok(household::count_read(&self.db, &reader.id, None).await?);
+        if let Some(count) = SeaOrmHouseholdRepository::new(&self.db)
+            .count_read_by_current_reader(None)
+            .await?
+        {
+            return Ok(count);
         }
         Ok(book::Entity::find()
             .filter(book::Column::ReadingStatus.eq("read"))
@@ -48,8 +52,11 @@ impl GamificationRepository for SeaOrmGamificationRepository {
     }
 
     async fn count_books_read_in_year(&self, year: &str) -> Result<i64, DomainError> {
-        if let Some(reader) = household::current_reader(&self.db).await? {
-            return Ok(household::count_read(&self.db, &reader.id, Some(year)).await?);
+        if let Some(count) = SeaOrmHouseholdRepository::new(&self.db)
+            .count_read_by_current_reader(Some(year))
+            .await?
+        {
+            return Ok(count);
         }
         Ok(book::Entity::find()
             .filter(book::Column::FinishedReadingAt.like(format!("{}%", year)))

@@ -2571,7 +2571,7 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         }
     }
 
-    // Migration 101: household readers (see `infrastructure::household`). Two
+    // Migration 101: household readers (see `domain::household`). Two
     // people sharing one library through account sync each keep their own
     // reading state. `readers` and `book_readings` are CRRs (listed in
     // `crsqlite_crr::CRR_TABLES`), created CRR-ready from the start: text PKs,

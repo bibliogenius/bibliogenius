@@ -6,8 +6,9 @@ use sea_orm::{
     QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 
+use crate::domain::HouseholdRepository;
 use crate::domain::{BookFilter, BookRepository, DomainError, PaginatedBooks};
-use crate::infrastructure::household;
+use crate::infrastructure::repositories::SeaOrmHouseholdRepository;
 use crate::models::Book;
 use crate::models::book::{ActiveModel, Column, Entity as BookEntity};
 
@@ -83,14 +84,19 @@ impl BookRepository for SeaOrmBookRepository {
         let mut query = BookEntity::find();
 
         // Apply filters. The status is the current household reader's when this
-        // device has one (see `infrastructure::household`).
+        // device has one (see `domain::household`).
         if let Some(status) = &filter.status
             && !status.is_empty()
         {
-            query = match crate::infrastructure::household::current_reader(&self.db).await? {
-                Some(reader) => query.filter(crate::infrastructure::household::status_condition(
-                    &reader.id, status,
-                )),
+            query = match SeaOrmHouseholdRepository::new(&self.db)
+                .current_reader()
+                .await?
+            {
+                Some(reader) => query.filter(
+                    crate::infrastructure::repositories::household_repository::status_condition(
+                        &reader.id, status,
+                    ),
+                ),
                 None => query.filter(Column::ReadingStatus.eq(status)),
             };
         }
@@ -231,9 +237,9 @@ impl BookRepository for SeaOrmBookRepository {
             .clone()
             .unwrap_or_else(|| "to_read".to_string());
         let owned = book.owned.unwrap_or_else(|| reading_status != "wanting");
-        let reading_change = household::ReadingChange {
+        let reading_change = crate::domain::ReadingChange {
             reading_status: Some(reading_status.clone()),
-            ..household::ReadingChange::from_book(&book)
+            ..crate::domain::ReadingChange::from_book(&book)
         };
 
         let new_book = ActiveModel {
@@ -266,11 +272,15 @@ impl BookRepository for SeaOrmBookRepository {
         // The creator's own reading, when this device has a household reader.
         let txn = self.db.begin().await?;
         let result = new_book.insert(&txn).await?;
-        household::record(&txn, &result.id, reading_change).await?;
+        SeaOrmHouseholdRepository::new(&txn)
+            .record(&result.id, reading_change)
+            .await?;
         txn.commit().await?;
 
         let mut created = Book::from(result);
-        household::overlay(&self.db, std::slice::from_mut(&mut created)).await;
+        SeaOrmHouseholdRepository::new(&self.db)
+            .overlay_or_stored(std::slice::from_mut(&mut created))
+            .await;
         Ok(created)
     }
 
@@ -299,20 +309,15 @@ impl BookRepository for SeaOrmBookRepository {
         let owned = book.owned.unwrap_or(true);
         // This path replaces every reading field, so the reader's reading is
         // replaced whole too.
-        let reading_change = household::ReadingChange {
+        let reading_change = crate::domain::ReadingChange {
             reading_status: Some(reading_status.clone()),
             started_reading_at: Some(book.started_reading_at.clone().flatten()),
             finished_reading_at: Some(book.finished_reading_at.clone().flatten()),
             user_rating: Some(book.user_rating),
         };
-        let keeps_wish = household::keeps_wish(
-            &self.db,
-            id,
-            &existing.reading_status,
-            &reading_status,
-            owned,
-        )
-        .await?;
+        let keeps_wish = SeaOrmHouseholdRepository::new(&self.db)
+            .keeps_wish(id, &existing.reading_status, &reading_status, owned)
+            .await?;
 
         let mut active: ActiveModel = existing.into();
         active.title = Set(book.title);
@@ -341,11 +346,15 @@ impl BookRepository for SeaOrmBookRepository {
 
         let txn = self.db.begin().await?;
         let result = active.update(&txn).await?;
-        household::record(&txn, id, reading_change).await?;
+        SeaOrmHouseholdRepository::new(&txn)
+            .record(id, reading_change)
+            .await?;
         txn.commit().await?;
 
         let mut updated = Book::from(result);
-        household::overlay(&self.db, std::slice::from_mut(&mut updated)).await;
+        SeaOrmHouseholdRepository::new(&self.db)
+            .overlay_or_stored(std::slice::from_mut(&mut updated))
+            .await;
         Ok(updated)
     }
 
