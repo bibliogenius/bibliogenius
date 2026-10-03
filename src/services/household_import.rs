@@ -16,19 +16,21 @@
 //!
 //! The export's `wanting` books join the shared wishlist only when they are new
 //! to the library: a book the household already has is not pushed back into
-//! the wishlist by an import.
+//! the wishlist by an import. Nor does an import take a book off it: a book
+//! the household wishes for keeps its wish, whatever the reader read.
 //!
 //! Idempotent: running the same file twice records the same readings again and
 //! creates nothing the second time.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sea_orm::{
-    ActiveModelTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    ActiveModelTrait, DatabaseConnection, EntityTrait, QueryFilter, Set, TransactionTrait,
     sea_query::{Expr, Func},
 };
 use serde::Deserialize;
 
+use crate::domain::household::WANTING;
 use crate::domain::{HouseholdRepository, ReadingChange};
 use crate::infrastructure::repositories::SeaOrmHouseholdRepository;
 use crate::models::Book;
@@ -72,6 +74,8 @@ struct ExportedBook {
     user_rating: Option<i32>,
     #[serde(default)]
     owned: Option<bool>,
+    #[serde(default)]
+    private: bool,
     /// The simplified export carries the author inline.
     #[serde(default)]
     author: Option<String>,
@@ -118,11 +122,27 @@ fn accepted_status(status: Option<String>) -> String {
     }
 }
 
+/// A rating on the library's 0-10 scale; anything else in the file is dropped
+/// rather than stored, since a stored value replicates to every device.
+fn accepted_rating(rating: Option<i32>) -> Option<i32> {
+    rating.filter(|r| (0..=10).contains(r))
+}
+
+/// A person's name with its words lowercased and sorted: "VERNE Jules" and
+/// "Jules Verne" are the same writer.
+fn name_key(name: &str) -> String {
+    let mut words: Vec<String> = name.split_whitespace().map(str::to_lowercase).collect();
+    words.sort();
+    words.join(" ")
+}
+
 /// The library rows this exported book may be: by ISBN when it has one, else
-/// by title (case-insensitive).
+/// by title (case-insensitive). A title alone names several books ("Poems"),
+/// so a row whose authors are known and share none with `authors` is not one.
 async fn candidates(
     db: &DatabaseConnection,
     book: &ExportedBook,
+    authors: &[String],
 ) -> Result<Vec<crate::models::book::Model>, ServiceError> {
     if let Some(isbn) = book_service::normalize_isbn(book.isbn.clone()) {
         return Ok(BookEntity::find()
@@ -136,10 +156,29 @@ async fn candidates(
     if title.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(BookEntity::find()
+    let same_title = BookEntity::find()
         .filter(Expr::expr(Func::lower(Expr::col(Column::Title))).eq(title.to_lowercase()))
         .all(db)
-        .await?)
+        .await?;
+    let wanted: HashSet<String> = authors.iter().map(|a| name_key(a)).collect();
+    if wanted.is_empty() {
+        return Ok(same_title);
+    }
+    let mut kept = Vec::new();
+    for model in same_title {
+        let held: HashSet<String> = book_service::get_book(db, &model.id)
+            .await?
+            .author
+            .unwrap_or_default()
+            .split(',')
+            .map(name_key)
+            .filter(|name| !name.is_empty())
+            .collect();
+        if held.is_empty() || !held.is_disjoint(&wanted) {
+            kept.push(model);
+        }
+    }
+    Ok(kept)
 }
 
 /// Merge the readings of a catalogue export into the library, for the current
@@ -180,17 +219,27 @@ pub async fn import_readings(
             continue;
         }
         let status = accepted_status(exported.reading_status.clone());
-        let found = candidates(db, exported).await?;
+        let rating = accepted_rating(exported.user_rating);
+        // The simplified export carries the author inline, the full one in
+        // its own tables.
+        let authors: Vec<String> = match &exported.author {
+            Some(inline) => inline
+                .split(',')
+                .map(|a| a.trim().to_owned())
+                .filter(|a| !a.is_empty())
+                .collect(),
+            None => exported
+                .id
+                .as_deref()
+                .and_then(|id| authors_of.get(id))
+                .map(|names| names.iter().map(|n| (*n).to_owned()).collect())
+                .unwrap_or_default(),
+        };
+        let found = candidates(db, exported, &authors).await?;
 
         match found.as_slice() {
             [] => {
-                let author = exported.author.clone().or_else(|| {
-                    exported
-                        .id
-                        .as_deref()
-                        .and_then(|id| authors_of.get(id))
-                        .map(|names| names.join(", "))
-                });
+                let author = (!authors.is_empty()).then(|| authors.join(", "));
                 let created = book_service::create_book(
                     db,
                     Book {
@@ -202,8 +251,9 @@ pub async fn import_readings(
                         reading_status: Some(status),
                         started_reading_at: Some(exported.started_reading_at.clone()),
                         finished_reading_at: Some(exported.finished_reading_at.clone()),
-                        user_rating: exported.user_rating,
+                        user_rating: rating,
                         owned: Some(exported.owned.unwrap_or(true)),
+                        private: Some(exported.private),
                         ..Default::default()
                     },
                 )
@@ -218,26 +268,34 @@ pub async fn import_readings(
                 // The household's wishlist is not re-entered by an import: a
                 // book the library holds keeps its shared status.
                 let change = ReadingChange {
-                    reading_status: (status != "wanting").then(|| status.clone()),
+                    reading_status: (status != WANTING).then(|| status.clone()),
                     started_reading_at: Some(exported.started_reading_at.clone()),
                     finished_reading_at: Some(exported.finished_reading_at.clone()),
-                    user_rating: Some(exported.user_rating),
+                    user_rating: Some(rating),
                     ..Default::default()
                 };
                 // The book columns keep the last writer's reading, as every
-                // household write does (see `domain::household`).
+                // household write does (see `domain::household`). The shared
+                // wish is the exception: a reading made elsewhere says
+                // nothing about what the household still wants to acquire.
                 let mut active: BookActiveModel = model.clone().into();
-                if let Some(status) = &change.reading_status {
+                if let Some(status) = &change.reading_status
+                    && model.reading_status != WANTING
+                {
                     active.reading_status = Set(status.clone());
                 }
                 active.started_reading_at = Set(exported.started_reading_at.clone());
                 active.finished_reading_at = Set(exported.finished_reading_at.clone());
-                active.user_rating = Set(exported.user_rating);
+                active.user_rating = Set(rating);
                 active.updated_at = Set(chrono::Utc::now().to_rfc3339());
-                active.update(db).await?;
-                SeaOrmHouseholdRepository::new(db)
+                // One transaction: a row updated without the reader's reading
+                // would show the reader a status they never imported.
+                let txn = db.begin().await?;
+                active.update(&txn).await?;
+                SeaOrmHouseholdRepository::new(&txn)
                     .record(&model.id, change)
                     .await?;
+                txn.commit().await?;
                 let _ = crate::sync::log_operation(db, "book", &model.id, "UPDATE", None).await;
                 report.matched += 1;
             }
@@ -344,6 +402,144 @@ mod tests {
         assert_eq!(
             status_of(&db, &dune).await.reading_status.as_deref(),
             Some("to_read")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shared_wish_survives_the_import_of_a_reading() {
+        let db = migrated_db().await;
+        // The household wishes for Dune; the importing reader read it elsewhere.
+        let dune = book_service::create_book(
+            &db,
+            Book {
+                title: "Dune".to_owned(),
+                isbn: Some("9782266320344".to_owned()),
+                reading_status: Some("wanting".to_owned()),
+                owned: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .id
+        .unwrap();
+        household_service::create_reader(&db, "Bruno")
+            .await
+            .unwrap();
+        household_service::create_reader(&db, "Alice")
+            .await
+            .unwrap();
+
+        let report = import_readings(&db, EXPORT).await.unwrap();
+        assert_eq!(report.matched, 1);
+
+        // Her reading is recorded, the wish stays on the shared row.
+        let hers = status_of(&db, &dune).await;
+        assert_eq!(hers.reading_status.as_deref(), Some("read"));
+        assert_eq!(hers.wanted, Some(true));
+        let row = BookEntity::find_by_id(dune)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.reading_status, "wanting");
+    }
+
+    #[tokio::test]
+    async fn a_rating_off_the_scale_is_not_imported() {
+        let db = migrated_db().await;
+        let dune = add_book(&db, "Dune", "9782266320344", "to_read").await;
+        household_service::create_reader(&db, "Alice")
+            .await
+            .unwrap();
+
+        let export = r#"{"books": [
+            {"title": "Dune", "isbn": "9782266320344",
+             "reading_status": "read", "user_rating": 999},
+            {"title": "Hyperion", "isbn": "9782266111560",
+             "reading_status": "read", "user_rating": -3}
+        ]}"#;
+        let report = import_readings(&db, export).await.unwrap();
+        assert_eq!((report.matched, report.created), (1, 1));
+
+        // The readings come in, the ratings do not.
+        let matched = status_of(&db, &dune).await;
+        assert_eq!(matched.reading_status.as_deref(), Some("read"));
+        assert_eq!(matched.user_rating, None);
+        let all = book_service::list_books(&db, Default::default())
+            .await
+            .unwrap();
+        let created = all.iter().find(|b| b.title == "Hyperion").unwrap();
+        assert_eq!(created.user_rating, None);
+    }
+
+    #[tokio::test]
+    async fn a_private_book_stays_private_when_it_is_created() {
+        let db = migrated_db().await;
+        household_service::create_reader(&db, "Alice")
+            .await
+            .unwrap();
+
+        let export = r#"{"books": [
+            {"title": "Kept to myself", "isbn": "9782266111560",
+             "reading_status": "read", "private": true},
+            {"title": "For everyone", "isbn": "9782266320344",
+             "reading_status": "read"}
+        ]}"#;
+        import_readings(&db, export).await.unwrap();
+
+        let all = book_service::list_books(&db, Default::default())
+            .await
+            .unwrap();
+        let private_of = |title: &str| all.iter().find(|b| b.title == title).unwrap().private;
+        assert_eq!(private_of("Kept to myself"), Some(true));
+        assert_eq!(private_of("For everyone"), Some(false));
+    }
+
+    #[tokio::test]
+    async fn a_shared_title_is_not_enough_when_the_authors_differ() {
+        let db = migrated_db().await;
+        let add = |title: &'static str, author: &'static str| {
+            let db = db.clone();
+            async move {
+                book_service::create_book(
+                    &db,
+                    Book {
+                        title: title.to_owned(),
+                        author: Some(author.to_owned()),
+                        reading_status: Some("to_read".to_owned()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap()
+                .id
+                .unwrap()
+            }
+        };
+        let rimbaud = add("Poésies", "Arthur Rimbaud").await;
+        let verne = add("Voyages", "Jules Verne").await;
+        household_service::create_reader(&db, "Alice")
+            .await
+            .unwrap();
+
+        // No ISBN anywhere: the title is all there is to match on.
+        let export = r#"{"books": [
+            {"title": "Poésies", "author": "Stéphane Mallarmé",
+             "reading_status": "read", "user_rating": 8},
+            {"title": "voyages", "author": "VERNE Jules",
+             "reading_status": "read"}
+        ]}"#;
+        let report = import_readings(&db, export).await.unwrap();
+        assert_eq!(report.matched, 1, "the same writer, whatever the order");
+        assert_eq!(report.created, 1, "another writer's book of that title");
+
+        let untouched = status_of(&db, &rimbaud).await;
+        assert_eq!(untouched.reading_status.as_deref(), Some("to_read"));
+        assert_eq!(untouched.user_rating, None);
+        assert_eq!(
+            status_of(&db, &verne).await.reading_status.as_deref(),
+            Some("read")
         );
     }
 

@@ -412,6 +412,9 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         // this, a book created with a rating (an imported shelf) lost it.
         user_rating: Set(book.user_rating),
         owned: Set(book.owned.unwrap_or(true)),
+        // Set at insert: a book created private must never be public, even
+        // for the time of a later update.
+        private: Set(book.private.unwrap_or(false)),
         price: Set(book.price),
         created_at: Set(now.to_rfc3339()),
         updated_at: Set(now.to_rfc3339()),
@@ -2609,6 +2612,33 @@ mod tests {
             get_book_by_uuid(&db, "00000000-0000-0000-0000-000000000000").await,
             Err(ServiceError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn create_book_is_private_from_the_start_when_asked() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let created = create_book(
+            &db,
+            Book {
+                title: "Kept to myself".to_string(),
+                private: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.private, Some(true));
+
+        let public = create_book(
+            &db,
+            Book {
+                title: "For everyone".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(public.private, Some(false));
     }
 
     #[tokio::test]
