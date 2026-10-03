@@ -408,6 +408,9 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         reading_status: Set(reading_status),
         started_reading_at: Set(book.started_reading_at.clone().flatten()),
         finished_reading_at: Set(book.finished_reading_at.clone().flatten()),
+        // The household overlay only exists once a reader is chosen: without
+        // this, a book created with a rating (an imported shelf) lost it.
+        user_rating: Set(book.user_rating),
         owned: Set(book.owned.unwrap_or(true)),
         price: Set(book.price),
         created_at: Set(now.to_rfc3339()),
@@ -742,7 +745,9 @@ pub struct ReadRecord {
 /// the lender's string verbatim. Callers pass the query side through
 /// `utils::isbn::lookup_forms`, which covers the ISBN-10 / ISBN-13 equivalence
 /// that no amount of stripping can produce.
-fn stored_isbn_matches(forms: impl IntoIterator<Item = String>) -> sea_orm::sea_query::SimpleExpr {
+pub(crate) fn stored_isbn_matches(
+    forms: impl IntoIterator<Item = String>,
+) -> sea_orm::sea_query::SimpleExpr {
     use sea_orm::sea_query::Expr;
 
     let forms: Vec<String> = forms.into_iter().map(|form| form.to_uppercase()).collect();
@@ -2604,6 +2609,35 @@ mod tests {
             get_book_by_uuid(&db, "00000000-0000-0000-0000-000000000000").await,
             Err(ServiceError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn create_book_keeps_the_reading_it_is_given() {
+        use crate::db;
+
+        // An imported shelf arrives with its reading already known. A device
+        // with no household reader stores it on the book row, rating included.
+        let db = db::init_db("sqlite::memory:").await.unwrap();
+        let created = create_book(
+            &db,
+            Book {
+                title: "Martin Eden".to_string(),
+                reading_status: Some("read".to_string()),
+                finished_reading_at: Some(Some("2024-06-09T00:00:00.000".to_string())),
+                user_rating: Some(8),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let stored = get_book(&db, created.id.as_deref().unwrap()).await.unwrap();
+        assert_eq!(stored.reading_status.as_deref(), Some("read"));
+        assert_eq!(stored.user_rating, Some(8));
+        assert_eq!(
+            stored.finished_reading_at.flatten().as_deref(),
+            Some("2024-06-09T00:00:00.000")
+        );
     }
 
     // ── shelf deletion (subjects are the shelf membership) ──────────────
