@@ -51,6 +51,20 @@ pub async fn clear_current_reader<C: ConnectionTrait>(db: &C) -> Result<(), Doma
         .await
 }
 
+/// Remove a reader and every reading of theirs, on every device of the
+/// account. A device that had chosen them falls back to the shared columns.
+pub async fn remove_reader<C>(db: &C, reader_id: &str) -> Result<(), DomainError>
+where
+    C: ConnectionTrait + TransactionTrait,
+{
+    let txn = db.begin().await?;
+    SeaOrmHouseholdRepository::new(&txn)
+        .remove_reader(reader_id)
+        .await?;
+    txn.commit().await?;
+    Ok(())
+}
+
 pub async fn rename_reader<C: ConnectionTrait>(
     db: &C,
     reader_id: &str,
@@ -746,6 +760,44 @@ mod tests {
         assert_eq!(status_seen(&db, &created_id).await, "read");
         set_current_reader(&db, &owner.id).await.unwrap();
         assert_eq!(status_seen(&db, &created_id).await, "");
+    }
+
+    #[tokio::test]
+    async fn removing_a_reader_forgets_their_readings_and_frees_the_device() {
+        let db = migrated_db().await;
+        let (id, owner, partner) = one_reader_has_read_dune(&db).await;
+
+        // Alice (current) is removed: the device falls back to the shared
+        // columns, Bruno and his reading are untouched.
+        remove_reader(&db, &partner.id).await.unwrap();
+        let names: Vec<String> = list_readers(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names, vec!["Bruno".to_owned()]);
+        assert!(current_reader(&db).await.unwrap().is_none());
+        assert_eq!(status_seen(&db, &id).await, "read");
+        set_current_reader(&db, &owner.id).await.unwrap();
+        assert_eq!(status_seen(&db, &id).await, "read");
+
+        // Bruno removed too: his reading goes with him.
+        remove_reader(&db, &owner.id).await.unwrap();
+        assert!(list_readers(&db).await.unwrap().is_empty());
+        let n = db
+            .query_one(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT count(*) AS n FROM book_readings".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<i64>("", "n")
+            .unwrap();
+        assert_eq!(n, 0);
+
+        assert!(remove_reader(&db, "nobody").await.is_err());
     }
 
     #[tokio::test]

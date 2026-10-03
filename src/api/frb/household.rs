@@ -68,6 +68,15 @@ pub async fn clear_current_household_reader() -> Result<(), String> {
         .map_err(|e| format!("{e:?}"))
 }
 
+/// Remove a reader and every reading of theirs, on every device of the
+/// account. Their wishes stay on the books, unnamed.
+pub async fn delete_household_reader(reader_id: String) -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+    crate::services::household_service::remove_reader(db, &reader_id)
+        .await
+        .map_err(|e| format!("{e:?}"))
+}
+
 pub async fn rename_household_reader(reader_id: String, name: String) -> Result<(), String> {
     let db = db().ok_or("Database not initialized")?;
     crate::services::household_service::rename_reader(db, &reader_id, &name)

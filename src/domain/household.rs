@@ -266,6 +266,10 @@ pub trait HouseholdRepository: Send + Sync {
     /// goes back to no status.
     async fn clear_wish_claims(&self, book_uuid: &str) -> Result<(), DomainError>;
 
+    async fn delete_reader(&self, reader_id: &str) -> Result<(), DomainError>;
+
+    async fn delete_readings_of_reader(&self, reader_id: &str) -> Result<(), DomainError>;
+
     /// Names of the readers whose row says `wanting`, by book, oldest reader
     /// first, for `book_ids` or for every book when `None`.
     async fn wishers_of(
@@ -314,6 +318,21 @@ pub trait HouseholdRepository: Send + Sync {
             return Err(DomainError::NotFound);
         }
         self.store_current_reader_id(reader_id).await
+    }
+
+    /// Remove a reader and every reading of theirs. Their wishes stay on the
+    /// books, unnamed. If this device had chosen them, it goes back to the
+    /// shared columns. Several writes: the caller runs it on a transaction.
+    async fn remove_reader(&self, reader_id: &str) -> Result<(), DomainError> {
+        if self.find_reader(reader_id).await?.is_none() {
+            return Err(DomainError::NotFound);
+        }
+        self.delete_readings_of_reader(reader_id).await?;
+        self.delete_reader(reader_id).await?;
+        if self.current_reader_id().await?.as_deref() == Some(reader_id) {
+            self.clear_current_reader().await?;
+        }
+        Ok(())
     }
 
     async fn rename_reader(&self, reader_id: &str, name: &str) -> Result<(), DomainError> {

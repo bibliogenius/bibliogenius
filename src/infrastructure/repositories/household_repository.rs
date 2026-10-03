@@ -282,6 +282,21 @@ impl<C: ConnectionTrait> HouseholdRepository for SeaOrmHouseholdRepository<'_, C
             .await?)
     }
 
+    async fn delete_reader(&self, reader_id: &str) -> Result<(), DomainError> {
+        Ok(self
+            .execute("DELETE FROM readers WHERE id = ?", vec![reader_id.into()])
+            .await?)
+    }
+
+    async fn delete_readings_of_reader(&self, reader_id: &str) -> Result<(), DomainError> {
+        Ok(self
+            .execute(
+                "DELETE FROM book_readings WHERE reader_id = ?",
+                vec![reader_id.into()],
+            )
+            .await?)
+    }
+
     async fn count_read(&self, reader_id: &str, year: Option<&str>) -> Result<i64, DomainError> {
         let (condition, value) = match year {
             Some(year) => ("finished_reading_at LIKE ?", format!("{year}%")),
