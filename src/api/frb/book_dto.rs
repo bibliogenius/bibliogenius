@@ -48,6 +48,14 @@ pub struct FrbBook {
     /// "not computed" (a write path, a search result), never "false".
     pub is_borrowed: Option<bool>,
     pub is_lent: Option<bool>,
+    /// Whether the library wants this book while `reading_status` shows
+    /// something else: a household reader's own status stands in front of the
+    /// shared wish. `None` everywhere else, where the `wanting` status itself
+    /// says it.
+    pub wanted: Option<bool>,
+    /// Names of the readers who put the book on the wishlist, when the device
+    /// has a reader and the book is wished for. See the Book DTO.
+    pub wished_by: Option<Vec<String>>,
 }
 
 /// Convert domain Book to FFI-safe FrbBook
@@ -82,6 +90,8 @@ impl From<crate::models::Book> for FrbBook {
             hub_cover_upload_failed_at: book.hub_cover_upload_failed_at,
             is_borrowed: book.is_borrowed,
             is_lent: book.is_lent,
+            wanted: book.wanted,
+            wished_by: book.wished_by,
         }
     }
 }

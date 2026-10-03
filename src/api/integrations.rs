@@ -697,6 +697,7 @@ pub async fn search_unified(
                     is_borrowed: None,
                     is_lent: None,
                     wanted: None,
+                    wished_by: None,
                 };
                 results.push(book);
             }
@@ -793,6 +794,7 @@ pub async fn search_unified(
                     is_borrowed: None,
                     is_lent: None,
                     wanted: None,
+                    wished_by: None,
                 };
                 results.push(book);
             }
@@ -1244,6 +1246,7 @@ fn book_from_inventaire_search(
         is_borrowed: None,
         is_lent: None,
         wanted: None,
+        wished_by: None,
     }
 }
 

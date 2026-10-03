@@ -265,6 +265,25 @@ pub trait MergeEngine: Send + Sync {
     ) -> std::result::Result<(), MergeEngineError> {
         Ok(())
     }
+
+    /// Whether this build replicates `entity_type` at all. A lane of a type it
+    /// lacks was sealed by a newer build (a mixed fleet, the normal state for
+    /// users): it is skipped without counting as a failure and without raising
+    /// its anti-rollback floor, and the pull replay that follows the upgrade
+    /// bringing the type applies it (see [`MergeEngine::replicated_set_fingerprint`]).
+    ///
+    /// Default: every type, for an engine without a fixed table set.
+    fn knows(&self, _entity_type: &str) -> bool {
+        true
+    }
+
+    /// A stable fingerprint of the set of replicated types, or `None` for an
+    /// engine without a fixed set. When it differs from the one recorded at the
+    /// last pull, the pull is replayed from the start once, so the lanes skipped
+    /// by [`MergeEngine::knows`] before an upgrade are applied after it.
+    fn replicated_set_fingerprint(&self) -> Option<i64> {
+        None
+    }
 }
 
 /// Hub lane transport. Wraps [`AccountSyncClient`] in production; in-memory in tests.
@@ -349,6 +368,17 @@ pub trait SyncStateStore: Send + Sync {
         &self,
         account_id: &str,
         seq: i64,
+    ) -> std::result::Result<(), SyncError>;
+    /// The [`MergeEngine::replicated_set_fingerprint`] the last pull ran with
+    /// (0 = never recorded: an account enrolled before fingerprints existed).
+    async fn replicated_set_fingerprint(
+        &self,
+        account_id: &str,
+    ) -> std::result::Result<i64, SyncError>;
+    async fn set_replicated_set_fingerprint(
+        &self,
+        account_id: &str,
+        fingerprint: i64,
     ) -> std::result::Result<(), SyncError>;
     /// Highest in-ciphertext HLC already applied for a lane `(opaque_id, device_id)`
     /// (0 = never applied). The anti-rollback floor for H5: a pulled blob whose HLC
@@ -599,6 +629,13 @@ async fn retry_pending_lanes(
             forget_pending_lane(state, account_id, &lane.opaque_id, &lane.device_id).await;
             continue;
         }
+        if !engine.knows(&lane.entity.entity_type) {
+            // Queued by an older build, which counted a type it did not replicate
+            // as a failure. Not one: the pull replay that follows the upgrade
+            // bringing the type re-delivers it, so the queue slot is freed now.
+            forget_pending_lane(state, account_id, &lane.opaque_id, &lane.device_id).await;
+            continue;
+        }
         let change = InboundChange {
             entity: lane.entity,
             deleted: lane.deleted,
@@ -749,6 +786,26 @@ pub async fn sync_once_with_covers(
     let mut stats = SyncStats::default();
     let account_aad = ctx.account_id.as_bytes();
 
+    // A build replicating a type the last pull did not know replays the pull
+    // from the start, once. The lanes of that type were skipped while this
+    // device lacked it (see the `knows` gate below), their floor left unraised,
+    // and nothing else re-delivers them: their sender has no reason to push
+    // them again. The replay costs one full download; lanes already applied are
+    // dropped by their floor. An account that never recorded a fingerprint (0)
+    // replays too, which is what recovers the lanes an older build gave up on.
+    if let Some(fingerprint) = engine.replicated_set_fingerprint()
+        && state.replicated_set_fingerprint(&ctx.account_id).await? != fingerprint
+    {
+        tracing::info!(
+            "the replicated table set changed since the last pull; replaying the pull \
+             from the start once"
+        );
+        state.set_pull_cursor(&ctx.account_id, 0).await?;
+        state
+            .set_replicated_set_fingerprint(&ctx.account_id, fingerprint)
+            .await?;
+    }
+
     // 0. RETRY the lanes an earlier cycle pulled but could not merge (ADR-058).
     // Nothing else re-delivers them: the pull cursor advanced over them and the
     // sender's push watermark advanced too, so a transient refusal would otherwise
@@ -757,6 +814,7 @@ pub async fn sync_once_with_covers(
 
     // 1. PULL + apply other devices' lanes, paging until the cursor stops moving.
     let mut cursor = state.pull_cursor(&ctx.account_id).await?;
+    let mut skipped_unknown = 0usize;
     loop {
         let resp = transport
             .pull(&ctx.device_id, cursor, PULL_PAGE_LIMIT)
@@ -822,6 +880,13 @@ pub async fn sync_once_with_covers(
                     continue;
                 }
             } else {
+                // A type this build does not replicate comes from a newer build.
+                // Not a failure: skip it with its floor unraised, and the replay
+                // that follows the upgrade bringing the type applies it.
+                if !engine.knows(&frame.t) {
+                    skipped_unknown += 1;
+                    continue;
+                }
                 let entity = EntityRef {
                     entity_type: frame.t,
                     entity_uuid: frame.u,
@@ -951,6 +1016,16 @@ pub async fn sync_once_with_covers(
         if resp.lanes.len() < PULL_PAGE_LIMIT as usize || !advanced {
             break;
         }
+    }
+
+    // One line per cycle rather than one per lane: a device behind on the app
+    // version shows up in the logs without flooding them.
+    if skipped_unknown > 0 {
+        tracing::info!(
+            skipped = skipped_unknown,
+            "skipped lanes of types this build does not replicate yet; they apply \
+             after the upgrade that brings them"
+        );
     }
 
     // 2. PUSH our own changed entities since the last pushed db_version.
@@ -1253,7 +1328,7 @@ impl DbSyncStateStore {
         col: &str,
         value: i64,
     ) -> std::result::Result<(), SyncError> {
-        // `col` is one of two compile-time-fixed literals, never user input.
+        // `col` is one of a few compile-time-fixed literals, never user input.
         //
         // A row created here is born under the ADR-056 engine, so it needs no
         // repair: `full_repush_done` is set on INSERT. Leaving it to the column
@@ -1311,6 +1386,20 @@ impl SyncStateStore for DbSyncStateStore {
         seq: i64,
     ) -> std::result::Result<(), SyncError> {
         self.upsert(account_id, "registry_seq", seq).await
+    }
+    async fn replicated_set_fingerprint(
+        &self,
+        account_id: &str,
+    ) -> std::result::Result<i64, SyncError> {
+        self.column(account_id, "replicated_set_fingerprint").await
+    }
+    async fn set_replicated_set_fingerprint(
+        &self,
+        account_id: &str,
+        fingerprint: i64,
+    ) -> std::result::Result<(), SyncError> {
+        self.upsert(account_id, "replicated_set_fingerprint", fingerprint)
+            .await
     }
 
     async fn lane_hlc(
@@ -1491,6 +1580,7 @@ mod tests {
         pull: Mutex<HashMap<String, i64>>,
         push: Mutex<HashMap<String, i64>>,
         registry: Mutex<HashMap<String, i64>>,
+        fingerprint: Mutex<HashMap<String, i64>>,
         // key: (account_id, opaque_id, device_id) -> last applied HLC.
         lane: Mutex<HashMap<(String, String, String), i64>>,
         // Retry queue (ADR-058), insertion-ordered like the SQLite one.
@@ -1533,6 +1623,28 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(account_id.to_string(), seq);
+            Ok(())
+        }
+        async fn replicated_set_fingerprint(
+            &self,
+            account_id: &str,
+        ) -> std::result::Result<i64, SyncError> {
+            Ok(*self
+                .fingerprint
+                .lock()
+                .unwrap()
+                .get(account_id)
+                .unwrap_or(&0))
+        }
+        async fn set_replicated_set_fingerprint(
+            &self,
+            account_id: &str,
+            fingerprint: i64,
+        ) -> std::result::Result<(), SyncError> {
+            self.fingerprint
+                .lock()
+                .unwrap()
+                .insert(account_id.to_string(), fingerprint);
             Ok(())
         }
         async fn lane_hlc(
@@ -1945,6 +2057,9 @@ mod tests {
         reject_value: Mutex<Option<String>>,
         /// Refuse everything, for the queue-cap test.
         reject_all: Mutex<bool>,
+        /// An entity type this engine does not replicate, standing in for a
+        /// build that predates it (see [`MergeEngine::knows`]).
+        unknown_type: Mutex<Option<String>>,
     }
 
     impl RejectingEngine {
@@ -1956,6 +2071,7 @@ mod tests {
                 reject_repair: Mutex::new(None),
                 reject_value: Mutex::new(None),
                 reject_all: Mutex::new(false),
+                unknown_type: Mutex::new(None),
             }
         }
 
@@ -2042,6 +2158,10 @@ mod tests {
             self.inner
                 .repair_after_apply(entity_type, entity_uuid)
                 .await
+        }
+
+        fn knows(&self, entity_type: &str) -> bool {
+            self.unknown_type.lock().unwrap().as_deref() != Some(entity_type)
         }
     }
 
@@ -2494,6 +2614,46 @@ mod tests {
         );
     }
 
+    // An older build counted a lane of a type it did not replicate as a failure
+    // and queued it. A build that still lacks the type frees the slot instead of
+    // spending ten cycles reporting a failure: the replay that follows the
+    // upgrade bringing the type re-delivers the lane, its floor still unraised.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_lane_of_an_unknown_type_is_dropped_not_counted_as_failed() {
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        hub_with_three_books(&hub, &bundle).await.unwrap();
+
+        // The older build: refuses the lane and queues it.
+        let eng_b = RejectingEngine::rejecting_apply("devB", "book-2");
+        let state_b = MemState::default();
+        let first = sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+        assert_eq!(first.failed, 1);
+        assert_eq!(state_b.pending_lanes("acct-1").await.unwrap().len(), 1);
+
+        // Upgraded to a build that knows it skips that type.
+        eng_b.heal();
+        *eng_b.unknown_type.lock().unwrap() = Some("book".to_string());
+        let after = sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+            .await
+            .unwrap();
+        assert_eq!(after.failed, 0, "a type this build lacks is not a failure");
+        assert!(
+            state_b.pending_lanes("acct-1").await.unwrap().is_empty(),
+            "the queue slot is freed"
+        );
+        assert_eq!(
+            state_b
+                .lane_hlc("acct-1", &lane_id(&bundle, "book-2"), "devA")
+                .await
+                .unwrap(),
+            0,
+            "the floor stays unraised, so the replay after the upgrade applies it"
+        );
+    }
+
     // The queue is storage on a device the performance policy targets, so it is
     // capped. A receiver that refuses everything (a wedged cr-sqlite connection
     // during a bootstrap pull) must not turn every inbound lane into a stored row.
@@ -2829,12 +2989,14 @@ mod tests {
         db.execute(Statement::from_string(
             db.get_database_backend(),
             // Mirrors `db::run_migrations`; keep both in step, `full_repush_done`
-            // included (migration 092).
+            // (migration 092) and `replicated_set_fingerprint` (migration 101)
+            // included.
             "CREATE TABLE account_sync_state (account_id TEXT PRIMARY KEY, \
              pull_cursor INTEGER NOT NULL DEFAULT 0, \
              push_version INTEGER NOT NULL DEFAULT 0, \
              registry_seq INTEGER NOT NULL DEFAULT 0, last_synced_at TEXT, \
-             full_repush_done INTEGER NOT NULL DEFAULT 0)"
+             full_repush_done INTEGER NOT NULL DEFAULT 0, \
+             replicated_set_fingerprint INTEGER NOT NULL DEFAULT 0)"
                 .to_owned(),
         ))
         .await
@@ -2885,8 +3047,22 @@ mod tests {
         assert_eq!(store.push_version("acct-1").await.unwrap(), 12);
         assert_eq!(store.registry_seq("acct-1").await.unwrap(), 3);
 
+        // The replicated-set fingerprint: 0 until recorded, then roundtrips
+        // without touching the cursors.
+        assert_eq!(store.replicated_set_fingerprint("acct-1").await.unwrap(), 0);
+        store
+            .set_replicated_set_fingerprint("acct-1", -4_242)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.replicated_set_fingerprint("acct-1").await.unwrap(),
+            -4_242
+        );
+        assert_eq!(store.pull_cursor("acct-1").await.unwrap(), 9);
+
         // Distinct accounts are isolated.
         assert_eq!(store.pull_cursor("acct-2").await.unwrap(), 0);
+        assert_eq!(store.replicated_set_fingerprint("acct-2").await.unwrap(), 0);
 
         // Per-lane HLC store (H5): unknown lane defaults to 0, then roundtrips,
         // and distinct lanes / accounts stay isolated.
@@ -3357,5 +3533,195 @@ mod tests {
         // Honour the cr-sqlite teardown contract.
         eng_a.finalize().await.unwrap();
         eng_b.finalize().await.unwrap();
+    }
+
+    // Two people, one library: the book replicates, each keeps their own reading
+    // state (`domain::household`), on the real cr-sqlite engine.
+    #[cfg(feature = "crsqlite")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_crsqlite_household_readers_keep_their_own_reading() {
+        use crate::services::book_service;
+        use crate::services::crsqlite_engine::CrSqliteMergeEngine;
+        use crate::services::household_service as household;
+
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        let eng_a = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap();
+        let eng_b = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap();
+        let state_a = MemState::default();
+        let state_b = MemState::default();
+        let sync_both = || async {
+            for _ in 0..2 {
+                sync_once(&*hub, &eng_a, &bundle, &state_a, &ctx("devA"))
+                    .await
+                    .unwrap();
+                sync_once(&*hub, &eng_b, &bundle, &state_b, &ctx("devB"))
+                    .await
+                    .unwrap();
+            }
+        };
+
+        // Device A: a book already read, then its owner becomes the first reader.
+        let book_id = book_service::create_book(
+            eng_a.db(),
+            crate::models::Book {
+                title: "Dune".to_owned(),
+                reading_status: Some("read".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .id
+        .unwrap();
+        household::create_reader(eng_a.db(), "Bruno").await.unwrap();
+        sync_both().await;
+
+        // Device B got the book and the first reader, and joins as a new reader.
+        household::create_reader(eng_b.db(), "Alice").await.unwrap();
+        let mut book = book_service::get_book(eng_b.db(), &book_id).await.unwrap();
+        assert_eq!(book.reading_status.as_deref(), Some(""));
+        book.reading_status = Some("reading".to_owned());
+        book_service::update_book(eng_b.db(), &book_id, book)
+            .await
+            .unwrap();
+        sync_both().await;
+
+        let status = |eng: &CrSqliteMergeEngine| {
+            let db = eng.db().clone();
+            let id = book_id.clone();
+            async move {
+                book_service::get_book(&db, &id)
+                    .await
+                    .unwrap()
+                    .reading_status
+                    .unwrap()
+            }
+        };
+        assert_eq!(status(&eng_a).await, "read", "Bruno keeps his reading");
+        assert_eq!(status(&eng_b).await, "reading", "Alice keeps hers");
+        assert_eq!(household::list_readers(eng_a.db()).await.unwrap().len(), 2);
+        assert_eq!(household::list_readers(eng_b.db()).await.unwrap().len(), 2);
+
+        eng_a.finalize().await.unwrap();
+        eng_b.finalize().await.unwrap();
+    }
+
+    // A newer build replicates a table this build does not have yet (a mixed
+    // fleet: one device updated, the other not). That is not a failure: the
+    // older device must report nothing wrong, however many cycles it runs, and
+    // must get the lane once it is upgraded, although the sender has no reason
+    // to push that entity again.
+    #[cfg(feature = "crsqlite")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_crsqlite_a_lane_for_a_table_this_build_lacks_waits_for_the_upgrade() {
+        use crate::services::crsqlite_engine::CrSqliteMergeEngine;
+        use sea_orm::{ActiveModelTrait, ConnectionTrait, Set, Statement};
+
+        async fn exec(eng: &CrSqliteMergeEngine, sql: &str) {
+            eng.db()
+                .execute(Statement::from_string(
+                    eng.db().get_database_backend(),
+                    sql.to_owned(),
+                ))
+                .await
+                .unwrap();
+        }
+        async fn add_future_table(eng: &CrSqliteMergeEngine) {
+            exec(
+                eng,
+                "CREATE TABLE future_entities (\
+                 id TEXT PRIMARY KEY NOT NULL, label TEXT NOT NULL DEFAULT '')",
+            )
+            .await;
+            exec(eng, "SELECT crsql_as_crr('future_entities')").await;
+        }
+        async fn count(eng: &CrSqliteMergeEngine, table: &str) -> i64 {
+            eng.db()
+                .query_one(Statement::from_string(
+                    eng.db().get_database_backend(),
+                    format!("SELECT count(*) AS n FROM {table}"),
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get("", "n")
+                .unwrap()
+        }
+
+        let bundle = Arc::new(AccountKeyBundle::generate());
+        let hub = Arc::new(MemHub::default());
+        let newer = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap()
+            .replicating("future_entities");
+        let older = CrSqliteMergeEngine::open_real_schema_in_memory()
+            .await
+            .unwrap();
+        let state_newer = MemState::default();
+        let state_older = MemState::default();
+
+        add_future_table(&newer).await;
+        exec(
+            &newer,
+            "INSERT INTO future_entities (id, label) VALUES ('future-1', 'from a newer build')",
+        )
+        .await;
+        crate::models::book::ActiveModel {
+            id: Set("book-1".to_owned()),
+            title: Set("shared by both builds".to_owned()),
+            created_at: Set("2026-10-01T00:00:00Z".to_owned()),
+            updated_at: Set("2026-10-01T00:00:00Z".to_owned()),
+            ..Default::default()
+        }
+        .insert(newer.db())
+        .await
+        .unwrap();
+
+        // More cycles than a refused lane is retried, so a lane given up on
+        // would show here.
+        for cycle in 0..(MAX_PENDING_LANE_ATTEMPTS + 2) {
+            sync_once(&*hub, &newer, &bundle, &state_newer, &ctx("devNewer"))
+                .await
+                .unwrap();
+            let stats = sync_once(&*hub, &older, &bundle, &state_older, &ctx("devOlder"))
+                .await
+                .unwrap();
+            assert_eq!(
+                stats.failed, 0,
+                "cycle {cycle}: a table this build lacks is not a sync failure"
+            );
+        }
+        assert_eq!(
+            count(&older, "books").await,
+            1,
+            "the known tables still converge"
+        );
+
+        // The upgrade brings the table, on the same database; the skipped lane
+        // lands without the sender pushing anything again.
+        add_future_table(&older).await;
+        let upgraded = CrSqliteMergeEngine::new(older.db().clone()).replicating("future_entities");
+        let stats = sync_once(&*hub, &upgraded, &bundle, &state_older, &ctx("devOlder"))
+            .await
+            .unwrap();
+        assert_eq!(stats.failed, 0);
+        assert_eq!(
+            count(&upgraded, "future_entities").await,
+            1,
+            "the lane skipped before the upgrade is applied after it"
+        );
+        assert_eq!(
+            count(&upgraded, "books").await,
+            1,
+            "the replay duplicates nothing"
+        );
+
+        newer.finalize().await.unwrap();
+        upgraded.finalize().await.unwrap();
     }
 }

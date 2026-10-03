@@ -2,6 +2,8 @@ use sea_orm::entity::prelude::*;
 use sea_orm::{ConnectionTrait, ModelTrait, NotSet, Set};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::HouseholdRepository;
+use crate::infrastructure::repositories::SeaOrmHouseholdRepository;
 use crate::utils::cover_url::{self, ResolveScope};
 
 /// Backward-compatible alias so existing callers and tests that name the
@@ -241,6 +243,12 @@ pub struct Book {
     /// false`, which also covers books the sender merely borrowed.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub wanted: Option<bool>,
+    /// Names of the household readers who put the book on the wishlist, set
+    /// by the reader view when the book is wished for. `None` when the device
+    /// has no reader, when the book is not wished for, or when the wish
+    /// predates the names. Never sent to peers.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub wished_by: Option<Vec<String>>,
 }
 
 /// Read the book's language code out of the raw `source_data` JSON.
@@ -314,6 +322,7 @@ impl From<Model> for Book {
             is_lent: None,
             // Peer-facing only; set by `redact_for_peer`.
             wanted: None,
+            wished_by: None,
         }
     }
 }
@@ -488,6 +497,13 @@ impl Book {
         }
     }
 
+    /// Whether the library wants this book. The stored `wanting` status says
+    /// so, and so does the flag a household reader view sets when it shows the
+    /// reader's own status in place of the wish.
+    pub fn is_wished(&self) -> bool {
+        self.wanted == Some(true) || self.reading_status.as_deref() == Some("wanting")
+    }
+
     /// Strip fields that must not leak to unauthenticated peer callers.
     ///
     /// The HTTP catalog endpoints (`/api/books`, `/api/books/:id`) are
@@ -513,7 +529,8 @@ impl Book {
         // wish is deliberately shared (it is what lets a peer offer the
         // book), the rest of the reading state is not. Emitted only when
         // true so non-wanted books keep their payload unchanged.
-        self.wanted = (self.reading_status.as_deref() == Some("wanting")).then_some(true);
+        self.wanted = self.is_wished().then_some(true);
+        self.wished_by = None;
         self.cataloguing_notes = None;
         self.source_data = None;
         self.shelf_position = None;
@@ -671,10 +688,23 @@ impl Book {
             }
         }
 
+        // The current household reader's state, when this device has one. Laid
+        // before the copy overlay below, which must keep the last word.
+        let reader_view = SeaOrmHouseholdRepository::new(db)
+            .current_view(Some(book_ids.as_slice()))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("household overlay skipped: {e}");
+                None
+            });
+
         let mut dtos = Vec::with_capacity(models.len());
         for model in models {
             let book_id = model.id.clone();
             let mut dto = Book::from(model.clone());
+            if let Some(view) = &reader_view {
+                view.apply(&mut dto);
+            }
             if let Ok(authors) = model.find_related(super::author::Entity).all(db).await
                 && !authors.is_empty()
             {

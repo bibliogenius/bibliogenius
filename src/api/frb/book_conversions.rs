@@ -61,6 +61,7 @@ impl From<FrbBook> for crate::models::Book {
             is_lent: None,
             // Peer-facing only (redact_for_peer); never accepted on write.
             wanted: None,
+            wished_by: None,
         }
     }
 }

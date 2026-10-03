@@ -10,6 +10,8 @@ use sea_orm::{
 };
 use std::collections::HashMap;
 
+use crate::domain::HouseholdRepository;
+use crate::infrastructure::repositories::SeaOrmHouseholdRepository;
 use crate::models::Book;
 use crate::models::book::{ActiveModel as BookActiveModel, Entity as BookEntity};
 
@@ -87,6 +89,18 @@ impl From<sea_orm::DbErr> for ServiceError {
     }
 }
 
+impl From<crate::domain::DomainError> for ServiceError {
+    fn from(e: crate::domain::DomainError) -> Self {
+        use crate::domain::DomainError;
+        match e {
+            DomainError::NotFound => ServiceError::NotFound,
+            DomainError::Validation(msg) => ServiceError::InvalidInput(msg),
+            DomainError::Database(msg) => ServiceError::Database(msg),
+            other => ServiceError::Database(other.to_string()),
+        }
+    }
+}
+
 /// Populate `Book.available_copies` from the `copies` table for a batch of
 /// books. Must run before serving any `/api/books*` response so peers can
 /// tell which books are actually borrowable — without it, the iPhone-side
@@ -150,11 +164,25 @@ pub async fn list_books(
 
     let mut query = BookEntity::find();
 
+    // The reading state this device shows, when it belongs to a household
+    // reader (see `domain::household`). `None` keeps the book columns.
+    let reader_view = SeaOrmHouseholdRepository::new(db)
+        .current_view(None)
+        .await?;
+
     // Apply DB-level filters
     if let Some(status) = &filter.status
         && !status.is_empty()
     {
-        query = query.filter(crate::models::book::Column::ReadingStatus.eq(status));
+        query = match &reader_view {
+            Some(view) => query.filter(
+                crate::infrastructure::repositories::household_repository::status_condition(
+                    &view.reader_id,
+                    status,
+                ),
+            ),
+            None => query.filter(crate::models::book::Column::ReadingStatus.eq(status)),
+        };
     }
 
     if let Some(title) = &filter.title
@@ -220,6 +248,9 @@ pub async fn list_books(
 
     for (book_model, authors) in books_with_authors {
         let mut book_dto = Book::from(book_model);
+        if let Some(view) = &reader_view {
+            view.apply(&mut book_dto);
+        }
 
         if let Some(id) = book_dto.id.as_deref() {
             book_dto.hub_cover_upload_failed_at = cover_failed_map.get(id).cloned();
@@ -243,15 +274,17 @@ pub async fn list_books(
         book_dto.is_borrowed = Some(borrowed_set.contains(book_id));
         book_dto.is_lent = Some(lent_set.contains(book_id));
 
-        // In-memory status filter (safety net)
+        // In-memory status filter (safety net). The wishlist matches on the
+        // wish, which a household reader's own status may stand in front of.
         if let Some(status_filter) = &filter.status
             && !status_filter.is_empty()
         {
-            if let Some(book_status) = &book_dto.reading_status {
-                if book_status != status_filter {
-                    continue;
-                }
+            let matches = if status_filter == "wanting" {
+                book_dto.is_wished()
             } else {
+                book_dto.reading_status.as_deref() == Some(status_filter.as_str())
+            };
+            if !matches {
                 continue;
             }
         }
@@ -306,6 +339,9 @@ async fn enrich_book(
     book_model: crate::models::book::Model,
 ) -> Result<Book, ServiceError> {
     let mut book_dto = Book::from(book_model.clone());
+    SeaOrmHouseholdRepository::new(db)
+        .overlay_or_stored(std::slice::from_mut(&mut book_dto))
+        .await;
 
     // The hub-cover-upload retry flag is device-local: it lives in `book_local`,
     // not on the `books` CRR (ADR-044). Populate it for the owner's badge;
@@ -345,6 +381,11 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         .clone()
         .unwrap_or_else(|| "to_read".to_string());
     validate_reading_status(&reading_status)?;
+    let reading_change = crate::domain::ReadingChange {
+        reading_status: Some(reading_status.clone()),
+        ..crate::domain::ReadingChange::from_book(&book)
+    }
+    .with_wish_transition("", &reading_status, false);
 
     let subjects_json = book
         .subjects
@@ -396,6 +437,11 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         let _ = create_or_link_author(db, &model.id, &author_name).await;
     }
 
+    // The creator's own reading state, when this device has a household reader.
+    SeaOrmHouseholdRepository::new(db)
+        .record(&model.id, reading_change)
+        .await?;
+
     // Log sync operation (minimal payload, no sensitive data)
     let _ = crate::sync::log_operation(db, "book", &model.id, "INSERT", None).await;
 
@@ -445,7 +491,11 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
         crate::services::wishlist_service::notify_providers_for_wish(db, isbn, &model.title).await;
     }
 
-    Ok(Book::from(model))
+    let mut created = Book::from(model);
+    SeaOrmHouseholdRepository::new(db)
+        .overlay_or_stored(std::slice::from_mut(&mut created))
+        .await;
+    Ok(created)
 }
 
 /// Validates that the reading status is one of the allowed values
@@ -503,6 +553,8 @@ pub async fn update_book(
         .ok_or(ServiceError::NotFound)?;
 
     let previous_reading_status = book_model.reading_status.clone();
+    let owned_after = book_data.owned.unwrap_or(book_model.owned);
+    let mut reading_change = crate::domain::ReadingChange::from_book(&book_data);
     let mut book: BookActiveModel = book_model.into();
 
     book.title = Set(book_data.title);
@@ -512,7 +564,14 @@ pub async fn update_book(
     book.publication_year = Set(book_data.publication_year);
     if let Some(status) = book_data.reading_status {
         validate_reading_status(&status)?;
-        book.reading_status = Set(status);
+        let keeps_wish = SeaOrmHouseholdRepository::new(db)
+            .keeps_wish(id, &previous_reading_status, &status, owned_after)
+            .await?;
+        reading_change =
+            reading_change.with_wish_transition(&previous_reading_status, &status, keeps_wish);
+        if !keeps_wish {
+            book.reading_status = Set(status);
+        }
     }
     if let Some(finished_at) = book_data.finished_reading_at {
         book.finished_reading_at = Set(finished_at);
@@ -540,7 +599,14 @@ pub async fn update_book(
 
     book.updated_at = Set(now.to_rfc3339());
 
-    let model = book.update(db).await?;
+    // One transaction: a book row updated without the reader's reading would
+    // show the reader a status they never set.
+    let txn = db.begin().await?;
+    let model = book.update(&txn).await?;
+    SeaOrmHouseholdRepository::new(&txn)
+        .record(id, reading_change)
+        .await?;
+    txn.commit().await?;
 
     let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
 
@@ -637,7 +703,11 @@ pub async fn update_book(
         }
     }
 
-    Ok(Book::from(model))
+    let mut updated = Book::from(model);
+    SeaOrmHouseholdRepository::new(db)
+        .overlay_or_stored(std::slice::from_mut(&mut updated))
+        .await;
+    Ok(updated)
 }
 
 /// What recording a reading changed in the library.
@@ -745,9 +815,15 @@ pub async fn record_read_book(
         });
     };
 
-    if model.reading_status == READ {
+    // "Already read" is the current household reader's answer when there is one:
+    // the other reader having read it says nothing about this one.
+    let mut current = Book::from(model.clone());
+    SeaOrmHouseholdRepository::new(db)
+        .overlay_or_stored(std::slice::from_mut(&mut current))
+        .await;
+    if current.reading_status.as_deref() == Some(READ) {
         return Ok(ReadRecord {
-            book: Book::from(model),
+            book: current,
             created: false,
             was_already_read: true,
         });
@@ -756,18 +832,62 @@ pub async fn record_read_book(
     // A targeted update, not `update_book`: the caller holds the OTHER library's
     // metadata for this book, and passing it through the full update would
     // overwrite the reader's own title, cover, rating and price with it.
+    let keeps_wish = SeaOrmHouseholdRepository::new(db)
+        .keeps_wish(&model.id, &model.reading_status, READ, model.owned)
+        .await?;
+    let reading_change = crate::domain::ReadingChange {
+        reading_status: Some(READ.to_owned()),
+        ..Default::default()
+    }
+    .with_wish_transition(&model.reading_status, READ, keeps_wish);
     let mut active: BookActiveModel = model.into();
-    active.reading_status = Set(READ.to_owned());
+    if !keeps_wish {
+        active.reading_status = Set(READ.to_owned());
+    }
     active.updated_at = Set(chrono::Utc::now().to_rfc3339());
-    let updated = active.update(db).await?;
+    let txn = db.begin().await?;
+    let updated = active.update(&txn).await?;
+    SeaOrmHouseholdRepository::new(&txn)
+        .record(&updated.id, reading_change)
+        .await?;
+    txn.commit().await?;
 
     let _ = crate::sync::log_operation(db, "book", &updated.id, "UPDATE", None).await;
 
+    let mut book = Book::from(updated);
+    SeaOrmHouseholdRepository::new(db)
+        .overlay_or_stored(std::slice::from_mut(&mut book))
+        .await;
     Ok(ReadRecord {
-        book: Book::from(updated),
+        book,
         created: false,
         was_already_read: false,
     })
+}
+
+/// Take a book off the wishlist without touching anyone's reading.
+///
+/// For a household reader whose own status shows in place of the wish: the
+/// status picker cannot reach the wish for them, so the wish gets its own
+/// gesture. A book that is not wished for is returned unchanged.
+pub async fn remove_wish(db: &DatabaseConnection, id: &str) -> Result<Book, ServiceError> {
+    let model = BookEntity::find_by_id(id.to_owned())
+        .one(db)
+        .await?
+        .ok_or(ServiceError::NotFound)?;
+    if model.reading_status == "wanting" {
+        let mut active: BookActiveModel = model.into();
+        active.reading_status = Set(String::new());
+        active.updated_at = Set(chrono::Utc::now().to_rfc3339());
+        let txn = db.begin().await?;
+        active.update(&txn).await?;
+        SeaOrmHouseholdRepository::new(&txn)
+            .clear_wish_claims(id)
+            .await?;
+        txn.commit().await?;
+        let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
+    }
+    get_book(db, id).await
 }
 
 /// What the reader's own library holds for one ISBN.
@@ -820,14 +940,21 @@ pub async fn library_status_for_isbns(
     // record and its source payload, and none of that is an answer to "do I
     // already have this one". The call runs on every page of someone else's
     // catalogue, on devices where that matters.
-    let rows: Vec<(Option<String>, bool, String)> = BookEntity::find()
+    let rows: Vec<(String, Option<String>, bool, String)> = BookEntity::find()
         .select_only()
+        .column(crate::models::book::Column::Id)
         .column(crate::models::book::Column::Isbn)
         .column(crate::models::book::Column::Owned)
         .column(crate::models::book::Column::ReadingStatus)
         .filter(stored_isbn_matches(forms))
         .into_tuple()
         .all(db)
+        .await?;
+
+    // "Have I read it" is the current household reader's answer, when there is one.
+    let book_ids: Vec<String> = rows.iter().map(|(id, ..)| id.clone()).collect();
+    let reader_view = SeaOrmHouseholdRepository::new(db)
+        .current_view(Some(&book_ids))
         .await?;
 
     // The caller indexes its list by the string it sent, which may be neither
@@ -838,9 +965,21 @@ pub async fn library_status_for_isbns(
         .collect();
 
     let mut strongest: HashMap<String, LibraryIsbnStatus> = HashMap::new();
-    for (row_isbn, owned, reading_status) in rows {
+    for (book_id, row_isbn, owned, reading_status) in rows {
         let Some(row_isbn) = row_isbn else {
             continue;
+        };
+        let reading_status = match &reader_view {
+            Some(view) => {
+                let mut book = Book {
+                    id: Some(book_id),
+                    reading_status: Some(reading_status),
+                    ..Default::default()
+                };
+                view.apply(&mut book);
+                book.reading_status.unwrap_or_default()
+            }
+            None => reading_status,
         };
         let Some(asked_form) = asked_by_canonical.get(&canonical(&row_isbn)) else {
             // A row matched by a length-variant form the caller never asked

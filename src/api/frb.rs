@@ -51,3 +51,4 @@ include!("frb/recommendations.rs");
 include!("frb/favorites.rs");
 include!("frb/book_merge.rs");
 include!("frb/import_completion.rs");
+include!("frb/household.rs");

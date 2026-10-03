@@ -58,6 +58,11 @@ where
         .filter(book_note::Column::BookId.eq(book_uuid))
         .exec(conn)
         .await?;
+    // Every household reader's state for it (CRR, so the deletes replicate).
+    crate::infrastructure::repositories::household_repository::delete_readings_of_book(
+        conn, book_uuid,
+    )
+    .await?;
 
     // Finally the book row itself.
     book::Entity::delete_by_id(book_uuid.to_owned())

@@ -29,7 +29,9 @@ use std::collections::{HashMap, HashSet};
 
 use sea_orm::{DatabaseConnection, EntityTrait};
 
+use crate::domain::HouseholdRepository;
 use crate::domain::recommendations::{RecommendationReason, ScoredRecommendation, TasteProfile};
+use crate::infrastructure::repositories::SeaOrmHouseholdRepository;
 use crate::models::Book;
 use crate::services::book_service::ServiceError;
 
@@ -253,14 +255,24 @@ pub async fn load_scoring_books(db: &DatabaseConnection) -> Result<Vec<ScoringBo
         }
     }
 
+    // The taste profile is the current household reader's, when this device
+    // has one: the view swaps in their status, dates and rating, still as raw
+    // stored values.
+    let reader_view = SeaOrmHouseholdRepository::new(db)
+        .current_view(None)
+        .await?;
+
     Ok(models
         .into_iter()
         .map(|model| {
-            let raw_status = model.reading_status.clone();
             let id = model.id.clone();
-            // Book::from keeps the raw status; the overlay only happens in
-            // populate_authors, which is deliberately NOT used here.
+            // Book::from keeps the raw status; the borrowed/lent overlay only
+            // happens in populate_authors, which is deliberately NOT used here.
             let mut book = Book::from(model);
+            if let Some(view) = &reader_view {
+                view.apply(&mut book);
+            }
+            let raw_status = book.reading_status.clone().unwrap_or_default();
             if let Some(names) = authors_by_book.remove(&id) {
                 book.author = Some(names.join(", "));
                 book.authors = Some(names);
