@@ -2578,6 +2578,10 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     // no FOREIGN KEY, a DEFAULT on every NOT NULL non-PK column, no UNIQUE
     // index. `reader_local` records who reads on THIS device and is
     // deliberately NOT a CRR. All three are additive and gateless.
+    //
+    // The readings are always read by reader, and the wishlist by reader and
+    // status; the composite PK (book_uuid, reader_id) serves neither. A plain
+    // (non-UNIQUE) index is allowed on a CRR.
     for sql in [
         r#"CREATE TABLE IF NOT EXISTS readers (
             id TEXT PRIMARY KEY NOT NULL,
@@ -2598,6 +2602,8 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
             id INTEGER PRIMARY KEY CHECK (id = 1),
             reader_id TEXT NOT NULL
         )"#,
+        "CREATE INDEX IF NOT EXISTS idx_book_readings_reader \
+         ON book_readings(reader_id, reading_status)",
     ] {
         db.execute(Statement::from_string(
             db.get_database_backend(),

@@ -80,6 +80,25 @@ impl<C: ConnectionTrait> HouseholdRepository for SeaOrmHouseholdRepository<'_, C
             .collect::<Result<_, DbErr>>()?)
     }
 
+    async fn find_reader(&self, reader_id: &str) -> Result<Option<Reader>, DomainError> {
+        let row = self
+            .db
+            .query_one(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "SELECT id, name FROM readers WHERE id = ?",
+                [reader_id.into()],
+            ))
+            .await?;
+        Ok(row
+            .map(|r| {
+                Ok::<_, DbErr>(Reader {
+                    id: r.try_get("", "id")?,
+                    name: r.try_get("", "name")?,
+                })
+            })
+            .transpose()?)
+    }
+
     async fn current_reader_id(&self) -> Result<Option<String>, DomainError> {
         let row = self
             .db

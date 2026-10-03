@@ -749,6 +749,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_readings_are_indexed_by_reader() {
+        let db = migrated_db().await;
+        let row = db
+            .query_one(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT sql FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'idx_book_readings_reader'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .expect("index");
+        let sql: String = row.try_get("", "sql").unwrap();
+        assert!(sql.contains("(reader_id, reading_status)"), "{sql}");
+        // cr-sqlite forbids UNIQUE indexes on a CRR.
+        assert!(!sql.to_uppercase().contains("UNIQUE"), "{sql}");
+    }
+
+    #[tokio::test]
     async fn a_reader_name_is_bounded_on_create_and_rename() {
         let db = migrated_db().await;
         // Counted in characters, not bytes: accented names get the full length.

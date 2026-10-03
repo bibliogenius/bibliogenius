@@ -222,6 +222,8 @@ pub trait HouseholdRepository: Send + Sync {
     /// Every reader of the household, oldest first.
     async fn list_readers(&self) -> Result<Vec<Reader>, DomainError>;
 
+    async fn find_reader(&self, reader_id: &str) -> Result<Option<Reader>, DomainError>;
+
     /// Who reads on this device, if a reader was chosen.
     async fn current_reader_id(&self) -> Result<Option<String>, DomainError>;
 
@@ -280,7 +282,7 @@ pub trait HouseholdRepository: Send + Sync {
         let Some(id) = self.current_reader_id().await? else {
             return Ok(None);
         };
-        Ok(self.list_readers().await?.into_iter().find(|r| r.id == id))
+        self.find_reader(&id).await
     }
 
     /// Add a reader to the household and make it the reader of this device.
