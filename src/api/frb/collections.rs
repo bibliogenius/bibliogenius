@@ -260,6 +260,34 @@ pub async fn set_book_volume_number(
         .map_err(|e| format!("{e:?}"))
 }
 
+/// Files a selection of books onto shelves and into collections in one
+/// transaction, optionally removing them from the shelf or collection they
+/// were selected from. Additions are idempotent. Returns how many books
+/// actually changed.
+pub async fn assign_books_to_shelves_and_collections(
+    book_ids: Vec<String>,
+    add_shelves: Vec<String>,
+    add_collection_ids: Vec<String>,
+    remove_shelves: Vec<String>,
+    remove_collection_ids: Vec<String>,
+) -> Result<u32, String> {
+    use crate::services::shelving_service::{BulkAssignment, assign_books};
+    let db = db().ok_or("Database not initialized")?;
+    assign_books(
+        db,
+        BulkAssignment {
+            book_ids,
+            add_shelves,
+            add_collection_ids,
+            remove_shelves,
+            remove_collection_ids,
+        },
+    )
+    .await
+    .map(|outcome| outcome.books_changed as u32)
+    .map_err(|e| format!("{e:?}"))
+}
+
 // ============ View Stats (FFI) ============
 
 /// Get library view statistics (peer and follower views).

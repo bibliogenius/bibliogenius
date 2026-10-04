@@ -338,6 +338,7 @@ fn owner_routes() -> Router<AppState> {
         .route("/scan/image", post(scan::scan_image))
         // Batch Operations
         .route("/books/batch/edit", post(batch::batch_edit))
+        .route("/books/batch/assign", post(batch::batch_assign))
         .route("/books/batch/sort", post(batch::batch_sort))
         .route("/books/duplicates", get(batch::find_duplicates))
         // Copies

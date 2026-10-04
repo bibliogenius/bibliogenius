@@ -60,6 +60,59 @@ pub async fn batch_edit(
     }
 }
 
+#[derive(Deserialize)]
+pub struct BatchAssignRequest {
+    pub ids: Vec<String>,
+    #[serde(default)]
+    pub add_shelves: Vec<String>,
+    #[serde(default)]
+    pub add_collection_ids: Vec<String>,
+    #[serde(default)]
+    pub remove_shelves: Vec<String>,
+    #[serde(default)]
+    pub remove_collection_ids: Vec<String>,
+}
+
+/// File a selection of books onto shelves and into collections, optionally
+/// removing them from the shelf or collection they were selected from.
+pub async fn batch_assign(
+    State(db): State<DatabaseConnection>,
+    Json(payload): Json<BatchAssignRequest>,
+) -> impl IntoResponse {
+    use crate::services::book_service::ServiceError;
+    use crate::services::shelving_service::{BulkAssignment, assign_books};
+
+    let assignment = BulkAssignment {
+        book_ids: payload.ids,
+        add_shelves: payload.add_shelves,
+        add_collection_ids: payload.add_collection_ids,
+        remove_shelves: payload.remove_shelves,
+        remove_collection_ids: payload.remove_collection_ids,
+    };
+    match assign_books(&db, assignment).await {
+        Ok(outcome) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "books_changed": outcome.books_changed })),
+        )
+            .into_response(),
+        Err(ServiceError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Collection not found" })),
+        )
+            .into_response(),
+        Err(ServiceError::InvalidInput(msg)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response(),
+        Err(ServiceError::Database(msg)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn batch_sort(
     State(db): State<DatabaseConnection>,
     Json(payload): Json<BatchSortRequest>,
