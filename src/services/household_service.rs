@@ -497,9 +497,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_lone_reader_is_not_named_on_their_own_wish() {
+        let db = migrated_db().await;
+        let id = insert_unowned_book(&db, "Dune", "").await;
+        create_reader(&db, "Bruno").await.unwrap();
+        set_status(&db, &id, "wanting").await;
+
+        // Nobody else it could have been: the name says nothing.
+        let seen = crate::services::book_service::get_book(&db, &id)
+            .await
+            .unwrap();
+        assert!(seen.is_wished());
+        assert_eq!(seen.wished_by, None);
+
+        // A second reader arrives: the claim was kept, and now it tells.
+        create_reader(&db, "Alice").await.unwrap();
+        let seen = crate::services::book_service::get_book(&db, &id)
+            .await
+            .unwrap();
+        assert_eq!(seen.wished_by.as_deref(), Some(&["Bruno".to_owned()][..]));
+    }
+
+    #[tokio::test]
     async fn peers_never_learn_who_wished() {
         let db = migrated_db().await;
         let id = insert_unowned_book(&db, "Dune", "").await;
+        create_reader(&db, "Alice").await.unwrap();
         create_reader(&db, "Bruno").await.unwrap();
         set_status(&db, &id, "wanting").await;
 

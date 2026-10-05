@@ -351,7 +351,13 @@ pub trait HouseholdRepository: Send + Sync {
             return Ok(None);
         };
         let readings = self.readings_of(&reader_id, book_ids).await?;
-        let wishers = self.wishers_of(book_ids).await?;
+        // A wisher's name only tells something when it could have been
+        // someone else: a lone reader is not named on their own wishes.
+        let wishers = if self.list_readers().await?.len() > 1 {
+            self.wishers_of(book_ids).await?
+        } else {
+            HashMap::new()
+        };
         Ok(Some(ReaderView {
             reader_id,
             readings,
