@@ -265,6 +265,12 @@ pub enum PushCatalogOutcome {
 /// `SkippedLocal` outcome, so the worst-case gap between two real pushes is
 /// just under (this window + 4 days). Two days keeps that below the 7-day
 /// hub TTL with a day of margin.
+///
+/// The hub also purges the catalog of a library nobody may read (unlisted,
+/// no follow) `UNSHARED_CATALOG_GRACE_DAYS` (7) after its last accepted push,
+/// in `LibraryProfileRepository`. That grace is sized on the same worst-case
+/// gap (this window + 4 days): lengthening either one past 7 days in total
+/// would let an active library lose its copy right before it pairs.
 const CATALOG_LOCAL_SKIP_MAX_AGE_DAYS: i64 = 2;
 
 /// True when the last confirmed network push is recent enough that the hub's
