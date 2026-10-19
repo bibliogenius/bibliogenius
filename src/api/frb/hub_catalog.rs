@@ -43,24 +43,6 @@ async fn beacon_sync_failure(result: Result<i32, String>) -> Result<i32, String>
     result
 }
 
-/// Re-encrypts and pushes the catalog under `key`: the rotation path
-/// (ADR-072 D4), where the key is already chosen.
-async fn push_catalog_encrypted_with(
-    db: &sea_orm::DatabaseConnection,
-    key: &crate::crypto::catalog_key::CatalogKey,
-) -> Result<i32, String> {
-    let built = build_hub_catalog(db).await?;
-    push_built_catalog(
-        db,
-        &built,
-        CatalogPushMode::Encrypted {
-            key,
-            cover_book_ids: built.cover_book_ids.clone(),
-        },
-    )
-    .await
-}
-
 /// The catalog as the hub will receive it, after the cover uploads.
 struct BuiltHubCatalog {
     entries: Vec<CatalogEntry>,

@@ -126,10 +126,12 @@ pub async fn hub_directory_sync_catalog_keys() -> Result<i32, String> {
 }
 
 /// Rotates the catalog key after a reader left (ADR-072 D4): retires the
-/// current key, re-encrypts the catalog under the new one and re-wraps it
-/// for the readers that remain. The ex-reader never receives the new key.
-/// No-op when this library holds no catalog key. Returns the number of
-/// entries pushed.
+/// current key, generates a new one and re-wraps it for the readers that
+/// remain. The ex-reader never receives the new key. The catalog itself is
+/// not pushed here: the caller decides clear or encrypted for the next push
+/// (D8), and a push under the new key goes through on its own because the
+/// keyed digest changed. No-op when this library holds no catalog key.
+/// Returns the number of follow rows re-wrapped.
 pub async fn hub_directory_rotate_catalog_key() -> Result<i32, String> {
     let db = hub_db()?;
     let library_uuid = identity_library_uuid()?;
@@ -138,12 +140,10 @@ pub async fn hub_directory_rotate_catalog_key() -> Result<i32, String> {
         return Ok(0);
     }
     let key = store.rotate(db, &library_uuid).await?;
-    let count = push_catalog_encrypted_with(db, &key).await?;
     hub_directory_svc()
         .wrap_catalog_key_for_followers(db, &key)
         .await
-        .map_err(|e| e.to_string())?;
-    Ok(count)
+        .map_err(|e| e.to_string())
 }
 
 /// Lists libraries the local library is following (active follows).
