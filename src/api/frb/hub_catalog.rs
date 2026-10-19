@@ -5,7 +5,7 @@
 // declaration order. Shared imports live in frb.rs.
 
 /// Reads all owned books from the local database, collects title, author,
-/// and cover data, and pushes the enriched catalog to the hub.
+/// and cover data, and pushes the enriched catalog to the hub in clear.
 /// Every entry carries its local `book_id` so the hub-side cover GC
 /// (ADR-033) can diff the catalog against the `covers/{node}/{id}.jpg`
 /// files on disk. Books without ISBN are still included; the entry is
@@ -13,30 +13,93 @@
 /// Local cover images are resized and uploaded as thumbnails (best-effort).
 /// Returns the number of entries pushed.
 pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
-    let result = hub_directory_sync_catalog_inner().await;
-    if let Err(ref e) = result {
-        // Best-effort diagnostic beacon: a sync that fails before/at the push
-        // is otherwise invisible server-side (the POST never lands). Report the
-        // failure into the hub's hub_events table so it surfaces in DB backups
-        // without needing the device log. Never alters the returned result.
-        if let Ok(db) = hub_db() {
-            hub_directory_svc()
-                .report_sync_diag(db, "sync_catalog", false, e)
-                .await;
-        }
+    beacon_sync_failure(hub_directory_sync_catalog_inner(false).await).await
+}
+
+/// Same catalog, pushed as a ciphertext under this library's catalog key
+/// (ADR-072): the hub stores what it cannot read, and every reader opens it
+/// with the wrap it holds on its follow. The key is created on first use.
+/// The caller decides between this and the clear push (D8: encrypt only
+/// when every current reader runs a build that can decrypt); this function
+/// never falls back on its own. Covers are uploaded exactly as for a clear
+/// push (D5), and their book ids travel in clear so the hub can garbage
+/// collect them. Returns the number of entries pushed.
+pub async fn hub_directory_sync_catalog_encrypted() -> Result<i32, String> {
+    beacon_sync_failure(hub_directory_sync_catalog_inner(true).await).await
+}
+
+/// Best-effort diagnostic beacon: a sync that fails before/at the push is
+/// otherwise invisible server-side (the POST never lands). Report the
+/// failure into the hub's hub_events table so it surfaces in DB backups
+/// without needing the device log. Never alters the returned result.
+async fn beacon_sync_failure(result: Result<i32, String>) -> Result<i32, String> {
+    if let Err(ref e) = result
+        && let Ok(db) = hub_db()
+    {
+        hub_directory_svc()
+            .report_sync_diag(db, "sync_catalog", false, e)
+            .await;
     }
     result
 }
 
-/// Inner worker for [`hub_directory_sync_catalog`]: builds the enriched
-/// catalog and pushes it to the hub. Kept separate so the public entry point
-/// can beacon any failure for diagnosis without changing the FFI contract.
-async fn hub_directory_sync_catalog_inner() -> Result<i32, String> {
+/// Re-encrypts and pushes the catalog under `key`: the rotation path
+/// (ADR-072 D4), where the key is already chosen.
+async fn push_catalog_encrypted_with(
+    db: &sea_orm::DatabaseConnection,
+    key: &crate::crypto::catalog_key::CatalogKey,
+) -> Result<i32, String> {
+    let built = build_hub_catalog(db).await?;
+    push_built_catalog(
+        db,
+        &built,
+        CatalogPushMode::Encrypted {
+            key,
+            cover_book_ids: built.cover_book_ids.clone(),
+        },
+    )
+    .await
+}
+
+/// The catalog as the hub will receive it, after the cover uploads.
+struct BuiltHubCatalog {
+    entries: Vec<CatalogEntry>,
+    book_count: i64,
+    /// Ids of the books whose cover the hub now holds (uploaded this run or
+    /// replayed from the upload cache): what an encrypted push lists in
+    /// clear for the hub's cover GC (ADR-072 D6).
+    cover_book_ids: Vec<String>,
+}
+
+/// Inner worker for the two sync entry points: builds the enriched catalog
+/// and pushes it, in clear or under the catalog key. Kept separate so the
+/// public entry points can beacon any failure for diagnosis without
+/// changing the FFI contract.
+async fn hub_directory_sync_catalog_inner(encrypted: bool) -> Result<i32, String> {
+    let db = hub_db()?;
+    let built = build_hub_catalog(db).await?;
+    if !encrypted {
+        return push_built_catalog(db, &built, CatalogPushMode::Clear).await;
+    }
+    let key = catalog_key_store()
+        .load_or_create(db, &identity_library_uuid()?)
+        .await?;
+    push_built_catalog(
+        db,
+        &built,
+        CatalogPushMode::Encrypted {
+            key: &key,
+            cover_book_ids: built.cover_book_ids.clone(),
+        },
+    )
+    .await
+}
+
+/// Collects the catalog entries and uploads the local covers.
+async fn build_hub_catalog(db: &sea_orm::DatabaseConnection) -> Result<BuiltHubCatalog, String> {
     use crate::models::book::Entity as BookEntity;
     use crate::services::hub_directory_service::public_catalog_condition;
     use sea_orm::{EntityTrait, QueryFilter};
-
-    let db = hub_db()?;
 
     // Verify the library is registered before doing any work.
     let _cfg = crate::services::hub_directory_service::HubDirectoryService::get_config(db)
@@ -140,6 +203,11 @@ async fn hub_directory_sync_catalog_inner() -> Result<i32, String> {
     // a raw read would then fail with ENOENT on a file that is still on disk,
     // pinning a "cover not synced" badge on a book whose cover renders fine.
     let covers_dir = crate::api::frb::covers_dir().map(|d| d.as_path());
+    // Every book with a local cover, uploaded this run or not: the hub keeps
+    // a cover as long as its book is still catalogued, exactly as it reads
+    // the entries of a clear catalog. Listing only the successful uploads
+    // would have a transient failure delete the cover the hub already holds.
+    let cover_book_ids: Vec<String> = local_covers.iter().map(|(bid, _, _)| bid.clone()).collect();
     for (bid, path, updated_at) in &local_covers {
         if let Some(hub_url) = svc
             .process_local_cover_upload(db, bid, covers_dir, path)
@@ -163,18 +231,34 @@ async fn hub_directory_sync_catalog_inner() -> Result<i32, String> {
     // the two writers reaches the hub last, the announced count holds.
     let book_count = count as i64;
 
-    // Always push: even with an empty catalog, book_count must reach the hub.
-    // push_catalog short-circuits when the catalog hasn't changed (ADR-027);
-    // we log the outcome but keep returning the entry count so the Flutter
-    // provider clears its `_catalogDirty` flag either way.
-    let outcome = svc
-        .push_catalog(db, &entries, book_count)
+    Ok(BuiltHubCatalog {
+        entries,
+        book_count,
+        cover_book_ids,
+    })
+}
+
+/// Pushes a built catalog. Always pushes: even with an empty catalog,
+/// book_count must reach the hub. push_catalog short-circuits when the
+/// catalog hasn't changed (ADR-027); we log the outcome but keep returning
+/// the entry count so the Flutter provider clears its `_catalogDirty` flag
+/// either way.
+async fn push_built_catalog(
+    db: &sea_orm::DatabaseConnection,
+    built: &BuiltHubCatalog,
+    mode: CatalogPushMode<'_>,
+) -> Result<i32, String> {
+    let encrypted = matches!(mode, CatalogPushMode::Encrypted { .. });
+    let outcome = hub_directory_svc()
+        .push_catalog(db, &built.entries, built.book_count, mode)
         .await
         .map_err(|e| e.to_string())?;
+    let count = built.entries.len() as i32;
     tracing::info!(
         target: "hub_directory",
         outcome = ?outcome,
         count = count,
+        encrypted = encrypted,
         "hub catalog sync outcome"
     );
 
@@ -229,6 +313,12 @@ pub struct FrbHubCatalogResult {
     /// - "catalog_unavailable": access is fine but the hub holds no
     ///   catalog (expired TTL or never pushed)
     /// - "not_found": no hub profile for this node id
+    /// - "catalog_key_unavailable": the catalog is encrypted (ADR-072) and
+    ///   this library holds no usable wrap of its key: none yet, or one for
+    ///   a key the owner has since rotated
+    /// - "catalog_invalid": the encrypted catalog could not be opened or
+    ///   trusted (tampered, bound to another library, or older than one
+    ///   already seen)
     /// - "http_<status>": other hub error without a machine code
     /// - "network": transport failure or local config issue
     pub error_code: Option<String>,
@@ -243,6 +333,8 @@ fn hub_catalog_error_code(e: &HubDirectoryError) -> String {
             .ok()
             .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string))
             .unwrap_or_else(|| format!("http_{status}")),
+        HubDirectoryError::CatalogKeyUnavailable(_) => "catalog_key_unavailable".to_string(),
+        HubDirectoryError::CatalogInvalid(_) => "catalog_invalid".to_string(),
         _ => "network".to_string(),
     }
 }
@@ -259,8 +351,11 @@ pub async fn hub_directory_get_catalog_detailed(
 
     let db = hub_db()?;
 
-    // Try to fetch fresh catalog from hub
-    let hub_result = hub_directory_svc().get_catalog(db, &node_id).await;
+    // Try to fetch fresh catalog from hub. An encrypted catalog (ADR-072)
+    // is opened with the local identity's X25519 secret, when loaded.
+    let hub_result = hub_directory_svc()
+        .get_catalog(db, &node_id, identity_x25519_secret())
+        .await;
 
     match hub_result {
         Ok(entries) => {
@@ -352,6 +447,14 @@ mod hub_catalog_error_code_tests {
     fn maps_transport_failures_to_network() {
         let e = HubDirectoryError::Network("connection refused".to_string());
         assert_eq!(hub_catalog_error_code(&e), "network");
+    }
+
+    #[test]
+    fn maps_the_encrypted_catalog_failures_to_their_codes() {
+        let e = HubDirectoryError::CatalogKeyUnavailable("no wrap".to_string());
+        assert_eq!(hub_catalog_error_code(&e), "catalog_key_unavailable");
+        let e = HubDirectoryError::CatalogInvalid("rollback".to_string());
+        assert_eq!(hub_catalog_error_code(&e), "catalog_invalid");
     }
 }
 

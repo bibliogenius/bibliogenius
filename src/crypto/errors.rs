@@ -21,6 +21,9 @@ pub enum CryptoError {
     UnknownSender,
     /// Identity not initialized or key material unavailable.
     IdentityNotAvailable,
+    /// The ciphertext names a key other than the one held (ADR-072: an
+    /// outdated wrap after a rotation).
+    KeyIdMismatch,
 }
 
 impl fmt::Display for CryptoError {
@@ -35,6 +38,7 @@ impl fmt::Display for CryptoError {
             Self::Compression(msg) => write!(f, "compression error: {msg}"),
             Self::UnknownSender => write!(f, "unknown sender"),
             Self::IdentityNotAvailable => write!(f, "identity not available"),
+            Self::KeyIdMismatch => write!(f, "key id mismatch"),
         }
     }
 }

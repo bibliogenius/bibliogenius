@@ -45,18 +45,105 @@ pub async fn hub_directory_pending_requests() -> Result<Vec<FrbHubFollow>, Strin
 }
 
 /// Resolves a pending follow request. resolution: "approve" | "reject" | "block"
-/// When approving, encrypted_contact is an optional sealed blob of the owner's contact info.
+/// When approving, encrypted_contact is an optional sealed blob of the owner's contact info,
+/// and follower_x25519_public_key (hex) lets the owner hand this follower its
+/// wrap of the catalog key when the library holds one (ADR-072 D3). A
+/// library that never encrypted its catalog has no key and sends no wrap.
 pub async fn hub_directory_resolve_follow(
     follow_id: i64,
     resolution: String,
     encrypted_contact: Option<String>,
+    follower_x25519_public_key: Option<String>,
 ) -> Result<FrbHubFollow, String> {
     let db = hub_db()?;
+    // Best-effort: approving is the user's gesture and must not depend on
+    // the key store. A missing wrap is caught up by the next wrap batch.
+    let wrap = match (resolution.as_str(), follower_x25519_public_key.as_deref()) {
+        ("approve", Some(public_hex)) => match catalog_key_wrap_for(db, public_hex).await {
+            Ok(wrap) => wrap,
+            Err(e) => {
+                tracing::warn!(
+                    target: "hub_directory",
+                    "follow {follow_id} approved without a catalog key wrap: {e}"
+                );
+                None
+            }
+        },
+        _ => None,
+    };
     hub_directory_svc()
-        .resolve_follow(db, follow_id, &resolution, encrypted_contact.as_deref())
+        .resolve_follow(
+            db,
+            follow_id,
+            &resolution,
+            encrypted_contact.as_deref(),
+            wrap.as_deref(),
+        )
         .await
         .map(FrbHubFollow::from)
         .map_err(|e| e.to_string())
+}
+
+/// The current catalog key wrapped for `public_hex`, or None when this
+/// library holds no catalog key (it pushes in clear) or the key is not a
+/// 32-byte hex string.
+async fn catalog_key_wrap_for(
+    db: &sea_orm::DatabaseConnection,
+    public_hex: &str,
+) -> Result<Option<String>, String> {
+    let Some(key) = catalog_key_store()
+        .load(db, &identity_library_uuid()?)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(public) = hex::decode(public_hex)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+    else {
+        return Ok(None);
+    };
+    key.wrap_for(&public)
+        .map(Some)
+        .map_err(|e| format!("catalog key wrap: {e}"))
+}
+
+/// Hands every active follower its wrap of the current catalog key
+/// (ADR-072 D3). No-op when this library holds no catalog key. Returns the
+/// number of follow rows the hub updated.
+pub async fn hub_directory_sync_catalog_keys() -> Result<i32, String> {
+    let db = hub_db()?;
+    let Some(key) = catalog_key_store()
+        .load(db, &identity_library_uuid()?)
+        .await?
+    else {
+        return Ok(0);
+    };
+    hub_directory_svc()
+        .wrap_catalog_key_for_followers(db, &key)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Rotates the catalog key after a reader left (ADR-072 D4): retires the
+/// current key, re-encrypts the catalog under the new one and re-wraps it
+/// for the readers that remain. The ex-reader never receives the new key.
+/// No-op when this library holds no catalog key. Returns the number of
+/// entries pushed.
+pub async fn hub_directory_rotate_catalog_key() -> Result<i32, String> {
+    let db = hub_db()?;
+    let library_uuid = identity_library_uuid()?;
+    let store = catalog_key_store();
+    if store.load(db, &library_uuid).await?.is_none() {
+        return Ok(0);
+    }
+    let key = store.rotate(db, &library_uuid).await?;
+    let count = push_catalog_encrypted_with(db, &key).await?;
+    hub_directory_svc()
+        .wrap_catalog_key_for_followers(db, &key)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(count)
 }
 
 /// Lists libraries the local library is following (active follows).

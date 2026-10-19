@@ -13,7 +13,8 @@
 
 use rust_lib_app::db;
 use rust_lib_app::services::hub_directory_service::{
-    CatalogEntry, DirectoryConfig, HubDirectoryService, PushCatalogOutcome, compute_catalog_hash,
+    CatalogEntry, CatalogPushMode, DirectoryConfig, HubDirectoryService, PushCatalogOutcome,
+    compute_catalog_hash,
 };
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serial_test::serial;
@@ -100,7 +101,9 @@ async fn first_push_hits_hub_and_stores_hash() {
 
     let svc = HubDirectoryService::new();
     let entries = sample_entries();
-    let outcome = svc.push_catalog(&db, &entries, entries.len() as i64).await;
+    let outcome = svc
+        .push_catalog(&db, &entries, entries.len() as i64, CatalogPushMode::Clear)
+        .await;
 
     assert_eq!(outcome.unwrap(), PushCatalogOutcome::Pushed);
 
@@ -137,13 +140,13 @@ async fn second_identical_push_is_skipped_locally() {
     let entries = sample_entries();
 
     let first = svc
-        .push_catalog(&db, &entries, entries.len() as i64)
+        .push_catalog(&db, &entries, entries.len() as i64, CatalogPushMode::Clear)
         .await
         .unwrap();
     assert_eq!(first, PushCatalogOutcome::Pushed);
 
     let second = svc
-        .push_catalog(&db, &entries, entries.len() as i64)
+        .push_catalog(&db, &entries, entries.len() as i64, CatalogPushMode::Clear)
         .await
         .unwrap();
     assert_eq!(second, PushCatalogOutcome::SkippedLocal);
@@ -175,13 +178,13 @@ async fn mutation_triggers_new_push() {
     let grown = mutated_entries();
 
     assert_eq!(
-        svc.push_catalog(&db, &base, base.len() as i64)
+        svc.push_catalog(&db, &base, base.len() as i64, CatalogPushMode::Clear)
             .await
             .unwrap(),
         PushCatalogOutcome::Pushed
     );
     assert_eq!(
-        svc.push_catalog(&db, &grown, grown.len() as i64)
+        svc.push_catalog(&db, &grown, grown.len() as i64, CatalogPushMode::Clear)
             .await
             .unwrap(),
         PushCatalogOutcome::Pushed
@@ -212,7 +215,7 @@ async fn hub_304_is_recorded_as_skipped_remote_and_future_pushes_short_circuit()
     let entries = sample_entries();
 
     let first = svc
-        .push_catalog(&db, &entries, entries.len() as i64)
+        .push_catalog(&db, &entries, entries.len() as i64, CatalogPushMode::Clear)
         .await
         .unwrap();
     assert_eq!(first, PushCatalogOutcome::SkippedRemote);
@@ -221,7 +224,7 @@ async fn hub_304_is_recorded_as_skipped_remote_and_future_pushes_short_circuit()
     assert!(cfg.last_catalog_hash.is_some());
 
     let second = svc
-        .push_catalog(&db, &entries, entries.len() as i64)
+        .push_catalog(&db, &entries, entries.len() as i64, CatalogPushMode::Clear)
         .await
         .unwrap();
     assert_eq!(second, PushCatalogOutcome::SkippedLocal);
@@ -250,7 +253,7 @@ async fn posted_body_contains_catalog_hash_matching_pure_helper() {
     let svc = HubDirectoryService::new();
     let entries = sample_entries();
 
-    svc.push_catalog(&db, &entries, entries.len() as i64)
+    svc.push_catalog(&db, &entries, entries.len() as i64, CatalogPushMode::Clear)
         .await
         .unwrap();
 

@@ -29,6 +29,8 @@ pub mod favorites_service;
 pub mod gamification_service;
 pub mod household_import;
 pub mod household_service;
+pub mod hub_catalog_e2ee;
+pub mod hub_catalog_key_store;
 pub mod hub_directory_service;
 pub mod identity_service;
 pub mod import_completion_service;

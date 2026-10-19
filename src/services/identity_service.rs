@@ -305,7 +305,7 @@ pub(crate) async fn delete_identity_from_db(db: &DatabaseConnection) -> Result<(
 }
 
 /// Derive Argon2 key from library_uuid + salt.
-fn derive_argon2_key(library_uuid: &str, salt: &[u8]) -> Result<[u8; 32], String> {
+pub(crate) fn derive_argon2_key(library_uuid: &str, salt: &[u8]) -> Result<[u8; 32], String> {
     let salt_array: [u8; 32] = salt
         .try_into()
         .map_err(|_| "Salt must be 32 bytes".to_string())?;
@@ -314,7 +314,7 @@ fn derive_argon2_key(library_uuid: &str, salt: &[u8]) -> Result<[u8; 32], String
 }
 
 /// Encrypt a 32-byte secret with AES-256-GCM. Returns nonce || ciphertext.
-fn encrypt_secret(key: &[u8; 32], secret: &[u8; 32]) -> Result<Vec<u8>, String> {
+pub(crate) fn encrypt_secret(key: &[u8; 32], secret: &[u8; 32]) -> Result<Vec<u8>, String> {
     let (nonce, ciphertext) =
         encrypt_aes_gcm(key, secret).map_err(|e| format!("Encryption failed: {e}"))?;
     let mut result = Vec::with_capacity(12 + ciphertext.len());
@@ -324,7 +324,7 @@ fn encrypt_secret(key: &[u8; 32], secret: &[u8; 32]) -> Result<Vec<u8>, String> 
 }
 
 /// Decrypt a secret. Input is nonce (12 bytes) || ciphertext.
-fn decrypt_secret(key: &[u8; 32], encrypted: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn decrypt_secret(key: &[u8; 32], encrypted: &[u8]) -> Result<Vec<u8>, String> {
     if encrypted.len() < 12 {
         return Err("Encrypted data too short".to_string());
     }

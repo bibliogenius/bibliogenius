@@ -32,6 +32,12 @@ pub enum HubDirectoryError {
     NotRegistered,
     /// Local configuration or environment issue
     Config(String),
+    /// The catalog is encrypted (ADR-072) and this reader holds no usable
+    /// wrap of its key: none at all, or one for a key since rotated.
+    CatalogKeyUnavailable(String),
+    /// The encrypted catalog could not be opened or trusted: tampered,
+    /// bound to another library, or older than a version already seen.
+    CatalogInvalid(String),
 }
 
 impl std::fmt::Display for HubDirectoryError {
@@ -41,6 +47,8 @@ impl std::fmt::Display for HubDirectoryError {
             Self::Hub(code, msg) => write!(f, "Hub error {code}: {msg}"),
             Self::NotRegistered => write!(f, "Not registered with hub directory"),
             Self::Config(e) => write!(f, "Configuration error: {e}"),
+            Self::CatalogKeyUnavailable(e) => write!(f, "Catalog key unavailable: {e}"),
+            Self::CatalogInvalid(e) => write!(f, "Catalog invalid: {e}"),
         }
     }
 }
@@ -129,6 +137,14 @@ pub struct HubFollow {
     /// X25519 public key of the follower (returned in pending/followers lists for encryption).
     #[serde(default)]
     pub follower_x25519_public_key: Option<String>,
+    /// App version of the follower (pending/followers lists): tells whether
+    /// it can read an encrypted catalog (ADR-072 D8).
+    #[serde(default)]
+    pub follower_app_version: Option<String>,
+    /// E2EE sealed blob: the followed library's catalog key, wrapped for
+    /// this follower (ADR-072 D3). Carried on the following list.
+    #[serde(default)]
+    pub encrypted_catalog_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -138,6 +154,11 @@ pub struct HubCatalog {
     /// Enriched catalog: JSON array of CatalogEntry objects. Absent for legacy pushes.
     #[serde(default)]
     pub catalog_payload: Option<String>,
+    /// Storage format of `catalog_payload`: absent for a clear JSON list,
+    /// `e2ee-v1` for a ciphertext the reader must open with its wrap of
+    /// the owner's catalog key (ADR-072).
+    #[serde(default)]
+    pub catalog_format: Option<String>,
     pub updated_at: String,
     pub expires_at: String,
 }
@@ -239,6 +260,17 @@ fn parse_catalog_entries(payload: &str) -> Result<Vec<CatalogEntry>, serde_json:
             },
         )
         .collect())
+}
+
+/// What `push_catalog` sends the hub (ADR-072 D1): the clear payloads, or
+/// a ciphertext under the library's catalog key plus the clear list of book
+/// ids whose covers the hub holds, so its cover GC keeps working (D6).
+pub enum CatalogPushMode<'a> {
+    Clear,
+    Encrypted {
+        key: &'a crate::crypto::catalog_key::CatalogKey,
+        cover_book_ids: Vec<String>,
+    },
 }
 
 /// Result of `push_catalog`: whether the catalog was actually sent or the
@@ -437,6 +469,10 @@ pub struct DirectoryConfig {
     /// bumped even when the catalog never changes locally. None until the
     /// first confirmed push (and reset together with the hash on recovery).
     pub last_catalog_pushed_at: Option<String>,
+    /// Version carried inside the last encrypted catalog the hub accepted
+    /// (ADR-072 D2). Monotonic; readers refuse a lower one. 0 until the
+    /// first encrypted push.
+    pub catalog_version: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -485,7 +521,7 @@ pub enum FollowRevocation {
 }
 
 pub struct HubDirectoryService {
-    http_client: Client,
+    pub(crate) http_client: Client,
     /// Covers already uploaded during this run, keyed by book id.
     ///
     /// Deliberately in memory and not persisted (ADR-044 A.6 defers the shared
@@ -614,7 +650,7 @@ impl HubDirectoryService {
         let result = db
             .query_one(Statement::from_string(
                 backend,
-                "SELECT node_id, write_token, is_listed, requires_approval, accept_from, allow_borrowing, recovery_code, last_catalog_hash, last_catalog_pushed_at
+                "SELECT node_id, write_token, is_listed, requires_approval, accept_from, allow_borrowing, recovery_code, last_catalog_hash, last_catalog_pushed_at, catalog_version
                  FROM hub_directory_config WHERE id = 1"
                     .to_owned(),
             ))
@@ -634,6 +670,7 @@ impl HubDirectoryService {
             recovery_code: row.try_get::<String>("", "recovery_code").ok(),
             last_catalog_hash: row.try_get::<String>("", "last_catalog_hash").ok(),
             last_catalog_pushed_at: row.try_get::<String>("", "last_catalog_pushed_at").ok(),
+            catalog_version: row.try_get::<i64>("", "catalog_version").unwrap_or(0),
         }))
     }
 
@@ -986,6 +1023,9 @@ impl HubDirectoryService {
             recovery_code,
             last_catalog_hash,
             last_catalog_pushed_at,
+            // Not written by save_config: the column keeps its value, and the
+            // hub keeps serving the ciphertext that carries it.
+            catalog_version: existing.as_ref().map(|c| c.catalog_version).unwrap_or(0),
         };
 
         Self::save_config(db, &config).await?;
@@ -1076,6 +1116,7 @@ impl HubDirectoryService {
             recovery_code: None,
             last_catalog_hash: None,
             last_catalog_pushed_at: None,
+            catalog_version: 0,
         });
 
         // On recovery the hub's cached catalog may have been dropped or
@@ -1091,6 +1132,8 @@ impl HubDirectoryService {
             recovery_code: profile.recovery_code,
             last_catalog_hash: None,
             last_catalog_pushed_at: None,
+            // Kept: a version only ever climbs, and readers refuse a lower one.
+            catalog_version: existing.catalog_version,
         };
 
         Self::save_config(db, &config).await?;
@@ -1119,11 +1162,16 @@ impl HubDirectoryService {
     ///
     /// Returns [`PushCatalogOutcome`] indicating whether the hub was
     /// actually contacted or the push was short-circuited.
+    /// `mode` decides what the hub stores: the clear payloads, or a
+    /// ciphertext under the library's catalog key (ADR-072). The caller
+    /// decides, because only it knows whether every current reader can
+    /// decrypt (D8); this function never falls back on its own.
     pub async fn push_catalog(
         &self,
         db: &DatabaseConnection,
         entries: &[CatalogEntry],
         book_count: i64,
+        mode: CatalogPushMode<'_>,
     ) -> Result<PushCatalogOutcome, HubDirectoryError> {
         let cfg = Self::get_config(db)
             .await?
@@ -1144,7 +1192,17 @@ impl HubDirectoryService {
         let catalog_payload =
             serde_json::to_string(&sorted).map_err(|e| HubDirectoryError::Config(e.to_string()))?;
 
-        let catalog_hash = compute_catalog_hash(&isbn_payload, &catalog_payload, book_count);
+        // The keyed digest of an encrypted catalog is computed over the same
+        // clear canonical bytes, so it stays stable while the catalog does
+        // and the ADR-027 skip keeps working (ADR-072 D6).
+        let catalog_hash = match &mode {
+            CatalogPushMode::Clear => {
+                compute_catalog_hash(&isbn_payload, &catalog_payload, book_count)
+            }
+            CatalogPushMode::Encrypted { key, .. } => {
+                key.catalog_hash(&isbn_payload, &catalog_payload, book_count)
+            }
+        };
 
         // Fast path: same hash as last successful push → no round-trip.
         // Only allowed while the hub confirmed a push recently: the hub
@@ -1170,23 +1228,47 @@ impl HubDirectoryService {
             );
         }
 
+        let (body, pushed_version) = match &mode {
+            CatalogPushMode::Clear => (
+                serde_json::json!({
+                    "isbn_payload": isbn_payload,
+                    "catalog_payload": catalog_payload,
+                    "book_count": book_count,
+                    "catalog_hash": catalog_hash,
+                }),
+                None,
+            ),
+            CatalogPushMode::Encrypted {
+                key,
+                cover_book_ids,
+            } => {
+                let version = cfg.catalog_version + 1;
+                let body = Self::encrypted_push_body(
+                    key,
+                    &cfg.node_id,
+                    version,
+                    &catalog_payload,
+                    book_count,
+                    &catalog_hash,
+                    cover_book_ids,
+                )?;
+                (body, Some(version))
+            }
+        };
+
         let response = self
             .http_client
             .post(format!("{hub_url}/api/directory/catalog"))
             .header("Authorization", format!("Bearer {}", cfg.write_token))
-            .json(&serde_json::json!({
-                "isbn_payload": isbn_payload,
-                "catalog_payload": catalog_payload,
-                "book_count": book_count,
-                "catalog_hash": catalog_hash,
-            }))
+            .json(&body)
             .send()
             .await?;
 
         let status = response.status().as_u16();
 
         // 304 Not Modified: hub's stored catalog already matches this hash.
-        // Persist it locally so subsequent pushes can short-circuit.
+        // Persist it locally so subsequent pushes can short-circuit. The
+        // stored ciphertext keeps its version, so nothing to record there.
         if status == 304 {
             Self::record_catalog_push_state(db, Some(&catalog_hash)).await?;
             tracing::debug!(
@@ -1201,8 +1283,12 @@ impl HubDirectoryService {
             return Err(HubDirectoryError::Hub(status, msg));
         }
 
-        // 2xx success: persist the hash so the next identical push skips.
+        // 2xx success: persist the hash so the next identical push skips,
+        // and the version the hub now serves so the next push goes above it.
         Self::record_catalog_push_state(db, Some(&catalog_hash)).await?;
+        if let Some(version) = pushed_version {
+            Self::record_catalog_version(db, version).await?;
+        }
         Ok(PushCatalogOutcome::Pushed)
     }
 
@@ -1517,10 +1603,14 @@ impl HubDirectoryService {
     /// Fetches the catalog of a public or approved library from the hub.
     ///
     /// Returns enriched entries if available, otherwise falls back to ISBN-only entries.
+    /// An encrypted catalog (ADR-072) is opened with the reader's wrap of
+    /// the owner's key, found in the following list, using
+    /// `reader_x25519_secret`; without it the catalog is unavailable.
     pub async fn get_catalog(
         &self,
         db: &DatabaseConnection,
         node_id: &str,
+        reader_x25519_secret: Option<&x25519_dalek::StaticSecret>,
     ) -> Result<Vec<CatalogEntry>, HubDirectoryError> {
         let hub_url = Self::hub_base_url()?;
         let cfg = Self::get_config(db).await?;
@@ -1543,6 +1633,19 @@ impl HubDirectoryService {
             .json()
             .await
             .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
+
+        if catalog.catalog_format.as_deref()
+            == Some(crate::crypto::catalog_key::CATALOG_FORMAT_E2EE_V1)
+        {
+            let payload = catalog.catalog_payload.as_deref().ok_or_else(|| {
+                HubDirectoryError::CatalogInvalid("encrypted catalog without payload".into())
+            })?;
+            let plaintext = self
+                .open_encrypted_catalog(db, node_id, payload, reader_x25519_secret)
+                .await?;
+            return parse_catalog_entries(&plaintext)
+                .map_err(|e| HubDirectoryError::CatalogInvalid(e.to_string()));
+        }
 
         // Prefer enriched catalog_payload if present
         if let Some(ref cp) = catalog.catalog_payload {
@@ -1727,12 +1830,15 @@ impl HubDirectoryService {
 
     /// resolution: "approve" | "reject" | "block"
     /// encrypted_contact: optional sealed blob to attach when approving
+    /// encrypted_catalog_key: optional wrap of the catalog key for this
+    /// follower, attached when approving (ADR-072 D3)
     pub async fn resolve_follow(
         &self,
         db: &DatabaseConnection,
         follow_id: i64,
         resolution: &str,
         encrypted_contact: Option<&str>,
+        encrypted_catalog_key: Option<&str>,
     ) -> Result<HubFollow, HubDirectoryError> {
         let cfg = Self::get_config(db)
             .await?
@@ -1742,6 +1848,9 @@ impl HubDirectoryService {
         let mut body = serde_json::json!({ "resolution": resolution });
         if let Some(blob) = encrypted_contact {
             body["encrypted_contact"] = serde_json::Value::String(blob.to_string());
+        }
+        if let Some(wrap) = encrypted_catalog_key {
+            body["encrypted_catalog_key"] = serde_json::Value::String(wrap.to_string());
         }
 
         let response = self
@@ -2250,7 +2359,7 @@ mod catalog_push_state_tests {
     /// In-memory DB with the `hub_directory_config` schema as produced by
     /// the base CREATE TABLE plus migrations 055 (allow_borrowing),
     /// 064 (recovery_code), 068 (last_catalog_hash) and
-    /// 086 (last_catalog_pushed_at), seeded with the singleton row.
+    /// 086 (last_catalog_pushed_at) and 103 (catalog_version), seeded with the singleton row.
     pub(super) async fn db_with_config() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         db.execute_unprepared(
@@ -2265,6 +2374,7 @@ mod catalog_push_state_tests {
                 recovery_code          TEXT,
                 last_catalog_hash      TEXT,
                 last_catalog_pushed_at TEXT,
+                catalog_version        INTEGER NOT NULL DEFAULT 0,
                 created_at             TEXT NOT NULL,
                 updated_at             TEXT NOT NULL
             )",
@@ -2548,6 +2658,7 @@ mod follow_revocation_tests {
                 accept_from TEXT NOT NULL DEFAULT 'everyone',
                 allow_borrowing INTEGER NOT NULL DEFAULT 1, recovery_code TEXT,
                 last_catalog_hash TEXT, last_catalog_pushed_at TEXT,
+                catalog_version INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
         )
         .await

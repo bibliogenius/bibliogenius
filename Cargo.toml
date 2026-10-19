@@ -142,6 +142,8 @@ tokio-tungstenite = { version = "0.24", features = ["native-tls-vendored"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 aes-gcm = "0.10"
+# Nonce-misuse-resistant AEAD for the long-lived directory catalog key (ADR-072 D2, B6)
+aes-gcm-siv = "0.11"
 hkdf = "0.12"
 sha2 = "0.10"
 hmac = "0.12"

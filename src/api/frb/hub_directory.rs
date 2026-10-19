@@ -9,8 +9,8 @@
 // =============================================================================
 
 use crate::services::hub_directory_service::{
-    CatalogEntry, DirectoryConfig, HubBorrowRequest, HubDirectoryError, HubDirectoryService,
-    HubFollow, HubProfile, RegisterParams,
+    CatalogEntry, CatalogPushMode, DirectoryConfig, HubBorrowRequest, HubDirectoryError,
+    HubDirectoryService, HubFollow, HubProfile, RegisterParams,
 };
 
 static HUB_DIRECTORY_SVC: OnceLock<HubDirectoryService> = OnceLock::new();
@@ -21,6 +21,34 @@ fn hub_directory_svc() -> &'static HubDirectoryService {
 
 fn hub_db() -> Result<&'static sea_orm::DatabaseConnection, String> {
     db().ok_or_else(|| "Database not initialized".to_string())
+}
+
+/// At-rest store of the directory catalog key (ADR-072), one per process
+/// like the directory service itself.
+static CATALOG_KEY_STORE: OnceLock<crate::services::hub_catalog_key_store::CatalogKeyStore> =
+    OnceLock::new();
+
+fn catalog_key_store() -> &'static crate::services::hub_catalog_key_store::CatalogKeyStore {
+    CATALOG_KEY_STORE.get_or_init(crate::services::hub_catalog_key_store::CatalogKeyStore::new)
+}
+
+/// The library uuid the identity was initialized with: the catalog key is
+/// stored under the same Argon2 protection as the identity keys.
+fn identity_library_uuid() -> Result<String, String> {
+    IDENTITY_SERVICE
+        .get()
+        .and_then(|svc| svc.library_uuid())
+        .map(str::to_string)
+        .ok_or_else(|| "Identity not initialized".to_string())
+}
+
+/// The local X25519 static secret, when the identity is loaded. A reader
+/// opens its wrap of an owner's catalog key with it.
+fn identity_x25519_secret() -> Option<&'static x25519_dalek::StaticSecret> {
+    IDENTITY_SERVICE
+        .get()
+        .and_then(|svc| svc.identity().ok())
+        .map(|identity| identity.x25519_static_secret())
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +179,12 @@ pub struct FrbHubFollow {
     pub follower_display_name: Option<String>,
     pub encrypted_contact: Option<String>,
     pub follower_x25519_public_key: Option<String>,
+    /// App version of the follower, on the followers and pending lists
+    /// (ADR-072 D8: the owner encrypts only when every reader can decrypt).
+    pub follower_app_version: Option<String>,
+    /// The followed library's catalog key wrapped for this follower, on the
+    /// following list (ADR-072 D3). Opaque: the Rust side opens it.
+    pub encrypted_catalog_key: Option<String>,
 }
 
 impl From<HubFollow> for FrbHubFollow {
@@ -165,6 +199,8 @@ impl From<HubFollow> for FrbHubFollow {
             follower_display_name: f.follower_display_name,
             encrypted_contact: f.encrypted_contact,
             follower_x25519_public_key: f.follower_x25519_public_key,
+            follower_app_version: f.follower_app_version,
+            encrypted_catalog_key: f.encrypted_catalog_key,
         }
     }
 }
@@ -301,6 +337,9 @@ pub async fn hub_directory_purge_config() -> Result<(), String> {
     // URLs carrying the old node id, and the hub holds none of those blobs any
     // more. Next registration re-uploads from scratch.
     hub_directory_svc().forget_uploaded_covers();
+    // The cached catalog key goes too: its rows stay, the next registration
+    // reloads it from the database if it is still wanted.
+    catalog_key_store().forget();
     tracing::info!("hub_directory_config purged for 401 recovery");
     Ok(())
 }

@@ -2626,6 +2626,30 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         .await?;
     }
 
+    // Migration 103: encrypted directory catalog (ADR-072). The owner keeps
+    // the version carried inside the last ciphertext the hub accepted, so
+    // the next push goes above it; a reader keeps the highest version it
+    // accepted from each library, so a hub serving an older ciphertext is
+    // refused. The ALTER fails harmlessly once the column exists.
+    let _ = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE hub_directory_config ADD COLUMN catalog_version INTEGER NOT NULL DEFAULT 0"
+                .to_owned(),
+        ))
+        .await;
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        "CREATE TABLE IF NOT EXISTS hub_catalog_reader_state (
+            node_id      TEXT PRIMARY KEY NOT NULL,
+            key_id       TEXT NOT NULL,
+            last_version INTEGER NOT NULL,
+            updated_at   TEXT NOT NULL
+        )"
+        .to_owned(),
+    ))
+    .await?;
+
     Ok(())
 }
 

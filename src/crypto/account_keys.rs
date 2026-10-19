@@ -537,7 +537,7 @@ fn bucket_for(len: usize) -> usize {
 }
 
 /// Pad plaintext to a size bucket with a 4-byte little-endian length prefix (ADR-042 §6).
-fn pad_bucket(data: &[u8]) -> Vec<u8> {
+pub(crate) fn pad_bucket(data: &[u8]) -> Vec<u8> {
     let target = bucket_for(data.len());
     let mut out = Vec::with_capacity(target);
     out.extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -547,7 +547,7 @@ fn pad_bucket(data: &[u8]) -> Vec<u8> {
 }
 
 /// Strip the bucket padding added by [`pad_bucket`].
-fn unpad_bucket(padded: &[u8]) -> Result<Vec<u8>, CryptoError> {
+pub(crate) fn unpad_bucket(padded: &[u8]) -> Result<Vec<u8>, CryptoError> {
     if padded.len() < 4 {
         return Err(CryptoError::Serialization(
             "padded blob too short".to_string(),
