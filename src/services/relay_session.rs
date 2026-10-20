@@ -16,6 +16,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static MAILBOX_CREATED_THIS_SESSION: AtomicBool = AtomicBool::new(false);
 
+static RELAY_CONFIG_WRITE_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+/// Serializes the writers of `my_relay_config` (explicit setup and implicit
+/// recreation): two interleaved setups would leave an orphan mailbox on the
+/// hub, and `HUB_URL` naming another hub than the relay row.
+pub fn relay_config_write_lock() -> &'static tokio::sync::Mutex<()> {
+    RELAY_CONFIG_WRITE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// Mark the relay mailbox as freshly created in the current process session.
 ///
 /// Call after a successful insert into `my_relay_config` — both on explicit

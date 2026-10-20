@@ -191,7 +191,7 @@ async fn poll_inner(state: &AppState, source: NudgeSource) -> Result<(), String>
                 "Relay poller: Mailbox {} not found (expired/deleted), recreating...",
                 config.mailbox_uuid
             );
-            match recreate_mailbox(db, &config.relay_url).await {
+            match recreate_mailbox(db, &config.relay_url, &config.mailbox_uuid).await {
                 Ok(new_uuid) => {
                     tracing::info!("Relay poller: New mailbox created: {new_uuid}");
                     // Notify peers of new credentials (requires crypto, handled internally)
@@ -723,6 +723,7 @@ async fn handle_relay_request_response(
 pub async fn recreate_mailbox(
     db: &sea_orm::DatabaseConnection,
     relay_url: &str,
+    stale_mailbox_uuid: &str,
 ) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -768,7 +769,19 @@ pub async fn recreate_mailbox(
         return Err("Relay hub returned incomplete mailbox data".to_string());
     }
 
-    // Update my_relay_config (replace singleton row)
+    // Update my_relay_config (replace singleton row) only if it still holds
+    // the mailbox that answered 404: a setup (another hub, or a renewal on
+    // this one) or a disconnect may have replaced or removed it meanwhile.
+    let _relay_write = crate::services::relay_session::relay_config_write_lock()
+        .lock()
+        .await;
+    let still_stale = crate::api::relay::get_my_relay_config(db)
+        .await
+        .is_some_and(|c| c.mailbox_uuid == stale_mailbox_uuid);
+    if !still_stale {
+        return Err("Relay config changed during mailbox recreation".to_string());
+    }
+
     let _ = db
         .execute(sea_orm::Statement::from_string(
             db.get_database_backend(),

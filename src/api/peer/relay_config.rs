@@ -98,12 +98,22 @@ pub async fn setup_relay(
     //    profile that only the purged token could authenticate.
     let relay_url_for_notify = payload.relay_url.clone();
 
+    // The directory config was registered with the hub `HUB_URL` still
+    // names (it is only moved below), which outlives a "Disconnect" that
+    // already deleted the previous relay row.
+    let _relay_write = crate::services::relay_session::relay_config_write_lock()
+        .lock()
+        .await;
+    let directory_hub_url =
+        crate::services::hub_directory_service::HubDirectoryService::hub_base_url().ok();
+
     let hub_changed = match apply_relay_setup(
         db,
         &payload.relay_url,
         &mailbox_uuid,
         &read_token,
         &write_token,
+        directory_hub_url.as_deref(),
     )
     .await
     {
@@ -159,7 +169,9 @@ pub async fn setup_relay(
 }
 
 /// Persist a freshly-registered relay mailbox and invalidate the hub
-/// directory config only when the hub URL actually changes.
+/// directory config only when the hub URL actually changes, compared with
+/// `directory_hub_url` (the hub the registration was made with) or, when
+/// unknown, with the previous relay row.
 ///
 /// Extracted from `setup_relay` so the DB-level conditional can be tested
 /// without standing up a mock relay server. Returns `true` if the hub URL
@@ -171,17 +183,39 @@ async fn apply_relay_setup(
     mailbox_uuid: &str,
     read_token: &str,
     write_token: &str,
+    directory_hub_url: Option<&str>,
 ) -> Result<bool, sea_orm::DbErr> {
     use crate::models::relay_config;
-    use sea_orm::ConnectionTrait;
+    use sea_orm::{ConnectionTrait, TransactionTrait};
 
-    let previous_hub_url: Option<String> = relay_config::Entity::find()
+    // The registration belongs to the hub the directory service calls. The
+    // previous relay row is only a fallback: "Disconnect" deletes it while
+    // the registration of that hub stays in place.
+    let previous_relay_url: Option<String> = relay_config::Entity::find()
         .one(db)
         .await?
         .map(|m| m.relay_url);
+    let previous_hub_url = directory_hub_url.map(str::to_string).or(previous_relay_url);
 
-    db.execute(sea_orm::Statement::from_string(
-        db.get_database_backend(),
+    let hub_changed = previous_hub_url
+        .as_deref()
+        .is_some_and(|prev| crate::utils::hub_url::hub_urls_differ(prev, relay_url));
+
+    // Purge before moving the relay row: if the purge fails, the row still
+    // names the old hub, never the new hub next to the old registration.
+    if hub_changed {
+        // The registration and its catalog key leave together (ADR-072).
+        crate::services::hub_directory_service::HubDirectoryService::purge_local_config(
+            db,
+            crate::services::hub_catalog_key_store::CatalogKeyStore::shared(),
+        )
+        .await
+        .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+    }
+
+    let txn = db.begin().await?;
+    txn.execute(sea_orm::Statement::from_string(
+        txn.get_database_backend(),
         "DELETE FROM my_relay_config".to_owned(),
     ))
     .await?;
@@ -195,24 +229,11 @@ async fn apply_relay_setup(
         write_token: Set(write_token.to_string()),
         created_at: Set(now),
     }
-    .insert(db)
+    .insert(&txn)
     .await?;
+    txn.commit().await?;
 
     crate::services::relay_session::mark_mailbox_created_this_session();
-
-    let hub_changed = previous_hub_url
-        .as_deref()
-        .is_some_and(|prev| crate::utils::hub_url::hub_urls_differ(prev, relay_url));
-
-    if hub_changed {
-        // The registration and its catalog key leave together (ADR-072).
-        crate::services::hub_directory_service::HubDirectoryService::purge_local_config(
-            db,
-            crate::services::hub_catalog_key_store::CatalogKeyStore::shared(),
-        )
-        .await
-        .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
-    }
 
     Ok(hub_changed)
 }
@@ -282,8 +303,11 @@ pub async fn delete_relay_config_endpoint(
         }
     }
 
-    // 3. Delete local config
+    // 3. Delete local config, never in the middle of a mailbox recreation
     use sea_orm::ConnectionTrait;
+    let _relay_write = crate::services::relay_session::relay_config_write_lock()
+        .lock()
+        .await;
     match db
         .execute(sea_orm::Statement::from_string(
             db.get_database_backend(),
@@ -571,17 +595,30 @@ mod relay_setup_tests {
         relay_session::reset_for_tests();
         let db = setup_db().await;
 
-        apply_relay_setup(&db, "https://hub.example.org", "mbx-1", "rtok-1", "wtok-1")
-            .await
-            .expect("first setup");
+        apply_relay_setup(
+            &db,
+            "https://hub.example.org",
+            "mbx-1",
+            "rtok-1",
+            "wtok-1",
+            None,
+        )
+        .await
+        .expect("first setup");
 
         seed_directory_config(&db, "preserved-token").await;
         seed_catalog_key(&db).await;
 
-        let changed =
-            apply_relay_setup(&db, "https://hub.example.org/", "mbx-2", "rtok-2", "wtok-2")
-                .await
-                .expect("second setup same hub");
+        let changed = apply_relay_setup(
+            &db,
+            "https://hub.example.org/",
+            "mbx-2",
+            "rtok-2",
+            "wtok-2",
+            None,
+        )
+        .await
+        .expect("second setup same hub");
 
         assert!(!changed, "hub URL should be detected as unchanged");
         assert_eq!(
@@ -614,6 +651,7 @@ mod relay_setup_tests {
             "mbx-1",
             "rtok-1",
             "wtok-1",
+            None,
         )
         .await
         .expect("first setup");
@@ -627,6 +665,7 @@ mod relay_setup_tests {
             "mbx-2",
             "rtok-2",
             "wtok-2",
+            None,
         )
         .await
         .expect("second setup new hub");
@@ -647,6 +686,201 @@ mod relay_setup_tests {
         );
     }
 
+    async fn disconnect_relay(db: &DatabaseConnection) {
+        // What `delete_relay_config_endpoint` does locally.
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM my_relay_config".to_owned(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    /// "Disconnect" deletes the relay row, then "Connect" targets another
+    /// hub: the registration and the catalog key of the old hub must not
+    /// survive (seen on 2026-10-20, staging back to production, 401).
+    #[tokio::test]
+    #[serial]
+    async fn apply_relay_setup_after_disconnect_wipes_directory_config_on_new_hub() {
+        relay_session::reset_for_tests();
+        let db = setup_db().await;
+
+        apply_relay_setup(
+            &db,
+            "https://hub-a.example.org",
+            "mbx-1",
+            "rtok-1",
+            "wtok-1",
+            None,
+        )
+        .await
+        .expect("first setup");
+        seed_directory_config(&db, "hub-a-token").await;
+        seed_catalog_key(&db).await;
+        disconnect_relay(&db).await;
+
+        let changed = apply_relay_setup(
+            &db,
+            "https://hub-b.example.org",
+            "mbx-2",
+            "rtok-2",
+            "wtok-2",
+            Some("https://hub-a.example.org"),
+        )
+        .await
+        .expect("setup on another hub after disconnect");
+
+        assert!(changed, "a hub change after a disconnect must be detected");
+        assert!(
+            directory_token(&db).await.is_none(),
+            "the old hub's registration must not be presented to the new hub",
+        );
+        assert_eq!(
+            live_catalog_keys(&db).await,
+            0,
+            "the catalog key must be retired with the registration (ADR-072)",
+        );
+    }
+
+    /// Disconnect then reconnect to the SAME hub (mailbox renewal) keeps
+    /// the registration and the key: no rotation, no re-registration.
+    #[tokio::test]
+    #[serial]
+    async fn apply_relay_setup_after_disconnect_preserves_directory_config_on_same_hub() {
+        relay_session::reset_for_tests();
+        let db = setup_db().await;
+
+        apply_relay_setup(
+            &db,
+            "https://hub-a.example.org",
+            "mbx-1",
+            "rtok-1",
+            "wtok-1",
+            None,
+        )
+        .await
+        .expect("first setup");
+        seed_directory_config(&db, "hub-a-token").await;
+        seed_catalog_key(&db).await;
+        disconnect_relay(&db).await;
+
+        let changed = apply_relay_setup(
+            &db,
+            "https://hub-a.example.org",
+            "mbx-2",
+            "rtok-2",
+            "wtok-2",
+            Some("https://hub-a.example.org/"),
+        )
+        .await
+        .expect("setup on the same hub after disconnect");
+
+        assert!(!changed, "reconnecting to the same hub is not a hub change");
+        assert_eq!(
+            directory_token(&db).await.as_deref(),
+            Some("hub-a-token"),
+            "the registration must survive a mailbox renewal on the same hub",
+        );
+        assert_eq!(live_catalog_keys(&db).await, 1, "no rotation on a renewal");
+    }
+
+    /// The registration belongs to the hub the directory service calls
+    /// (`HUB_URL`), so that hub wins over a relay row naming another one.
+    #[tokio::test]
+    #[serial]
+    async fn apply_relay_setup_compares_against_the_directory_hub_first() {
+        relay_session::reset_for_tests();
+        let db = setup_db().await;
+
+        apply_relay_setup(
+            &db,
+            "https://hub-a.example.org",
+            "mbx-1",
+            "rtok-1",
+            "wtok-1",
+            None,
+        )
+        .await
+        .expect("first setup");
+        seed_directory_config(&db, "hub-b-token").await;
+        seed_catalog_key(&db).await;
+
+        let changed = apply_relay_setup(
+            &db,
+            "https://hub-a.example.org",
+            "mbx-2",
+            "rtok-2",
+            "wtok-2",
+            Some("https://hub-b.example.org"),
+        )
+        .await
+        .expect("setup on the relay row's hub");
+
+        assert!(changed, "the registration was issued by another hub");
+        assert!(directory_token(&db).await.is_none());
+        assert_eq!(live_catalog_keys(&db).await, 0);
+    }
+
+    /// A purge that fails must leave the relay row on the old hub: a mailbox
+    /// on the new hub next to the old hub's registration would send the old
+    /// write token to the new hub at the next registration.
+    #[tokio::test]
+    #[serial]
+    async fn apply_relay_setup_keeps_relay_row_when_purge_fails() {
+        relay_session::reset_for_tests();
+        let db = setup_db().await;
+
+        apply_relay_setup(
+            &db,
+            "https://hub-a.example.org",
+            "mbx-1",
+            "rtok-1",
+            "wtok-1",
+            None,
+        )
+        .await
+        .expect("first setup");
+        seed_directory_config(&db, "hub-a-token").await;
+        seed_catalog_key(&db).await;
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE TRIGGER fail_purge BEFORE DELETE ON hub_directory_config
+             BEGIN SELECT RAISE(ABORT, 'purge failure for the test'); END"
+                .to_owned(),
+        ))
+        .await
+        .unwrap();
+
+        let result = apply_relay_setup(
+            &db,
+            "https://hub-b.example.org",
+            "mbx-2",
+            "rtok-2",
+            "wtok-2",
+            Some("https://hub-a.example.org"),
+        )
+        .await;
+
+        assert!(result.is_err(), "a failed purge must fail the setup");
+        let row = crate::models::relay_config::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("relay row kept");
+        assert_eq!(row.relay_url, "https://hub-a.example.org");
+        assert_eq!(row.mailbox_uuid, "mbx-1");
+        assert_eq!(
+            directory_token(&db).await.as_deref(),
+            Some("hub-a-token"),
+            "the purge rolled back: the registration stays",
+        );
+        assert_eq!(
+            live_catalog_keys(&db).await,
+            1,
+            "the purge rolled back: the catalog key stays live",
+        );
+    }
+
     /// First-time setup (no previous relay config) is neither a "same hub"
     /// nor a "hub change" — we simply have nothing to invalidate.
     #[tokio::test]
@@ -660,10 +894,16 @@ mod relay_setup_tests {
             "flag must start unset",
         );
 
-        let changed =
-            apply_relay_setup(&db, "https://hub.example.org", "mbx-1", "rtok-1", "wtok-1")
-                .await
-                .expect("first setup");
+        let changed = apply_relay_setup(
+            &db,
+            "https://hub.example.org",
+            "mbx-1",
+            "rtok-1",
+            "wtok-1",
+            None,
+        )
+        .await
+        .expect("first setup");
 
         assert!(!changed, "no previous hub means no change to signal");
         assert!(
