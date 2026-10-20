@@ -26,7 +26,7 @@ pub async fn reset_app() -> Result<String, String> {
         installation_profile, library, library_config, loan, notification, operation_log,
         p2p_outgoing_request, p2p_request, peer, peer_book, tag, user,
     };
-    use sea_orm::{ConnectionTrait, EntityTrait};
+    use sea_orm::EntityTrait;
 
     // Helper macro to delete all from a table
     macro_rules! delete_all {
@@ -64,16 +64,11 @@ pub async fn reset_app() -> Result<String, String> {
     // Delete users too for complete reset
     delete_all!(user);
 
-    // Clean hub directory config (raw SQL - no SeaORM entity)
-    if let Err(e) = db
-        .execute(sea_orm::Statement::from_string(
-            db.get_database_backend(),
-            "DELETE FROM hub_directory_config".to_owned(),
-        ))
-        .await
-    {
+    // Forget the hub registration and retire the catalog key with it
+    // (ADR-072). Non-fatal: the reset must complete even if these tables
+    // are missing on an older install.
+    if let Err(e) = HubDirectoryService::purge_local_config(db, catalog_key_store()).await {
         tracing::warn!("Failed to delete hub_directory_config: {}", e);
-        // Non-fatal: table may not exist on older installs
     }
 
     Ok("App reset successfully - all data cleared".to_string())

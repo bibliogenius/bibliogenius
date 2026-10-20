@@ -23,7 +23,12 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
 /// when every current reader runs a build that can decrypt); this function
 /// never falls back on its own. Covers are uploaded exactly as for a clear
 /// push (D5), and their book ids travel in clear so the hub can garbage
-/// collect them. Returns the number of entries pushed.
+/// collect them. Once the hub confirms it holds the ciphertext (stored, or
+/// 304 on an unchanged digest), every active follower with a published
+/// X25519 key receives its wrap of the key (D3); a locally skipped push
+/// leaves the wraps as they are. Returns the number of entries pushed, or
+/// an error when the ciphertext went out but the wraps did not (the next
+/// sync then contacts the hub again and wraps).
 pub async fn hub_directory_sync_catalog_encrypted() -> Result<i32, String> {
     beacon_sync_failure(hub_directory_sync_catalog_inner(true).await).await
 }
@@ -61,12 +66,14 @@ async fn hub_directory_sync_catalog_inner(encrypted: bool) -> Result<i32, String
     let db = hub_db()?;
     let built = build_hub_catalog(db).await?;
     if !encrypted {
-        return push_built_catalog(db, &built, CatalogPushMode::Clear).await;
+        return push_built_catalog(db, &built, CatalogPushMode::Clear)
+            .await
+            .map(|(count, _)| count);
     }
     let key = catalog_key_store()
         .load_or_create(db, &identity_library_uuid()?)
         .await?;
-    push_built_catalog(
+    let (count, outcome) = push_built_catalog(
         db,
         &built,
         CatalogPushMode::Encrypted {
@@ -74,7 +81,14 @@ async fn hub_directory_sync_catalog_inner(encrypted: bool) -> Result<i32, String
             cover_book_ids: built.cover_book_ids.clone(),
         },
     )
-    .await
+    .await?;
+    // Prefixed so the diagnostic beacon tells a failed hand-out of the
+    // wraps from a failed push: the ciphertext is on the hub in this case.
+    hub_directory_svc()
+        .wrap_catalog_key_after_push(db, &key, outcome)
+        .await
+        .map_err(|e| format!("catalog key wraps: {e}"))?;
+    Ok(count)
 }
 
 /// Collects the catalog entries and uploads the local covers.
@@ -224,12 +238,13 @@ async fn build_hub_catalog(db: &sea_orm::DatabaseConnection) -> Result<BuiltHubC
 /// book_count must reach the hub. push_catalog short-circuits when the
 /// catalog hasn't changed (ADR-027); we log the outcome but keep returning
 /// the entry count so the Flutter provider clears its `_catalogDirty` flag
-/// either way.
+/// either way. The outcome comes back with it so an encrypted push can
+/// tell a stored ciphertext from a skip.
 async fn push_built_catalog(
     db: &sea_orm::DatabaseConnection,
     built: &BuiltHubCatalog,
     mode: CatalogPushMode<'_>,
-) -> Result<i32, String> {
+) -> Result<(i32, PushCatalogOutcome), String> {
     let encrypted = matches!(mode, CatalogPushMode::Encrypted { .. });
     let outcome = hub_directory_svc()
         .push_catalog(db, &built.entries, built.book_count, mode)
@@ -244,7 +259,7 @@ async fn push_built_catalog(
         "hub catalog sync outcome"
     );
 
-    Ok(count)
+    Ok((count, outcome))
 }
 
 /// Browses the hub public directory.

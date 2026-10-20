@@ -131,13 +131,11 @@ pub async fn set_hub_url_ffi(hub_url: String) -> Result<(), String> {
     if crate::utils::hub_url::hub_urls_differ(&hub_url, &effective_url)
         && let Ok(db_ref) = hub_db()
     {
-        use sea_orm::ConnectionTrait;
-        let _ = db_ref
-            .execute(sea_orm::Statement::from_string(
-                db_ref.get_database_backend(),
-                "DELETE FROM hub_directory_config".to_owned(),
-            ))
-            .await;
+        // The catalog key goes with the registration (ADR-072).
+        if let Err(e) = HubDirectoryService::purge_local_config(db_ref, catalog_key_store()).await
+        {
+            tracing::warn!("Failed to invalidate hub_directory_config: {e}");
+        }
         tracing::info!(
             "Hub URL differs from .env ({hub_url} -> {effective_url}), directory config invalidated"
         );

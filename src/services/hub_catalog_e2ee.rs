@@ -13,7 +13,9 @@ use x25519_dalek::StaticSecret;
 
 use crate::crypto::catalog_key::{CATALOG_FORMAT_E2EE_V1, CatalogKey, key_id_of_blob};
 
-use super::hub_directory_service::{HubDirectoryError, HubDirectoryService, HubFollow};
+use super::hub_directory_service::{
+    HubDirectoryError, HubDirectoryService, HubFollow, PushCatalogOutcome,
+};
 
 impl HubDirectoryService {
     /// The push body of an encrypted catalog (ADR-072 D6): the ciphertext
@@ -164,6 +166,40 @@ impl HubDirectoryService {
         Ok(())
     }
 
+    /// What follows an encrypted push (ADR-072 D3): once the hub confirmed
+    /// it holds this ciphertext, either by storing it (`Pushed`) or by
+    /// answering 304 to it (`SkippedRemote`), every active follower gets its
+    /// wrap of the key that opens it. A local skip never reached the hub, so
+    /// the wraps already there still open the stored ciphertext and nothing
+    /// is sent. The 304 case matters: when the wraps cannot be delivered
+    /// after a real push, the local push state is reset so the next sync
+    /// contacts the hub again, and the hub, holding that same digest,
+    /// answers 304. Wrapping on that answer too is what gets the wraps out
+    /// without waiting for the next catalog change; it also costs one small
+    /// batch on each keep-alive push, every few days. Returns how many
+    /// follow rows the hub updated.
+    pub async fn wrap_catalog_key_after_push(
+        &self,
+        db: &DatabaseConnection,
+        key: &CatalogKey,
+        outcome: PushCatalogOutcome,
+    ) -> Result<i32, HubDirectoryError> {
+        if outcome == PushCatalogOutcome::SkippedLocal {
+            return Ok(0);
+        }
+        match self.wrap_catalog_key_for_followers(db, key).await {
+            Ok(updated) => Ok(updated),
+            Err(e) => {
+                tracing::warn!(
+                    target: "hub_directory",
+                    "catalog key wraps not delivered after push, next sync will push again: {e}"
+                );
+                Self::record_catalog_push_state(db, None).await?;
+                Err(e)
+            }
+        }
+    }
+
     /// Wraps the catalog key for every active follower that published an
     /// X25519 key and hands the wraps to the hub (ADR-072 D3, D4). Returns
     /// how many follow rows the hub updated. Followers without a key are
@@ -275,9 +311,7 @@ mod tests {
     use x25519_dalek::PublicKey as X25519PublicKey;
 
     use super::*;
-    use crate::services::hub_directory_service::{
-        CatalogEntry, CatalogPushMode, PushCatalogOutcome,
-    };
+    use crate::services::hub_directory_service::{CatalogEntry, CatalogPushMode};
 
     const OWNER: &str = "owner-node";
 
@@ -847,6 +881,154 @@ mod tests {
             .unwrap();
         let opened = CatalogKey::unwrap(&secret, wrap).unwrap();
         assert_eq!(opened.key_id_hex(), key.key_id_hex());
+    }
+
+    async fn mount_one_follower(server: &MockServer, public: &str) {
+        Mock::given(method("GET"))
+            .and(path("/api/directory/follows"))
+            .and(query_param("direction", "followers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "items": [
+                { "id": 7, "follower_node_id": "a", "followed_node_id": "reader-node", "status": "active",
+                  "created_at": "x", "follower_x25519_public_key": public },
+            ]})))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn wraps_follow_a_push_the_hub_stored() {
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = local_db().await;
+        let key = CatalogKey::generate();
+        let (_, public) = reader();
+        mount_one_follower(&server, &public).await;
+        Mock::given(method("POST"))
+            .and(path("/api/directory/contacts/sync"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "updated": 1 })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let updated = HubDirectoryService::new()
+            .wrap_catalog_key_after_push(&db, &key, PushCatalogOutcome::Pushed)
+            .await
+            .unwrap();
+
+        assert_eq!(updated, 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_locally_skipped_push_sends_no_wrap() {
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = local_db().await;
+        let key = CatalogKey::generate();
+        let (_, public) = reader();
+        mount_one_follower(&server, &public).await;
+        Mock::given(method("POST"))
+            .and(path("/api/directory/contacts/sync"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let updated = HubDirectoryService::new()
+            .wrap_catalog_key_after_push(&db, &key, PushCatalogOutcome::SkippedLocal)
+            .await
+            .unwrap();
+
+        assert_eq!(updated, 0);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn after_undelivered_wraps_the_next_sync_is_answered_304_and_still_wraps() {
+        // Second round of the failure above, end to end through push_catalog:
+        // the hub already holds this digest, so the re-push comes back 304.
+        // The wraps must go out on that answer, or the readers would wait
+        // for the next catalog change.
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = local_db().await;
+        let key = CatalogKey::generate();
+        let (_, public) = reader();
+        mount_one_follower(&server, &public).await;
+        Mock::given(method("POST"))
+            .and(path("/api/directory/catalog"))
+            .respond_with(ResponseTemplate::new(304))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/directory/contacts/sync"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "updated": 1 })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let svc = HubDirectoryService::new();
+        // State left by the failed first round: no local digest.
+        HubDirectoryService::record_catalog_push_state(&db, None)
+            .await
+            .unwrap();
+
+        let outcome = svc
+            .push_catalog(
+                &db,
+                &[entry("9781", "A")],
+                1,
+                CatalogPushMode::Encrypted {
+                    key: &key,
+                    cover_book_ids: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, PushCatalogOutcome::SkippedRemote);
+
+        let updated = svc
+            .wrap_catalog_key_after_push(&db, &key, outcome)
+            .await
+            .unwrap();
+
+        assert_eq!(updated, 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn undelivered_wraps_reset_the_push_state_so_the_next_sync_pushes_again() {
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = local_db().await;
+        let key = CatalogKey::generate();
+        let (_, public) = reader();
+        mount_one_follower(&server, &public).await;
+        Mock::given(method("POST"))
+            .and(path("/api/directory/contacts/sync"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // As if the push had just been confirmed.
+        HubDirectoryService::record_catalog_push_state(&db, Some("digest"))
+            .await
+            .unwrap();
+
+        let err = HubDirectoryService::new()
+            .wrap_catalog_key_after_push(&db, &key, PushCatalogOutcome::Pushed)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, HubDirectoryError::Hub(500, _)), "{err}");
+        let cfg = HubDirectoryService::get_config(&db).await.unwrap().unwrap();
+        assert_eq!(cfg.last_catalog_hash, None, "the digest must be forgotten");
+        assert_eq!(cfg.last_catalog_pushed_at, None);
     }
 
     #[tokio::test]

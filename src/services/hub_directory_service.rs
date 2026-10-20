@@ -787,6 +787,37 @@ impl HubDirectoryService {
         Ok(())
     }
 
+    /// Forgets the hub registration: the `hub_directory_config` row and,
+    /// with it, the catalog key (ADR-072). Every path that drops the row
+    /// goes through here (hub change, 401 recovery, startup hub mismatch,
+    /// app reset), because the catalog version readers compare lives in
+    /// that row: a new registration under the same key id would restart at
+    /// version 1 and be refused by every reader as a rollback. Retiring the
+    /// key gives the next registration a fresh key id, hence a fresh
+    /// version history on the reader side.
+    pub async fn purge_local_config(
+        db: &DatabaseConnection,
+        key_store: &crate::services::hub_catalog_key_store::CatalogKeyStore,
+    ) -> Result<(), HubDirectoryError> {
+        use crate::services::hub_catalog_key_store::CatalogKeyStore;
+        use sea_orm::TransactionTrait;
+
+        // One transaction: a row gone with its key still live would be the
+        // very restart-at-version-1 this helper exists to prevent.
+        let txn = db.begin().await?;
+        txn.execute(Statement::from_string(
+            txn.get_database_backend(),
+            "DELETE FROM hub_directory_config".to_owned(),
+        ))
+        .await?;
+        CatalogKeyStore::retire_rows(&txn)
+            .await
+            .map_err(HubDirectoryError::Config)?;
+        txn.commit().await?;
+        key_store.forget();
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Profile
     // -----------------------------------------------------------------------
@@ -2423,6 +2454,96 @@ mod catalog_push_state_tests {
         let cfg = HubDirectoryService::get_config(&db).await.unwrap().unwrap();
         assert_eq!(cfg.last_catalog_hash, None);
         assert_eq!(cfg.last_catalog_pushed_at, None);
+    }
+}
+
+#[cfg(test)]
+mod purge_local_config_tests {
+    //! The registration and the catalog key leave together (ADR-072): a key
+    //! that outlived its `catalog_version` would have readers refuse the
+    //! restarted history as a rollback.
+
+    use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+
+    use super::*;
+    use crate::services::hub_catalog_key_store::CatalogKeyStore;
+
+    const UUID: &str = "11111111-2222-3333-4444-555555555555";
+
+    async fn db_with_config_and_keys() -> DatabaseConnection {
+        let db = super::catalog_push_state_tests::db_with_config().await;
+        db.execute_unprepared(
+            "CREATE TABLE crypto_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                key_type TEXT NOT NULL,
+                public_key BLOB NOT NULL,
+                encrypted_secret BLOB NOT NULL,
+                salt BLOB NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                revoked_at TEXT
+            )",
+        )
+        .await
+        .unwrap();
+        db
+    }
+
+    async fn live_catalog_keys(db: &DatabaseConnection) -> i64 {
+        db.query_one(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT COUNT(*) AS n FROM crypto_keys WHERE key_type = 'catalog' AND revoked_at IS NULL"
+                .to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "n")
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn purge_drops_the_row_and_retires_the_catalog_key() {
+        let db = db_with_config_and_keys().await;
+        let store = CatalogKeyStore::new();
+        let before = store.load_or_create(&db, UUID).await.unwrap();
+        HubDirectoryService::record_catalog_version(&db, 7)
+            .await
+            .unwrap();
+
+        HubDirectoryService::purge_local_config(&db, &store)
+            .await
+            .unwrap();
+
+        assert!(
+            HubDirectoryService::get_config(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(live_catalog_keys(&db).await, 0);
+        // The cache is gone too: the next key is a new one.
+        let after = store.load_or_create(&db, UUID).await.unwrap();
+        assert_ne!(before.key_id_hex(), after.key_id_hex());
+    }
+
+    #[tokio::test]
+    async fn purge_without_a_key_only_drops_the_row() {
+        let db = db_with_config_and_keys().await;
+        let store = CatalogKeyStore::new();
+
+        HubDirectoryService::purge_local_config(&db, &store)
+            .await
+            .unwrap();
+
+        assert!(
+            HubDirectoryService::get_config(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(live_catalog_keys(&db).await, 0);
+        assert!(store.load(&db, UUID).await.unwrap().is_none());
     }
 }
 

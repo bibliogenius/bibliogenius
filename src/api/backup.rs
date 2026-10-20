@@ -1118,9 +1118,15 @@ async fn apply_replace(
             true
         }
         _ if same_device => {
-            // No-op: the row in the restored DB was written by THIS device's
-            // previous self with the same `library_uuid`. The local
-            // NodeIdentity is intact and decrypts the row as-is.
+            // The identity rows in the restored DB were written by THIS
+            // device's previous self with the same `library_uuid`: the local
+            // NodeIdentity decrypts them as-is. The catalog key row (ADR-072)
+            // is retired nonetheless: the restored `hub_directory_config`
+            // carries the catalog version of the archive, lower than the one
+            // readers have seen since, and a push under the same key id
+            // would be refused as a rollback. A fresh key starts a fresh
+            // version history.
+            retire_catalog_keys(db_path).await?;
             false
         }
         _ => {
@@ -1128,6 +1134,9 @@ async fn apply_replace(
             false
         }
     };
+    // Whatever the branch, the catalog key cached in memory describes rows
+    // that are gone or retired.
+    crate::services::hub_catalog_key_store::CatalogKeyStore::shared().forget();
 
     // 4. Rebuild the cover directory: wipe everything inside, then write the
     //    archive's covers verbatim. Hub-hosted covers (https URLs) live in
@@ -1223,6 +1232,21 @@ async fn rewrite_crypto_keys(
         .await
         .map_err(|e| BackupError::Db(e.to_string()))?;
     crate::services::identity_service::store_identity_bytes(&db, library_uuid, ed_bytes, x_bytes)
+        .await
+        .map_err(BackupError::Db)?;
+    db.close()
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    Ok(())
+}
+
+async fn retire_catalog_keys(db_path: &Path) -> Result<(), BackupError> {
+    let url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db = sea_orm::Database::connect(&url)
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    crate::services::hub_catalog_key_store::CatalogKeyStore::shared()
+        .retire(&db)
         .await
         .map_err(BackupError::Db)?;
     db.close()

@@ -13,8 +13,19 @@
 //! derivation costs tens of milliseconds and the catalog push runs on every
 //! launch and behind every edit. The cache holds a zeroizing [`CatalogKey`]
 //! and is dropped on reset.
+//!
+//! The key is bound to one hub registration. The catalog version that
+//! readers compare lives in `hub_directory_config`, so when that row goes
+//! (hub change, 401 recovery, startup hub mismatch, app reset) or comes
+//! back older (same-device backup restore), the key must be retired: a
+//! push under the same key id would otherwise restart or rewind the
+//! version and be refused by every reader as a rollback. Every purge of
+//! the directory config retires the rows and the cache together
+//! ([`CatalogKeyStore::retire_rows`] inside the purge transaction, then
+//! [`CatalogKeyStore::forget`]); the restore path calls
+//! [`CatalogKeyStore::retire`].
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use zeroize::Zeroize;
@@ -34,6 +45,14 @@ pub struct CatalogKeyStore {
 impl CatalogKeyStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The process-wide store, one per app like the directory service: the
+    /// FFI and the embedded HTTP server must share the cache, or a purge
+    /// done by one would leave the other serving a retired key.
+    pub fn shared() -> &'static CatalogKeyStore {
+        static SHARED: OnceLock<CatalogKeyStore> = OnceLock::new();
+        SHARED.get_or_init(CatalogKeyStore::new)
     }
 
     /// The current catalog key, when the library already has one. Never
@@ -75,16 +94,29 @@ impl CatalogKeyStore {
         db: &DatabaseConnection,
         library_uuid: &str,
     ) -> Result<Arc<CatalogKey>, String> {
-        db.execute(Statement::from_sql_and_values(
-            db.get_database_backend(),
-            "UPDATE crypto_keys SET revoked_at = ? WHERE user_id = 0 AND key_type = ? AND revoked_at IS NULL",
-            [chrono::Utc::now().to_rfc3339().into(), KEY_TYPE.into()],
-        ))
-        .await
-        .map_err(|e| format!("Failed to retire catalog key: {e}"))?;
+        retire_current_in_db(db).await?;
         let key = CatalogKey::generate();
         store_to_db(db, library_uuid, &key).await?;
         Ok(self.remember(key))
+    }
+
+    /// Retires the current key without replacing it, and drops the cache.
+    /// Called whenever the directory registration is purged: the next
+    /// encrypted push creates a fresh key, with a fresh key id, so readers
+    /// start a new version history instead of refusing a restart at 1.
+    /// A library that pushes in clear holds no key; this is then a no-op.
+    pub async fn retire(&self, db: &DatabaseConnection) -> Result<(), String> {
+        Self::retire_rows(db).await?;
+        self.forget();
+        Ok(())
+    }
+
+    /// The at-rest half of [`Self::retire`], on any connection (a
+    /// transaction included) so a caller can tie it to other statements.
+    /// The caller still owns the cache: call [`Self::forget`] once the
+    /// statements are committed.
+    pub(crate) async fn retire_rows<C: ConnectionTrait>(conn: &C) -> Result<(), String> {
+        retire_current_in_db(conn).await
     }
 
     /// Drops the cached key. The rows stay: a reset that wipes the identity
@@ -106,6 +138,20 @@ impl CatalogKeyStore {
         }
         key
     }
+}
+
+/// Marks every live catalog key row as revoked. Rows are kept, never
+/// deleted: a reader-side wrap names a key id, and keeping the history
+/// readable is what lets a diagnosis tell a retired key from an unknown one.
+async fn retire_current_in_db<C: ConnectionTrait>(db: &C) -> Result<(), String> {
+    db.execute(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "UPDATE crypto_keys SET revoked_at = ? WHERE user_id = 0 AND key_type = ? AND revoked_at IS NULL",
+        [chrono::Utc::now().to_rfc3339().into(), KEY_TYPE.into()],
+    ))
+    .await
+    .map_err(|e| format!("Failed to retire catalog key: {e}"))?;
+    Ok(())
 }
 
 async fn load_current_from_db(
@@ -270,5 +316,80 @@ mod tests {
             .try_get("", "n")
             .unwrap();
         assert_eq!(live, 1);
+    }
+
+    #[tokio::test]
+    async fn retire_leaves_no_live_key_and_forgets_the_cache() {
+        let db = db_with_crypto_keys().await;
+        let store = CatalogKeyStore::new();
+        let first = store.load_or_create(&db, UUID).await.unwrap();
+
+        store.retire(&db).await.unwrap();
+
+        // Nothing to load any more, from this store or a fresh one.
+        assert!(store.load(&db, UUID).await.unwrap().is_none());
+        assert!(
+            CatalogKeyStore::new()
+                .load(&db, UUID)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // The next key is a new one: new key id, new version baseline.
+        let next = store.load_or_create(&db, UUID).await.unwrap();
+        assert_ne!(first.key_id_hex(), next.key_id_hex());
+        // The retired row is kept for the record.
+        let total: i64 = db
+            .query_one(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT COUNT(*) AS n FROM crypto_keys WHERE key_type = 'catalog'".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get("", "n")
+            .unwrap();
+        assert_eq!(total, 2);
+    }
+
+    #[tokio::test]
+    async fn retire_without_a_key_is_a_no_op() {
+        let db = db_with_crypto_keys().await;
+        CatalogKeyStore::new().retire(&db).await.unwrap();
+        assert!(
+            CatalogKeyStore::new()
+                .load(&db, UUID)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn retire_never_touches_the_identity_rows() {
+        let db = db_with_crypto_keys().await;
+        db.execute_unprepared(
+            "INSERT INTO crypto_keys (user_id, key_type, public_key, encrypted_secret, salt)
+             VALUES (0, 'x25519', X'00', X'00', X'00'), (0, 'ed25519', X'00', X'00', X'00')",
+        )
+        .await
+        .unwrap();
+        let store = CatalogKeyStore::new();
+        store.load_or_create(&db, UUID).await.unwrap();
+
+        store.retire(&db).await.unwrap();
+
+        let live_identity: i64 = db
+            .query_one(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT COUNT(*) AS n FROM crypto_keys WHERE key_type != 'catalog' AND revoked_at IS NULL"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get("", "n")
+            .unwrap();
+        assert_eq!(live_identity, 2);
     }
 }

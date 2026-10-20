@@ -10,7 +10,7 @@
 
 use crate::services::hub_directory_service::{
     CatalogEntry, CatalogPushMode, DirectoryConfig, HubBorrowRequest, HubDirectoryError,
-    HubDirectoryService, HubFollow, HubProfile, RegisterParams,
+    HubDirectoryService, HubFollow, HubProfile, PushCatalogOutcome, RegisterParams,
 };
 
 static HUB_DIRECTORY_SVC: OnceLock<HubDirectoryService> = OnceLock::new();
@@ -23,13 +23,11 @@ fn hub_db() -> Result<&'static sea_orm::DatabaseConnection, String> {
     db().ok_or_else(|| "Database not initialized".to_string())
 }
 
-/// At-rest store of the directory catalog key (ADR-072), one per process
-/// like the directory service itself.
-static CATALOG_KEY_STORE: OnceLock<crate::services::hub_catalog_key_store::CatalogKeyStore> =
-    OnceLock::new();
-
+/// At-rest store of the directory catalog key (ADR-072): the process-wide
+/// instance, shared with the embedded HTTP server so a purge done on
+/// either side empties the same cache.
 fn catalog_key_store() -> &'static crate::services::hub_catalog_key_store::CatalogKeyStore {
-    CATALOG_KEY_STORE.get_or_init(crate::services::hub_catalog_key_store::CatalogKeyStore::new)
+    crate::services::hub_catalog_key_store::CatalogKeyStore::shared()
 }
 
 /// The library uuid the identity was initialized with: the catalog key is
@@ -322,13 +320,11 @@ pub async fn hub_directory_import_write_token(
 /// stored write_token is no longer valid on the hub.
 pub async fn hub_directory_purge_config() -> Result<(), String> {
     let db = hub_db()?;
-    use sea_orm::ConnectionTrait;
-    db.execute(sea_orm::Statement::from_string(
-        db.get_database_backend(),
-        "DELETE FROM hub_directory_config".to_owned(),
-    ))
-    .await
-    .map_err(|e| format!("Failed to purge hub_directory_config: {e}"))?;
+    // The row and the catalog key leave together (ADR-072): the next
+    // registration gets a fresh key id, hence a fresh version history.
+    HubDirectoryService::purge_local_config(db, catalog_key_store())
+        .await
+        .map_err(|e| format!("Failed to purge hub_directory_config: {e}"))?;
     // Clear any pending cover-upload failures: once unregistered, the old
     // warnings become meaningless and would never auto-clear (no next sync
     // with the old registration). Next registration starts fresh.
@@ -337,9 +333,6 @@ pub async fn hub_directory_purge_config() -> Result<(), String> {
     // URLs carrying the old node id, and the hub holds none of those blobs any
     // more. Next registration re-uploads from scratch.
     hub_directory_svc().forget_uploaded_covers();
-    // The cached catalog key goes too: its rows stay, the next registration
-    // reloads it from the database if it is still wanted.
-    catalog_key_store().forget();
     tracing::info!("hub_directory_config purged for 401 recovery");
     Ok(())
 }

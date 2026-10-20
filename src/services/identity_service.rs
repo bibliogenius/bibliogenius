@@ -301,6 +301,10 @@ pub(crate) async fn delete_identity_from_db(db: &DatabaseConnection) -> Result<(
     ))
     .await
     .map_err(|e| format!("Failed to delete old crypto_keys: {e}"))?;
+    // The catalog key row (ADR-072) went with the identity rows: the cached
+    // copy must not outlive it, or the next push would encrypt under a key
+    // that no longer exists at rest.
+    crate::services::hub_catalog_key_store::CatalogKeyStore::shared().forget();
     Ok(())
 }
 

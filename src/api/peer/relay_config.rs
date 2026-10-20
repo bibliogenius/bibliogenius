@@ -205,11 +205,13 @@ async fn apply_relay_setup(
         .is_some_and(|prev| crate::utils::hub_url::hub_urls_differ(prev, relay_url));
 
     if hub_changed {
-        db.execute(sea_orm::Statement::from_string(
-            db.get_database_backend(),
-            "DELETE FROM hub_directory_config".to_owned(),
-        ))
-        .await?;
+        // The registration and its catalog key leave together (ADR-072).
+        crate::services::hub_directory_service::HubDirectoryService::purge_local_config(
+            db,
+            crate::services::hub_catalog_key_store::CatalogKeyStore::shared(),
+        )
+        .await
+        .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
     }
 
     Ok(hub_changed)
@@ -527,6 +529,28 @@ mod relay_setup_tests {
         .unwrap();
     }
 
+    /// Live (not revoked) catalog key rows, after seeding one. The key is
+    /// stored through the real store so the row looks like production's.
+    async fn seed_catalog_key(db: &DatabaseConnection) {
+        crate::services::hub_catalog_key_store::CatalogKeyStore::new()
+            .load_or_create(db, "11111111-2222-3333-4444-555555555555")
+            .await
+            .expect("catalog key stored");
+    }
+
+    async fn live_catalog_keys(db: &DatabaseConnection) -> i64 {
+        db.query_one(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT COUNT(*) AS n FROM crypto_keys WHERE key_type = 'catalog' AND revoked_at IS NULL"
+                .to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "n")
+        .unwrap()
+    }
+
     async fn directory_token(db: &DatabaseConnection) -> Option<String> {
         db.query_one(Statement::from_string(
             db.get_database_backend(),
@@ -552,6 +576,7 @@ mod relay_setup_tests {
             .expect("first setup");
 
         seed_directory_config(&db, "preserved-token").await;
+        seed_catalog_key(&db).await;
 
         let changed =
             apply_relay_setup(&db, "https://hub.example.org/", "mbx-2", "rtok-2", "wtok-2")
@@ -563,6 +588,11 @@ mod relay_setup_tests {
             directory_token(&db).await.as_deref(),
             Some("preserved-token"),
             "hub_directory_config must survive a same-URL re-setup",
+        );
+        assert_eq!(
+            live_catalog_keys(&db).await,
+            1,
+            "the catalog key must survive a same-URL re-setup",
         );
         assert!(
             relay_session::mailbox_created_this_session(),
@@ -589,6 +619,7 @@ mod relay_setup_tests {
         .expect("first setup");
 
         seed_directory_config(&db, "stale-token").await;
+        seed_catalog_key(&db).await;
 
         let changed = apply_relay_setup(
             &db,
@@ -604,6 +635,11 @@ mod relay_setup_tests {
         assert!(
             directory_token(&db).await.is_none(),
             "hub_directory_config must be wiped when the hub actually changes",
+        );
+        assert_eq!(
+            live_catalog_keys(&db).await,
+            0,
+            "the catalog key must be retired with the registration (ADR-072)",
         );
         assert!(
             relay_session::mailbox_created_this_session(),

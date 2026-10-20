@@ -108,23 +108,6 @@ async fn catalog_key_wrap_for(
         .map_err(|e| format!("catalog key wrap: {e}"))
 }
 
-/// Hands every active follower its wrap of the current catalog key
-/// (ADR-072 D3). No-op when this library holds no catalog key. Returns the
-/// number of follow rows the hub updated.
-pub async fn hub_directory_sync_catalog_keys() -> Result<i32, String> {
-    let db = hub_db()?;
-    let Some(key) = catalog_key_store()
-        .load(db, &identity_library_uuid()?)
-        .await?
-    else {
-        return Ok(0);
-    };
-    hub_directory_svc()
-        .wrap_catalog_key_for_followers(db, &key)
-        .await
-        .map_err(|e| e.to_string())
-}
-
 /// Rotates the catalog key after a reader left (ADR-072 D4): retires the
 /// current key, generates a new one and re-wraps it for the readers that
 /// remain. The ex-reader never receives the new key. The catalog itself is

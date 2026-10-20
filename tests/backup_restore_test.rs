@@ -63,11 +63,24 @@ async fn seed_crypto_keys(db: &DatabaseConnection) {
     db.execute(Statement::from_sql_and_values(
         db.get_database_backend(),
         "INSERT INTO crypto_keys (user_id, key_type, public_key, encrypted_secret, salt) \
-         VALUES (0, 'ed25519', X'00', X'01', X'02')",
+         VALUES (0, 'ed25519', X'00', X'01', X'02'), (0, 'catalog', X'00', X'01', X'02')",
         [],
     ))
     .await
-    .expect("seed crypto_keys row");
+    .expect("seed crypto_keys rows");
+}
+
+/// Live (not revoked) rows of one key type.
+async fn count_live_keys(db: &DatabaseConnection, key_type: &str) -> i64 {
+    db.query_one(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "SELECT COUNT(*) AS n FROM crypto_keys WHERE user_id = 0 AND key_type = ? AND revoked_at IS NULL",
+        [key_type.into()],
+    ))
+    .await
+    .expect("count live keys")
+    .and_then(|r| r.try_get::<i64>("", "n").ok())
+    .unwrap_or(0)
 }
 
 async fn count_crypto_keys(db: &DatabaseConnection) -> i64 {
@@ -468,6 +481,18 @@ async fn replace_same_device_preserves_crypto_keys() {
         n > 0,
         "same-device Replace must preserve the archive's crypto_keys row \
          instead of wiping it ({n} rows kept)"
+    );
+    assert_eq!(
+        count_live_keys(&live_after, "ed25519").await,
+        1,
+        "the identity row stays live"
+    );
+    // The archive's catalog version is older than what readers have seen:
+    // the catalog key is retired so the next push starts a new history.
+    assert_eq!(
+        count_live_keys(&live_after, "catalog").await,
+        0,
+        "same-device Replace must retire the archive's catalog key (ADR-072)"
     );
     live_after.close().await.unwrap();
 }
