@@ -123,13 +123,16 @@ pub struct FrbRegisterParams {
     /// time so the profile header and the catalog cannot disagree; the field
     /// stays on the FFI struct to keep the Dart call sites compiling.
     pub book_count: i32,
-    pub is_listed: bool,
-    pub requires_approval: bool,
+    /// The three visibility settings. `None` leaves the hub's stored value
+    /// untouched; only a settings change sends `Some`. The local config
+    /// mirrors what the hub returns either way.
+    pub is_listed: Option<bool>,
+    pub requires_approval: Option<bool>,
     pub accept_from: String,
     pub description: Option<String>,
     pub location_country: Option<String>,
     pub location_city_id: Option<i64>,
-    pub allow_borrowing: bool,
+    pub allow_borrowing: Option<bool>,
     pub x25519_public_key: Option<String>,
     pub website: Option<String>,
     pub device_model: Option<String>,

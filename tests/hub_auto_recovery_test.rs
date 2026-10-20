@@ -74,10 +74,10 @@ fn base_params(node_id: &str) -> RegisterParams {
     RegisterParams {
         node_id: node_id.to_string(),
         display_name: "Eve's Library".to_string(),
-        is_listed: false,
-        requires_approval: true,
+        is_listed: Some(false),
+        requires_approval: Some(true),
         accept_from: "everyone".to_string(),
-        allow_borrowing: true,
+        allow_borrowing: Some(true),
         ..Default::default()
     }
 }
@@ -178,6 +178,112 @@ async fn register_recovers_on_401_with_local_recovery_code() {
         Some("RC-NEW"),
         "new recovery_code must replace the burned one",
     );
+}
+
+/// A registration that leaves the visibility flags out (relay refresh,
+/// rename, silent registration after a purge) sends no flag to the hub and
+/// takes the hub's answer as its local copy: a published library stays
+/// published locally too, even when the local row was a default.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn register_without_flags_mirrors_the_hub_profile_locally() {
+    let db = setup_test_db().await;
+    let node_id = "26e4b4d9-acff-42cb-8b25-0bf32457a232";
+    // The local row says unlisted, approval required: a default left by a
+    // Keychain import after a purge, not the owner's settings.
+    seed_directory_config(&db, node_id, "good-token", Some("RC")).await;
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+
+    let mut published = profile_json(node_id, None);
+    published["is_listed"] = serde_json::json!(true);
+    published["requires_approval"] = serde_json::json!(false);
+    published["allow_borrowing"] = serde_json::json!(false);
+    Mock::given(method("POST"))
+        .and(path("/api/directory/profile"))
+        .and(header("authorization", "Bearer good-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(published))
+        .expect(1)
+        .mount(&hub)
+        .await;
+
+    let params = RegisterParams {
+        is_listed: None,
+        requires_approval: None,
+        allow_borrowing: None,
+        ..base_params(node_id)
+    };
+    let result = HubDirectoryService::new()
+        .register_or_update(&db, params)
+        .await
+        .expect("register_or_update");
+
+    // Nothing about visibility left the device.
+    let request = &hub.received_requests().await.unwrap()[0];
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert!(body.get("is_listed").is_none());
+    assert!(body.get("requires_approval").is_none());
+    assert!(body.get("allow_borrowing").is_none());
+
+    // The local copy now says what the hub holds.
+    assert!(result.is_listed);
+    assert!(!result.requires_approval);
+    assert!(!result.allow_borrowing);
+    let stored = HubDirectoryService::get_config(&db).await.unwrap().unwrap();
+    assert!(stored.is_listed);
+    assert!(!stored.requires_approval);
+    assert!(!stored.allow_borrowing);
+}
+
+/// An older hub does not return `is_listed`. The local copy then falls
+/// back on what was sent, and on the previous local value when nothing
+/// was sent: never on a default that would flip a published library.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn register_on_a_hub_without_is_listed_falls_back_on_the_sent_then_local_value() {
+    let db = setup_test_db().await;
+    let node_id = "26e4b4d9-acff-42cb-8b25-0bf32457a232";
+    seed_directory_config(&db, node_id, "good-token", Some("RC")).await;
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+    // profile_json carries no is_listed, like a hub predating the field.
+    Mock::given(method("POST"))
+        .and(path("/api/directory/profile"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(profile_json(node_id, None)))
+        .expect(2)
+        .mount(&hub)
+        .await;
+    let svc = HubDirectoryService::new();
+
+    // Sent: the local copy takes it.
+    let listed = svc
+        .register_or_update(
+            &db,
+            RegisterParams {
+                is_listed: Some(true),
+                ..base_params(node_id)
+            },
+        )
+        .await
+        .expect("register with the flag");
+    assert!(listed.is_listed);
+
+    // Not sent: the previous local value stays, the default never wins.
+    let kept = svc
+        .register_or_update(
+            &db,
+            RegisterParams {
+                is_listed: None,
+                ..base_params(node_id)
+            },
+        )
+        .await
+        .expect("register without the flag");
+    assert!(kept.is_listed);
+    let stored = HubDirectoryService::get_config(&db).await.unwrap().unwrap();
+    assert!(stored.is_listed);
 }
 
 /// No recovery_code locally -> we can't self-heal; the 401 must surface

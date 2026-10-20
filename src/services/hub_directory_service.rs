@@ -14,10 +14,6 @@ use reqwest::Client;
 use sea_orm::{ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
 
-fn default_true() -> Option<bool> {
-    Some(true)
-}
-
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -81,9 +77,16 @@ pub struct HubProfile {
     #[serde(default)]
     pub location_city_id: Option<i64>,
     pub requires_approval: bool,
-    /// Whether this library accepts borrow requests from followers.
-    #[serde(default = "default_true")]
+    /// Whether this library accepts borrow requests from followers. `None`
+    /// when the hub left it out, so the registration can fall back on
+    /// what it sent and on the previous local value, like `is_listed`.
+    #[serde(default)]
     pub allow_borrowing: Option<bool>,
+    /// Whether the library appears in the public directory. Returned by
+    /// the upsert and recovery responses so a registration that left the
+    /// flag out mirrors the hub; absent on older hubs.
+    #[serde(default)]
+    pub is_listed: Option<bool>,
     pub last_seen_at: Option<String>,
     /// Returned once on first registration - must be stored locally.
     pub write_token: Option<String>,
@@ -380,14 +383,19 @@ pub struct HubBorrowRequest {
 pub struct RegisterParams {
     pub node_id: String,
     pub display_name: String,
-    pub is_listed: bool,
-    pub requires_approval: bool,
+    /// The owner's visibility settings. `None` leaves the hub's stored
+    /// value untouched: a registration made for another reason (relay
+    /// credentials, rename, silent registration after a purge) must not
+    /// unlist a published library or reopen a gated one. Only a settings
+    /// change sends `Some`.
+    pub is_listed: Option<bool>,
+    pub requires_approval: Option<bool>,
     pub accept_from: String,
     pub description: Option<String>,
     pub location_country: Option<String>,
     /// GeoNames populated-place ID, opt-in (ADR-035). None means no city sharing.
     pub location_city_id: Option<i64>,
-    pub allow_borrowing: bool,
+    pub allow_borrowing: Option<bool>,
     pub x25519_public_key: Option<String>,
     pub website: Option<String>,
     pub device_model: Option<String>,
@@ -858,11 +866,21 @@ impl HubDirectoryService {
             "node_id":           params.node_id,
             "display_name":      params.display_name,
             "book_count":        book_count,
-            "is_listed":         params.is_listed,
-            "requires_approval": params.requires_approval,
             "accept_from":       params.accept_from,
-            "allow_borrowing":   params.allow_borrowing,
         });
+
+        // The visibility flags follow "Some = set, None = leave alone" too:
+        // the hub's upsert reads them with isset, so an absent key keeps
+        // the stored value (see `RegisterParams`).
+        if let Some(listed) = params.is_listed {
+            body["is_listed"] = serde_json::Value::Bool(listed);
+        }
+        if let Some(approval) = params.requires_approval {
+            body["requires_approval"] = serde_json::Value::Bool(approval);
+        }
+        if let Some(borrowing) = params.allow_borrowing {
+            body["allow_borrowing"] = serde_json::Value::Bool(borrowing);
+        }
 
         if let Some(ref desc) = params.description {
             body["description"] = serde_json::Value::String(desc.clone());
@@ -1044,13 +1062,26 @@ impl HubDirectoryService {
                 .and_then(|c| c.last_catalog_pushed_at.clone())
         };
 
+        // The local copy of the visibility flags follows the hub: what it
+        // returns after the upsert is what it holds, whether this call set
+        // the flags or left them alone. An older hub that does not return
+        // `is_listed` falls back to what was sent, then to the previous
+        // local value, then to unlisted.
         let config = DirectoryConfig {
             node_id: params.node_id,
             write_token,
-            is_listed: params.is_listed,
-            requires_approval: params.requires_approval,
+            is_listed: profile
+                .is_listed
+                .or(params.is_listed)
+                .or(existing.as_ref().map(|c| c.is_listed))
+                .unwrap_or(false),
+            requires_approval: profile.requires_approval,
             accept_from: params.accept_from,
-            allow_borrowing: params.allow_borrowing,
+            allow_borrowing: profile
+                .allow_borrowing
+                .or(params.allow_borrowing)
+                .or(existing.as_ref().map(|c| c.allow_borrowing))
+                .unwrap_or(true),
             recovery_code,
             last_catalog_hash,
             last_catalog_pushed_at,
@@ -1153,13 +1184,15 @@ impl HubDirectoryService {
         // On recovery the hub's cached catalog may have been dropped or
         // drifted; clear the local hash so the next sync re-pushes
         // unconditionally (ADR-027).
+        // The hub's values win when it returns them: after a purge the
+        // local row is a default, not the owner's settings.
         let config = DirectoryConfig {
             node_id: node_id.to_string(),
             write_token,
-            is_listed: existing.is_listed,
-            requires_approval: existing.requires_approval,
+            is_listed: profile.is_listed.unwrap_or(existing.is_listed),
+            requires_approval: profile.requires_approval,
             accept_from: existing.accept_from,
-            allow_borrowing: existing.allow_borrowing,
+            allow_borrowing: profile.allow_borrowing.unwrap_or(existing.allow_borrowing),
             recovery_code: profile.recovery_code,
             last_catalog_hash: None,
             last_catalog_pushed_at: None,
@@ -2559,12 +2592,38 @@ mod register_body_tests {
         RegisterParams {
             node_id: "node123".to_string(),
             display_name: "Test".to_string(),
-            is_listed: true,
-            requires_approval: false,
+            is_listed: Some(true),
+            requires_approval: Some(false),
             accept_from: "anyone".to_string(),
-            allow_borrowing: true,
+            allow_borrowing: Some(true),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn body_carries_the_visibility_flags_when_set() {
+        let body = HubDirectoryService::build_register_body(&base_params(), 0);
+        assert_eq!(body["is_listed"], serde_json::json!(true));
+        assert_eq!(body["requires_approval"], serde_json::json!(false));
+        assert_eq!(body["allow_borrowing"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn body_omits_the_visibility_flags_when_none() {
+        // A registration made for another reason (relay, rename, silent
+        // registration after a purge) must leave the hub's stored settings
+        // alone: the hub reads these keys with isset.
+        let params = RegisterParams {
+            is_listed: None,
+            requires_approval: None,
+            allow_borrowing: None,
+            ..base_params()
+        };
+        let body = HubDirectoryService::build_register_body(&params, 0);
+        assert!(body.get("is_listed").is_none());
+        assert!(body.get("requires_approval").is_none());
+        assert!(body.get("allow_borrowing").is_none());
+        assert_eq!(body["accept_from"], serde_json::json!("anyone"));
     }
 
     #[test]

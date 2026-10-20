@@ -132,8 +132,7 @@ pub async fn set_hub_url_ffi(hub_url: String) -> Result<(), String> {
         && let Ok(db_ref) = hub_db()
     {
         // The catalog key goes with the registration (ADR-072).
-        if let Err(e) = HubDirectoryService::purge_local_config(db_ref, catalog_key_store()).await
-        {
+        if let Err(e) = HubDirectoryService::purge_local_config(db_ref, catalog_key_store()).await {
             tracing::warn!("Failed to invalidate hub_directory_config: {e}");
         }
         tracing::info!(
@@ -145,6 +144,16 @@ pub async fn set_hub_url_ffi(hub_url: String) -> Result<(), String> {
     unsafe { std::env::set_var("HUB_URL", &effective_url) };
     tracing::info!("HUB_URL set to {effective_url}");
     Ok(())
+}
+
+/// The hub this process actually talks to: the persisted relay URL when
+/// one exists, the `.env` default otherwise (see [`set_hub_url_ffi`]), as
+/// updated by a relay setup since. The app keys its Keychain copies of the
+/// hub credentials on it, so a token is always filed under the hub that
+/// issued it. `None` before [`set_hub_url_ffi`] ran.
+#[frb(sync)]
+pub fn hub_effective_url() -> Option<String> {
+    HubDirectoryService::hub_base_url().ok()
 }
 
 // ============ Health Check ============

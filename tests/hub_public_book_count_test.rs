@@ -60,10 +60,10 @@ fn base_params() -> RegisterParams {
     RegisterParams {
         node_id: "node-abc".to_string(),
         display_name: "Test Library".to_string(),
-        is_listed: true,
-        requires_approval: false,
+        is_listed: Some(true),
+        requires_approval: Some(false),
         accept_from: "everyone".to_string(),
-        allow_borrowing: true,
+        allow_borrowing: Some(true),
         ..Default::default()
     }
 }
