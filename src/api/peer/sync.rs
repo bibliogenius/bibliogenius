@@ -731,7 +731,89 @@ pub async fn sync_peer(
     }
 }
 
-/// Sync peer by URL (solves ID mismatch between Hub and Backend)
+/// Where a `/api/config` answer came from, for [`config_may_refresh_peer`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConfigSource {
+    /// The address stored on the peer row.
+    StoredAddress,
+    /// Another port on the same host, found by `peer_discovery`.
+    PortDiscovery,
+}
+
+/// Whether the `/api/config` answer declares the identity the row describes,
+/// so the answer may refresh the row (address, relay credentials, name,
+/// avatar) and be synced from.
+///
+/// This compares public values, it does not authenticate the answerer: a
+/// host serving a peer's published keys passes. What it rules out is the
+/// accidental case, another library answering where a peer is expected.
+/// A trusted row is never rewritten from an answer whose identity does not
+/// concord with it: the ed25519 key decides when both sides have one, the
+/// library uuid otherwise. Two libraries can
+/// answer on one host (two apps on one phone, an address reassigned by DHCP),
+/// and port discovery once copied the relay mailbox of the wrong one onto a
+/// trusted peer, so every relayed message to that peer went to a mailbox it
+/// could not read. A row without any identity (a pairing older than the key
+/// exchange) has nothing to compare: its stored address keeps working, but
+/// a discovered address cannot prove it hosts that peer, so the row is not
+/// moved onto it.
+pub(crate) fn config_may_refresh_peer(
+    peer: &peer::Model,
+    config: &crate::api::setup::ConfigResponse,
+    source: ConfigSource,
+) -> bool {
+    let compare = |stored: &Option<String>, answered: &Option<String>| match (stored, answered) {
+        (Some(a), Some(b)) => Some(a == b),
+        _ => None,
+    };
+    let uuid = compare(&peer.library_uuid, &config.library_uuid);
+    let key = compare(&peer.public_key, &config.ed25519_public_key);
+    // The ed25519 key is the trust anchor when both sides have one: a reset
+    // that kept its keys shows a new uuid, which reaches the row only
+    // through the signed manifest (ADR-030), never from this answer.
+    if let Some(same_key) = key {
+        return same_key;
+    }
+    if let Some(same_uuid) = uuid {
+        return same_uuid;
+    }
+    let row_has_identity = peer.library_uuid.is_some() || peer.public_key.is_some();
+    !row_has_identity && source == ConfigSource::StoredAddress
+}
+
+/// Outcome of [`gate_peer_config`].
+enum GatedConfig {
+    /// The peer answered: its config may be applied.
+    Peer(Box<crate::api::setup::ConfigResponse>),
+    /// Nothing answered.
+    Silent,
+    /// Another library answered at that address: nothing it says is the
+    /// peer's, and no plaintext catalog may be pulled from it either.
+    OtherLibrary,
+}
+
+/// Applies [`config_may_refresh_peer`] to a fetched answer, with a warning
+/// when another library answered.
+fn gate_peer_config(
+    peer: &peer::Model,
+    config: Option<crate::api::setup::ConfigResponse>,
+    source: ConfigSource,
+) -> GatedConfig {
+    let Some(config) = config else {
+        return GatedConfig::Silent;
+    };
+    if config_may_refresh_peer(peer, &config, source) {
+        return GatedConfig::Peer(Box::new(config));
+    }
+    tracing::warn!(
+        "Sync: another library answered for peer {} ({:?}), ignoring its config",
+        peer.id,
+        source
+    );
+    GatedConfig::OtherLibrary
+}
+
+// Sync peer by URL (solves ID mismatch between Hub and Backend)
 pub async fn sync_peer_by_url(
     State(state): State<crate::infrastructure::AppState>,
     Json(payload): Json<serde_json::Value>,
@@ -852,6 +934,9 @@ pub async fn sync_peer_by_url(
     // avoids burning 5-10s on timeouts we already know will fail.
     let peer_cached_unreachable = state.is_peer_direct_unreachable(peer.id);
 
+    // Set when another library answers where this peer is expected: the
+    // direct lane and the plaintext fallback are then off for this sync.
+    let mut address_is_another_library = false;
     let mut peer_config = if peer_cached_unreachable {
         tracing::debug!(
             "Sync: Skipping config fetch for peer {} (cached unreachable)",
@@ -860,35 +945,59 @@ pub async fn sync_peer_by_url(
         None
     } else {
         let config_url = format!("{}/api/config", peer.url);
-        match client.get(&config_url).send().await {
+        let fetched = match client.get(&config_url).send().await {
             Ok(res) if res.status().is_success() => {
                 res.json::<crate::api::setup::ConfigResponse>().await.ok()
             }
             _ => None,
+        };
+        match gate_peer_config(&peer, fetched, ConfigSource::StoredAddress) {
+            GatedConfig::Peer(config) => Some(*config),
+            GatedConfig::Silent => None,
+            GatedConfig::OtherLibrary => {
+                address_is_another_library = true;
+                None
+            }
         }
     };
 
     // 4b. If config fetch failed, the peer may have restarted on a different port.
     // Try scanning ports 8000-8010 on the same host.
     // (Skip when peer is cached unreachable -- port scan would also timeout.)
+    // A discovered address is only adopted when the library answering there
+    // is this peer; another library on the same host is ignored entirely.
     let effective_url = if peer_config.is_none() && !peer_cached_unreachable {
         match crate::utils::peer_discovery::try_discover_peer_port(&peer.url, &client).await {
             Some(new_url) => {
                 // Retry config fetch with discovered URL
                 let retry_url = format!("{}/api/config", new_url);
-                peer_config = match client.get(&retry_url).send().await {
+                let fetched = match client.get(&retry_url).send().await {
                     Ok(res) if res.status().is_success() => {
                         res.json::<crate::api::setup::ConfigResponse>().await.ok()
                     }
                     _ => None,
                 };
-                new_url
+                match gate_peer_config(&peer, fetched, ConfigSource::PortDiscovery) {
+                    GatedConfig::Peer(config) => {
+                        peer_config = Some(*config);
+                        new_url
+                    }
+                    GatedConfig::Silent => peer.url.clone(),
+                    GatedConfig::OtherLibrary => peer.url.clone(),
+                }
             }
             None => peer.url.clone(),
         }
     } else {
         peer.url.clone()
     };
+
+    if address_is_another_library {
+        // The stored address is not this peer's for now: the direct lane
+        // would hand the envelope to the wrong library, so only the relay
+        // is tried, and the plaintext fallback below stays off.
+        state.mark_peer_direct_failed(peer.id);
+    }
 
     // Distinguish "peer explicitly disallows caching" from "peer unreachable"
     // When peer_config is None (unreachable on 5G), preserve cache and try E2EE/relay
@@ -961,12 +1070,17 @@ pub async fn sync_peer_by_url(
             // any stale-token gate.
             active.relay_write_token_invalid_at = Set(None);
             active.updated_at = Set(chrono::Utc::now().to_rfc3339());
-            let _ = active.update(&db).await;
-            tracing::info!(
-                "Sync: Updated relay credentials for peer {} (mailbox: {})",
-                peer.name,
-                m_id
-            );
+            match active.update(&db).await {
+                Ok(_) => tracing::info!(
+                    "Sync: Updated relay credentials for peer {} (mailbox: {})",
+                    peer.name,
+                    m_id
+                ),
+                Err(e) => tracing::warn!(
+                    "Sync: could not update relay credentials of peer {}: {e}",
+                    peer.id
+                ),
+            }
         }
     }
 
@@ -1018,7 +1132,9 @@ pub async fn sync_peer_by_url(
             }
             active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
             active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
-            let _ = active_peer.update(&db).await;
+            if let Err(e) = active_peer.update(&db).await {
+                tracing::warn!("Sync: could not update peer {}: {e}", peer_id);
+            }
         }
 
         return (
@@ -1089,6 +1205,18 @@ pub async fn sync_peer_by_url(
             Ok(Some(None)) => {
                 // E2EE sent but no response body (unexpected for sync)
                 vec![]
+            }
+            Ok(None) | Err(_) if peer_config.is_none() => {
+                // No plaintext fallback unless this very sync got a
+                // concordant /api/config from the address: another library
+                // may answer there (detected now, or detected on the previous
+                // sync and hidden behind the direct-unreachable cache).
+                let error = if address_is_another_library {
+                    "Another library answers at the peer address"
+                } else {
+                    "Peer did not answer as itself, no plaintext fallback"
+                };
+                return (StatusCode::BAD_GATEWAY, Json(json!({ "error": error }))).into_response();
             }
             Ok(None) | Err(_) => {
                 // Fallback to plaintext. Full peer-visible catalog, wishlist
@@ -1198,7 +1326,9 @@ pub async fn sync_peer_by_url(
         }
         active_peer.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
         active_peer.updated_at = Set(chrono::Utc::now().to_rfc3339());
-        let _ = active_peer.update(&db).await;
+        if let Err(e) = active_peer.update(&db).await {
+            tracing::warn!("Sync: could not update peer {}: {e}", peer_id);
+        }
     }
 
     (
@@ -1695,5 +1825,206 @@ mod added_at_tests {
             1,
             "wishlist_match must fire once the peer actually owns the book",
         );
+    }
+}
+
+#[cfg(test)]
+mod config_identity_gate_tests {
+    //! Rule: a trusted peer row is only refreshed from a `/api/config` answer
+    //! whose identity (library uuid, ed25519 key) concords with the row. Seen
+    //! on 2026-10-21: port discovery found another library on the same host
+    //! and copied its relay mailbox onto a trusted peer, so every relayed
+    //! message to that peer went to a mailbox it could not read.
+    use super::{ConfigSource, config_may_refresh_peer};
+    use crate::api::setup::ConfigResponse;
+    use crate::models::peer;
+
+    const UUID_A: &str = "94df3033-4a30-4307-8b82-1c5941474b99";
+    const UUID_B: &str = "a5a1150e-d93d-4e0c-a488-6d867d3f8e39";
+    const KEY_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const KEY_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn stored(uuid: Option<&str>, key: Option<&str>) -> peer::Model {
+        let now = chrono::Utc::now().to_rfc3339();
+        peer::Model {
+            id: 42,
+            name: "trusted".to_string(),
+            display_name: None,
+            url: "http://192.168.1.24:8000".to_string(),
+            library_uuid: uuid.map(str::to_string),
+            public_key: key.map(str::to_string),
+            x25519_public_key: key.map(|_| "x".repeat(64)),
+            key_exchange_done: key.is_some(),
+            mailbox_id: Some("20dae332-mailbox".to_string()),
+            relay_url: Some("https://hub.bibliogenius.org".to_string()),
+            relay_write_token: Some("stored-token".to_string()),
+            relay_write_token_invalid_at: None,
+            latitude: None,
+            longitude: None,
+            auto_approve: true,
+            connection_status: "accepted".to_string(),
+            last_seen: None,
+            catalog_hash: None,
+            last_catalog_sync: None,
+            avatar_config: None,
+            last_delta_cursor: None,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    fn answered(uuid: Option<&str>, key: Option<&str>) -> ConfigResponse {
+        ConfigResponse {
+            id: 1,
+            library_name: "whoever answered".to_string(),
+            library_description: None,
+            profile_type: "personal".to_string(),
+            enabled_modules: vec![],
+            theme: "default".to_string(),
+            latitude: None,
+            longitude: None,
+            share_location: false,
+            show_borrowed_books: false,
+            allow_library_caching: true,
+            share_gamification_stats: false,
+            library_uuid: uuid.map(str::to_string),
+            ed25519_public_key: key.map(str::to_string),
+            x25519_public_key: key.map(|_| "y".repeat(64)),
+            relay_url: Some("https://hub-dev.bibliogenius.org".to_string()),
+            mailbox_id: Some("cedad87b-mailbox".to_string()),
+            relay_write_token: Some("other-token".to_string()),
+            avatar_config: None,
+        }
+    }
+
+    #[test]
+    fn the_same_library_may_refresh_from_either_source() {
+        let peer = stored(Some(UUID_A), Some(KEY_A));
+        let config = answered(Some(UUID_A), Some(KEY_A));
+        assert!(config_may_refresh_peer(
+            &peer,
+            &config,
+            ConfigSource::StoredAddress
+        ));
+        assert!(config_may_refresh_peer(
+            &peer,
+            &config,
+            ConfigSource::PortDiscovery
+        ));
+    }
+
+    #[test]
+    fn another_library_on_the_same_host_may_not_refresh() {
+        // The 2026-10-21 case: the store app (A) is suspended, the test app
+        // (B) answers on another port of the same phone.
+        let peer = stored(Some(UUID_A), Some(KEY_A));
+        let config = answered(Some(UUID_B), Some(KEY_B));
+        assert!(!config_may_refresh_peer(
+            &peer,
+            &config,
+            ConfigSource::PortDiscovery
+        ));
+        // Same host, same port, another library (an address reassigned by DHCP).
+        assert!(!config_may_refresh_peer(
+            &peer,
+            &config,
+            ConfigSource::StoredAddress
+        ));
+    }
+
+    #[test]
+    fn one_matching_identity_field_is_enough_when_nothing_contradicts() {
+        let peer = stored(Some(UUID_A), Some(KEY_A));
+        assert!(config_may_refresh_peer(
+            &peer,
+            &answered(None, Some(KEY_A)),
+            ConfigSource::PortDiscovery
+        ));
+        assert!(config_may_refresh_peer(
+            &peer,
+            &answered(Some(UUID_A), None),
+            ConfigSource::PortDiscovery
+        ));
+        let keyless_row = stored(Some(UUID_A), None);
+        assert!(config_may_refresh_peer(
+            &keyless_row,
+            &answered(Some(UUID_A), Some(KEY_A)),
+            ConfigSource::PortDiscovery
+        ));
+    }
+
+    #[test]
+    fn a_contradicting_key_refuses_even_with_a_matching_uuid() {
+        let peer = stored(Some(UUID_A), Some(KEY_A));
+        let config = answered(Some(UUID_A), Some(KEY_B));
+        assert!(!config_may_refresh_peer(
+            &peer,
+            &config,
+            ConfigSource::StoredAddress
+        ));
+    }
+
+    #[test]
+    fn the_same_key_with_a_new_uuid_is_the_same_library() {
+        // A reset that kept its keys (ADR-030): the key is the trust anchor,
+        // the new uuid reaches the row through the signed manifest only.
+        let peer = stored(Some(UUID_A), Some(KEY_A));
+        let config = answered(Some(UUID_B), Some(KEY_A));
+        assert!(config_may_refresh_peer(
+            &peer,
+            &config,
+            ConfigSource::StoredAddress
+        ));
+        assert!(config_may_refresh_peer(
+            &peer,
+            &config,
+            ConfigSource::PortDiscovery
+        ));
+    }
+
+    #[test]
+    fn without_a_key_to_compare_the_uuid_decides() {
+        let keyless_row = stored(Some(UUID_A), None);
+        let config = answered(Some(UUID_B), Some(KEY_B));
+        assert!(!config_may_refresh_peer(
+            &keyless_row,
+            &config,
+            ConfigSource::StoredAddress
+        ));
+    }
+
+    #[test]
+    fn an_answer_without_identity_cannot_concord_with_a_row_that_has_one() {
+        let peer = stored(Some(UUID_A), Some(KEY_A));
+        let config = answered(None, None);
+        assert!(!config_may_refresh_peer(
+            &peer,
+            &config,
+            ConfigSource::StoredAddress
+        ));
+        assert!(!config_may_refresh_peer(
+            &peer,
+            &config,
+            ConfigSource::PortDiscovery
+        ));
+    }
+
+    #[test]
+    fn a_row_without_identity_keeps_its_stored_address_but_is_never_moved() {
+        // Legacy pairing, no uuid and no keys: nothing to compare. Its stored
+        // address keeps working as today; a discovered address cannot prove
+        // it hosts this peer, so the row is not moved onto it.
+        let peer = stored(None, None);
+        let config = answered(Some(UUID_B), Some(KEY_B));
+        assert!(config_may_refresh_peer(
+            &peer,
+            &config,
+            ConfigSource::StoredAddress
+        ));
+        assert!(!config_may_refresh_peer(
+            &peer,
+            &config,
+            ConfigSource::PortDiscovery
+        ));
     }
 }

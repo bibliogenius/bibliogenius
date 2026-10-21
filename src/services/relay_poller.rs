@@ -1107,16 +1107,37 @@ async fn handle_connection_request(
     let existing = existing_by_uuid.or(existing_by_key).or(existing_by_url);
 
     if let Some(existing_peer) = existing {
-        // Update existing peer with new keys/credentials
+        // The message is not authenticated: our write token, which every
+        // invitation we shared carries, is enough to deposit it. It may
+        // refresh a known peer that presents exactly the keys we hold (a
+        // recreated mailbox, a new scan from the mobile network); it never
+        // rotates stored keys nor changes a stored uuid, the same rule as
+        // the LAN pairing request (ADR-026). A row that never exchanged
+        // keys adopts them, as a first exchange does. A message without keys
+        // cannot match a row that has some, so it refreshes nothing there.
+        let keys_contradict = existing_peer.key_exchange_done
+            && (existing_peer.public_key != ed25519_key
+                || existing_peer.x25519_public_key != x25519_key);
+        let uuid_contradicts = matches!(
+            (existing_peer.library_uuid.as_deref(), library_uuid.as_deref()),
+            (Some(stored), Some(declared)) if stored != declared
+        );
+        if keys_contradict || uuid_contradicts {
+            tracing::warn!(
+                "Relay poller: connection_request for peer {} presented another identity, ignored",
+                existing_peer.id
+            );
+            return Ok(());
+        }
+        let peer_id = existing_peer.id;
+        let adopts_keys = !existing_peer.key_exchange_done && key_exchange_done;
         let mut active: peer::ActiveModel = existing_peer.into();
         active.name = Set(name.to_string());
-        if ed25519_key.is_some() {
+        if adopts_keys {
             active.public_key = Set(ed25519_key);
-        }
-        if x25519_key.is_some() {
             active.x25519_public_key = Set(x25519_key);
+            active.key_exchange_done = Set(true);
         }
-        active.key_exchange_done = Set(key_exchange_done);
         if relay_url.is_some() {
             active.relay_url = Set(relay_url);
         }
@@ -1129,9 +1150,9 @@ async fn handle_connection_request(
             // mailbox and sent us new credentials. Clear any stale-token gate.
             active.relay_write_token_invalid_at = Set(None);
         }
-        if library_uuid.is_some() {
-            active.library_uuid = Set(library_uuid);
-        }
+        // The uuid of a known peer is left to the signed manifest (ADR-030):
+        // this message only cites public values, and ADR-053 approves hub
+        // follows by uuid.
         active.connection_status = Set("accepted".to_string());
         active.auto_approve = Set(true);
         active.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
@@ -1142,8 +1163,8 @@ async fn handle_connection_request(
             .map_err(|e| format!("Failed to update peer from connection_request: {e}"))?;
 
         tracing::info!(
-            "Relay poller: Updated existing peer '{}' from connection_request",
-            name
+            "Relay poller: Updated existing peer {} from connection_request",
+            peer_id
         );
     } else {
         // Insert new peer
@@ -1272,5 +1293,230 @@ pub async fn notify_peers_of_new_credentials(state: &AppState, relay_url: &str, 
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod raw_connection_request_tests {
+    //! A raw `connection_request` is deposited with our mailbox write token,
+    //! which every invitation link we ever shared carries. It may create a
+    //! peer (the invitation is the trust anchor for that) and refresh the
+    //! relay credentials of a peer that presents exactly the keys we hold;
+    //! it may never rotate a known peer's keys or change its uuid.
+    use super::handle_connection_request;
+    use crate::db;
+    use crate::models::peer;
+    use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, PaginatorTrait, Set};
+
+    const KEY_A_ED: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const KEY_A_X: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    const KEY_B_ED: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const KEY_B_X: &str = "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1";
+    const UUID_A: &str = "94df3033-4a30-4307-8b82-1c5941474b99";
+    const UUID_B: &str = "a5a1150e-d93d-4e0c-a488-6d867d3f8e39";
+
+    async fn setup_db() -> DatabaseConnection {
+        db::init_db("sqlite::memory:").await.expect("init db")
+    }
+
+    async fn insert_trusted_a(db: &DatabaseConnection) -> i32 {
+        let now = chrono::Utc::now().to_rfc3339();
+        peer::ActiveModel {
+            name: Set("Store app".to_string()),
+            url: Set("http://192.168.1.25:8000".to_string()),
+            library_uuid: Set(Some(UUID_A.to_string())),
+            public_key: Set(Some(KEY_A_ED.to_string())),
+            x25519_public_key: Set(Some(KEY_A_X.to_string())),
+            key_exchange_done: Set(true),
+            relay_url: Set(Some("https://hub.bibliogenius.org".to_string())),
+            mailbox_id: Set(Some("mailbox-a".to_string())),
+            relay_write_token: Set(Some("token-a".to_string())),
+            relay_write_token_invalid_at: Set(Some("2026-10-21T05:00:00Z".to_string())),
+            connection_status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert peer")
+        .id
+    }
+
+    fn message(
+        name: &str,
+        library_uuid: Option<&str>,
+        keys: (&str, &str),
+        mailbox: (&str, &str),
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "type": "connection_request",
+            "name": name,
+            "url": "",
+            "library_uuid": library_uuid,
+            "ed25519_public_key": keys.0,
+            "x25519_public_key": keys.1,
+            "relay_url": "https://hub.bibliogenius.org",
+            "mailbox_id": mailbox.0,
+            "relay_write_token": mailbox.1,
+        })
+    }
+
+    async fn peer_by_id(db: &DatabaseConnection, id: i32) -> peer::Model {
+        peer::Entity::find_by_id(id)
+            .one(db)
+            .await
+            .expect("find")
+            .expect("exists")
+    }
+
+    #[tokio::test]
+    async fn other_keys_under_a_known_uuid_rewrite_nothing() {
+        let db = setup_db().await;
+        let a = insert_trusted_a(&db).await;
+
+        handle_connection_request(
+            &db,
+            &message(
+                "Attacker",
+                Some(UUID_A),
+                (KEY_B_ED, KEY_B_X),
+                ("mailbox-x", "token-x"),
+            ),
+        )
+        .await
+        .expect("handled");
+
+        let stored = peer_by_id(&db, a).await;
+        assert_eq!(
+            stored.public_key.as_deref(),
+            Some(KEY_A_ED),
+            "keys never rotate here"
+        );
+        assert_eq!(stored.x25519_public_key.as_deref(), Some(KEY_A_X));
+        assert_eq!(stored.mailbox_id.as_deref(), Some("mailbox-a"));
+        assert_eq!(stored.name, "Store app");
+        assert_eq!(stored.library_uuid.as_deref(), Some(UUID_A));
+        assert_eq!(
+            peer::Entity::find().count(&db).await.unwrap(),
+            1,
+            "no row for a forged identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_known_key_with_another_x25519_or_uuid_rewrites_nothing() {
+        let db = setup_db().await;
+        let a = insert_trusted_a(&db).await;
+
+        handle_connection_request(
+            &db,
+            &message(
+                "Attacker",
+                None,
+                (KEY_A_ED, KEY_B_X),
+                ("mailbox-x", "token-x"),
+            ),
+        )
+        .await
+        .expect("handled");
+        handle_connection_request(
+            &db,
+            &message(
+                "Attacker",
+                Some(UUID_B),
+                (KEY_A_ED, KEY_A_X),
+                ("mailbox-x", "token-x"),
+            ),
+        )
+        .await
+        .expect("handled");
+
+        let stored = peer_by_id(&db, a).await;
+        assert_eq!(stored.x25519_public_key.as_deref(), Some(KEY_A_X));
+        assert_eq!(stored.library_uuid.as_deref(), Some(UUID_A));
+        assert_eq!(stored.mailbox_id.as_deref(), Some("mailbox-a"));
+        assert_eq!(stored.name, "Store app");
+    }
+
+    #[tokio::test]
+    async fn the_same_keys_refresh_the_relay_credentials() {
+        // A recreated its mailbox and scanned our QR again from the 4G.
+        let db = setup_db().await;
+        let a = insert_trusted_a(&db).await;
+
+        handle_connection_request(
+            &db,
+            &message(
+                "Store app, renamed",
+                Some(UUID_A),
+                (KEY_A_ED, KEY_A_X),
+                ("mailbox-new", "token-new"),
+            ),
+        )
+        .await
+        .expect("handled");
+
+        let stored = peer_by_id(&db, a).await;
+        assert_eq!(stored.mailbox_id.as_deref(), Some("mailbox-new"));
+        assert_eq!(stored.relay_write_token.as_deref(), Some("token-new"));
+        assert!(
+            stored.relay_write_token_invalid_at.is_none(),
+            "ADR-032 gate lifted"
+        );
+        assert_eq!(stored.name, "Store app, renamed");
+        assert_eq!(stored.public_key.as_deref(), Some(KEY_A_ED));
+    }
+
+    #[tokio::test]
+    async fn a_missing_uuid_is_not_filled_on_a_known_peer() {
+        let db = setup_db().await;
+        let a = insert_trusted_a(&db).await;
+        peer::Entity::update_many()
+            .col_expr(
+                peer::Column::LibraryUuid,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .exec(&db)
+            .await
+            .expect("clear uuid");
+
+        handle_connection_request(
+            &db,
+            &message(
+                "Store app",
+                Some(UUID_B),
+                (KEY_A_ED, KEY_A_X),
+                ("mailbox-a", "token-a"),
+            ),
+        )
+        .await
+        .expect("handled");
+
+        assert_eq!(
+            peer_by_id(&db, a).await.library_uuid,
+            None,
+            "uuid waits for ADR-030"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_library_is_created_as_a_peer() {
+        let db = setup_db().await;
+        insert_trusted_a(&db).await;
+
+        handle_connection_request(
+            &db,
+            &message(
+                "New friend",
+                Some(UUID_B),
+                (KEY_B_ED, KEY_B_X),
+                ("mailbox-b", "token-b"),
+            ),
+        )
+        .await
+        .expect("handled");
+
+        assert_eq!(peer::Entity::find().count(&db).await.unwrap(), 2);
     }
 }

@@ -11,7 +11,10 @@ use super::*;
 use crate::db;
 use crate::models::peer;
 use axum::http::StatusCode;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, PaginatorTrait, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
+    Set,
+};
 
 const KEY_A_ED: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const KEY_A_X: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
@@ -498,4 +501,732 @@ async fn first_key_exchange_keeps_the_stored_address_when_the_new_one_is_refused
     assert_eq!(legacy.public_key.as_deref(), Some(KEY_B_ED), "keys adopted");
     assert!(legacy.key_exchange_done);
     assert_eq!(legacy.mailbox_id.as_deref(), Some("mailbox-store"));
+}
+
+// ---------------------------------------------------------------------------
+// Outbound pairing (`connect`, QR code or invitation link scanned by the
+// local user): the same identity rule as the inbound path. A trusted row is
+// only rewritten by a pairing that declares its identity; a pairing for
+// another library at that row's address gets a row of its own.
+// ---------------------------------------------------------------------------
+
+fn outbound(
+    name: &str,
+    url: &str,
+    library_uuid: Option<&str>,
+    keys: (&str, &str),
+    mailbox: (&str, &str),
+) -> ConnectRequest {
+    ConnectRequest {
+        name: name.to_string(),
+        url: url.to_string(),
+        public_key: None,
+        library_uuid: library_uuid.map(str::to_string),
+        ed25519_public_key: Some(keys.0.to_string()),
+        x25519_public_key: Some(keys.1.to_string()),
+        relay_url: Some("https://hub.bibliogenius.org".to_string()),
+        mailbox_id: Some(mailbox.0.to_string()),
+        relay_write_token: Some(mailbox.1.to_string()),
+    }
+}
+
+/// Pairs with the address unreachable (no WiFi): everything comes from the
+/// scanned payload, as on a phone pairing over the relay.
+async fn pair_outbound(db: &DatabaseConnection, payload: ConnectRequest) -> i32 {
+    register_outbound_peer(db, payload, RemoteConfigData::default())
+        .await
+        .expect("outbound pairing")
+        .0
+}
+
+async fn peer_by_id(db: &DatabaseConnection, id: i32) -> peer::Model {
+    peer::Entity::find_by_id(id)
+        .one(db)
+        .await
+        .expect("find peer")
+        .expect("peer exists")
+}
+
+#[tokio::test]
+async fn scanning_another_library_at_a_trusted_peers_address_keeps_that_peer_intact() {
+    // 2026-10-21, A4: the store app and the test app share one phone. A QR
+    // for the test app (B) scanned while the store app (A) holds the address
+    // must not turn A's row into B.
+    let db = setup_db().await;
+    let a = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Store app",
+            url: SHARED_URL,
+            library_uuid: Some(UUID_A),
+            keys: Some((KEY_A_ED, KEY_A_X)),
+            mailbox: Some(("mailbox-a", "token-a")),
+            stale_since: None,
+        },
+    )
+    .await;
+
+    // The address is silent at scan time: nothing proves it is B's now, so
+    // the trusted holder keeps it and B is stored reachable through its relay.
+    let b = pair_outbound(
+        &db,
+        outbound(
+            "Test app",
+            SHARED_URL,
+            Some(UUID_B),
+            (KEY_B_ED, KEY_B_X),
+            ("mailbox-b", "token-b"),
+        ),
+    )
+    .await;
+
+    assert_ne!(a, b, "another identity gets its own row");
+    let stored_a = peer_by_id(&db, a).await;
+    assert_eq!(stored_a.name, "Store app");
+    assert_eq!(stored_a.library_uuid.as_deref(), Some(UUID_A));
+    assert_eq!(stored_a.public_key.as_deref(), Some(KEY_A_ED));
+    assert_eq!(stored_a.x25519_public_key.as_deref(), Some(KEY_A_X));
+    assert_eq!(stored_a.mailbox_id.as_deref(), Some("mailbox-a"));
+    assert_eq!(stored_a.relay_write_token.as_deref(), Some("token-a"));
+    assert_eq!(
+        stored_a.url, SHARED_URL,
+        "a silent address stays with its holder"
+    );
+    let stored_b = peer_by_id(&db, b).await;
+    assert_eq!(stored_b.url, format!("relay://{UUID_B}"));
+    assert_eq!(stored_b.library_uuid.as_deref(), Some(UUID_B));
+    assert_eq!(stored_b.public_key.as_deref(), Some(KEY_B_ED));
+    assert_eq!(stored_b.mailbox_id.as_deref(), Some("mailbox-b"));
+}
+
+#[tokio::test]
+async fn an_address_answering_as_the_scanned_library_is_released_by_its_holder() {
+    let db = setup_db().await;
+    let a = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Store app",
+            url: SHARED_URL,
+            library_uuid: Some(UUID_A),
+            keys: Some((KEY_A_ED, KEY_A_X)),
+            mailbox: Some(("mailbox-a", "token-a")),
+            stale_since: None,
+        },
+    )
+    .await;
+
+    let (b, sync_url) = register_outbound_peer(
+        &db,
+        outbound(
+            "Test app",
+            SHARED_URL,
+            Some(UUID_B),
+            (KEY_B_ED, KEY_B_X),
+            ("mailbox-b", "token-b"),
+        ),
+        remote(Some(UUID_B), Some(KEY_B_ED)),
+    )
+    .await
+    .expect("outbound pairing");
+
+    assert_ne!(a, b);
+    let stored_a = peer_by_id(&db, a).await;
+    assert_eq!(
+        stored_a.url,
+        format!("relay://{UUID_A}"),
+        "the address changed hands; peers.url is UNIQUE"
+    );
+    assert_eq!(stored_a.public_key.as_deref(), Some(KEY_A_ED));
+    assert_eq!(stored_a.mailbox_id.as_deref(), Some("mailbox-a"));
+    let stored_b = peer_by_id(&db, b).await;
+    assert_eq!(stored_b.url, SHARED_URL);
+    assert_eq!(sync_url.as_deref(), Some(SHARED_URL));
+}
+
+#[tokio::test]
+async fn scanning_a_payload_without_uuid_keeps_a_trusted_row_with_other_keys() {
+    // Older payloads carry keys but no library uuid: the key is identity
+    // enough to refuse a URL match on a row holding other keys.
+    let db = setup_db().await;
+    let a = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Store app",
+            url: SHARED_URL,
+            library_uuid: Some(UUID_A),
+            keys: Some((KEY_A_ED, KEY_A_X)),
+            mailbox: Some(("mailbox-a", "token-a")),
+            stale_since: None,
+        },
+    )
+    .await;
+
+    let b = pair_outbound(
+        &db,
+        outbound(
+            "Test app",
+            SHARED_URL,
+            None,
+            (KEY_B_ED, KEY_B_X),
+            ("mailbox-b", "token-b"),
+        ),
+    )
+    .await;
+
+    assert_ne!(a, b);
+    let stored_a = peer_by_id(&db, a).await;
+    assert_eq!(stored_a.public_key.as_deref(), Some(KEY_A_ED));
+    assert_eq!(stored_a.library_uuid.as_deref(), Some(UUID_A));
+    assert_eq!(stored_a.mailbox_id.as_deref(), Some("mailbox-a"));
+    assert_eq!(
+        stored_a.url, SHARED_URL,
+        "a silent address stays with its holder"
+    );
+    assert_eq!(peer_by_id(&db, b).await.url, format!("relay://{KEY_B_ED}"));
+}
+
+#[tokio::test]
+async fn a_scan_without_identity_keeps_the_identity_of_the_row_it_matches() {
+    // Legacy payload (name and url only) for an address held by a peer that
+    // already exchanged keys: nothing may be erased by a payload that
+    // declares nothing.
+    let db = setup_db().await;
+    let a = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Store app",
+            url: SHARED_URL,
+            library_uuid: Some(UUID_A),
+            keys: Some((KEY_A_ED, KEY_A_X)),
+            mailbox: Some(("mailbox-a", "token-a")),
+            stale_since: None,
+        },
+    )
+    .await;
+
+    let paired = pair_outbound(
+        &db,
+        ConnectRequest {
+            name: "Store app".to_string(),
+            url: SHARED_URL.to_string(),
+            public_key: None,
+            library_uuid: None,
+            ed25519_public_key: None,
+            x25519_public_key: None,
+            relay_url: None,
+            mailbox_id: None,
+            relay_write_token: None,
+        },
+    )
+    .await;
+
+    assert_eq!(paired, a);
+    let stored = peer_by_id(&db, a).await;
+    assert_eq!(stored.library_uuid.as_deref(), Some(UUID_A));
+    assert_eq!(stored.public_key.as_deref(), Some(KEY_A_ED));
+    assert_eq!(stored.x25519_public_key.as_deref(), Some(KEY_A_X));
+    assert!(stored.key_exchange_done);
+    assert_eq!(stored.mailbox_id.as_deref(), Some("mailbox-a"));
+}
+
+#[tokio::test]
+async fn scanning_the_same_library_again_refreshes_its_address_and_relay() {
+    // The legitimate case: the peer moved port or recreated its mailbox and
+    // shows a fresh QR. Matched by uuid, refreshed in place.
+    let db = setup_db().await;
+    let a = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Store app",
+            url: "http://192.168.1.25:8000",
+            library_uuid: Some(UUID_A),
+            keys: Some((KEY_A_ED, KEY_A_X)),
+            mailbox: Some(("mailbox-old", "token-old")),
+            stale_since: Some("2026-10-21T05:00:00Z"),
+        },
+    )
+    .await;
+
+    let again = pair_outbound(
+        &db,
+        outbound(
+            "Store app",
+            "http://192.168.1.25:8010",
+            Some(UUID_A),
+            (KEY_A_ED, KEY_A_X),
+            ("mailbox-new", "token-new"),
+        ),
+    )
+    .await;
+
+    assert_eq!(again, a, "same identity, same row");
+    assert_eq!(all_peers(&db).await.len(), 1);
+    let stored = peer_by_id(&db, a).await;
+    assert_eq!(stored.url, "http://192.168.1.25:8010");
+    assert_eq!(stored.mailbox_id.as_deref(), Some("mailbox-new"));
+    assert_eq!(stored.relay_write_token.as_deref(), Some("token-new"));
+    assert!(stored.relay_write_token_invalid_at.is_none());
+}
+
+#[tokio::test]
+async fn scanning_adopts_a_row_without_identity_on_a_url_match() {
+    // A row from before the key exchange: nothing contradicts, it is adopted.
+    let db = setup_db().await;
+    let legacy = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Old row",
+            url: SHARED_URL,
+            library_uuid: None,
+            keys: None,
+            mailbox: None,
+            stale_since: None,
+        },
+    )
+    .await;
+
+    let paired = pair_outbound(
+        &db,
+        outbound(
+            "Store app",
+            SHARED_URL,
+            Some(UUID_A),
+            (KEY_A_ED, KEY_A_X),
+            ("mailbox-a", "token-a"),
+        ),
+    )
+    .await;
+
+    assert_eq!(paired, legacy);
+    assert_eq!(all_peers(&db).await.len(), 1);
+    let stored = peer_by_id(&db, legacy).await;
+    assert_eq!(stored.library_uuid.as_deref(), Some(UUID_A));
+    assert_eq!(stored.public_key.as_deref(), Some(KEY_A_ED));
+    assert!(stored.key_exchange_done);
+}
+
+// ---------------------------------------------------------------------------
+// Inbound: a request that carries a trusted peer's PUBLIC keys (the hub
+// publishes them) with another library uuid, from an address that serves
+// nothing. Keys matched the stored row; nothing else may be rewritten
+// without proof that the address hosts that identity.
+// ---------------------------------------------------------------------------
+
+async fn insert_cached_book(db: &DatabaseConnection, peer_id: i32) {
+    use crate::models::peer_book;
+    let now = chrono::Utc::now().to_rfc3339();
+    peer_book::ActiveModel {
+        peer_id: Set(peer_id),
+        remote_book_id: Set("book-1".to_string()),
+        title: Set("Cached title".to_string()),
+        synced_at: Set(now),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .expect("insert cached book");
+}
+
+async fn cached_books(db: &DatabaseConnection, peer_id: i32) -> u64 {
+    use crate::models::peer_book;
+    peer_book::Entity::find()
+        .filter(peer_book::Column::PeerId.eq(peer_id))
+        .count(db)
+        .await
+        .expect("count cached books")
+}
+
+#[tokio::test]
+async fn public_keys_with_another_uuid_and_no_proof_rewrite_nothing() {
+    let db = setup_db().await;
+    let a = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Store app",
+            url: "http://192.168.1.25:8000",
+            library_uuid: Some(UUID_A),
+            keys: Some((KEY_A_ED, KEY_A_X)),
+            mailbox: Some(("mailbox-a", "token-a")),
+            stale_since: None,
+        },
+    )
+    .await;
+    insert_cached_book(&db, a).await;
+
+    let status = receive_with(
+        &db,
+        request(
+            "Attacker",
+            "http://192.168.1.99:8000",
+            UUID_B,
+            (KEY_A_ED, KEY_A_X),
+            ("mailbox-x", "token-x"),
+        ),
+        None,
+    )
+    .await;
+
+    assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let stored = peer_by_id(&db, a).await;
+    assert_eq!(stored.name, "Store app", "name is identity-bound");
+    assert_eq!(
+        stored.library_uuid.as_deref(),
+        Some(UUID_A),
+        "uuid is identity-bound"
+    );
+    assert_eq!(stored.url, "http://192.168.1.25:8000");
+    assert_eq!(stored.mailbox_id.as_deref(), Some("mailbox-a"));
+    assert_eq!(cached_books(&db, a).await, 1, "cache is identity-bound");
+    assert_eq!(
+        all_peers(&db).await.len(),
+        1,
+        "no row is created for a forged identity"
+    );
+}
+
+#[tokio::test]
+async fn a_known_uuid_never_changes_on_the_unauthenticated_path_even_with_proof() {
+    // The address serving a public key proves nothing about who holds it:
+    // anyone on the LAN can serve A's published keys on its own /api/config.
+    // Address and relay may follow that answer (denial of service at worst),
+    // the uuid may not: ADR-053 approves hub follows by uuid. A reset peer
+    // gets its new uuid through the signed manifest (ADR-030).
+    let db = setup_db().await;
+    let a = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Store app",
+            url: "http://192.168.1.25:8000",
+            library_uuid: Some(UUID_A),
+            keys: Some((KEY_A_ED, KEY_A_X)),
+            mailbox: Some(("mailbox-a", "token-a")),
+            stale_since: None,
+        },
+    )
+    .await;
+    insert_cached_book(&db, a).await;
+
+    receive(
+        &db,
+        request(
+            "Store app, reset",
+            "http://192.168.1.25:8000",
+            UUID_B,
+            (KEY_A_ED, KEY_A_X),
+            ("mailbox-new", "token-new"),
+        ),
+    )
+    .await;
+
+    let stored = peer_by_id(&db, a).await;
+    assert_eq!(
+        stored.library_uuid.as_deref(),
+        Some(UUID_A),
+        "uuid waits for the signed manifest"
+    );
+    assert_eq!(
+        stored.mailbox_id.as_deref(),
+        Some("mailbox-new"),
+        "relay follows the proven address"
+    );
+    assert_eq!(stored.name, "Store app, reset");
+    assert_eq!(
+        cached_books(&db, a).await,
+        1,
+        "the cache goes with the uuid"
+    );
+    assert_eq!(all_peers(&db).await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_missing_uuid_is_filled_on_the_unauthenticated_path_with_proof() {
+    let db = setup_db().await;
+    let a = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Store app",
+            url: "http://192.168.1.25:8000",
+            library_uuid: None,
+            keys: Some((KEY_A_ED, KEY_A_X)),
+            mailbox: Some(("mailbox-a", "token-a")),
+            stale_since: None,
+        },
+    )
+    .await;
+
+    receive(
+        &db,
+        request(
+            "Store app",
+            "http://192.168.1.25:8000",
+            UUID_A,
+            (KEY_A_ED, KEY_A_X),
+            ("mailbox-a", "token-a"),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        peer_by_id(&db, a).await.library_uuid.as_deref(),
+        Some(UUID_A)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Outbound: the address named by the QR answers as another library. Its
+// answer must not be merged with the scanned identity, and no catalog is
+// pulled from it.
+// ---------------------------------------------------------------------------
+
+fn remote(uuid: Option<&str>, key: Option<&str>) -> RemoteConfigData {
+    RemoteConfigData {
+        remote_name: Some("Whoever answered".to_string()),
+        library_uuid: uuid.map(str::to_string),
+        ed25519_public_key: key.map(str::to_string),
+        x25519_public_key: key.map(|_| "c1".repeat(32)),
+        relay_url: Some("https://hub.bibliogenius.org".to_string()),
+        mailbox_id: Some("mailbox-answered".to_string()),
+        relay_write_token: Some("token-answered".to_string()),
+        avatar_config: Some("{\"answered\":true}".to_string()),
+        ..RemoteConfigData::default()
+    }
+}
+
+#[tokio::test]
+async fn an_address_answering_as_another_library_is_not_merged_into_the_scan() {
+    // QR without uuid for A, the address answers as C (a trusted peer):
+    // C's row must keep its keys, A gets a row of its own, no sync from C.
+    let db = setup_db().await;
+    let c = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Peer C",
+            url: "http://192.168.1.30:8000",
+            library_uuid: Some(UUID_B),
+            keys: Some((KEY_B_ED, KEY_B_X)),
+            mailbox: Some(("mailbox-c", "token-c")),
+            stale_since: None,
+        },
+    )
+    .await;
+
+    let (a, sync_url) = register_outbound_peer(
+        &db,
+        outbound(
+            "Peer A",
+            "http://192.168.1.30:8000",
+            None,
+            (KEY_A_ED, KEY_A_X),
+            ("mailbox-a", "token-a"),
+        ),
+        remote(Some(UUID_B), Some(KEY_B_ED)),
+    )
+    .await
+    .expect("outbound pairing");
+
+    assert_ne!(a, c);
+    let stored_c = peer_by_id(&db, c).await;
+    assert_eq!(stored_c.public_key.as_deref(), Some(KEY_B_ED));
+    assert_eq!(stored_c.name, "Peer C");
+    assert_eq!(stored_c.mailbox_id.as_deref(), Some("mailbox-c"));
+    let stored_a = peer_by_id(&db, a).await;
+    assert_eq!(stored_a.public_key.as_deref(), Some(KEY_A_ED));
+    assert_eq!(stored_a.library_uuid, None, "the answer's uuid is not A's");
+    assert_eq!(stored_a.mailbox_id.as_deref(), Some("mailbox-a"));
+    assert_eq!(
+        stored_a.avatar_config, None,
+        "the answer's avatar is not A's"
+    );
+    assert!(
+        sync_url.is_none(),
+        "no catalog is pulled from an address that is not A"
+    );
+}
+
+#[tokio::test]
+async fn a_reassigned_address_does_not_move_the_scanned_peer_onto_it() {
+    // QR of A (uuid and keys) while its old address now answers as B.
+    let db = setup_db().await;
+    let a = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Store app",
+            url: "http://192.168.1.25:8000",
+            library_uuid: Some(UUID_A),
+            keys: Some((KEY_A_ED, KEY_A_X)),
+            mailbox: Some(("mailbox-old", "token-old")),
+            stale_since: None,
+        },
+    )
+    .await;
+
+    let (again, sync_url) = register_outbound_peer(
+        &db,
+        outbound(
+            "Store app",
+            "http://192.168.1.40:8000",
+            Some(UUID_A),
+            (KEY_A_ED, KEY_A_X),
+            ("mailbox-new", "token-new"),
+        ),
+        remote(Some(UUID_B), Some(KEY_B_ED)),
+    )
+    .await
+    .expect("outbound pairing");
+
+    assert_eq!(again, a);
+    let stored = peer_by_id(&db, a).await;
+    assert_eq!(
+        stored.url, "http://192.168.1.25:8000",
+        "the address is not A's"
+    );
+    assert_eq!(
+        stored.mailbox_id.as_deref(),
+        Some("mailbox-new"),
+        "the QR's relay is A's"
+    );
+    assert_eq!(stored.avatar_config, None);
+    assert!(sync_url.is_none());
+}
+
+#[tokio::test]
+async fn an_address_answering_as_the_scanned_library_is_merged_as_before() {
+    let db = setup_db().await;
+    let (a, sync_url) = register_outbound_peer(
+        &db,
+        outbound(
+            "",
+            "http://192.168.1.25:8000",
+            None,
+            (KEY_A_ED, KEY_A_X),
+            ("mailbox-a", "token-a"),
+        ),
+        remote(Some(UUID_A), Some(KEY_A_ED)),
+    )
+    .await
+    .expect("outbound pairing");
+    let stored = peer_by_id(&db, a).await;
+    assert_eq!(stored.name, "Whoever answered");
+    assert_eq!(stored.library_uuid.as_deref(), Some(UUID_A));
+    assert!(stored.avatar_config.is_some());
+    assert_eq!(sync_url.as_deref(), Some("http://192.168.1.25:8000"));
+}
+
+#[tokio::test]
+async fn a_missing_uuid_is_not_filled_without_proof() {
+    // Keyed row without uuid (older pairing): a request citing its public
+    // keys from a silent address must not hand it a uuid (ADR-053 follows).
+    let db = setup_db().await;
+    let a = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Store app",
+            url: "http://192.168.1.25:8000",
+            library_uuid: None,
+            keys: Some((KEY_A_ED, KEY_A_X)),
+            mailbox: Some(("mailbox-a", "token-a")),
+            stale_since: None,
+        },
+    )
+    .await;
+
+    receive_with(
+        &db,
+        request(
+            "Attacker",
+            "http://192.168.1.99:8000",
+            UUID_B,
+            (KEY_A_ED, KEY_A_X),
+            ("mailbox-x", "token-x"),
+        ),
+        None,
+    )
+    .await;
+
+    assert_eq!(peer_by_id(&db, a).await.library_uuid, None);
+}
+
+#[tokio::test]
+async fn a_legacy_scan_never_takes_keys_from_the_address_answer() {
+    // QR with name and url only; the address answers with A's uuid (public)
+    // and other keys. Keys come from the scan or from nothing.
+    let db = setup_db().await;
+    let a = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Store app",
+            url: SHARED_URL,
+            library_uuid: Some(UUID_A),
+            keys: Some((KEY_A_ED, KEY_A_X)),
+            mailbox: Some(("mailbox-a", "token-a")),
+            stale_since: None,
+        },
+    )
+    .await;
+
+    let (paired, _) = register_outbound_peer(
+        &db,
+        ConnectRequest {
+            name: "Store app".to_string(),
+            url: SHARED_URL.to_string(),
+            public_key: None,
+            library_uuid: None,
+            ed25519_public_key: None,
+            x25519_public_key: None,
+            relay_url: None,
+            mailbox_id: None,
+            relay_write_token: None,
+        },
+        remote(Some(UUID_A), Some(KEY_B_ED)),
+    )
+    .await
+    .expect("outbound pairing");
+
+    assert_eq!(paired, a);
+    let stored = peer_by_id(&db, a).await;
+    assert_eq!(stored.public_key.as_deref(), Some(KEY_A_ED));
+    assert_eq!(stored.x25519_public_key.as_deref(), Some(KEY_A_X));
+    assert_eq!(stored.mailbox_id.as_deref(), Some("mailbox-a"));
+}
+
+#[tokio::test]
+async fn an_answer_contradicting_the_matched_row_moves_nothing_and_syncs_nothing() {
+    // Legacy scan (name and url) of a new address; the address answers with
+    // A's uuid but other keys. A is matched by that uuid: it must keep its
+    // address, and no catalog is pulled from an address that is not A.
+    let db = setup_db().await;
+    let a = insert_peer(
+        &db,
+        StoredPeer {
+            name: "Store app",
+            url: "http://192.168.1.25:8000",
+            library_uuid: Some(UUID_A),
+            keys: Some((KEY_A_ED, KEY_A_X)),
+            mailbox: Some(("mailbox-a", "token-a")),
+            stale_since: None,
+        },
+    )
+    .await;
+
+    let (paired, sync_url) = register_outbound_peer(
+        &db,
+        ConnectRequest {
+            name: "Store app".to_string(),
+            url: "http://192.168.1.40:8000".to_string(),
+            public_key: None,
+            library_uuid: None,
+            ed25519_public_key: None,
+            x25519_public_key: None,
+            relay_url: None,
+            mailbox_id: None,
+            relay_write_token: None,
+        },
+        remote(Some(UUID_A), Some(KEY_B_ED)),
+    )
+    .await
+    .expect("outbound pairing");
+
+    assert_eq!(paired, a);
+    assert_eq!(peer_by_id(&db, a).await.url, "http://192.168.1.25:8000");
+    assert!(sync_url.is_none());
 }

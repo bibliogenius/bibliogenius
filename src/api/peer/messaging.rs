@@ -535,12 +535,17 @@ pub async fn refresh_peer_relay_credentials(
         active.relay_write_token = Set(Some(write_token.clone()));
         active.relay_write_token_invalid_at = Set(None);
         active.updated_at = Set(chrono::Utc::now().to_rfc3339());
-        let _ = active.update(db).await;
-        tracing::info!(
-            "Relay: Refreshed credentials for peer '{}' (mailbox: {})",
-            peer_model.name,
-            mailbox_id
-        );
+        match active.update(db).await {
+            Ok(_) => tracing::info!(
+                "Relay: Refreshed credentials for peer '{}' (mailbox: {})",
+                peer_model.name,
+                mailbox_id
+            ),
+            Err(e) => tracing::warn!(
+                "Relay: could not store refreshed credentials of peer {}: {e}",
+                peer_model.id
+            ),
+        }
     }
 
     Some((relay_url, mailbox_id, write_token))
@@ -602,6 +607,23 @@ async fn refresh_via_lan(peer_model: &peer::Model) -> Option<(String, String, St
     }
 
     let config: crate::api::setup::ConfigResponse = response.json().await.ok()?;
+    relay_credentials_from_config(peer_model, config)
+}
+
+/// The relay credentials a `/api/config` answer offers for `peer_model`,
+/// `None` unless the library answering at the stored address is that peer
+/// (same rule as the catalog sync: an address changes hands on a LAN).
+fn relay_credentials_from_config(
+    peer_model: &peer::Model,
+    config: crate::api::setup::ConfigResponse,
+) -> Option<(String, String, String)> {
+    if !config_may_refresh_peer(peer_model, &config, ConfigSource::StoredAddress) {
+        tracing::warn!(
+            "Relay: another library answered at the address of peer {}, ignoring its credentials",
+            peer_model.id
+        );
+        return None;
+    }
     Some((
         config.relay_url?,
         config.mailbox_id?,
@@ -795,5 +817,91 @@ mod stale_invite_flag_tests {
             "refresh must clear stale-invite flag"
         );
         assert!(reloaded.relay_gate_allows_send());
+    }
+}
+
+#[cfg(test)]
+mod lan_relay_refresh_identity_tests {
+    //! After a relay 404 the peer's stored address is asked for fresh
+    //! credentials. The library answering there must be that peer: on a LAN
+    //! an address changes hands (DHCP, two apps on one phone), and copying
+    //! another library's mailbox onto a trusted peer sends every relayed
+    //! message to a mailbox it cannot read.
+    use super::relay_credentials_from_config;
+    use crate::api::setup::ConfigResponse;
+    use crate::models::peer;
+
+    const UUID_A: &str = "94df3033-4a30-4307-8b82-1c5941474b99";
+    const UUID_B: &str = "a5a1150e-d93d-4e0c-a488-6d867d3f8e39";
+
+    fn stored(uuid: Option<&str>) -> peer::Model {
+        let now = chrono::Utc::now().to_rfc3339();
+        peer::Model {
+            id: 7,
+            name: "trusted".to_string(),
+            display_name: None,
+            url: "http://192.168.1.24:8000".to_string(),
+            library_uuid: uuid.map(str::to_string),
+            public_key: Some("k".repeat(64)),
+            x25519_public_key: Some("x".repeat(64)),
+            key_exchange_done: true,
+            mailbox_id: Some("old-mailbox".to_string()),
+            relay_url: Some("https://hub.bibliogenius.org".to_string()),
+            relay_write_token: Some("old-token".to_string()),
+            relay_write_token_invalid_at: Some("2026-10-21T05:00:00Z".to_string()),
+            latitude: None,
+            longitude: None,
+            auto_approve: true,
+            connection_status: "accepted".to_string(),
+            last_seen: None,
+            catalog_hash: None,
+            last_catalog_sync: None,
+            avatar_config: None,
+            last_delta_cursor: None,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    fn answered(uuid: Option<&str>) -> ConfigResponse {
+        ConfigResponse {
+            id: 1,
+            library_name: "answered".to_string(),
+            library_description: None,
+            profile_type: "personal".to_string(),
+            enabled_modules: vec![],
+            theme: "default".to_string(),
+            latitude: None,
+            longitude: None,
+            share_location: false,
+            show_borrowed_books: false,
+            allow_library_caching: true,
+            share_gamification_stats: false,
+            library_uuid: uuid.map(str::to_string),
+            ed25519_public_key: None,
+            x25519_public_key: None,
+            relay_url: Some("https://hub.bibliogenius.org".to_string()),
+            mailbox_id: Some("new-mailbox".to_string()),
+            relay_write_token: Some("new-token".to_string()),
+            avatar_config: None,
+        }
+    }
+
+    #[test]
+    fn credentials_are_taken_from_the_same_library_only() {
+        let peer = stored(Some(UUID_A));
+        let fresh = relay_credentials_from_config(&peer, answered(Some(UUID_A)));
+        assert_eq!(
+            fresh.as_ref().map(|(_, m, _)| m.as_str()),
+            Some("new-mailbox")
+        );
+        assert!(
+            relay_credentials_from_config(&peer, answered(Some(UUID_B))).is_none(),
+            "another library at the stored address must not hand its mailbox to this peer"
+        );
+        assert!(
+            relay_credentials_from_config(&peer, answered(None)).is_none(),
+            "an answer without identity cannot concord with an identified row"
+        );
     }
 }
