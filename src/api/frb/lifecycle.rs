@@ -6,6 +6,13 @@
 
 // ============ Initialization ============
 
+/// Default tracing filter of debug builds, when `RUST_LOG` is unset.
+///
+/// Targets outside the `rust_lib_app` namespace are dropped unless named
+/// here: the `ssrf` audit family (ADR-026) and the `hub_directory` target
+/// that carries the catalog push outcome and the key wrap failures (ADR-072).
+pub(crate) const DEBUG_LOG_FILTER: &str = "rust_lib_app=info,ssrf=warn,hub_directory=info";
+
 /// Initialize the FFI backend with database at the given path
 /// Must be called before any other FFI functions
 pub async fn init_backend(db_path: String) -> Result<String, String> {
@@ -40,11 +47,8 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
     static TRACING_INIT: std::sync::Once = std::sync::Once::new();
     TRACING_INIT.call_once(|| {
         if cfg!(debug_assertions) {
-            // Also enable the `ssrf` target family (ADR-026) so SSRF audit
-            // events are always visible in debug builds - they live outside
-            // the `rust_lib_app` namespace so they would otherwise be dropped.
             let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "rust_lib_app=info,ssrf=warn".into());
+                .unwrap_or_else(|_| DEBUG_LOG_FILTER.into());
 
             if let Ok(file) = std::fs::OpenOptions::new()
                 .create(true)
@@ -194,4 +198,79 @@ pub fn get_rust_log_tail(lines: u32) -> String {
 #[frb(sync)]
 pub fn greet(name: String) -> String {
     format!("Hello, {}! Welcome to BiblioGenius.", name)
+}
+
+#[cfg(test)]
+mod debug_log_filter_tests {
+    use super::DEBUG_LOG_FILTER;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// In-memory sink for the fmt layer.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("sink").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+        fn make_writer(&'a self) -> Captured {
+            self.clone()
+        }
+    }
+
+    /// What the debug log file receives from `emit` under `filter`.
+    fn logged_under(filter: &str, emit: impl FnOnce()) -> String {
+        let sink = Captured::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new(filter))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(sink.clone())
+                    .with_ansi(false),
+            );
+        tracing::subscriber::with_default(subscriber, emit);
+        let bytes = sink.0.lock().expect("sink").clone();
+        String::from_utf8(bytes).expect("utf8 log")
+    }
+
+    #[test]
+    fn debug_log_filter_keeps_the_hub_directory_target() {
+        let out = logged_under(DEBUG_LOG_FILTER, || {
+            tracing::info!(target: "hub_directory", "hub-directory-probe");
+            tracing::warn!(target: "hub_directory", "hub-directory-warn-probe");
+        });
+        assert!(
+            out.contains("hub-directory-probe"),
+            "the catalog sync outcome must reach the log file, got: {out:?}"
+        );
+        assert!(
+            out.contains("hub-directory-warn-probe"),
+            "undelivered key wraps must reach the log file, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn debug_log_filter_keeps_the_crate_and_ssrf_targets() {
+        let out = logged_under(DEBUG_LOG_FILTER, || {
+            tracing::info!("crate-probe");
+            tracing::debug!("crate-debug-probe");
+            tracing::warn!(target: "ssrf", "ssrf-warn-probe");
+            tracing::info!(target: "ssrf", "ssrf-info-probe");
+            tracing::info!(target: "elsewhere", "foreign-probe");
+        });
+        assert!(out.contains("crate-probe"));
+        assert!(!out.contains("crate-debug-probe"));
+        assert!(out.contains("ssrf-warn-probe"));
+        assert!(!out.contains("ssrf-info-probe"));
+        assert!(!out.contains("foreign-probe"));
+    }
 }
