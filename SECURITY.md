@@ -63,7 +63,7 @@ All peer-proxy endpoints also use `get_safe_client` (timeout 5s, redirects disab
 - [x] `get_safe_client` disables redirects and enforces a 5s timeout.
 - [x] `ensure_registered_peer` (strict): cover_proxy rejects unknown URLs with 403.
 - [x] `ensure_registered_peer_or_mdns` (audited fallback): proxy_search and request_book_by_url log every mDNS traversal on `ssrf:mdns`.
-- [ ] TOFU on `receive_loan_request` / `receive_connection_request` (ticket F-ter, deferred post-E): unauthenticated payload can still pre-register an arbitrary URL in the `peers` table, which would defeat `ensure_registered_peer`. Expected to close naturally once ticket E introduces peer-facing authentication.
+- [ ] TOFU on `receive_connection_request` (ticket F-ter, deferred post-E): unauthenticated payload can still pre-register an arbitrary URL in the `peers` table, which would defeat `ensure_registered_peer`. Expected to close naturally once ticket E introduces peer-facing authentication.
 
 ---
 
@@ -81,7 +81,7 @@ Threat examples: a neighbor on a shared residential WiFi, a stranger in a café/
 - [x] `Book::redact_for_peer` (`src/models/book.rs`) strips personal fields before serialisation. `#[serde(skip_serializing_if = "Option::is_none")]` drops them from the JSON.
 - [x] Handlers extract `Option<Claims>`. When absent (peer or anonymous caller), redaction runs and `private=true` books are filtered out of the response (total adjusted). `get_book` returns 404 for a private book to avoid confirming its existence.
 - [x] Owner access unchanged: a valid JWT (Flutter web, MCP, CLI) keeps the full DTO.
-- [ ] Peer-facing action endpoints (`POST /api/peers/request`, `/api/peers/search`, `/api/peers/requests/incoming`, `/api/peers/verify-disconnect`) are NOT yet authenticated — side-effect actions remain open to strangers on the LAN. Follow-up ticket E2 (HMAC peer-facing auth) will close this; deferred pending usage data and product priorities.
+- [ ] Peer-facing action endpoints (`POST /api/peers/request`, `/api/peers/search`, `/api/peers/verify-disconnect`) are NOT yet authenticated — side-effect actions remain open to strangers on the LAN. Follow-up ticket E2 (HMAC peer-facing auth) will close this; deferred pending usage data and product priorities.
 - [ ] `GET /api/books/:id/cover` remains public (binary image, no personal data in the payload).
 
 ---

@@ -326,7 +326,6 @@ pub async fn dispatch_clear_message(
 
 // ── Dispatch handlers ──────────────────────────────────────────────────
 
-/// Handle an encrypted loan request (same logic as `receive_loan_request` in peer.rs).
 /// Core loan request logic: validates, saves, returns request_id or error.
 async fn save_loan_request(
     db: &DatabaseConnection,

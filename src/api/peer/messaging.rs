@@ -134,8 +134,10 @@ pub async fn try_send_e2ee_with_timeout(
 
     match direct_result {
         Ok(response) => {
-            // Direct succeeded -- clear any cached failure for this peer
+            // Direct succeeded -- clear any cached failure for this peer.
+            // Only its pinned keys could have answered, so it has no new keys.
             state.clear_peer_direct_failed(peer.id);
+            state.clear_peer_keys_changed(peer.id);
             tracing::info!(
                 "E2EE: Sent '{}' to peer {} ({})",
                 message_type,
@@ -338,6 +340,8 @@ pub async fn try_send_e2ee_with_timeout(
                                 result = &mut rx => {
                                     match result {
                                         Ok(payload) => {
+                                            // An answer under the pinned keys.
+                                            state.clear_peer_keys_changed(peer.id);
                                             tracing::info!(
                                                 "E2EE Relay: Got response for '{}' from peer {} ({}ms)",
                                                 message_type,
@@ -644,6 +648,40 @@ async fn refresh_via_hub(
         peer_model.name,
         peer_model.library_uuid
     );
+    let profile = fetch_hub_profile(db, peer_model).await?;
+
+    // Verify x25519 key matches what we have locally to prevent
+    // an attacker from redirecting messages to their own mailbox.
+    if let Some(ref local_key) = peer_model.x25519_public_key
+        && profile.x25519_public_key.as_deref() != Some(local_key.as_str())
+    {
+        tracing::warn!(
+            "Relay: Hub profile x25519 key mismatch for peer '{}', rejecting credentials",
+            peer_model.name
+        );
+        return None;
+    }
+
+    let relay_url = profile.relay_url?;
+    let mailbox_id = profile.relay_mailbox_id?;
+    let write_token = profile.relay_write_token?;
+
+    tracing::info!(
+        "Relay: Refreshed credentials for relay-only peer '{}' via hub (mailbox: {})",
+        peer_model.name,
+        mailbox_id
+    );
+
+    Some((relay_url, mailbox_id, write_token))
+}
+
+/// The profile the hub publishes under the peer's library uuid, read with
+/// our own write token. `None` without a uuid, a hub registration, or a
+/// successful answer.
+async fn fetch_hub_profile(
+    db: &DatabaseConnection,
+    peer_model: &peer::Model,
+) -> Option<crate::services::hub_directory_service::HubProfile> {
     let hub_url =
         crate::services::hub_directory_service::HubDirectoryService::hub_base_url().ok()?;
     let peer_node_id = peer_model.library_uuid.as_deref()?;
@@ -675,31 +713,53 @@ async fn refresh_via_hub(
         return None;
     }
 
-    let profile: crate::services::hub_directory_service::HubProfile = response.json().await.ok()?;
+    response.json().await.ok()
+}
 
-    // Verify x25519 key matches what we have locally to prevent
-    // an attacker from redirecting messages to their own mailbox.
-    if let Some(ref local_key) = peer_model.x25519_public_key
-        && profile.x25519_public_key.as_deref() != Some(local_key.as_str())
-    {
-        tracing::warn!(
-            "Relay: Hub profile x25519 key mismatch for peer '{}', rejecting credentials",
-            peer_model.name
-        );
-        return None;
+/// How long [`hub_confirms_new_keys`] waits for the hub: the whole sync
+/// must answer within the app's 10 s receive timeout.
+const HUB_KEY_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Whether the hub confirms that `peer_model` now has other keys: the
+/// profile it publishes under the peer's library uuid carries another
+/// X25519 key than the one pinned at pairing.
+///
+/// The first registrant of a node id owns its profile, and a uuid is
+/// public, so the hub is only asked about a peer whose mailbox lives on our
+/// own hub: every app registers on its hub, so that peer already owns its
+/// profile there, and only the holder of its write token can change it. A
+/// peer elsewhere, or registered nowhere, is never confirmed. Residual: a
+/// profile purged after long inactivity can be claimed again by anyone.
+/// False when the hub cannot be asked in time, publishes no key, or no key
+/// was pinned.
+pub async fn hub_confirms_new_keys(db: &DatabaseConnection, peer_model: &peer::Model) -> bool {
+    let Some(pinned) = peer_model.x25519_public_key.as_deref() else {
+        return false;
+    };
+    if !mailbox_on_our_hub(peer_model) {
+        return false;
     }
+    let Ok(Some(profile)) =
+        tokio::time::timeout(HUB_KEY_CHECK_TIMEOUT, fetch_hub_profile(db, peer_model)).await
+    else {
+        return false;
+    };
+    matches!(
+        profile.x25519_public_key.as_deref(),
+        Some(published) if !published.eq_ignore_ascii_case(pinned)
+    )
+}
 
-    let relay_url = profile.relay_url?;
-    let mailbox_id = profile.relay_mailbox_id?;
-    let write_token = profile.relay_write_token?;
-
-    tracing::info!(
-        "Relay: Refreshed credentials for relay-only peer '{}' via hub (mailbox: {})",
-        peer_model.name,
-        mailbox_id
-    );
-
-    Some((relay_url, mailbox_id, write_token))
+/// Whether the peer's relay mailbox is on the hub this library uses.
+fn mailbox_on_our_hub(peer_model: &peer::Model) -> bool {
+    let Ok(ours) = crate::services::hub_directory_service::HubDirectoryService::hub_base_url()
+    else {
+        return false;
+    };
+    peer_model
+        .relay_url
+        .as_deref()
+        .is_some_and(|theirs| theirs.trim_end_matches('/').eq_ignore_ascii_case(&ours))
 }
 
 #[cfg(test)]

@@ -36,6 +36,11 @@ type PeerDirectFailures = Arc<dashmap::DashMap<i32, std::time::Instant>>;
 /// spinner doesn't wait on them again until the TTL expires.
 type PeerRelayFailures = Arc<dashmap::DashMap<i32, std::time::Instant>>;
 
+/// Peers whose new keys the hub confirmed (same library uuid, another
+/// published X25519 key). In memory only: a re-pairing makes a new row, and
+/// an answer concordant with the row clears the entry.
+type PeersWithNewKeys = Arc<dashmap::DashSet<i32>>;
+
 /// Guard against concurrent `poll_once()` executions.
 /// Multiple callers (timer, WS nudge, poll_now endpoint, peer.rs) could overlap
 /// and fetch the same relay messages before acks go through, causing double processing.
@@ -87,6 +92,9 @@ pub struct AppState {
     /// Cache of peers whose relay round-trip recently timed out.
     /// Used by the leaderboard refresh to skip unresponsive peers entirely.
     peer_relay_failures: PeerRelayFailures,
+    /// Peers that must be paired again: a sync answers so at once, instead
+    /// of waiting on a relay the peer cannot answer under its new keys.
+    peers_with_new_keys: PeersWithNewKeys,
     /// Relay poll lock — prevents concurrent `poll_once()` from double-processing messages.
     relay_poll_lock: RelayPollLock,
     /// Leaderboard sync lock — prevents concurrent `sync_all_leaderboards()` runs.
@@ -135,6 +143,7 @@ impl AppState {
             hub_directory: Arc::new(HubDirectoryService::new()),
             peer_direct_failures: Arc::new(dashmap::DashMap::new()),
             peer_relay_failures: Arc::new(dashmap::DashMap::new()),
+            peers_with_new_keys: Arc::new(dashmap::DashSet::new()),
             relay_poll_lock: Arc::new(tokio::sync::Mutex::new(())),
             leaderboard_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -238,6 +247,21 @@ impl AppState {
         self.peer_direct_failures.remove(&peer_id);
     }
 
+    /// Records that the hub confirmed `peer_id` has new keys.
+    pub fn mark_peer_keys_changed(&self, peer_id: i32) {
+        self.peers_with_new_keys.insert(peer_id);
+    }
+
+    /// Whether the hub confirmed `peer_id` has new keys since this run began.
+    pub fn peer_keys_changed(&self, peer_id: i32) -> bool {
+        self.peers_with_new_keys.contains(&peer_id)
+    }
+
+    /// Forgets the new keys of `peer_id` (it answered as the row again).
+    pub fn clear_peer_keys_changed(&self, peer_id: i32) {
+        self.peers_with_new_keys.remove(&peer_id);
+    }
+
     /// Mark a peer as unresponsive via relay. Paired with
     /// [`is_peer_relay_unreachable`] so subsequent leaderboard refreshes
     /// skip the peer until [`PEER_UNREACHABLE_TTL`] expires. Mirrors the
@@ -333,6 +357,19 @@ mod tests {
 
         state.clear_peer_direct_failed(42);
         assert!(!state.is_peer_direct_unreachable(42));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_keys_changed_mark_and_clear() {
+        let state = test_state().await;
+        assert!(!state.peer_keys_changed(42));
+
+        state.mark_peer_keys_changed(42);
+        assert!(state.peer_keys_changed(42));
+        assert!(!state.peer_keys_changed(99));
+
+        state.clear_peer_keys_changed(42);
+        assert!(!state.peer_keys_changed(42));
     }
 
     #[tokio::test(flavor = "multi_thread")]

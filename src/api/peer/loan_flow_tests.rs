@@ -1469,36 +1469,6 @@ mod multi_lender_borrow_tests {
             "a first-contact peer does not auto-approve loans"
         );
     }
-
-    /// The aligned inbound-request handler also creates a pending peer, regardless of the
-    /// connection-validation toggle (off by default here).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn an_inbound_loan_request_creates_a_pending_peer() {
-        let db = setup_db().await;
-
-        let response = receive_loan_request(
-            State(db.clone()),
-            Json(IncomingLoanRequest {
-                from_name: "stranger".to_string(),
-                from_url: "http://stranger2.local:8000".to_string(),
-                library_uuid: Some("stranger-uuid".to_string()),
-                book_isbn: "978-x".to_string(),
-                book_title: "Le Livre".to_string(),
-            }),
-        )
-        .await
-        .into_response();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let created = peer::Entity::find()
-            .filter(peer::Column::Url.eq("http://stranger2.local:8000"))
-            .one(&db)
-            .await
-            .expect("find")
-            .expect("peer created");
-        assert_eq!(created.connection_status, "pending");
-        assert!(!created.auto_approve);
-    }
 }
 
 /// `allow_borrowing` is a hub-directory setting and must never gate peer-to-peer loans.
@@ -1516,11 +1486,6 @@ mod multi_lender_borrow_tests {
 /// the check to the peer path would therefore cut P2P lending for nearly every install,
 /// silently. These tests pin the invariant on the two live entry points:
 /// `receive_request` (plaintext LAN) and `handle_loan_request_for_relay` (E2EE/relay).
-///
-/// A third handler, `receive_loan_request`, is deliberately NOT covered: `api/mod.rs`
-/// documents it as a dead plaintext receiver superseded by `POST /peers/request`, with no
-/// caller in either the Rust core or the Flutter client, and it sits behind the loopback
-/// guard. Should that route ever be revived, this module needs a third test.
 #[cfg(test)]
 mod allow_borrowing_does_not_gate_p2p_loans_tests {
     use super::*;

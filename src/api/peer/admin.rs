@@ -266,6 +266,24 @@ pub async fn update_peer_url(
         }
     };
 
+    // The app may match this row to an mDNS announcement by name, which any
+    // host can take: a uuid that contradicts the stored one is another
+    // library, and nothing of this row moves to its address. Checked before
+    // any holder of that address is touched.
+    if let (Some(stored), Some(announced)) = (&peer.library_uuid, &payload.library_uuid)
+        && !stored.eq_ignore_ascii_case(announced)
+    {
+        tracing::warn!(
+            "update_peer_url: peer {} announced with another library uuid, keeping its row",
+            peer_id
+        );
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "Another library announced this address" })),
+        )
+            .into_response();
+    }
+
     // Security: Only update URL for pending peers, unless upgrading from relay
     // to LAN or fixing a port mismatch (mDNS discovered the correct address).
     // This endpoint is localhost-only, so the caller is always the local app.
@@ -291,10 +309,25 @@ pub async fn update_peer_url(
         .one(&db)
         .await
     {
-        // If the existing peer currently holding this URL is pending (not auto_approve),
-        // we can assume it's a stale entry (e.g. from a previous mDNS discovery on this IP)
-        // and delete it to free up the URL.
-        if !existing_peer.auto_approve {
+        // A pending row holding this URL is a stale entry (e.g. from a previous
+        // mDNS discovery on this IP) and is deleted to free the URL. A paired
+        // peer or a catalog reader is never deleted here: this is no owner
+        // gesture, so it must not end a pairing nor leave a reader without a
+        // row (ADR-072 D4). An unreadable list counts as a reader.
+        let reader = crate::services::hub_catalog_readers::is_current_reader(
+            &db,
+            existing_peer.library_uuid.as_deref(),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "update_peer_url: catalog readers unreadable, peer {} keeps {}: {e}",
+                existing_peer.id,
+                payload.url
+            );
+            true
+        });
+        if !existing_peer.auto_approve && existing_peer.connection_status != "accepted" && !reader {
             tracing::info!(
                 "♻️ deleting stale peer {} to free up URL {}",
                 existing_peer.id,
@@ -312,12 +345,13 @@ pub async fn update_peer_url(
         }
     }
 
+    let peer_has_no_uuid = peer.library_uuid.is_none();
     let mut active_model: peer::ActiveModel = peer.into();
     active_model.url = Set(payload.url.clone());
     active_model.updated_at = Set(chrono::Utc::now().to_rfc3339());
 
-    // Backfill library_uuid if provided and valid UUID format
-    if let Some(ref uuid_str) = payload.library_uuid {
+    // Backfill library_uuid if missing, provided and valid UUID format
+    if peer_has_no_uuid && let Some(ref uuid_str) = payload.library_uuid {
         if uuid::Uuid::parse_str(uuid_str).is_ok() {
             active_model.library_uuid = Set(Some(uuid_str.clone()));
             tracing::info!(
@@ -646,5 +680,199 @@ mod hub_catalog_cache_tests {
             .await
             .unwrap();
         assert_eq!(remaining.len(), 1);
+    }
+}
+
+/// Which row `update_peer_url` may delete to free an address: a stale
+/// pending row, never a paired peer nor a catalog reader. A deletion here is
+/// no owner gesture, so it must not end a pairing behind the readers list
+/// (ADR-072 D4).
+#[cfg(test)]
+mod update_peer_url_tests {
+    use super::*;
+    use crate::db;
+    use crate::services::hub_catalog_readers::{self, ReaderSource};
+
+    const TAKEN_URL: &str = "http://192.168.1.30:8000";
+    const UUID_HOLDER: &str = "5f0c2a8e-3b1d-4c7a-9e2f-8d6b4a1c0e93";
+    const KEY_HOLDER_X: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+
+    async fn setup_db() -> DatabaseConnection {
+        db::init_db("sqlite::memory:").await.expect("init db")
+    }
+
+    async fn insert_peer(
+        db: &DatabaseConnection,
+        url: &str,
+        library_uuid: Option<&str>,
+        status: &str,
+        auto_approve: bool,
+    ) -> i32 {
+        let now = chrono::Utc::now().to_rfc3339();
+        peer::ActiveModel {
+            name: Set(format!("peer at {url}")),
+            url: Set(url.to_string()),
+            library_uuid: Set(library_uuid.map(str::to_string)),
+            connection_status: Set(status.to_string()),
+            auto_approve: Set(auto_approve),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert peer")
+        .id
+    }
+
+    async fn move_to_taken_url(db: &DatabaseConnection, peer_id: i32) -> StatusCode {
+        update_peer_url(
+            State(db.clone()),
+            Path(peer_id),
+            Json(UpdatePeerUrlRequest {
+                url: TAKEN_URL.to_string(),
+                library_uuid: None,
+            }),
+        )
+        .await
+        .into_response()
+        .status()
+    }
+
+    async fn url_of(db: &DatabaseConnection, peer_id: i32) -> Option<String> {
+        peer::Entity::find_by_id(peer_id)
+            .one(db)
+            .await
+            .expect("find peer")
+            .map(|p| p.url)
+    }
+
+    async fn uuid_of(db: &DatabaseConnection, peer_id: i32) -> Option<String> {
+        peer::Entity::find_by_id(peer_id)
+            .one(db)
+            .await
+            .expect("find peer")
+            .and_then(|p| p.library_uuid)
+    }
+
+    async fn move_with_uuid(
+        db: &DatabaseConnection,
+        peer_id: i32,
+        url: &str,
+        uuid: &str,
+    ) -> StatusCode {
+        update_peer_url(
+            State(db.clone()),
+            Path(peer_id),
+            Json(UpdatePeerUrlRequest {
+                url: url.to_string(),
+                library_uuid: Some(uuid.to_string()),
+            }),
+        )
+        .await
+        .into_response()
+        .status()
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_readers_list_keeps_the_holder() {
+        use sea_orm::{ConnectionTrait, Statement};
+        let db = setup_db().await;
+        let holder = insert_peer(&db, TAKEN_URL, Some(UUID_HOLDER), "pending", false).await;
+        let mover = insert_peer(&db, "relay://mover", None, "pending", false).await;
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE catalog_readers RENAME TO catalog_readers_unreadable".to_owned(),
+        ))
+        .await
+        .expect("hide the readers list");
+
+        assert_eq!(move_to_taken_url(&db, mover).await, StatusCode::CONFLICT);
+        assert_eq!(url_of(&db, holder).await.as_deref(), Some(TAKEN_URL));
+    }
+
+    /// The app matches a relay peer to an mDNS announcement by name, and any
+    /// host can take that name: the uuid it announces must never replace the
+    /// one the row holds, nor move the row onto its address.
+    #[tokio::test]
+    async fn a_stored_uuid_is_never_replaced_by_another() {
+        let db = setup_db().await;
+        let other_uuid = "0b7e4c1a-9d2f-4e83-a6c5-1f8d3b2a7e40";
+        let peer = insert_peer(&db, "relay://holder", Some(UUID_HOLDER), "pending", false).await;
+
+        assert_eq!(
+            move_with_uuid(&db, peer, TAKEN_URL, other_uuid).await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(uuid_of(&db, peer).await.as_deref(), Some(UUID_HOLDER));
+        assert_eq!(url_of(&db, peer).await.as_deref(), Some("relay://holder"));
+    }
+
+    #[tokio::test]
+    async fn a_missing_uuid_is_backfilled_and_the_same_one_is_accepted() {
+        let db = setup_db().await;
+        let blank = insert_peer(&db, "relay://blank", None, "pending", false).await;
+        assert_eq!(
+            move_with_uuid(&db, blank, TAKEN_URL, UUID_HOLDER).await,
+            StatusCode::OK
+        );
+        assert_eq!(uuid_of(&db, blank).await.as_deref(), Some(UUID_HOLDER));
+
+        let known_uuid = "0b7e4c1a-9d2f-4e83-a6c5-1f8d3b2a7e40";
+        let known = insert_peer(&db, "relay://known", Some(known_uuid), "pending", false).await;
+        assert_eq!(
+            move_with_uuid(
+                &db,
+                known,
+                "http://192.168.1.31:8000",
+                &known_uuid.to_uppercase()
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(uuid_of(&db, known).await.as_deref(), Some(known_uuid));
+    }
+
+    #[tokio::test]
+    async fn a_stale_pending_row_gives_up_its_address() {
+        let db = setup_db().await;
+        let holder = insert_peer(&db, TAKEN_URL, None, "pending", false).await;
+        let mover = insert_peer(&db, "relay://mover", None, "pending", false).await;
+
+        assert_eq!(move_to_taken_url(&db, mover).await, StatusCode::OK);
+        assert_eq!(url_of(&db, holder).await, None, "stale row deleted");
+        assert_eq!(url_of(&db, mover).await.as_deref(), Some(TAKEN_URL));
+    }
+
+    #[tokio::test]
+    async fn an_accepted_peer_without_auto_approve_keeps_its_address() {
+        let db = setup_db().await;
+        let holder = insert_peer(&db, TAKEN_URL, Some(UUID_HOLDER), "accepted", false).await;
+        let mover = insert_peer(&db, "relay://mover", None, "pending", false).await;
+
+        assert_eq!(move_to_taken_url(&db, mover).await, StatusCode::CONFLICT);
+        assert_eq!(url_of(&db, holder).await.as_deref(), Some(TAKEN_URL));
+        assert_eq!(url_of(&db, mover).await.as_deref(), Some("relay://mover"));
+    }
+
+    #[tokio::test]
+    async fn a_pending_row_still_reading_the_catalog_keeps_its_address() {
+        let db = setup_db().await;
+        let holder = insert_peer(&db, TAKEN_URL, Some(UUID_HOLDER), "pending", false).await;
+        assert!(
+            hub_catalog_readers::enrol(&db, UUID_HOLDER, KEY_HOLDER_X, ReaderSource::Approval)
+                .await
+                .expect("enrol")
+        );
+        let mover = insert_peer(&db, "relay://mover", None, "pending", false).await;
+
+        assert_eq!(move_to_taken_url(&db, mover).await, StatusCode::CONFLICT);
+        assert_eq!(url_of(&db, holder).await.as_deref(), Some(TAKEN_URL));
+        assert!(
+            hub_catalog_readers::is_current_reader(&db, Some(UUID_HOLDER))
+                .await
+                .expect("readers"),
+            "the reader stays on the list"
+        );
     }
 }

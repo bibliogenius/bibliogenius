@@ -4,7 +4,8 @@
 //! 1. LAN unreachable + hub returns valid creds (same x25519) -> fallback works
 //! 2. LAN unreachable + hub x25519 mismatch -> fallback rejected
 //! 3. No library_uuid + LAN unreachable -> no fallback attempted
-//! 4. LAN reachable -> hub not called
+//! 4. LAN reachable and answering as the peer -> hub not called
+//! 5. Hub confirmation of a peer's new keys (another published x25519)
 
 use rust_lib_app::db;
 use rust_lib_app::models::peer;
@@ -63,6 +64,18 @@ async fn insert_peer(
         .await
         .unwrap()
         .unwrap()
+}
+
+/// Store `relay_url` as the hub holding the peer's mailbox.
+async fn set_peer_relay(
+    db: &DatabaseConnection,
+    peer: &peer::Model,
+    relay_url: &str,
+) -> peer::Model {
+    use sea_orm::ActiveModelTrait;
+    let mut active: peer::ActiveModel = peer.clone().into();
+    active.relay_url = Set(Some(relay_url.to_string()));
+    active.update(db).await.expect("set relay")
 }
 
 /// Build a HubProfile JSON response with relay credentials.
@@ -245,7 +258,7 @@ async fn no_fallback_without_library_uuid() {
 async fn lan_reachable_no_hub_fallback() {
     let db = setup_test_db().await;
 
-    // LAN mock server returns valid config
+    // LAN mock server answers as the stored peer, with valid relay config
     let lan = MockServer::start().await;
     let relay_url = "https://hub.example.com";
     let mailbox_id = "lan-mailbox-uuid";
@@ -256,6 +269,7 @@ async fn lan_reachable_no_hub_fallback() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id": 1,
             "library_name": "iPhone Library",
+            "library_uuid": "peer-node-789",
             "library_description": null,
             "profile_type": "personal",
             "enabled_modules": [],
@@ -297,4 +311,182 @@ async fn lan_reachable_no_hub_fallback() {
     assert_eq!(r_url, relay_url);
     assert_eq!(r_mailbox, mailbox_id);
     assert_eq!(r_token, write_token);
+}
+
+/// The hub publishes another x25519 key for the peer's uuid: the peer has
+/// new keys, confirmed by a source a LAN host cannot speak for.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn hub_confirms_new_keys_when_it_publishes_another_key() {
+    let db = setup_test_db().await;
+    let hub = MockServer::start().await;
+    let pinned = "aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344";
+    let published = "ffeeddcc11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344";
+    Mock::given(method("GET"))
+        .and(path("/api/directory/peer-node-new-keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(hub_profile_json(
+            "peer-node-new-keys",
+            published,
+            "https://hub.example.com",
+            "mbx",
+            "tok",
+        )))
+        .expect(1)
+        .mount(&hub)
+        .await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+    insert_hub_config(&db, "our-write-token").await;
+    let peer_model = insert_peer(
+        &db,
+        "Reinstalled",
+        "http://192.168.1.99:8000",
+        Some("peer-node-new-keys"),
+        Some(pinned),
+    )
+    .await;
+    // The peer's mailbox lives on our hub, with a trailing slash.
+    let peer_model = set_peer_relay(&db, &peer_model, &format!("{}/", hub.uri())).await;
+
+    assert!(rust_lib_app::api::peer::hub_confirms_new_keys(&db, &peer_model).await);
+}
+
+/// A peer whose mailbox is not on our hub may never have registered there,
+/// and the first registrant of a node id owns it: whatever our hub
+/// publishes under its uuid proves nothing, and the hub is not even asked.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_peer_away_from_our_hub_is_never_confirmed() {
+    let db = setup_test_db().await;
+    let hub = MockServer::start().await;
+    let pinned = "aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344";
+    let published = "ffeeddcc11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344";
+    Mock::given(method("GET"))
+        .and(path("/api/directory/peer-elsewhere"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(hub_profile_json(
+            "peer-elsewhere",
+            published,
+            "https://hub.example.com",
+            "mbx",
+            "tok",
+        )))
+        .expect(0)
+        .mount(&hub)
+        .await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+    insert_hub_config(&db, "our-write-token").await;
+
+    let no_relay = insert_peer(
+        &db,
+        "LAN only",
+        "http://192.168.1.95:8000",
+        Some("peer-elsewhere"),
+        Some(pinned),
+    )
+    .await;
+    assert!(!rust_lib_app::api::peer::hub_confirms_new_keys(&db, &no_relay).await);
+
+    let other_hub = set_peer_relay(&db, &no_relay, "https://another-hub.example.org").await;
+    assert!(!rust_lib_app::api::peer::hub_confirms_new_keys(&db, &other_hub).await);
+}
+
+/// A slow hub confirms nothing: the answer must reach the app before its
+/// own timeout.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_slow_hub_confirms_nothing() {
+    let db = setup_test_db().await;
+    let hub = MockServer::start().await;
+    let pinned = "aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344";
+    let published = "ffeeddcc11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344";
+    Mock::given(method("GET"))
+        .and(path("/api/directory/peer-slow-hub"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(hub_profile_json(
+                    "peer-slow-hub",
+                    published,
+                    "https://hub.example.com",
+                    "mbx",
+                    "tok",
+                ))
+                .set_delay(std::time::Duration::from_secs(4)),
+        )
+        .mount(&hub)
+        .await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+    insert_hub_config(&db, "our-write-token").await;
+    let peer_model = insert_peer(
+        &db,
+        "Slow",
+        "http://192.168.1.94:8000",
+        Some("peer-slow-hub"),
+        Some(pinned),
+    )
+    .await;
+    let peer_model = set_peer_relay(&db, &peer_model, &hub.uri()).await;
+
+    let started = std::time::Instant::now();
+    assert!(!rust_lib_app::api::peer::hub_confirms_new_keys(&db, &peer_model).await);
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+}
+
+/// The hub still publishes the pinned key (in another case, too), answers
+/// an error, or has no key: nothing is confirmed.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn hub_does_not_confirm_new_keys_otherwise() {
+    let db = setup_test_db().await;
+    let hub = MockServer::start().await;
+    let pinned = "aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344";
+    Mock::given(method("GET"))
+        .and(path("/api/directory/peer-same-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(hub_profile_json(
+            "peer-same-key",
+            &pinned.to_uppercase(),
+            "https://hub.example.com",
+            "mbx",
+            "tok",
+        )))
+        .mount(&hub)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/directory/peer-hub-error"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&hub)
+        .await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+    insert_hub_config(&db, "our-write-token").await;
+
+    let same_key = insert_peer(
+        &db,
+        "Same key",
+        "http://192.168.1.98:8000",
+        Some("peer-same-key"),
+        Some(pinned),
+    )
+    .await;
+    let same_key = set_peer_relay(&db, &same_key, &hub.uri()).await;
+    assert!(!rust_lib_app::api::peer::hub_confirms_new_keys(&db, &same_key).await);
+
+    let hub_error = insert_peer(
+        &db,
+        "Hub error",
+        "http://192.168.1.97:8000",
+        Some("peer-hub-error"),
+        Some(pinned),
+    )
+    .await;
+    let hub_error = set_peer_relay(&db, &hub_error, &hub.uri()).await;
+    assert!(!rust_lib_app::api::peer::hub_confirms_new_keys(&db, &hub_error).await);
+
+    let no_pinned_key = insert_peer(
+        &db,
+        "No pinned key",
+        "http://192.168.1.96:8000",
+        Some("peer-same-key"),
+        None,
+    )
+    .await;
+    let no_pinned_key = set_peer_relay(&db, &no_pinned_key, &hub.uri()).await;
+    assert!(!rust_lib_app::api::peer::hub_confirms_new_keys(&db, &no_pinned_key).await);
 }

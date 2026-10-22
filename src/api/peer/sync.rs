@@ -762,8 +762,9 @@ pub(crate) fn config_may_refresh_peer(
     config: &crate::api::setup::ConfigResponse,
     source: ConfigSource,
 ) -> bool {
+    // Hex in either case is the same value.
     let compare = |stored: &Option<String>, answered: &Option<String>| match (stored, answered) {
-        (Some(a), Some(b)) => Some(a == b),
+        (Some(a), Some(b)) => Some(a.eq_ignore_ascii_case(b)),
         _ => None,
     };
     let uuid = compare(&peer.library_uuid, &config.library_uuid);
@@ -781,6 +782,37 @@ pub(crate) fn config_may_refresh_peer(
     !row_has_identity && source == ConfigSource::StoredAddress
 }
 
+/// Whether the answer claims to be the peer under new keys: same library
+/// uuid, another ed25519 key (a reinstall that lost its keys). The gate
+/// refuses it like any other library. Any LAN host can claim a uuid, so
+/// this is only a reason to ask the hub ([`hub_confirms_new_keys`]) before
+/// telling the owner to pair again.
+///
+/// [`hub_confirms_new_keys`]: super::messaging::hub_confirms_new_keys
+pub(crate) fn peer_keys_changed(
+    peer: &peer::Model,
+    config: &crate::api::setup::ConfigResponse,
+) -> bool {
+    let same_uuid = matches!(
+        (peer.library_uuid.as_deref(), config.library_uuid.as_deref()),
+        (Some(a), Some(b)) if a.eq_ignore_ascii_case(b)
+    );
+    let other_key = matches!(
+        (peer.public_key.as_deref(), config.ed25519_public_key.as_deref()),
+        (Some(a), Some(b)) if !a.eq_ignore_ascii_case(b)
+    );
+    same_uuid && other_key
+}
+
+/// The 502 body of a sync with a peer the hub confirmed has new keys: the
+/// app tells the owner to pair it again.
+fn peer_keys_changed_error() -> serde_json::Value {
+    json!({
+        "error": "The peer has new keys, pair it again",
+        "code": "peer_keys_changed",
+    })
+}
+
 /// Outcome of [`gate_peer_config`].
 enum GatedConfig {
     /// The peer answered: its config may be applied.
@@ -789,7 +821,8 @@ enum GatedConfig {
     Silent,
     /// Another library answered at that address: nothing it says is the
     /// peer's, and no plaintext catalog may be pulled from it either.
-    OtherLibrary,
+    /// `keys_changed` when it is the peer under new keys.
+    OtherLibrary { keys_changed: bool },
 }
 
 /// Applies [`config_may_refresh_peer`] to a fetched answer, with a warning
@@ -805,12 +838,14 @@ fn gate_peer_config(
     if config_may_refresh_peer(peer, &config, source) {
         return GatedConfig::Peer(Box::new(config));
     }
+    let keys_changed = peer_keys_changed(peer, &config);
     tracing::warn!(
-        "Sync: another library answered for peer {} ({:?}), ignoring its config",
+        "Sync: another library answered for peer {} ({:?}, new keys: {}), ignoring its config",
         peer.id,
-        source
+        source,
+        keys_changed
     );
-    GatedConfig::OtherLibrary
+    GatedConfig::OtherLibrary { keys_changed }
 }
 
 // Sync peer by URL (solves ID mismatch between Hub and Backend)
@@ -934,9 +969,21 @@ pub async fn sync_peer_by_url(
     // avoids burning 5-10s on timeouts we already know will fail.
     let peer_cached_unreachable = state.is_peer_direct_unreachable(peer.id);
 
+    // The hub confirmed new keys on an earlier sync and nothing has answered
+    // as this peer since: if the hub still says so, answer at once rather
+    // than wait on the relay. A peer back on its old keys loses the mark.
+    if peer_cached_unreachable && state.peer_keys_changed(peer.id) {
+        if super::messaging::hub_confirms_new_keys(&db, &peer).await {
+            return (StatusCode::BAD_GATEWAY, Json(peer_keys_changed_error())).into_response();
+        }
+        state.clear_peer_keys_changed(peer.id);
+    }
+
     // Set when another library answers where this peer is expected: the
     // direct lane and the plaintext fallback are then off for this sync.
     let mut address_is_another_library = false;
+    // Set when that library claims to be this peer under new keys.
+    let mut claims_new_keys = false;
     let mut peer_config = if peer_cached_unreachable {
         tracing::debug!(
             "Sync: Skipping config fetch for peer {} (cached unreachable)",
@@ -952,10 +999,14 @@ pub async fn sync_peer_by_url(
             _ => None,
         };
         match gate_peer_config(&peer, fetched, ConfigSource::StoredAddress) {
-            GatedConfig::Peer(config) => Some(*config),
+            GatedConfig::Peer(config) => {
+                state.clear_peer_keys_changed(peer.id);
+                Some(*config)
+            }
             GatedConfig::Silent => None,
-            GatedConfig::OtherLibrary => {
+            GatedConfig::OtherLibrary { keys_changed } => {
                 address_is_another_library = true;
+                claims_new_keys = keys_changed;
                 None
             }
         }
@@ -966,7 +1017,9 @@ pub async fn sync_peer_by_url(
     // (Skip when peer is cached unreachable -- port scan would also timeout.)
     // A discovered address is only adopted when the library answering there
     // is this peer; another library on the same host is ignored entirely.
-    let effective_url = if peer_config.is_none() && !peer_cached_unreachable {
+    // Skipped when the stored address already answered under this peer's
+    // uuid with other keys: the scan would only delay the answer.
+    let effective_url = if peer_config.is_none() && !peer_cached_unreachable && !claims_new_keys {
         match crate::utils::peer_discovery::try_discover_peer_port(&peer.url, &client).await {
             Some(new_url) => {
                 // Retry config fetch with discovered URL
@@ -979,11 +1032,15 @@ pub async fn sync_peer_by_url(
                 };
                 match gate_peer_config(&peer, fetched, ConfigSource::PortDiscovery) {
                     GatedConfig::Peer(config) => {
+                        state.clear_peer_keys_changed(peer.id);
                         peer_config = Some(*config);
                         new_url
                     }
                     GatedConfig::Silent => peer.url.clone(),
-                    GatedConfig::OtherLibrary => peer.url.clone(),
+                    GatedConfig::OtherLibrary { keys_changed } => {
+                        claims_new_keys |= keys_changed;
+                        peer.url.clone()
+                    }
                 }
             }
             None => peer.url.clone(),
@@ -997,6 +1054,20 @@ pub async fn sync_peer_by_url(
         // would hand the envelope to the wrong library, so only the relay
         // is tried, and the plaintext fallback below stays off.
         state.mark_peer_direct_failed(peer.id);
+    }
+
+    // A library claiming to be this peer under new keys: when the hub, which
+    // only the peer can update when its mailbox is on our hub (see
+    // `hub_confirms_new_keys`), publishes new keys too, the pairing is dead
+    // (the relay would encrypt for keys the peer no longer holds) and the
+    // owner must pair again. Otherwise the claim alone changes nothing.
+    if claims_new_keys && super::messaging::hub_confirms_new_keys(&db, &peer).await {
+        tracing::warn!(
+            "Sync: the hub confirms peer {} has new keys, it must be paired again",
+            peer.id
+        );
+        state.mark_peer_keys_changed(peer.id);
+        return (StatusCode::BAD_GATEWAY, Json(peer_keys_changed_error())).into_response();
     }
 
     // Distinguish "peer explicitly disallows caching" from "peer unreachable"
@@ -1835,7 +1906,9 @@ mod config_identity_gate_tests {
     //! on 2026-10-21: port discovery found another library on the same host
     //! and copied its relay mailbox onto a trusted peer, so every relayed
     //! message to that peer went to a mailbox it could not read.
-    use super::{ConfigSource, config_may_refresh_peer};
+    use super::{
+        ConfigSource, config_may_refresh_peer, peer_keys_changed, peer_keys_changed_error,
+    };
     use crate::api::setup::ConfigResponse;
     use crate::models::peer;
 
@@ -1961,6 +2034,58 @@ mod config_identity_gate_tests {
             &peer,
             &config,
             ConfigSource::StoredAddress
+        ));
+    }
+
+    #[test]
+    fn the_same_uuid_with_another_key_is_the_peer_with_new_keys() {
+        let peer = stored(Some(UUID_A), Some(KEY_A));
+        assert!(peer_keys_changed(
+            &peer,
+            &answered(Some(UUID_A), Some(KEY_B))
+        ));
+    }
+
+    #[test]
+    fn keys_changed_needs_both_the_uuid_and_a_key_on_each_side() {
+        let peer = stored(Some(UUID_A), Some(KEY_A));
+        // Another library: re-pairing is not the advice.
+        assert!(!peer_keys_changed(
+            &peer,
+            &answered(Some(UUID_B), Some(KEY_B))
+        ));
+        // The peer itself.
+        assert!(!peer_keys_changed(
+            &peer,
+            &answered(Some(UUID_A), Some(KEY_A))
+        ));
+        // Nothing to compare.
+        assert!(!peer_keys_changed(&peer, &answered(Some(UUID_A), None)));
+        assert!(!peer_keys_changed(&peer, &answered(None, Some(KEY_B))));
+        assert!(!peer_keys_changed(
+            &stored(Some(UUID_A), None),
+            &answered(Some(UUID_A), Some(KEY_B))
+        ));
+    }
+
+    #[test]
+    fn the_new_keys_error_carries_its_code() {
+        assert_eq!(peer_keys_changed_error()["code"], "peer_keys_changed");
+    }
+
+    #[test]
+    fn hex_case_never_tells_two_identities_apart() {
+        let peer = stored(Some(UUID_A), Some(KEY_A));
+        let shouted = answered(Some(&UUID_A.to_uppercase()), Some(&KEY_A.to_uppercase()));
+        assert!(config_may_refresh_peer(
+            &peer,
+            &shouted,
+            ConfigSource::PortDiscovery
+        ));
+        assert!(!peer_keys_changed(&peer, &shouted));
+        assert!(peer_keys_changed(
+            &peer,
+            &answered(Some(&UUID_A.to_uppercase()), Some(KEY_B))
         ));
     }
 

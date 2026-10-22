@@ -17,7 +17,7 @@
 //! Scope (E1 is intentionally narrow):
 //! - /api/books, /api/books/:id only.
 //! - /api/books/:id/cover is a binary endpoint (no DTO) — unchanged.
-//! - Peer-action endpoints (search, request, requests/incoming, ...) are
+//! - Peer-action endpoints (search, request, ...) are
 //!   NOT covered here — see ticket E2 (HMAC auth, deferred).
 
 use axum::body::{Body, to_bytes};

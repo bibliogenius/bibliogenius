@@ -659,6 +659,27 @@ pub async fn restore_pairing<C: ConnectionTrait>(
     Ok(())
 }
 
+/// Whether the library `library_uuid` is a current catalog reader: it holds
+/// a wrap of the current key, so its row may only leave `peers` through a
+/// path that also takes it off the list. False without a uuid.
+pub async fn is_current_reader<C: ConnectionTrait>(
+    db: &C,
+    library_uuid: Option<&str>,
+) -> Result<bool, String> {
+    let Some(uuid) = library_uuid.and_then(node_key) else {
+        return Ok(false);
+    };
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "SELECT 1 AS current FROM catalog_readers WHERE node_id = ? AND revoked_at IS NULL",
+            [uuid.into()],
+        ))
+        .await
+        .map_err(|e| format!("catalog readers: {e}"))?;
+    Ok(row.is_some())
+}
+
 /// Whether messages from `peer` must be refused: the owner ended the
 /// pairing with it and did not restore it. A peer accepted again by the
 /// owner had its mark lifted, so a mark still standing on an accepted row

@@ -325,11 +325,9 @@ fn owner_routes() -> Router<AppState> {
         // no caller constructs these URLs (in either the Rust core or the Flutter
         // client). `pull_operations` would dump the whole operation_log and
         // `push_operations` would ingest oplog rows unauthenticated, so they are
-        // guarded rather than left reachable on the LAN. `receive_loan_request`
-        // is superseded by the peer-facing `POST /peers/request` (`receive_request`).
+        // guarded rather than left reachable on the LAN.
         .route("/peers/push", post(peer::push_operations))
         .route("/peers/pull", get(peer::pull_operations))
-        .route("/peers/requests/incoming", post(peer::receive_loan_request))
         // Local Discovery (mDNS) - local control only
         .route("/discovery/local", get(discovery::list_local_peers))
         .route("/discovery/status", get(discovery::mdns_status))
