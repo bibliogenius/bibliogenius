@@ -18,15 +18,17 @@ pub async fn hub_directory_sync_catalog() -> Result<i32, String> {
 
 /// Same catalog, pushed as a ciphertext under this library's catalog key
 /// (ADR-072): the hub stores what it cannot read, and every reader opens it
-/// with the wrap it holds on its follow. The key is created on first use.
-/// The caller decides between this and the clear push (D8: encrypt only
-/// when every current reader runs a build that can decrypt); this function
-/// never falls back on its own. Covers are uploaded exactly as for a clear
-/// push (D5), and their book ids travel in clear so the hub can garbage
-/// collect them. Once the hub confirms it holds the ciphertext (stored, or
-/// 304 on an unchanged digest), every active follower with a published
-/// X25519 key receives its wrap of the key (D3); a locally skipped push
-/// leaves the wraps as they are. Returns the number of entries pushed, or
+/// with the wrap it holds on its follow. The key is created on first use,
+/// and rotated first when a reader left since it was made (D4). The caller
+/// decides between this and the clear push (D8: encrypt only when every
+/// current reader runs a build that can decrypt); this function never falls
+/// back on its own. Covers are uploaded exactly as for a clear push (D5),
+/// and their book ids travel in clear so the hub can garbage collect them.
+/// Once the hub confirms it holds the ciphertext (stored, or 304 on an
+/// unchanged digest), every reader on the owner's list receives its wrap of
+/// the key toward its pinned key, and any other active follower loses the
+/// wrap it held (D3); a locally skipped push only wraps for readers let in
+/// since the last batch. Returns the number of entries pushed, or
 /// an error when the ciphertext went out but the wraps did not (the next
 /// sync then contacts the hub again and wraps).
 pub async fn hub_directory_sync_catalog_encrypted() -> Result<i32, String> {
@@ -70,9 +72,12 @@ async fn hub_directory_sync_catalog_inner(encrypted: bool) -> Result<i32, String
             .await
             .map(|(count, _)| count);
     }
-    let key = catalog_key_store()
-        .load_or_create(db, &identity_library_uuid()?)
-        .await?;
+    // Rotates first when a reader left since the current key was made
+    // (ADR-072 D4), whichever run recorded the departure.
+    let key = hub_directory_svc()
+        .catalog_key_for_encrypted_push(db, catalog_key_store(), &identity_library_uuid()?)
+        .await
+        .map_err(|e| e.to_string())?;
     let (count, outcome) = push_built_catalog(
         db,
         &built,

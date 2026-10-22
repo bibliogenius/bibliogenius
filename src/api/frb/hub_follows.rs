@@ -45,21 +45,53 @@ pub async fn hub_directory_pending_requests() -> Result<Vec<FrbHubFollow>, Strin
 }
 
 /// Resolves a pending follow request. resolution: "approve" | "reject" | "block"
-/// When approving, encrypted_contact is an optional sealed blob of the owner's contact info,
-/// and follower_x25519_public_key (hex) lets the owner hand this follower its
-/// wrap of the catalog key when the library holds one (ADR-072 D3). A
-/// library that never encrypted its catalog has no key and sends no wrap.
+/// When approving, encrypted_contact is an optional sealed blob of the owner's contact info.
+/// follower_node_id and follower_x25519_public_key (hex) let the owner put
+/// the follower on its catalog readers list (ADR-072 D4, D8) and, when the
+/// library holds a catalog key, hand it its wrap (D3). A paired peer is
+/// pinned and wrapped for with the key exchanged at pairing, never with the
+/// one the hub returns. owner_gesture is false for the paired-peer
+/// auto-approval (ADR-053), which is refused for a library whose pairing
+/// the owner ended; the owner's own approval restores that pairing.
 pub async fn hub_directory_resolve_follow(
     follow_id: i64,
     resolution: String,
     encrypted_contact: Option<String>,
     follower_x25519_public_key: Option<String>,
+    follower_node_id: Option<String>,
+    owner_gesture: bool,
 ) -> Result<FrbHubFollow, String> {
+    use crate::services::hub_catalog_readers;
+
     let db = hub_db()?;
+    if resolution == "approve" {
+        hub_catalog_readers::admit_approval(db, follower_node_id.as_deref(), owner_gesture).await?;
+    }
+    let reader = match (resolution.as_str(), follower_node_id.as_deref()) {
+        ("approve", Some(node_id)) => {
+            match hub_catalog_readers::key_for_approval(
+                db,
+                node_id,
+                follower_x25519_public_key.as_deref(),
+            )
+            .await
+            {
+                Ok(found) => found.map(|(key, source)| (node_id, key, source)),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "hub_directory",
+                        "follow {follow_id}: no catalog reader key: {e}"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
     // Best-effort: approving is the user's gesture and must not depend on
     // the key store. A missing wrap is caught up by the next wrap batch.
-    let wrap = match (resolution.as_str(), follower_x25519_public_key.as_deref()) {
-        ("approve", Some(public_hex)) => match catalog_key_wrap_for(db, public_hex).await {
+    let wrap = match &reader {
+        Some((_, key, _)) => match catalog_key_wrap_for(db, key).await {
             Ok(wrap) => wrap,
             Err(e) => {
                 tracing::warn!(
@@ -69,9 +101,9 @@ pub async fn hub_directory_resolve_follow(
                 None
             }
         },
-        _ => None,
+        None => None,
     };
-    hub_directory_svc()
+    let follow = hub_directory_svc()
         .resolve_follow(
             db,
             follow_id,
@@ -80,8 +112,25 @@ pub async fn hub_directory_resolve_follow(
             wrap.as_deref(),
         )
         .await
-        .map(FrbHubFollow::from)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Only once the hub accepted the approval, and only for the library it
+    // says it approved: the node id comes from a pending list that may be
+    // stale. Left off the list, the follower counts as unknown and the
+    // catalog stays in clear.
+    if let Some((node_id, key, source)) = reader {
+        if follow.follower_node_id != node_id {
+            tracing::warn!(
+                target: "hub_directory",
+                "follow {follow_id} approved for another library than requested, not put on the catalog readers list"
+            );
+        } else if let Err(e) = hub_catalog_readers::enrol(db, node_id, &key, source).await {
+            tracing::warn!(
+                target: "hub_directory",
+                "follow {follow_id} approved but not put on the catalog readers list: {e}"
+            );
+        }
+    }
+    Ok(FrbHubFollow::from(follow))
 }
 
 /// The current catalog key wrapped for `public_hex`, or None when this
@@ -108,27 +157,6 @@ async fn catalog_key_wrap_for(
         .map_err(|e| format!("catalog key wrap: {e}"))
 }
 
-/// Rotates the catalog key after a reader left (ADR-072 D4): retires the
-/// current key, generates a new one and re-wraps it for the readers that
-/// remain. The ex-reader never receives the new key. The catalog itself is
-/// not pushed here: the caller decides clear or encrypted for the next push
-/// (D8), and a push under the new key goes through on its own because the
-/// keyed digest changed. No-op when this library holds no catalog key.
-/// Returns the number of follow rows re-wrapped.
-pub async fn hub_directory_rotate_catalog_key() -> Result<i32, String> {
-    let db = hub_db()?;
-    let library_uuid = identity_library_uuid()?;
-    let store = catalog_key_store();
-    if store.load(db, &library_uuid).await?.is_none() {
-        return Ok(0);
-    }
-    let key = store.rotate(db, &library_uuid).await?;
-    hub_directory_svc()
-        .wrap_catalog_key_for_followers(db, &key)
-        .await
-        .map_err(|e| e.to_string())
-}
-
 /// Lists libraries the local library is following (active follows).
 pub async fn hub_directory_list_following() -> Result<Vec<FrbHubFollow>, String> {
     let db = hub_db()?;
@@ -139,14 +167,61 @@ pub async fn hub_directory_list_following() -> Result<Vec<FrbHubFollow>, String>
         .map_err(|e| e.to_string())
 }
 
-/// Lists libraries that follow the local library (active followers).
+/// An active follower the encrypted catalog cannot be wrapped for keeps it
+/// in clear (ADR-072 D8). That must be visible: a key that changed under a
+/// pin is a reinstall or a substitution by the hub. Never logs a key.
+fn log_reader_anomaly(
+    follow: &crate::services::hub_directory_service::HubFollow,
+    status: crate::services::hub_catalog_readers::ReaderStatus,
+) {
+    use crate::services::hub_catalog_readers::{ReaderStatus, short};
+    match status {
+        ReaderStatus::KeyMismatch => tracing::warn!(
+            target: "hub_directory",
+            "follow {} ({}): the hub returns another key than the one pinned, the catalog stays in clear",
+            follow.id,
+            short(&follow.follower_node_id)
+        ),
+        ReaderStatus::Unknown => tracing::warn!(
+            target: "hub_directory",
+            "follow {} ({}): active but never let in as a catalog reader, the catalog stays in clear",
+            follow.id,
+            short(&follow.follower_node_id)
+        ),
+        ReaderStatus::Reader | ReaderStatus::NotReader => {}
+    }
+}
+
+/// Lists libraries that follow the local library (active followers), each
+/// with where it stands toward the encrypted catalog. Brings the catalog
+/// readers list in step on the way (ADR-072 D4): a follower that left is
+/// noticed here too, and a failure to do so fails the call, since the
+/// statuses would then be unreliable for the clear-or-encrypted decision.
 pub async fn hub_directory_list_followers() -> Result<Vec<FrbHubFollow>, String> {
+    use crate::services::hub_catalog_readers::{self, CatalogReaders};
+
     let db = hub_db()?;
-    hub_directory_svc()
+    let listed_at = hub_catalog_readers::now_rfc3339();
+    let followers = hub_directory_svc()
         .list_followers(db)
         .await
-        .map(|v| v.into_iter().map(FrbHubFollow::from).collect())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    hub_catalog_readers::reconcile(db, &followers, &listed_at).await?;
+    let readers = CatalogReaders::load(db).await?;
+    Ok(followers
+        .into_iter()
+        .map(|f| {
+            let status = readers.status(&f);
+            if f.status == "active" {
+                log_reader_anomaly(&f, status);
+            }
+            let status = status.as_str().to_string();
+            FrbHubFollow {
+                catalog_reader_status: Some(status),
+                ..FrbHubFollow::from(f)
+            }
+        })
+        .collect())
 }
 
 /// Unfollows a library.

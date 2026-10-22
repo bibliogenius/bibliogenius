@@ -150,6 +150,30 @@ pub async fn dispatch_clear_message(
     our_library_uuid: Option<&str>,
 ) -> axum::response::Response {
     let db = state.db();
+    // An ex-peer still holds our write token: until the owner restores the
+    // pairing it gets nothing but the right to leave (ADR-072 D4). A failed
+    // lookup lets the message through, as before the mark existed.
+    if !matches!(
+        clear_message.message_type.as_str(),
+        "peer_disconnect" | "relay_credential_update"
+    ) && crate::services::hub_catalog_readers::held_back(db, sender_peer)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("E2EE: ended pairing lookup failed: {e}");
+            false
+        })
+    {
+        tracing::warn!(
+            "E2EE: refused {} from peer {} whose pairing was ended",
+            clear_message.message_type,
+            sender_peer.id
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "Pairing ended" })),
+        )
+            .into_response();
+    }
     match clear_message.message_type.as_str() {
         "loan_request" => {
             let response_payload =
@@ -1346,8 +1370,8 @@ async fn handle_peer_disconnect(
         }
     }
 
-    match peer::Entity::delete_by_id(peer_id).exec(db).await {
-        Ok(_) => {
+    match crate::services::hub_catalog_readers::delete_peer_that_left(db, sender_peer).await {
+        Ok(()) => {
             tracing::info!(
                 "E2EE: Peer {} ({}) removed via disconnect notification",
                 peer_name,

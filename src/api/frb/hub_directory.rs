@@ -186,6 +186,11 @@ pub struct FrbHubFollow {
     /// The followed library's catalog key wrapped for this follower, on the
     /// following list (ADR-072 D3). Opaque: the Rust side opens it.
     pub encrypted_catalog_key: Option<String>,
+    /// Where this follower stands toward the encrypted catalog, on the
+    /// followers list only: "reader", "key_mismatch" or "not_reader"
+    /// (ADR-072 D8 counts readers only, and a key mismatch as unable to
+    /// read). None on the other lists.
+    pub catalog_reader_status: Option<String>,
 }
 
 impl From<HubFollow> for FrbHubFollow {
@@ -202,6 +207,7 @@ impl From<HubFollow> for FrbHubFollow {
             follower_x25519_public_key: f.follower_x25519_public_key,
             follower_app_version: f.follower_app_version,
             encrypted_catalog_key: f.encrypted_catalog_key,
+            catalog_reader_status: None,
         }
     }
 }

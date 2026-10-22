@@ -143,6 +143,19 @@ pub(crate) async fn register_outbound_peer(
     // Library UUID: prefer payload (QR/invite), fall back to remote config
     let peer_library_uuid = payload.library_uuid.or(remote_data.library_uuid);
 
+    // Scanning a library whose pairing was ended, or adding it by its
+    // address, is the owner restoring it (ADR-072 D4): the scan names it,
+    // or else, when the scan names nothing, the address answers for it.
+    // Never one field from each: they could be two libraries. Lifted before
+    // the row is written, so the pairing never stands while its messages
+    // are still refused.
+    let restored = if scan_uuid.is_some() || scan_ed25519.is_some() {
+        (scan_uuid.as_deref(), scan_ed25519.as_deref())
+    } else {
+        (answer_uuid.as_deref(), answer_ed25519.as_deref())
+    };
+    crate::services::hub_catalog_readers::restore_pairing(db, restored.0, restored.1).await?;
+
     // Translate localhost URLs to Docker service names for inter-container communication
     let scanned_url = translate_url_for_docker(&payload.url);
 
@@ -988,8 +1001,19 @@ where
                 )
                     .into_response();
             }
-            // Check if connection_validation module is enabled
-            let connection_status = if is_connection_validation_enabled(&db).await {
+            // A new peer waits for the owner when connection validation is
+            // on, and always when the owner ended a pairing with this
+            // library, known by its uuid or its signing key: an ex-peer must
+            // not pair itself back in (ADR-072 D4).
+            let pairing_ended = crate::services::hub_catalog_readers::pairing_ended(
+                &db,
+                payload.library_uuid.as_deref(),
+                payload.ed25519_public_key.as_deref(),
+            )
+            .await
+            .unwrap_or(true);
+            let connection_status = if pairing_ended || is_connection_validation_enabled(&db).await
+            {
                 "pending"
             } else {
                 "accepted"
@@ -1446,8 +1470,8 @@ pub async fn receive_disconnect_notification(
     // 7. Delete the peer
     let peer_name = peer_model.name.clone();
     let peer_id = peer_model.id;
-    match peer::Entity::delete_by_id(peer_id).exec(db).await {
-        Ok(_) => {
+    match crate::services::hub_catalog_readers::delete_peer_that_left(db, &peer_model).await {
+        Ok(()) => {
             info!(
                 "Peer {} ({}) removed via authenticated disconnect (uuid={})",
                 peer_name, peer_id, library_uuid

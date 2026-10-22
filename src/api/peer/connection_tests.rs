@@ -1230,3 +1230,237 @@ async fn an_answer_contradicting_the_matched_row_moves_nothing_and_syncs_nothing
     assert_eq!(peer_by_id(&db, a).await.url, "http://192.168.1.25:8000");
     assert!(sync_url.is_none());
 }
+
+#[tokio::test]
+async fn a_lan_request_from_a_library_whose_pairing_we_ended_waits_for_the_owner() {
+    let db = setup_db().await;
+    crate::services::hub_catalog_readers::record_pairing_end(&db, Some(UUID_B), None)
+        .await
+        .unwrap();
+
+    receive(
+        &db,
+        request(
+            "Ex peer",
+            "http://192.168.1.40:8000",
+            UUID_B,
+            (KEY_B_ED, KEY_B_X),
+            ("mailbox-b", "token-b"),
+        ),
+    )
+    .await;
+
+    let stored = peer::Entity::find()
+        .filter(peer::Column::LibraryUuid.eq(UUID_B))
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("created");
+    assert_eq!(stored.connection_status, "pending");
+    assert!(!stored.auto_approve);
+}
+
+#[tokio::test]
+async fn a_lan_request_from_an_ex_peer_leaving_out_its_uuid_waits_for_the_owner() {
+    let db = setup_db().await;
+    crate::services::hub_catalog_readers::record_pairing_end(&db, Some(UUID_B), Some(KEY_B_ED))
+        .await
+        .unwrap();
+    let mut payload = request(
+        "Ex peer",
+        "http://192.168.1.40:8000",
+        UUID_B,
+        (KEY_B_ED, KEY_B_X),
+        ("mailbox-b", "token-b"),
+    );
+    payload.library_uuid = None;
+
+    receive(&db, payload).await;
+
+    let stored = peer::Entity::find()
+        .filter(peer::Column::PublicKey.eq(KEY_B_ED))
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("created");
+    assert_eq!(stored.connection_status, "pending");
+    assert!(!stored.auto_approve);
+}
+
+async fn pending_peer(db: &DatabaseConnection, uuid: &str, ed25519: &str) -> i32 {
+    let now = chrono::Utc::now().to_rfc3339();
+    peer::ActiveModel {
+        name: Set(format!("peer {uuid}")),
+        url: Set(format!("relay://{uuid}")),
+        library_uuid: Set(Some(uuid.to_string())),
+        public_key: Set(Some(ed25519.to_string())),
+        connection_status: Set("pending".to_string()),
+        auto_approve: Set(false),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .expect("insert peer")
+    .id
+}
+
+#[tokio::test]
+async fn accepting_an_ex_peer_restores_its_pairing() {
+    use axum::extract::{Json, Path, State};
+    use axum::response::IntoResponse;
+    let db = setup_db().await;
+    crate::services::hub_catalog_readers::record_pairing_end(&db, Some(UUID_B), Some(KEY_B_ED))
+        .await
+        .unwrap();
+    let id = pending_peer(&db, UUID_B, KEY_B_ED).await;
+
+    let status = update_peer_status(
+        State(db.clone()),
+        Path(id),
+        Json(serde_json::from_value(serde_json::json!({ "status": "active" })).unwrap()),
+    )
+    .await
+    .into_response()
+    .status();
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(peer_by_id(&db, id).await.connection_status, "accepted");
+    assert!(
+        !crate::services::hub_catalog_readers::pairing_ended(&db, Some(UUID_B), None)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn turning_validation_off_never_lets_an_ex_peer_back_in() {
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    let db = setup_db().await;
+    crate::services::hub_catalog_readers::record_pairing_end(&db, Some(UUID_B), Some(KEY_B_ED))
+        .await
+        .unwrap();
+    let ex = pending_peer(&db, UUID_B, KEY_B_ED).await;
+    let newcomer = pending_peer(&db, UUID_A, KEY_A_ED).await;
+
+    let status = auto_approve_all_peers(State(db.clone()))
+        .await
+        .into_response()
+        .status();
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        peer_by_id(&db, newcomer).await.connection_status,
+        "accepted"
+    );
+    assert_eq!(peer_by_id(&db, ex).await.connection_status, "pending");
+    assert!(
+        crate::services::hub_catalog_readers::pairing_ended(&db, Some(UUID_B), None)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_failed_acceptance_keeps_the_ex_peer_held_back() {
+    use axum::extract::{Json, Path, State};
+    use axum::response::IntoResponse;
+    use sea_orm::ConnectionTrait;
+    let db = setup_db().await;
+    crate::services::hub_catalog_readers::record_pairing_end(&db, Some(UUID_B), Some(KEY_B_ED))
+        .await
+        .unwrap();
+    let id = pending_peer(&db, UUID_B, KEY_B_ED).await;
+    db.execute_unprepared(
+        "CREATE TRIGGER refuse_acceptance BEFORE UPDATE ON peers
+         BEGIN SELECT RAISE(ABORT, 'refused'); END",
+    )
+    .await
+    .unwrap();
+
+    let status = update_peer_status(
+        State(db.clone()),
+        Path(id),
+        Json(serde_json::from_value(serde_json::json!({ "status": "active" })).unwrap()),
+    )
+    .await
+    .into_response()
+    .status();
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(peer_by_id(&db, id).await.connection_status, "pending");
+    assert!(
+        crate::services::hub_catalog_readers::pairing_ended(&db, Some(UUID_B), None)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn adding_an_ex_peer_by_its_address_restores_its_pairing() {
+    // Nothing in the payload but an address: the library that answers
+    // there is the one the owner chose to add.
+    let db = setup_db().await;
+    crate::services::hub_catalog_readers::record_pairing_end(&db, Some(UUID_B), Some(KEY_B_ED))
+        .await
+        .unwrap();
+
+    register_outbound_peer(
+        &db,
+        ConnectRequest {
+            name: "Ex peer".to_string(),
+            url: "http://192.168.1.40:8000".to_string(),
+            public_key: None,
+            library_uuid: None,
+            ed25519_public_key: None,
+            x25519_public_key: None,
+            relay_url: None,
+            mailbox_id: None,
+            relay_write_token: None,
+        },
+        remote(Some(UUID_B), Some(KEY_B_ED)),
+    )
+    .await
+    .expect("outbound pairing");
+
+    assert!(
+        !crate::services::hub_catalog_readers::pairing_ended(&db, Some(UUID_B), Some(KEY_B_ED))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn an_address_answering_for_another_library_restores_nothing_of_it() {
+    // The scan names B by uuid; the address answers with nothing but the
+    // signing key of A. Mixing the two would lift A's mark.
+    let db = setup_db().await;
+    crate::services::hub_catalog_readers::record_pairing_end(&db, Some(UUID_A), Some(KEY_A_ED))
+        .await
+        .unwrap();
+
+    let _ = register_outbound_peer(
+        &db,
+        ConnectRequest {
+            name: "Newcomer".to_string(),
+            url: "http://192.168.1.40:8000".to_string(),
+            public_key: None,
+            library_uuid: Some(UUID_B.to_string()),
+            ed25519_public_key: None,
+            x25519_public_key: None,
+            relay_url: None,
+            mailbox_id: None,
+            relay_write_token: None,
+        },
+        remote(None, Some(KEY_A_ED)),
+    )
+    .await;
+
+    assert!(
+        crate::services::hub_catalog_readers::pairing_ended(&db, Some(UUID_A), Some(KEY_A_ED))
+            .await
+            .unwrap()
+    );
+}

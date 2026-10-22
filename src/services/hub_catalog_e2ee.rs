@@ -11,7 +11,12 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde::Deserialize;
 use x25519_dalek::StaticSecret;
 
+use std::sync::Arc;
+
 use crate::crypto::catalog_key::{CATALOG_FORMAT_E2EE_V1, CatalogKey, key_id_of_blob};
+
+use super::hub_catalog_key_store::CatalogKeyStore;
+use super::hub_catalog_readers::{self, CatalogReaders, ReaderStatus};
 
 use super::hub_directory_service::{
     HubDirectoryError, HubDirectoryService, HubFollow, PushCatalogOutcome,
@@ -184,7 +189,15 @@ impl HubDirectoryService {
         key: &CatalogKey,
         outcome: PushCatalogOutcome,
     ) -> Result<i32, HubDirectoryError> {
-        if outcome == PushCatalogOutcome::SkippedLocal {
+        // A local skip never reached the hub, so the wraps already there
+        // still open the stored ciphertext; only a reader let in since the
+        // last batch is missing one.
+        if outcome == PushCatalogOutcome::SkippedLocal
+            && hub_catalog_readers::wraps_due(db)
+                .await
+                .map_err(HubDirectoryError::Config)?
+                .is_none()
+        {
             return Ok(0);
         }
         match self.wrap_catalog_key_for_followers(db, key).await {
@@ -200,22 +213,112 @@ impl HubDirectoryService {
         }
     }
 
-    /// Wraps the catalog key for every active follower that published an
-    /// X25519 key and hands the wraps to the hub (ADR-072 D3, D4). Returns
-    /// how many follow rows the hub updated. Followers without a key are
-    /// left as they are: they cannot be sealed for, and the owner's push
-    /// decision (D8) already keeps the catalog in clear for them.
+    /// Wraps the catalog key for every active follower on the readers list
+    /// whose key still matches the pinned one, withdraws it from every other
+    /// active follower, and hands the batch to the hub (ADR-072 D3, D4).
+    /// Returns how many follow rows the hub updated.
     pub async fn wrap_catalog_key_for_followers(
         &self,
         db: &DatabaseConnection,
         key: &CatalogKey,
     ) -> Result<i32, HubDirectoryError> {
+        let listed_at = hub_catalog_readers::now_rfc3339();
         let followers = self.list_followers(db).await?;
-        let wraps = plan_catalog_key_wraps(&followers, key)?;
-        if wraps.is_empty() {
-            return Ok(0);
+        hub_catalog_readers::reconcile(db, &followers, &listed_at)
+            .await
+            .map_err(HubDirectoryError::Config)?;
+        let due = hub_catalog_readers::wraps_due(db)
+            .await
+            .map_err(HubDirectoryError::Config)?;
+        let readers = CatalogReaders::load(db)
+            .await
+            .map_err(HubDirectoryError::Config)?;
+        let wraps = plan_catalog_key_wraps(&followers, &readers, key)?;
+        let updated = if wraps.is_empty() {
+            0
+        } else {
+            self.sync_follow_catalog_keys(db, &wraps).await?
+        };
+        if let Some(through) = due {
+            hub_catalog_readers::mark_wrapped(db, through)
+                .await
+                .map_err(HubDirectoryError::Config)?;
         }
-        self.sync_follow_catalog_keys(db, &wraps).await
+        Ok(updated)
+    }
+
+    /// The key the next encrypted push goes out under (ADR-072 D4). Reads
+    /// the followers first, so a reader that left is noticed, then rotates
+    /// when a departure is newer than the current key, wherever and
+    /// whenever it was recorded. Fails, creating and rotating nothing, when
+    /// the followers cannot be read: the push is retried later rather than
+    /// sent under a key an ex-reader may still hold.
+    pub async fn catalog_key_for_encrypted_push(
+        &self,
+        db: &DatabaseConnection,
+        store: &CatalogKeyStore,
+        library_uuid: &str,
+    ) -> Result<Arc<CatalogKey>, HubDirectoryError> {
+        let listed_at = hub_catalog_readers::now_rfc3339();
+        let followers = self.list_followers(db).await?;
+        hub_catalog_readers::reconcile(db, &followers, &listed_at)
+            .await
+            .map_err(HubDirectoryError::Config)?;
+        let due = hub_catalog_readers::rotation_due(db)
+            .await
+            .map_err(HubDirectoryError::Config)?;
+
+        let current = store
+            .load(db, library_uuid)
+            .await
+            .map_err(HubDirectoryError::Config)?;
+        let key = match (current, due) {
+            (Some(key), None) => return Ok(key),
+            (Some(_), Some(_)) => {
+                let key = store
+                    .rotate(db, library_uuid)
+                    .await
+                    .map_err(HubDirectoryError::Config)?;
+                tracing::info!(
+                    target: "hub_directory",
+                    "catalog key rotated after a reader left"
+                );
+                key
+            }
+            // A key created now postdates every departure already counted.
+            (None, _) => store
+                .load_or_create(db, library_uuid)
+                .await
+                .map_err(HubDirectoryError::Config)?,
+        };
+        if let Some(through) = due {
+            hub_catalog_readers::mark_rotated(db, through)
+                .await
+                .map_err(HubDirectoryError::Config)?;
+        }
+        Ok(key)
+    }
+
+    /// Withdraws, right away, the wrap held by `node_id`'s follow when it
+    /// still follows this library (ADR-072 D4). The rotation that follows
+    /// protects the next ciphertexts; this closes the window before it.
+    /// Returns whether a follow row was updated.
+    pub async fn withdraw_catalog_key_for(
+        &self,
+        db: &DatabaseConnection,
+        node_id: &str,
+    ) -> Result<bool, HubDirectoryError> {
+        let followers = self.list_followers(db).await?;
+        let Some(follow) = followers
+            .iter()
+            .find(|f| f.status == "active" && f.follower_node_id == node_id)
+        else {
+            return Ok(false);
+        };
+        let updated = self
+            .sync_follow_catalog_keys(db, &[(follow.id, None)])
+            .await?;
+        Ok(updated > 0)
     }
 
     /// Batch-updates the wrapped catalog key on follow rows; `None`
@@ -231,63 +334,85 @@ impl HubDirectoryService {
             .ok_or(HubDirectoryError::NotRegistered)?;
         let hub_url = Self::hub_base_url()?;
 
-        let payload: Vec<serde_json::Value> = wraps
-            .iter()
-            .map(|(id, wrap)| {
-                serde_json::json!({
-                    "follow_id": id,
-                    "encrypted_catalog_key": wrap,
-                })
-            })
-            .collect();
-
-        let response = self
-            .http_client
-            .post(format!("{hub_url}/api/directory/contacts/sync"))
-            .header("Authorization", format!("Bearer {}", cfg.write_token))
-            .json(&serde_json::json!({ "contacts": payload }))
-            .send()
-            .await?;
-
-        let status = response.status().as_u16();
-        if status >= 400 {
-            let msg = response.text().await.unwrap_or_default();
-            return Err(HubDirectoryError::Hub(status, msg));
-        }
-
         #[derive(Deserialize)]
         struct SyncResult {
             updated: i32,
         }
-        let result: SyncResult = response
-            .json()
-            .await
-            .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
-        Ok(result.updated)
+        let mut updated = 0;
+        // The hub takes at most this many entries per call.
+        for batch in wraps.chunks(CONTACT_SYNC_BATCH) {
+            let payload: Vec<serde_json::Value> = batch
+                .iter()
+                .map(|(id, wrap)| {
+                    serde_json::json!({
+                        "follow_id": id,
+                        "encrypted_catalog_key": wrap,
+                    })
+                })
+                .collect();
+
+            let response = self
+                .http_client
+                .post(format!("{hub_url}/api/directory/contacts/sync"))
+                .header("Authorization", format!("Bearer {}", cfg.write_token))
+                .json(&serde_json::json!({ "contacts": payload }))
+                .send()
+                .await?;
+
+            let status = response.status().as_u16();
+            if status >= 400 {
+                let msg = response.text().await.unwrap_or_default();
+                return Err(HubDirectoryError::Hub(status, msg));
+            }
+            let result: SyncResult = response
+                .json()
+                .await
+                .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
+            updated += result.updated;
+        }
+        Ok(updated)
     }
 }
 
-/// Wraps `key` for every active follower carrying an X25519 key. A follower
-/// whose key is not 32 bytes of hex is skipped, not failed on: one bad
-/// profile must not keep every other reader from its wrap.
+/// Entries per `/contacts/sync` call: the hub refuses more.
+const CONTACT_SYNC_BATCH: usize = 500;
+
+/// Plans the wraps of `key` for the active followers: a wrap toward the
+/// pinned key for each reader the hub still describes with that key, and a
+/// withdrawal (`None`) for every other active follower that still holds a
+/// wrap, so a stale one never outlives a departure or a key change. A
+/// follower holding nothing, and pending or resolved follows, are not
+/// touched.
 pub(crate) fn plan_catalog_key_wraps(
     followers: &[HubFollow],
+    readers: &CatalogReaders,
     key: &CatalogKey,
 ) -> Result<Vec<(i64, Option<String>)>, HubDirectoryError> {
     let mut wraps = Vec::new();
     for follow in followers.iter().filter(|f| f.status == "active") {
-        let Some(public_hex) = follow.follower_x25519_public_key.as_deref() else {
-            continue;
+        let pinned = match readers.status(follow) {
+            ReaderStatus::Reader => readers.pinned_key(&follow.follower_node_id),
+            ReaderStatus::KeyMismatch => {
+                tracing::warn!(
+                    target: "hub_directory",
+                    "catalog key withheld from follow {}: the hub returns another key than the one pinned",
+                    follow.id
+                );
+                None
+            }
+            ReaderStatus::NotReader | ReaderStatus::Unknown => None,
         };
-        let Some(public) = hex::decode(public_hex)
-            .ok()
+        let Some(public) = pinned
+            .and_then(|k| hex::decode(k).ok())
             .and_then(|b| <[u8; 32]>::try_from(b).ok())
         else {
-            tracing::warn!(
-                target: "hub_directory",
-                "catalog key wrap skipped for follow {}: malformed x25519 key",
-                follow.id
-            );
+            if follow
+                .encrypted_catalog_key
+                .as_deref()
+                .is_some_and(|w| !w.is_empty())
+            {
+                wraps.push((follow.id, None));
+            }
             continue;
         };
         let wrap = key
@@ -304,7 +429,7 @@ mod tests {
     //! state an in-memory SQLite with the two tables the push and read
     //! paths touch. Tests are serial because `HUB_URL` is process-wide.
 
-    use sea_orm::{ConnectionTrait, Database};
+    use sea_orm::ConnectionTrait;
     use serial_test::serial;
     use wiremock::matchers::{body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -316,34 +441,13 @@ mod tests {
     const OWNER: &str = "owner-node";
 
     async fn local_db() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        for sql in [
-            "CREATE TABLE hub_directory_config (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                node_id TEXT NOT NULL,
-                write_token TEXT NOT NULL,
-                is_listed INTEGER NOT NULL DEFAULT 0,
-                requires_approval INTEGER NOT NULL DEFAULT 1,
-                accept_from TEXT NOT NULL DEFAULT 'everyone',
-                allow_borrowing INTEGER NOT NULL DEFAULT 1,
-                recovery_code TEXT,
-                last_catalog_hash TEXT,
-                last_catalog_pushed_at TEXT,
-                catalog_version INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )",
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
             "INSERT INTO hub_directory_config (id, node_id, write_token, created_at, updated_at)
              VALUES (1, 'reader-node', 'reader-token', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
-            "CREATE TABLE hub_catalog_reader_state (
-                node_id TEXT PRIMARY KEY NOT NULL,
-                key_id TEXT NOT NULL,
-                last_version INTEGER NOT NULL,
-                updated_at TEXT NOT NULL
-            )",
-        ] {
-            db.execute_unprepared(sql).await.unwrap();
-        }
+        )
+        .await
+        .unwrap();
         db
     }
 
@@ -809,27 +913,65 @@ mod tests {
 
     // ── owner side: wraps for the readers ────────────────────────────────
 
-    #[test]
-    fn wraps_go_to_active_followers_with_a_key_only() {
+    #[tokio::test]
+    async fn wraps_go_to_readers_only_and_every_other_active_follower_loses_its_own() {
+        let db = local_db().await;
         let key = CatalogKey::generate();
-        let (_, public) = reader();
+        let (secret, public) = reader();
+        let (_, other) = reader();
+        hub_catalog_readers::enrol(
+            &db,
+            "a",
+            &public,
+            hub_catalog_readers::ReaderSource::Approval,
+        )
+        .await
+        .unwrap();
+        hub_catalog_readers::enrol(
+            &db,
+            "e",
+            &public,
+            hub_catalog_readers::ReaderSource::Approval,
+        )
+        .await
+        .unwrap();
+        let readers = CatalogReaders::load(&db).await.unwrap();
         let follows: Vec<HubFollow> = serde_json::from_value(serde_json::json!([
             { "id": 1, "follower_node_id": "a", "followed_node_id": "me", "status": "active",
               "created_at": "x", "follower_x25519_public_key": public },
             { "id": 2, "follower_node_id": "b", "followed_node_id": "me", "status": "pending",
               "created_at": "x", "follower_x25519_public_key": public },
             { "id": 3, "follower_node_id": "c", "followed_node_id": "me", "status": "active",
-              "created_at": "x" },
+              "created_at": "x", "encrypted_catalog_key": "old-wrap" },
             { "id": 4, "follower_node_id": "d", "followed_node_id": "me", "status": "active",
-              "created_at": "x", "follower_x25519_public_key": "not-hex" },
+              "created_at": "x", "follower_x25519_public_key": public,
+              "encrypted_catalog_key": "old-wrap" },
+            // A reader the hub now describes with another key.
+            { "id": 5, "follower_node_id": "e", "followed_node_id": "me", "status": "active",
+              "created_at": "x", "follower_x25519_public_key": other,
+              "encrypted_catalog_key": "old-wrap" },
+            // Not a reader and holding nothing: nothing to send it.
+            { "id": 6, "follower_node_id": "f", "followed_node_id": "me", "status": "active",
+              "created_at": "x", "follower_x25519_public_key": public },
         ]))
         .unwrap();
 
-        let wraps = plan_catalog_key_wraps(&follows, &key).unwrap();
+        let wraps = plan_catalog_key_wraps(&follows, &readers, &key).unwrap();
 
-        assert_eq!(wraps.len(), 1);
-        assert_eq!(wraps[0].0, 1);
-        assert!(wraps[0].1.is_some());
+        let by_id: std::collections::HashMap<i64, Option<String>> = wraps.into_iter().collect();
+        assert_eq!(
+            by_id.len(),
+            4,
+            "the pending follow and a follower holding no wrap are not touched"
+        );
+        let opened = CatalogKey::unwrap(&secret, by_id[&1].as_deref().unwrap()).unwrap();
+        assert_eq!(opened.key_id_hex(), key.key_id_hex());
+        assert_eq!(by_id[&3], None, "not a reader");
+        assert_eq!(by_id[&4], None, "a key is not an invitation");
+        assert_eq!(
+            by_id[&5], None,
+            "never wrapped for a key that was not pinned"
+        );
     }
 
     #[tokio::test]
@@ -947,6 +1089,44 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn a_locally_skipped_push_still_wraps_for_a_reader_just_let_in() {
+        // A peer paired again while its follow stayed active is let back in
+        // by the reconciliation, but the catalog did not change: without
+        // this, it would wait days for the next real push.
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = local_db().await;
+        let key = CatalogKey::generate();
+        let (_, public) = reader();
+        mount_one_follower(&server, &public).await;
+        Mock::given(method("POST"))
+            .and(path("/api/directory/contacts/sync"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "updated": 1 })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        hub_catalog_readers::enrol(&db, "a", &public, hub_catalog_readers::ReaderSource::Paired)
+            .await
+            .unwrap();
+        let svc = HubDirectoryService::new();
+
+        let first = svc
+            .wrap_catalog_key_after_push(&db, &key, PushCatalogOutcome::SkippedLocal)
+            .await
+            .unwrap();
+        let second = svc
+            .wrap_catalog_key_after_push(&db, &key, PushCatalogOutcome::SkippedLocal)
+            .await
+            .unwrap();
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 0, "once delivered, a skip sends nothing again");
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn after_undelivered_wraps_the_next_sync_is_answered_304_and_still_wraps() {
         // Second round of the failure above, end to end through push_catalog:
         // the hub already holds this digest, so the re-push comes back 304.
@@ -1055,5 +1235,279 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated, 1);
+    }
+
+    // ── owner side: readers, departures and rotation ─────────────────────
+
+    async fn mount_followers(server: &MockServer, items: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path("/api/directory/follows"))
+            .and(query_param("direction", "followers"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "items": items })),
+            )
+            .mount(server)
+            .await;
+    }
+
+    const LIB: &str = "11111111-2222-3333-4444-555555555555";
+
+    #[tokio::test]
+    #[serial]
+    async fn an_ex_peer_still_following_never_receives_the_new_key() {
+        // The 2026-10-21 recette: the owner removed the contact, the
+        // ex-peer's device had not unfollowed yet, and the next rotation
+        // wrapped the new key for it because the hub still listed it.
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = local_db().await;
+        let (ex_secret, ex_public) = reader();
+        let (stay_secret, stay_public) = reader();
+        mount_followers(
+            &server,
+            serde_json::json!([
+                { "id": 1, "follower_node_id": "ex-peer", "followed_node_id": "reader-node",
+                  "status": "active", "created_at": "x", "follower_x25519_public_key": ex_public,
+                  "encrypted_catalog_key": "wrap-of-the-old-key" },
+                { "id": 2, "follower_node_id": "stays", "followed_node_id": "reader-node",
+                  "status": "active", "created_at": "x", "follower_x25519_public_key": stay_public },
+            ]),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/api/directory/contacts/sync"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "updated": 2 })),
+            )
+            .mount(&server)
+            .await;
+        let svc = HubDirectoryService::new();
+        let store = CatalogKeyStore::new();
+        let first = svc
+            .catalog_key_for_encrypted_push(&db, &store, LIB)
+            .await
+            .unwrap();
+
+        hub_catalog_readers::record_pairing_end(&db, Some("ex-peer"), None)
+            .await
+            .unwrap();
+        let next = svc
+            .catalog_key_for_encrypted_push(&db, &store, LIB)
+            .await
+            .unwrap();
+        svc.wrap_catalog_key_for_followers(&db, &next)
+            .await
+            .unwrap();
+
+        assert_ne!(first.key_id_hex(), next.key_id_hex(), "the key rotated");
+        let requests = server.received_requests().await.unwrap();
+        let sync = requests
+            .iter()
+            .rev()
+            .find(|r| r.url.path() == "/api/directory/contacts/sync")
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&sync.body).unwrap();
+        let entries = body["contacts"].as_array().unwrap();
+        let of = |id: i64| {
+            entries.iter().find(|e| e["follow_id"] == id).unwrap()["encrypted_catalog_key"].clone()
+        };
+        assert_eq!(of(1), serde_json::Value::Null, "the ex-peer loses its wrap");
+        assert!(CatalogKey::unwrap(&ex_secret, of(2).as_str().unwrap()).is_err());
+        let opened = CatalogKey::unwrap(&stay_secret, of(2).as_str().unwrap()).unwrap();
+        assert_eq!(opened.key_id_hex(), next.key_id_hex());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_departure_recorded_by_a_closed_run_still_rotates_the_key() {
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = local_db().await;
+        let (_, public) = reader();
+        mount_followers(
+            &server,
+            serde_json::json!([
+                { "id": 1, "follower_node_id": "a", "followed_node_id": "reader-node",
+                  "status": "active", "created_at": "x", "follower_x25519_public_key": public },
+            ]),
+        )
+        .await;
+        let svc = HubDirectoryService::new();
+        let before = svc
+            .catalog_key_for_encrypted_push(&db, &CatalogKeyStore::new(), LIB)
+            .await
+            .unwrap();
+        hub_catalog_readers::record_pairing_end(&db, Some("a"), None)
+            .await
+            .unwrap();
+
+        // A new run: fresh key store, no in-memory state at all.
+        let store = CatalogKeyStore::new();
+        let after = svc
+            .catalog_key_for_encrypted_push(&db, &store, LIB)
+            .await
+            .unwrap();
+        let again = svc
+            .catalog_key_for_encrypted_push(&db, &store, LIB)
+            .await
+            .unwrap();
+
+        assert_ne!(before.key_id_hex(), after.key_id_hex());
+        assert_eq!(
+            after.key_id_hex(),
+            again.key_id_hex(),
+            "one rotation per departure"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn without_a_departure_the_key_stays() {
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = local_db().await;
+        mount_followers(&server, serde_json::json!([])).await;
+        let svc = HubDirectoryService::new();
+        let store = CatalogKeyStore::new();
+
+        let first = svc
+            .catalog_key_for_encrypted_push(&db, &store, LIB)
+            .await
+            .unwrap();
+        let second = svc
+            .catalog_key_for_encrypted_push(&db, &CatalogKeyStore::new(), LIB)
+            .await
+            .unwrap();
+
+        assert_eq!(first.key_id_hex(), second.key_id_hex());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_departure_before_any_key_costs_no_extra_rotation() {
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = local_db().await;
+        let (_, public) = reader();
+        hub_catalog_readers::enrol(&db, "a", &public, hub_catalog_readers::ReaderSource::Paired)
+            .await
+            .unwrap();
+        hub_catalog_readers::record_pairing_end(&db, Some("a"), None)
+            .await
+            .unwrap();
+        mount_followers(&server, serde_json::json!([])).await;
+        let svc = HubDirectoryService::new();
+        let store = CatalogKeyStore::new();
+
+        let created = svc
+            .catalog_key_for_encrypted_push(&db, &store, LIB)
+            .await
+            .unwrap();
+        let next = svc
+            .catalog_key_for_encrypted_push(&db, &store, LIB)
+            .await
+            .unwrap();
+
+        assert_eq!(created.key_id_hex(), next.key_id_hex());
+        assert_eq!(hub_catalog_readers::rotation_due(&db).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_unreadable_followers_list_creates_and_rotates_nothing() {
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = local_db().await;
+        Mock::given(method("GET"))
+            .and(path("/api/directory/follows"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let store = CatalogKeyStore::new();
+
+        let err = HubDirectoryService::new()
+            .catalog_key_for_encrypted_push(&db, &store, LIB)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, HubDirectoryError::Hub(503, _)), "{err}");
+        assert!(store.load(&db, LIB).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn the_wrap_of_a_departed_reader_is_withdrawn_at_once() {
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = local_db().await;
+        let (_, public) = reader();
+        mount_followers(
+            &server,
+            serde_json::json!([
+                { "id": 9, "follower_node_id": "ex-peer", "followed_node_id": "reader-node",
+                  "status": "active", "created_at": "x", "follower_x25519_public_key": public },
+            ]),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/api/directory/contacts/sync"))
+            .and(body_partial_json(serde_json::json!({
+                "contacts": [{ "follow_id": 9, "encrypted_catalog_key": null }]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "updated": 1 })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let svc = HubDirectoryService::new();
+
+        assert!(svc.withdraw_catalog_key_for(&db, "ex-peer").await.unwrap());
+        assert!(
+            !svc.withdraw_catalog_key_for(&db, "never-followed")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn wraps_go_out_in_batches_the_hub_accepts() {
+        // The hub refuses more than 500 entries per call.
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = local_db().await;
+        let key = CatalogKey::generate();
+        let followers: Vec<serde_json::Value> = (1..=600)
+            .map(|i| {
+                let (_, public) = reader();
+                serde_json::json!({
+                    "id": i, "follower_node_id": format!("node-{i}"),
+                    "followed_node_id": "reader-node", "status": "active",
+                    "created_at": "x", "follower_x25519_public_key": public,
+                })
+            })
+            .collect();
+        mount_followers(&server, serde_json::Value::Array(followers)).await;
+        Mock::given(method("POST"))
+            .and(path("/api/directory/contacts/sync"))
+            .respond_with(|req: &Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let n = body["contacts"].as_array().unwrap().len();
+                if n > 500 {
+                    ResponseTemplate::new(400)
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "updated": n }))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let updated = HubDirectoryService::new()
+            .wrap_catalog_key_for_followers(&db, &key)
+            .await
+            .unwrap();
+
+        assert_eq!(updated, 600);
     }
 }

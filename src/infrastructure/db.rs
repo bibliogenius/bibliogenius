@@ -2650,6 +2650,51 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
     ))
     .await?;
 
+    // Migration 104: who may read the encrypted directory catalog (ADR-072
+    // D4, D8). The owner's own list of readers with the key pinned when each
+    // was let in, and a single state row: whether the one-time bootstrap from
+    // the existing followers ran, how many readers left and how many of those
+    // departures the current catalog key already postdates, how many readers
+    // came in and how many of those already hold their wrap. Local to this
+    // device, never replicated.
+    for sql in [
+        "CREATE TABLE IF NOT EXISTS catalog_readers (
+            node_id           TEXT PRIMARY KEY NOT NULL,
+            x25519_public_key TEXT NOT NULL,
+            source            TEXT NOT NULL,
+            approved_at       TEXT NOT NULL,
+            revoked_at        TEXT,
+            revoke_reason     TEXT,
+            ed25519_public_key TEXT
+        )",
+        "CREATE TABLE IF NOT EXISTS catalog_reader_state (
+            id              INTEGER PRIMARY KEY CHECK (id = 1),
+            seeded          INTEGER NOT NULL DEFAULT 0,
+            revocations     INTEGER NOT NULL DEFAULT 0,
+            rotated_through INTEGER NOT NULL DEFAULT 0,
+            enrolments      INTEGER NOT NULL DEFAULT 0,
+            wrapped_through INTEGER NOT NULL DEFAULT 0
+        )",
+    ] {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            sql.to_owned(),
+        ))
+        .await?;
+    }
+
+    // Migration 105: the signing key of a library whose pairing was ended,
+    // so a request that leaves out its uuid is still recognised. Part of the
+    // table above on a fresh database; added here to one created by an
+    // earlier build of migration 104.
+    if !table_has_column(db, "catalog_readers", "ed25519_public_key").await? {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE catalog_readers ADD COLUMN ed25519_public_key TEXT".to_owned(),
+        ))
+        .await?;
+    }
+
     Ok(())
 }
 

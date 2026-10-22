@@ -396,6 +396,27 @@ async fn process_relay_message(
         sender_peer.id
     );
 
+    // An ex-peer still holds our write token: until the owner restores the
+    // pairing it may only leave or move its own mailbox (ADR-072 D4). The
+    // message is acked, so it is not fetched again.
+    if !matches!(
+        clear_message.message_type.as_str(),
+        "peer_disconnect" | "relay_credential_update"
+    ) && crate::services::hub_catalog_readers::held_back(db, sender_peer)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("Relay poller: ended pairing lookup failed: {e}");
+            false
+        })
+    {
+        tracing::warn!(
+            "Relay poller: dropped '{}' from peer {} whose pairing was ended",
+            clear_message.message_type,
+            sender_peer.id
+        );
+        return Ok(());
+    }
+
     // Handle relay credential updates (peer recreated their mailbox)
     if clear_message.message_type == "relay_credential_update" {
         return handle_credential_update(db, sender_peer, &clear_message).await;
@@ -1152,9 +1173,9 @@ async fn handle_connection_request(
         }
         // The uuid of a known peer is left to the signed manifest (ADR-030):
         // this message only cites public values, and ADR-053 approves hub
-        // follows by uuid.
-        active.connection_status = Set("accepted".to_string());
-        active.auto_approve = Set(true);
+        // follows by uuid. Its status is left to the owner too: a request
+        // anyone holding our write token can deposit never accepts a peer
+        // that waits for approval.
         active.last_seen = Set(Some(chrono::Utc::now().to_rfc3339()));
         active.updated_at = Set(chrono::Utc::now().to_rfc3339());
         active
@@ -1167,7 +1188,20 @@ async fn handle_connection_request(
             peer_id
         );
     } else {
-        // Insert new peer
+        // A new peer waits for the owner when connection validation is on,
+        // as on the LAN path, and always when the owner ended a pairing with
+        // this library, known by its uuid or its signing key: the ex-peer
+        // still holds our write token and must not pair itself back in
+        // (ADR-072 D4).
+        let pairing_ended = crate::services::hub_catalog_readers::pairing_ended(
+            db,
+            library_uuid.as_deref(),
+            ed25519_key.as_deref(),
+        )
+        .await
+        .unwrap_or(true);
+        let pending = pairing_ended || crate::api::peer::is_connection_validation_enabled(db).await;
+        let connection_status = if pending { "pending" } else { "accepted" };
         let new_peer = peer::ActiveModel {
             name: Set(name.to_string()),
             url: Set(peer_url),
@@ -1178,8 +1212,8 @@ async fn handle_connection_request(
             mailbox_id: Set(mailbox_id),
             relay_write_token: Set(relay_write_token),
             library_uuid: Set(library_uuid),
-            connection_status: Set("accepted".to_string()),
-            auto_approve: Set(true),
+            connection_status: Set(connection_status.to_string()),
+            auto_approve: Set(!pending),
             last_seen: Set(Some(chrono::Utc::now().to_rfc3339())),
             created_at: Set(chrono::Utc::now().to_rfc3339()),
             updated_at: Set(chrono::Utc::now().to_rfc3339()),
@@ -1191,9 +1225,23 @@ async fn handle_connection_request(
             .map_err(|e| format!("Failed to insert peer from connection_request: {e}"))?;
 
         tracing::info!(
-            "Relay poller: Created new peer '{}' from connection_request",
-            name
+            "Relay poller: Created new peer '{}' from connection_request (status={})",
+            name,
+            connection_status
         );
+        if pending {
+            crate::services::notification_service::emit(
+                db,
+                crate::domain::CreateNotification {
+                    event_type: crate::domain::NotificationEventType::ConnectionRequest,
+                    title: name.to_string(),
+                    body: None,
+                    ref_type: Some("peer".to_string()),
+                    ref_id: Some(name.to_string()),
+                },
+            )
+            .await;
+        }
     }
 
     Ok(())
@@ -1518,5 +1566,353 @@ mod raw_connection_request_tests {
         .expect("handled");
 
         assert_eq!(peer::Entity::find().count(&db).await.unwrap(), 2);
+    }
+
+    async fn enable_connection_validation(db: &DatabaseConnection) {
+        use sea_orm::ConnectionTrait;
+        db.execute_unprepared(
+            "INSERT OR REPLACE INTO installation_profile
+                (id, profile_type, enabled_modules, created_at, updated_at)
+             VALUES (1, 'individual', '[\"connection_validation\"]', '2026-01-01', '2026-01-01')",
+        )
+        .await
+        .expect("profile");
+    }
+
+    async fn peer_by_uuid(db: &DatabaseConnection, uuid: &str) -> peer::Model {
+        use sea_orm::{ColumnTrait, QueryFilter};
+        peer::Entity::find()
+            .filter(peer::Column::LibraryUuid.eq(uuid))
+            .one(db)
+            .await
+            .expect("find")
+            .expect("exists")
+    }
+
+    #[tokio::test]
+    async fn a_library_whose_pairing_we_ended_waits_for_the_owner() {
+        // The ex-peer still holds our mailbox write token from the
+        // invitation: it must not be able to pair itself back in.
+        let db = setup_db().await;
+        crate::services::hub_catalog_readers::record_pairing_end(&db, Some(UUID_B), None)
+            .await
+            .unwrap();
+
+        handle_connection_request(
+            &db,
+            &message(
+                "Ex peer",
+                Some(UUID_B),
+                (KEY_B_ED, KEY_B_X),
+                ("mailbox-b", "token-b"),
+            ),
+        )
+        .await
+        .expect("handled");
+
+        let stored = peer_by_uuid(&db, UUID_B).await;
+        assert_eq!(stored.connection_status, "pending");
+        assert!(!stored.auto_approve);
+    }
+
+    #[tokio::test]
+    async fn an_ex_peer_shouting_its_signing_key_still_waits_for_the_owner() {
+        let db = setup_db().await;
+        crate::services::hub_catalog_readers::record_pairing_end(&db, Some(UUID_B), Some(KEY_B_ED))
+            .await
+            .unwrap();
+        let shouted = KEY_B_ED.to_uppercase();
+
+        handle_connection_request(
+            &db,
+            &message(
+                "Ex peer",
+                None,
+                (&shouted, KEY_B_X),
+                ("mailbox-b", "token-b"),
+            ),
+        )
+        .await
+        .expect("handled");
+
+        use sea_orm::{ColumnTrait, QueryFilter};
+        let stored = peer::Entity::find()
+            .filter(peer::Column::PublicKey.eq(shouted.as_str()))
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("exists");
+        assert_eq!(stored.connection_status, "pending");
+    }
+
+    #[tokio::test]
+    async fn an_ex_peer_leaving_out_its_uuid_still_waits_for_the_owner() {
+        // Without its uuid the request is recognised by its signing key.
+        let db = setup_db().await;
+        crate::services::hub_catalog_readers::record_pairing_end(&db, Some(UUID_B), Some(KEY_B_ED))
+            .await
+            .unwrap();
+
+        handle_connection_request(
+            &db,
+            &message(
+                "Ex peer",
+                None,
+                (KEY_B_ED, KEY_B_X),
+                ("mailbox-b", "token-b"),
+            ),
+        )
+        .await
+        .expect("handled");
+
+        use sea_orm::{ColumnTrait, QueryFilter};
+        let stored = peer::Entity::find()
+            .filter(peer::Column::PublicKey.eq(KEY_B_ED))
+            .one(&db)
+            .await
+            .expect("find")
+            .expect("exists");
+        assert_eq!(stored.connection_status, "pending");
+        assert!(!stored.auto_approve);
+    }
+
+    #[tokio::test]
+    async fn connection_validation_holds_a_relay_request_too() {
+        let db = setup_db().await;
+        enable_connection_validation(&db).await;
+
+        handle_connection_request(
+            &db,
+            &message(
+                "New friend",
+                Some(UUID_B),
+                (KEY_B_ED, KEY_B_X),
+                ("mailbox-b", "token-b"),
+            ),
+        )
+        .await
+        .expect("handled");
+
+        assert_eq!(peer_by_uuid(&db, UUID_B).await.connection_status, "pending");
+    }
+
+    #[tokio::test]
+    async fn without_validation_a_new_relay_peer_is_accepted_as_before() {
+        let db = setup_db().await;
+
+        handle_connection_request(
+            &db,
+            &message(
+                "New friend",
+                Some(UUID_B),
+                (KEY_B_ED, KEY_B_X),
+                ("mailbox-b", "token-b"),
+            ),
+        )
+        .await
+        .expect("handled");
+
+        let stored = peer_by_uuid(&db, UUID_B).await;
+        assert_eq!(stored.connection_status, "accepted");
+        assert!(stored.auto_approve);
+    }
+
+    #[tokio::test]
+    async fn a_relay_request_never_accepts_a_pending_peer() {
+        let db = setup_db().await;
+        let a = insert_trusted_a(&db).await;
+        let mut pending: peer::ActiveModel = peer_by_id(&db, a).await.into();
+        pending.connection_status = Set("pending".to_string());
+        pending.auto_approve = Set(false);
+        pending.update(&db).await.unwrap();
+
+        handle_connection_request(
+            &db,
+            &message(
+                "Store app",
+                Some(UUID_A),
+                (KEY_A_ED, KEY_A_X),
+                ("mailbox-a2", "token-a2"),
+            ),
+        )
+        .await
+        .expect("handled");
+
+        let stored = peer_by_id(&db, a).await;
+        assert_eq!(stored.connection_status, "pending");
+        assert!(!stored.auto_approve);
+        // The relay credentials of a peer presenting its keys still refresh.
+        assert_eq!(stored.mailbox_id.as_deref(), Some("mailbox-a2"));
+    }
+}
+
+#[cfg(test)]
+mod ended_pairing_dispatch_tests {
+    //! Where the refusal of an ex-peer's messages is wired: the relay poller
+    //! drops them before any handler, and the E2EE dispatch refuses them.
+    use std::sync::Arc;
+
+    use axum::http::StatusCode;
+    use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+
+    use super::process_relay_message;
+    use crate::api::e2ee::{build_known_peers, dispatch_clear_message};
+    use crate::crypto::envelope::ClearMessage;
+    use crate::crypto::identity::NodeIdentity;
+    use crate::infrastructure::AppState;
+    use crate::infrastructure::nonce_store::SqliteNonceStore;
+    use crate::models::peer;
+    use crate::services::crypto_service::{CryptoService, PeerInfo};
+    use crate::services::hub_catalog_readers;
+
+    const UUID_P: &str = "a5a1150e-d93d-4e0c-a488-6d867d3f8e39";
+
+    struct Fixture {
+        db: DatabaseConnection,
+        state: AppState,
+        ours: Arc<CryptoService<SqliteNonceStore>>,
+        our_x25519: x25519_dalek::PublicKey,
+        theirs: CryptoService<SqliteNonceStore>,
+        their_ed: String,
+        peer_id: i32,
+    }
+
+    async fn fixture() -> Fixture {
+        let db = crate::db::init_db("sqlite::memory:")
+            .await
+            .expect("init db");
+        let our_identity = NodeIdentity::generate();
+        let our_x25519 = our_identity.x25519_public_key();
+        let their_identity = NodeIdentity::generate();
+        let their_ed = hex::encode(their_identity.verifying_key().to_bytes());
+        let their_x = hex::encode(their_identity.x25519_public_key().as_bytes());
+        let now = chrono::Utc::now().to_rfc3339();
+        let peer_id = peer::ActiveModel {
+            name: Set("Peer".to_string()),
+            url: Set("relay://peer".to_string()),
+            library_uuid: Set(Some(UUID_P.to_string())),
+            public_key: Set(Some(their_ed.clone())),
+            x25519_public_key: Set(Some(their_x)),
+            key_exchange_done: Set(true),
+            auto_approve: Set(true),
+            connection_status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert peer")
+        .id;
+        Fixture {
+            state: AppState::new(db.clone()),
+            ours: Arc::new(CryptoService::new(
+                our_identity,
+                SqliteNonceStore::new(db.clone()),
+            )),
+            our_x25519,
+            theirs: CryptoService::new(their_identity, SqliteNonceStore::new(db.clone())),
+            their_ed,
+            peer_id,
+            db,
+        }
+    }
+
+    fn message(message_type: &str, payload: serde_json::Value) -> ClearMessage {
+        ClearMessage {
+            message_type: message_type.to_string(),
+            payload,
+            timestamp: chrono::Utc::now().timestamp(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            correlation_id: None,
+            reply_to_mailbox: None,
+            reply_to_write_token: None,
+        }
+    }
+
+    async fn known(db: &DatabaseConnection) -> (Vec<PeerInfo>, Vec<peer::Model>) {
+        build_known_peers(&peer::Entity::find().all(db).await.expect("peers"))
+    }
+
+    /// A response carrying a library name renames the sender's row: what
+    /// tells a dropped message from a handled one.
+    async fn deliver_rename(f: &Fixture) -> String {
+        let envelope = f
+            .theirs
+            .seal(
+                &f.our_x25519,
+                &message(
+                    "library_manifest_response",
+                    serde_json::json!({ "library_name": "Renamed" }),
+                ),
+            )
+            .expect("seal");
+        let (known_peers, models) = known(&f.db).await;
+        process_relay_message(
+            &f.state,
+            "https://hub.bibliogenius.org",
+            &f.ours,
+            &envelope,
+            &known_peers,
+            &models,
+        )
+        .await
+        .expect("processed");
+        peer::Entity::find_by_id(f.peer_id)
+            .one(&f.db)
+            .await
+            .expect("find")
+            .expect("exists")
+            .name
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_relay_handles_a_message_from_a_peer() {
+        let f = fixture().await;
+
+        assert_eq!(deliver_rename(&f).await, "Renamed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_relay_drops_a_message_from_an_ex_peer() {
+        let f = fixture().await;
+        hub_catalog_readers::record_pairing_end(&f.db, Some(UUID_P), Some(&f.their_ed))
+            .await
+            .unwrap();
+
+        assert_eq!(deliver_rename(&f).await, "Peer");
+    }
+
+    async fn dispatch(f: &Fixture, message_type: &str) -> StatusCode {
+        let (known_peers, models) = known(&f.db).await;
+        dispatch_clear_message(
+            &f.state,
+            &f.ours,
+            &message(message_type, serde_json::json!({})),
+            &known_peers,
+            0,
+            &models[0],
+            None,
+        )
+        .await
+        .status()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_dispatch_refuses_an_ex_peer_and_serves_a_peer() {
+        let f = fixture().await;
+        assert_ne!(
+            dispatch(&f, "library_manifest_request").await,
+            StatusCode::FORBIDDEN
+        );
+
+        hub_catalog_readers::record_pairing_end(&f.db, Some(UUID_P), Some(&f.their_ed))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            dispatch(&f, "library_manifest_request").await,
+            StatusCode::FORBIDDEN
+        );
     }
 }

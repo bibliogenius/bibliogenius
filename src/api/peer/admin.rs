@@ -12,14 +12,25 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Qu
 use serde::Deserialize;
 use serde_json::json;
 
-/// Bulk-approve all pending peers (called when connection_validation is toggled OFF)
+/// Bulk-approve all pending peers (called when connection_validation is toggled OFF).
+/// A library whose pairing the owner ended keeps waiting: the setting is
+/// not about it, and only accepting it one by one restores it (ADR-072 D4).
 pub async fn auto_approve_all_peers(State(db): State<DatabaseConnection>) -> impl IntoResponse {
-    let peers = peer::Entity::find()
+    let pending = peer::Entity::find()
         .filter(peer::Column::ConnectionStatus.eq("pending"))
         .all(&db)
         .await
         .unwrap_or_default();
 
+    let mut peers = Vec::with_capacity(pending.len());
+    for p in pending {
+        if !crate::services::hub_catalog_readers::held_back(&db, &p)
+            .await
+            .unwrap_or(true)
+        {
+            peers.push(p);
+        }
+    }
     let count = peers.len();
     for p in peers {
         let mut active: peer::ActiveModel = p.into();
@@ -119,8 +130,8 @@ pub async fn update_peer_status(
 
     // If rejecting, delete the peer entirely
     if payload.status == "rejected" {
-        match peer::Entity::delete_by_id(peer_id).exec(&db).await {
-            Ok(_) => {
+        match crate::services::hub_catalog_readers::delete_peer_ending_pairing(&db, &peer).await {
+            Ok(()) => {
                 // Deactivate Library contacts associated with this peer (matched by name).
                 use crate::models::contact;
                 let _ = contact::Entity::update_many()
@@ -136,6 +147,15 @@ pub async fn update_peer_status(
                     )
                     .exec(&db)
                     .await;
+                // A rejected peer leaves the catalog readers like any ended
+                // pairing (ADR-072 D4); its wrap goes at once.
+                withdraw_catalog_key_for_peer(
+                    std::sync::Arc::new(
+                        crate::services::hub_directory_service::HubDirectoryService::new(),
+                    ),
+                    db.clone(),
+                    &peer,
+                );
                 tracing::info!("🗑️ Peer {} rejected and deleted", peer_id);
                 return (
                     StatusCode::OK,
@@ -158,7 +178,7 @@ pub async fn update_peer_status(
 
     // Update auto_approve and connection_status for accept/active
     let auto_approve = payload.status == "active" || payload.status == "accepted";
-
+    let restore = auto_approve.then(|| (peer.library_uuid.clone(), peer.public_key.clone()));
     let mut active_model: peer::ActiveModel = peer.into();
     active_model.auto_approve = Set(auto_approve);
     if auto_approve {
@@ -166,7 +186,16 @@ pub async fn update_peer_status(
     }
     active_model.updated_at = Set(chrono::Utc::now().to_rfc3339());
 
-    match active_model.update(&db).await {
+    // Accepting a library whose pairing was ended is the owner restoring it
+    // (ADR-072 D4).
+    let accepted = crate::services::hub_catalog_readers::update_peer_restoring_pairing(
+        &db,
+        active_model,
+        restore,
+    )
+    .await;
+
+    match accepted {
         Ok(updated) => {
             tracing::info!("Peer {} accepted, auto_approve={}", peer_id, auto_approve);
 
@@ -325,6 +354,37 @@ pub async fn update_peer_url(
     }
 }
 
+/// Withdraws, in the background, the catalog key wrap the ex-peer holds on
+/// its follow (ADR-072 D4). Withdrawn whether or not it was on the readers
+/// list: a wrap handed out before the list existed must go too. The
+/// rotation at the next encrypted push covers a failure.
+pub(crate) fn withdraw_catalog_key_for_peer(
+    hub_directory: std::sync::Arc<crate::services::hub_directory_service::HubDirectoryService>,
+    db: DatabaseConnection,
+    peer_model: &peer::Model,
+) {
+    use crate::services::hub_directory_service::HubDirectoryError;
+
+    let Some(node_id) = peer_model
+        .library_uuid
+        .clone()
+        .filter(|u| !u.trim().is_empty())
+    else {
+        return;
+    };
+    let peer_id = peer_model.id;
+    tokio::spawn(async move {
+        match hub_directory.withdraw_catalog_key_for(&db, &node_id).await {
+            // Not on the hub: no follow, no wrap.
+            Ok(_) | Err(HubDirectoryError::NotRegistered) => {}
+            Err(e) => tracing::warn!(
+                target: "hub_directory",
+                "catalog key wrap not withdrawn for removed peer {peer_id}, the next rotation covers it: {e}"
+            ),
+        }
+    });
+}
+
 /// Removes cached hub directory catalog entries (peer_id = 0 sentinel) for a
 /// given library_uuid. See ADR-024: the cache is owned by the peer relationship,
 /// so deletion must invalidate it to prevent stale reads on re-add.
@@ -332,15 +392,17 @@ pub async fn update_peer_url(
 /// once the local `peers` row is gone, on every path that removes it (own
 /// deletion here, and both disconnect receivers). Fire-and-forget, like the
 /// disconnect notification: a hub outage never blocks the local removal.
+/// The catalog key wrap of the ex-peer is withdrawn on the way (ADR-072 D4).
 pub(crate) fn revoke_hub_follow_for_peer(
     state: &crate::infrastructure::AppState,
     peer_model: &peer::Model,
 ) {
     use crate::services::hub_directory_service::FollowRevocation;
 
-    let state = state.clone();
     let library_uuid = peer_model.library_uuid.clone();
     let peer_id = peer_model.id;
+    withdraw_catalog_key_for_peer(state.hub_directory.clone(), state.db().clone(), peer_model);
+    let state = state.clone();
     tokio::spawn(async move {
         match state
             .hub_directory
@@ -414,8 +476,8 @@ pub async fn delete_peer(
     });
 
     // 3. Delete locally
-    match peer::Entity::delete_by_id(peer_id).exec(db).await {
-        Ok(_) => {
+    match crate::services::hub_catalog_readers::delete_peer_ending_pairing(db, &peer_model).await {
+        Ok(()) => {
             // Deactivate Library contacts associated with this peer (matched by name).
             // These contacts were auto-created during P2P interactions and are stale
             // now that the peer connection is gone.

@@ -547,6 +547,17 @@ pub async fn reset_app(
             .into_response();
     }
 
+    // The readers of the encrypted directory catalog (ADR-072) were this
+    // library's approvals: a reset library starts with none.
+    if let Err(e) = crate::services::hub_catalog_readers::clear(&db).await {
+        tracing::error!("Failed to clear catalog readers during reset_app: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to clear catalog readers: {e}") })),
+        )
+            .into_response();
+    }
+
     tracing::info!("App reset successful: All data cleared.");
 
     (
