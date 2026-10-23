@@ -167,9 +167,12 @@ pub async fn hub_directory_list_following() -> Result<Vec<FrbHubFollow>, String>
         .map_err(|e| e.to_string())
 }
 
-/// An active follower the encrypted catalog cannot be wrapped for keeps it
-/// in clear (ADR-072 D8). That must be visible: a key that changed under a
-/// pin is a reinstall or a substitution by the hub. Never logs a key.
+/// An active follower the encrypted catalog is not wrapped for must be
+/// visible (ADR-072 D8). A key that changed under a pin is a reinstall or a
+/// substitution by the hub: that follower is no reader until the owner
+/// approves or pairs it again, and the catalog stays encrypted for the
+/// others. One the list never held keeps the catalog in clear. Never logs a
+/// key.
 fn log_reader_anomaly(
     follow: &crate::services::hub_directory_service::HubFollow,
     status: crate::services::hub_catalog_readers::ReaderStatus,
@@ -178,7 +181,7 @@ fn log_reader_anomaly(
     match status {
         ReaderStatus::KeyMismatch => tracing::warn!(
             target: "hub_directory",
-            "follow {} ({}): the hub returns another key than the one pinned, the catalog stays in clear",
+            "follow {} ({}): the hub returns another key than the one pinned, not a catalog reader until approved or paired again",
             follow.id,
             short(&follow.follower_node_id)
         ),

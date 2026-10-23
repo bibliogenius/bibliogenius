@@ -1127,6 +1127,52 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn a_locally_skipped_push_gives_back_a_wrap_the_hub_no_longer_holds() {
+        // A reader that held its wrap lost it while the hub returned another
+        // key; the hub shows the pinned key again with no wrap, the catalog
+        // did not change. The followers read before the push asks for the
+        // batch, the skipped push delivers it.
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        let db = local_db().await;
+        let key = CatalogKey::generate();
+        let (_, public) = reader();
+        mount_one_follower(&server, &public).await;
+        Mock::given(method("POST"))
+            .and(path("/api/directory/contacts/sync"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "updated": 1 })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        hub_catalog_readers::enrol(
+            &db,
+            "a",
+            &public,
+            hub_catalog_readers::ReaderSource::Approval,
+        )
+        .await
+        .unwrap();
+        let due = hub_catalog_readers::wraps_due(&db).await.unwrap().unwrap();
+        hub_catalog_readers::mark_wrapped(&db, due).await.unwrap();
+        let svc = HubDirectoryService::new();
+        let listed_at = hub_catalog_readers::now_rfc3339();
+        let followers = svc.list_followers(&db).await.unwrap();
+        hub_catalog_readers::reconcile(&db, &followers, &listed_at)
+            .await
+            .unwrap();
+
+        let updated = svc
+            .wrap_catalog_key_after_push(&db, &key, PushCatalogOutcome::SkippedLocal)
+            .await
+            .unwrap();
+
+        assert_eq!(updated, 1);
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn after_undelivered_wraps_the_next_sync_is_answered_304_and_still_wraps() {
         // Second round of the failure above, end to end through push_catalog:
         // the hub already holds this digest, so the re-push comes back 304.

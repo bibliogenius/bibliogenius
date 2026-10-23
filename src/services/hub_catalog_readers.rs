@@ -62,9 +62,12 @@ pub enum ReaderStatus {
     /// On the list, and the hub returns the key that was pinned.
     Reader,
     /// On the list, but the hub now returns another key (or none): the
-    /// follower reinstalled, or the key was substituted. No wrap goes out,
-    /// and the follower counts as unable to read (D8 keeps the catalog in
-    /// clear rather than locking out a reader the owner let in).
+    /// follower reinstalled, or the key was substituted. No longer an
+    /// authorised reader: no wrap goes out and D8 does not count it, so the
+    /// catalog stays encrypted for the others. Not a departure either (the
+    /// owner withdrew no trust, nothing to rotate): the follower is a reader
+    /// again once the hub returns the pinned key, or once the owner pins
+    /// the new one by approving a new request or pairing it again.
     KeyMismatch,
     /// Taken off the list by the owner (an ended pairing): no wrap, and
     /// not counted by D8, so an ex-peer still following holds no one back.
@@ -704,6 +707,10 @@ pub async fn held_back<C: ConnectionTrait>(
 /// 4. A reader seen leaving comes back when the hub shows it following
 ///    again with the pinned key.
 /// 5. Departures: a current reader the list no longer shows as following.
+/// 6. Missing wraps: a reader the hub shows with its pinned key but no wrap
+///    (withdrawn while the hub returned another key, or never delivered)
+///    makes a wrap batch due, so the next push hands it out even when the
+///    catalog did not change.
 ///
 /// A reader let in at or after `listed_at` is never taken off on the
 /// strength of a list that predates it, and a reader revoked at or after
@@ -823,6 +830,30 @@ pub async fn reconcile(
             revoke(db, &node_id, REASON_FOLLOWER_LEFT).await?;
         }
     }
+
+    // 6. Missing wraps.
+    let current = CatalogReaders::load(db).await?;
+    let unwrapped = active.iter().any(|f| {
+        current.status(f) == ReaderStatus::Reader
+            && f.encrypted_catalog_key.as_deref().is_none_or(str::is_empty)
+    });
+    if unwrapped {
+        ask_for_wraps(db).await?;
+    }
+    Ok(())
+}
+
+/// Makes a wrap batch due, unless one already is: counts as an admission
+/// for [`wraps_due`] without letting anyone in.
+async fn ask_for_wraps(db: &DatabaseConnection) -> Result<(), String> {
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        "UPDATE catalog_reader_state SET enrolments = enrolments + 1
+         WHERE id = 1 AND enrolments <= wrapped_through"
+            .to_owned(),
+    ))
+    .await
+    .map_err(|e| format!("catalog reader state: {e}"))?;
     Ok(())
 }
 
@@ -1845,6 +1876,232 @@ mod tests {
         assert_eq!(
             list.status(&follower(1, A, "active", Some(&key(2)))),
             ReaderStatus::KeyMismatch
+        );
+    }
+
+    // ── a key that changed under its pin (rule (b)) ──────────────────────
+
+    #[tokio::test]
+    async fn a_key_that_changed_counts_no_departure() {
+        // A reinstalled reader, or a key the hub substituted: excluded from
+        // the wraps, but the owner withdrew no trust, so nothing to rotate,
+        // and the pin stays for the day the hub returns it again.
+        let db = test_db().await;
+        set_directory(&db, false, true).await;
+        reconcile(&db, &[], &now_rfc3339()).await.unwrap();
+        enrol(&db, A, &key(1), ReaderSource::Approval)
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            reconcile(
+                &db,
+                &[follower(1, A, "active", Some(&key(2)))],
+                &now_rfc3339(),
+            )
+            .await
+            .unwrap();
+        }
+
+        let list = readers(&db).await;
+        assert_eq!(list.pinned_key(A), Some(key(1).as_str()));
+        assert_eq!(
+            list.status(&follower(1, A, "active", Some(&key(2)))),
+            ReaderStatus::KeyMismatch
+        );
+        assert_eq!(rotation_due(&db).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_reader_is_back_once_the_hub_returns_its_pinned_key() {
+        let db = test_db().await;
+        set_directory(&db, false, true).await;
+        reconcile(&db, &[], &now_rfc3339()).await.unwrap();
+        enrol(&db, A, &key(1), ReaderSource::Approval)
+            .await
+            .unwrap();
+        reconcile(&db, &[follower(1, A, "active", None)], &now_rfc3339())
+            .await
+            .unwrap();
+
+        reconcile(
+            &db,
+            &[follower(1, A, "active", Some(&key(1)))],
+            &now_rfc3339(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            readers(&db)
+                .await
+                .status(&follower(1, A, "active", Some(&key(1)))),
+            ReaderStatus::Reader
+        );
+        assert_eq!(rotation_due(&db).await.unwrap(), None);
+    }
+
+    fn follower_with_wrap(id: i64, node: &str, x25519: &str, wrap: Option<&str>) -> HubFollow {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "follower_node_id": node,
+            "followed_node_id": "owner-node",
+            "status": "active",
+            "created_at": "2026-01-01T00:00:00Z",
+            "follower_x25519_public_key": x25519,
+            "encrypted_catalog_key": wrap,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_reader_back_without_its_wrap_makes_a_wrap_batch_due() {
+        // The wrap was withdrawn while the hub returned another key; once
+        // the pinned key is back, an unchanged catalog skips the push
+        // locally, so the batch must be due for the wrap to go out again.
+        let db = test_db().await;
+        set_directory(&db, false, true).await;
+        reconcile(&db, &[], &now_rfc3339()).await.unwrap();
+        enrol(&db, A, &key(1), ReaderSource::Approval)
+            .await
+            .unwrap();
+        mark_wrapped(&db, wraps_due(&db).await.unwrap().unwrap())
+            .await
+            .unwrap();
+
+        reconcile(
+            &db,
+            &[follower_with_wrap(1, A, &key(1), Some("wrap"))],
+            &now_rfc3339(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(wraps_due(&db).await.unwrap(), None, "holds its wrap");
+
+        reconcile(
+            &db,
+            &[follower_with_wrap(1, A, &key(1), None)],
+            &now_rfc3339(),
+        )
+        .await
+        .unwrap();
+        let due = wraps_due(&db).await.unwrap();
+        assert!(due.is_some(), "a reader without its wrap");
+
+        // Asked once: a second read before the batch keeps the same count.
+        reconcile(
+            &db,
+            &[follower_with_wrap(1, A, &key(1), Some(""))],
+            &now_rfc3339(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(wraps_due(&db).await.unwrap(), due);
+    }
+
+    #[tokio::test]
+    async fn a_follower_whose_key_changed_makes_no_wrap_batch_due() {
+        let db = test_db().await;
+        set_directory(&db, false, true).await;
+        reconcile(&db, &[], &now_rfc3339()).await.unwrap();
+        enrol(&db, A, &key(1), ReaderSource::Approval)
+            .await
+            .unwrap();
+        mark_wrapped(&db, wraps_due(&db).await.unwrap().unwrap())
+            .await
+            .unwrap();
+
+        reconcile(
+            &db,
+            &[follower_with_wrap(1, A, &key(2), None)],
+            &now_rfc3339(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(wraps_due(&db).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_reinstalled_follower_is_back_after_following_again_and_an_approval() {
+        // A directory follower that is no paired peer: it unfollows (the
+        // departure is counted), asks again, the owner approves, and the
+        // new key is pinned.
+        let db = test_db().await;
+        set_directory(&db, false, true).await;
+        reconcile(&db, &[], &now_rfc3339()).await.unwrap();
+        enrol(&db, A, &key(1), ReaderSource::Approval)
+            .await
+            .unwrap();
+        reconcile(
+            &db,
+            &[follower(1, A, "active", Some(&key(2)))],
+            &now_rfc3339(),
+        )
+        .await
+        .unwrap();
+        reconcile(
+            &db,
+            &[follower(2, A, "pending", Some(&key(2)))],
+            &now_rfc3339(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rotation_due(&db).await.unwrap(), Some(1));
+
+        let (pin, source) = key_for_approval(&db, A, Some(&key(2)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(enrol(&db, A, &pin, source).await.unwrap());
+
+        assert_eq!(
+            readers(&db)
+                .await
+                .status(&follower(2, A, "active", Some(&key(2)))),
+            ReaderStatus::Reader
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reinstalled_paired_peer_stays_out_until_paired_again() {
+        // Its peers row still holds the key of the old pairing, which
+        // outranks the hub's: an approval pins that one again, and only a
+        // removal and a new pairing let the new key in.
+        let db = test_db().await;
+        set_directory(&db, false, true).await;
+        reconcile(&db, &[], &now_rfc3339()).await.unwrap();
+        let peer = pair(&db, A, &key(1), "accepted").await;
+        enrol(&db, A, &key(1), ReaderSource::Paired).await.unwrap();
+
+        let (pin, source) = key_for_approval(&db, A, Some(&key(2)))
+            .await
+            .unwrap()
+            .unwrap();
+        enrol(&db, A, &pin, source).await.unwrap();
+        assert_eq!(
+            readers(&db)
+                .await
+                .status(&follower(1, A, "active", Some(&key(2)))),
+            ReaderStatus::KeyMismatch
+        );
+
+        delete_peer_ending_pairing(&db, &peer).await.unwrap();
+        pair(&db, A, &key(2), "accepted").await;
+        restore_pairing(&db, Some(A), None).await.unwrap();
+        reconcile(
+            &db,
+            &[follower(1, A, "active", Some(&key(2)))],
+            &now_rfc3339(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            readers(&db)
+                .await
+                .status(&follower(1, A, "active", Some(&key(2)))),
+            ReaderStatus::Reader
         );
     }
 
