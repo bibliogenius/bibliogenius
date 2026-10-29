@@ -39,7 +39,9 @@ type PeerRelayFailures = Arc<dashmap::DashMap<i32, std::time::Instant>>;
 /// Peers whose new keys the hub confirmed (same library uuid, another
 /// published X25519 key). In memory only: a re-pairing makes a new row, and
 /// an answer concordant with the row clears the entry.
-type PeersWithNewKeys = Arc<dashmap::DashSet<i32>>;
+/// Peers the hub confirmed have new keys, with the X25519 key pinned on
+/// their row when it did.
+type PeersWithNewKeys = Arc<dashmap::DashMap<i32, String>>;
 
 /// Guard against concurrent `poll_once()` executions.
 /// Multiple callers (timer, WS nudge, poll_now endpoint, peer.rs) could overlap
@@ -143,7 +145,7 @@ impl AppState {
             hub_directory: Arc::new(HubDirectoryService::new()),
             peer_direct_failures: Arc::new(dashmap::DashMap::new()),
             peer_relay_failures: Arc::new(dashmap::DashMap::new()),
-            peers_with_new_keys: Arc::new(dashmap::DashSet::new()),
+            peers_with_new_keys: Arc::new(dashmap::DashMap::new()),
             relay_poll_lock: Arc::new(tokio::sync::Mutex::new(())),
             leaderboard_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -247,14 +249,31 @@ impl AppState {
         self.peer_direct_failures.remove(&peer_id);
     }
 
-    /// Records that the hub confirmed `peer_id` has new keys.
-    pub fn mark_peer_keys_changed(&self, peer_id: i32) {
-        self.peers_with_new_keys.insert(peer_id);
+    /// Records that the hub confirmed `peer_id` has new keys, `pinned_x25519`
+    /// being the key its row held at that moment.
+    pub fn mark_peer_keys_changed(&self, peer_id: i32, pinned_x25519: &str) {
+        self.peers_with_new_keys
+            .insert(peer_id, pinned_x25519.to_string());
     }
 
     /// Whether the hub confirmed `peer_id` has new keys since this run began.
     pub fn peer_keys_changed(&self, peer_id: i32) -> bool {
-        self.peers_with_new_keys.contains(&peer_id)
+        self.peers_with_new_keys.contains_key(&peer_id)
+    }
+
+    /// Whether the mark of `peer_id` still describes its row, which now pins
+    /// `current_x25519`. The owner may have scanned the peer again since, and
+    /// a scan replaces the keys on the same row: the mark is then stale and
+    /// forgotten here.
+    pub fn peer_still_on_changed_keys(&self, peer_id: i32, current_x25519: Option<&str>) -> bool {
+        let Some(pinned) = self.peers_with_new_keys.get(&peer_id).map(|k| k.clone()) else {
+            return false;
+        };
+        let same = current_x25519.is_some_and(|k| k.eq_ignore_ascii_case(&pinned));
+        if !same {
+            self.peers_with_new_keys.remove(&peer_id);
+        }
+        same
     }
 
     /// Forgets the new keys of `peer_id` (it answered as the row again).
@@ -364,12 +383,28 @@ mod tests {
         let state = test_state().await;
         assert!(!state.peer_keys_changed(42));
 
-        state.mark_peer_keys_changed(42);
+        state.mark_peer_keys_changed(42, "aa11");
         assert!(state.peer_keys_changed(42));
         assert!(!state.peer_keys_changed(99));
 
         state.clear_peer_keys_changed(42);
         assert!(!state.peer_keys_changed(42));
+    }
+
+    /// A scan of the peer again replaces the keys on its row: the mark taken
+    /// under the old key no longer applies, and is forgotten.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_keys_changed_mark_is_stale_once_the_row_pins_another_key() {
+        let state = test_state().await;
+        state.mark_peer_keys_changed(42, "aa11");
+
+        assert!(state.peer_still_on_changed_keys(42, Some("AA11")));
+        assert!(state.peer_keys_changed(42));
+
+        assert!(!state.peer_still_on_changed_keys(42, Some("bb22")));
+        assert!(!state.peer_keys_changed(42), "a stale mark is forgotten");
+        assert!(!state.peer_still_on_changed_keys(42, Some("aa11")));
+        assert!(!state.peer_still_on_changed_keys(99, None));
     }
 
     #[tokio::test(flavor = "multi_thread")]

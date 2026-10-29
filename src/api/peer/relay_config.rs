@@ -443,6 +443,14 @@ pub async fn relay_library_request(
             )
                 .into_response()
         }
+        Err(e) if e == super::messaging::PEER_KEYS_CHANGED => {
+            // The pairing is dead until the owner scans the peer again.
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(super::sync::peer_keys_changed_error()),
+            )
+                .into_response()
+        }
         Err(e)
             if e.contains("peer unreachable for credential refresh")
                 || e.contains("failed after credential refresh") =>
@@ -910,5 +918,129 @@ mod relay_setup_tests {
             relay_session::mailbox_created_this_session(),
             "apply_relay_setup must mark the session flag",
         );
+    }
+}
+
+#[cfg(test)]
+mod keys_changed_tests {
+    //! A peer the hub confirmed has new keys gets no relay request: the
+    //! mailbox would hold envelopes it cannot open, and the screen would
+    //! wait the whole relay timeout for nothing.
+    use super::*;
+    use crate::db;
+    use crate::infrastructure::AppState;
+    use crate::services::identity_service::IdentityService;
+    use axum::body::to_bytes;
+    use std::sync::Arc;
+
+    async fn state_with_identity() -> AppState {
+        let db = db::init_db("sqlite::memory:").await.expect("init db");
+        let identity = IdentityService::new(db.clone());
+        identity
+            .init("11111111-2222-3333-4444-555555555555")
+            .await
+            .expect("identity");
+        AppState::with_identity_service(db, Arc::new(identity))
+    }
+
+    /// A paired peer with pinned keys and relay credentials, stored at an
+    /// address nothing answers on, with a relay nothing answers on either.
+    async fn insert_relay_peer(db: &DatabaseConnection) -> peer::Model {
+        let now = chrono::Utc::now().to_rfc3339();
+        let ed = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let x = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let id = peer::Entity::insert(peer::ActiveModel {
+            name: Set("reinstalled".to_string()),
+            url: Set("http://127.0.0.1:1".to_string()),
+            library_uuid: Set(Some("9a41590b-0000-4000-8000-000000000001".to_string())),
+            public_key: Set(Some(hex::encode(ed.verifying_key().to_bytes()))),
+            x25519_public_key: Set(Some(hex::encode(
+                x25519_dalek::PublicKey::from(&x).to_bytes(),
+            ))),
+            key_exchange_done: Set(true),
+            relay_url: Set(Some("http://127.0.0.1:1".to_string())),
+            mailbox_id: Set(Some("mbx-1".to_string())),
+            relay_write_token: Set(Some("wtok-1".to_string())),
+            connection_status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .expect("insert peer")
+        .last_insert_id;
+        peer::Entity::find_by_id(id)
+            .one(db)
+            .await
+            .expect("query")
+            .expect("peer row")
+    }
+
+    async fn body_of(response: axum::response::Response) -> serde_json::Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_with_new_keys_gets_the_keys_changed_error_without_a_relay_wait() {
+        let state = state_with_identity().await;
+        let the_peer = insert_relay_peer(state.db()).await;
+        // Direct already failed in this run, the relay is the next step.
+        state.mark_peer_direct_failed(the_peer.id);
+        state.mark_peer_keys_changed(
+            the_peer.id,
+            the_peer.x25519_public_key.as_deref().expect("pinned key"),
+        );
+
+        let started = std::time::Instant::now();
+        let response = relay_library_request(
+            State(state),
+            Json(RelayLibraryRequest {
+                peer_id: the_peer.id,
+                request_type: "manifest".to_string(),
+                cursor: None,
+                limit: None,
+                query: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(body_of(response).await["code"], "peer_keys_changed");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the answer must not wait on the relay"
+        );
+    }
+
+    /// The owner scanned the peer again without deleting it first: the row
+    /// now pins the new keys, the mark taken under the old ones no longer
+    /// holds, and the request goes to the relay like any other.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_scanned_again_on_the_same_row_is_relayed_again() {
+        let state = state_with_identity().await;
+        let the_peer = insert_relay_peer(state.db()).await;
+        state.mark_peer_direct_failed(the_peer.id);
+        state.mark_peer_keys_changed(the_peer.id, "00ff00ff");
+
+        let response = relay_library_request(
+            State(state),
+            Json(RelayLibraryRequest {
+                peer_id: the_peer.id,
+                request_type: "manifest".to_string(),
+                cursor: None,
+                limit: None,
+                query: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        // The relay at 127.0.0.1:1 refuses the connection: a plain send
+        // failure, not the changed-keys answer.
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_ne!(body_of(response).await["code"], "peer_keys_changed");
     }
 }

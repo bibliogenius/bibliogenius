@@ -11,6 +11,11 @@ use serde_json::json;
 /// so fire-and-forget request/response paths (loans, searches, syncs) keep
 /// their historical behavior. Latency-sensitive callers (leaderboard refresh)
 /// should use [`try_send_e2ee_with_timeout`] with a shorter bound.
+/// The error [`try_send_e2ee`] returns instead of relaying to a peer the hub
+/// confirmed has new keys; handlers turn it into the `peer_keys_changed`
+/// answer the app already knows from the sync path.
+pub(crate) const PEER_KEYS_CHANGED: &str = "peer_keys_changed";
+
 pub(crate) const DEFAULT_E2EE_RELAY_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(90);
 
@@ -162,6 +167,20 @@ pub async fn try_send_e2ee_with_timeout(
             // refused the envelope before opening it.
             if !skip_direct {
                 state.mark_peer_direct_failed(peer.id);
+            }
+            // The hub confirmed this peer has new keys and nothing answered
+            // under the pinned ones since: the relay would encrypt for keys
+            // the peer no longer holds, so answer now instead of waiting on
+            // its mailbox. A manual sync asks the hub again and lifts the
+            // mark when the peer is back on its old keys; a new scan of the
+            // peer replaces the keys on its row and makes the mark stale.
+            if state.peer_still_on_changed_keys(peer.id, peer.x25519_public_key.as_deref()) {
+                tracing::warn!(
+                    "E2EE: not relaying '{}' to peer {}, the hub confirmed its keys changed, it must be paired again",
+                    message_type,
+                    peer.id
+                );
+                return Err(PEER_KEYS_CHANGED.to_string());
             }
             // Peer unreachable in direct. Try relay fallback.
             // ADR-012: All message types can now be relayed. Request-response messages

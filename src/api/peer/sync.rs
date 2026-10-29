@@ -806,7 +806,7 @@ pub(crate) fn peer_keys_changed(
 
 /// The 502 body of a sync with a peer the hub confirmed has new keys: the
 /// app tells the owner to pair it again.
-fn peer_keys_changed_error() -> serde_json::Value {
+pub(crate) fn peer_keys_changed_error() -> serde_json::Value {
     json!({
         "error": "The peer has new keys, pair it again",
         "code": "peer_keys_changed",
@@ -1066,7 +1066,9 @@ pub async fn sync_peer_by_url(
             "Sync: the hub confirms peer {} has new keys, it must be paired again",
             peer.id
         );
-        state.mark_peer_keys_changed(peer.id);
+        if let Some(pinned) = peer.x25519_public_key.as_deref() {
+            state.mark_peer_keys_changed(peer.id, pinned);
+        }
         return (StatusCode::BAD_GATEWAY, Json(peer_keys_changed_error())).into_response();
     }
 
