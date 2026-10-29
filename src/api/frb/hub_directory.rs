@@ -8,9 +8,10 @@
 // Hub Directory (ADR-015)
 // =============================================================================
 
+use crate::services::hub_catalog_sync::{CatalogSyncMode, HubCatalogToPush};
 use crate::services::hub_directory_service::{
-    CatalogEntry, CatalogPushMode, DirectoryConfig, HubBorrowRequest, HubDirectoryError,
-    HubDirectoryService, HubFollow, HubProfile, PushCatalogOutcome, RegisterParams,
+    CatalogEntry, DirectoryConfig, HubBorrowRequest, HubDirectoryError, HubDirectoryService,
+    HubFollow, HubProfile, RegisterParams,
 };
 
 static HUB_DIRECTORY_SVC: OnceLock<HubDirectoryService> = OnceLock::new();

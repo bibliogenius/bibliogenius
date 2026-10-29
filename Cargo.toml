@@ -45,6 +45,11 @@ account_sync = []
 # runs during an acceptance recipe: cargokit.yaml turns it on for the
 # `profile` configuration only, never for `release`.
 profile_log = []
+# Lets `validate_url` accept loopback addresses so the two-instance
+# integration tests (`tests/two_instances_hub`) can run both backends and
+# the dev hub on this machine. Test-only: never enabled by cargokit.yaml or
+# a ship build, and the test target below is skipped without it.
+it-loopback = []
 
 [build-dependencies]
 # Verify the vendored cr-sqlite static archive's SHA-256 against CHECKSUMS.txt
@@ -172,6 +177,13 @@ zip = "2"
 strip = true
 lto = true
 codegen-units = 1
+
+# Two backends against the disposable dev hub (`make it-up` in
+# bibliogenius-hub): `cargo test --features it-loopback --test two_instances_hub`.
+[[test]]
+name = "two_instances_hub"
+path = "tests/two_instances_hub/main.rs"
+required-features = ["it-loopback"]
 
 [dev-dependencies]
 wiremock = "0.6"
