@@ -14,17 +14,20 @@ use std::time::{Duration, Instant};
 use axum::Router;
 use axum::body::Body;
 use axum::http::Request;
-use axum::routing::post;
+use axum::routing::{delete, post, put};
 use rust_lib_app::api;
+use rust_lib_app::crypto::envelope::ClearMessage;
 use rust_lib_app::infrastructure::AppState;
-use rust_lib_app::models::relay_config;
+use rust_lib_app::models::{peer, relay_config};
 use rust_lib_app::services::IdentityService;
 use rust_lib_app::services::hub_catalog_key_store::CatalogKeyStore;
 use rust_lib_app::services::hub_catalog_sync::{CatalogSyncMode, HubCatalogToPush};
 use rust_lib_app::services::hub_directory_service::{
     CatalogEntry, DirectoryConfig, HubDirectoryService, PushCatalogOutcome, RegisterParams,
 };
-use sea_orm::{DatabaseConnection, EntityTrait};
+use rust_lib_app::services::nudge_events::NudgeSource;
+use rust_lib_app::services::relay_poller;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use tower::ServiceExt;
 
 /// Where `make it-up` publishes the throwaway hub.
@@ -284,25 +287,25 @@ impl Instance {
         &self.library_uuid
     }
 
-    /// Creates a relay mailbox on the hub through the owner handler, the
-    /// path "Connect" takes in the app. Returns the mailbox uuid only: the
-    /// handler's body also carries the write token, which no test prints.
-    pub async fn setup_relay(&self, hub: &Hub) -> String {
-        let app = Router::new()
-            .route("/relay/setup", post(api::peer::setup_relay))
-            .with_state(self.state.clone());
-        let body = serde_json::json!({ "relay_url": hub.url }).to_string();
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/relay/setup")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+    /// Calls an owner handler the way the app does over its local HTTP
+    /// port, on a router holding this instance's state. Fails on any
+    /// non-success status, with the error body.
+    async fn owner_call(
+        &self,
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut request = Request::builder().method(method).uri(uri);
+        let body = match body {
+            Some(json) => {
+                request = request.header("content-type", "application/json");
+                Body::from(json.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response = app.oneshot(request.body(body).unwrap()).await.unwrap();
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -310,13 +313,171 @@ impl Instance {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
         assert!(
             status.is_success(),
-            "[{}] relay setup failed: {status} {json}",
+            "[{}] {method} {uri} failed: {status} {json}",
             self.name
         );
+        json
+    }
+
+    /// Creates a relay mailbox on the hub through the owner handler, the
+    /// path "Connect" takes in the app. Returns the mailbox uuid only: the
+    /// handler's body also carries the write token, which no test prints.
+    pub async fn setup_relay(&self, hub: &Hub) -> String {
+        let app = Router::new()
+            .route("/relay/setup", post(api::peer::setup_relay))
+            .with_state(self.state.clone());
+        let json = self
+            .owner_call(
+                app,
+                "POST",
+                "/relay/setup",
+                Some(serde_json::json!({ "relay_url": hub.url })),
+            )
+            .await;
         json["mailbox_uuid"]
             .as_str()
             .expect("mailbox uuid in the relay setup answer")
             .to_string()
+    }
+
+    /// What this backend answers on `/api/config`, the public identity a
+    /// peer reads at pairing time.
+    pub async fn config(&self) -> serde_json::Value {
+        reqwest::get(format!("{}/api/config", self.url()))
+            .await
+            .expect("config")
+            .json()
+            .await
+            .expect("config json")
+    }
+
+    /// Pairs with `peer` as the app does after a scan on the LAN: the
+    /// handshake posted to the peer's `/api/peers/incoming` with our
+    /// identity and relay credentials, then the peer stored here through
+    /// `connect` with what the handshake answered. Returns our row id of
+    /// the peer.
+    pub async fn pair_with(&self, peer: &Instance) -> i32 {
+        let mine = self.config().await;
+        let mut handshake = serde_json::json!({ "name": self.name, "url": self.url() });
+        for field in [
+            "library_uuid",
+            "ed25519_public_key",
+            "x25519_public_key",
+            "relay_url",
+            "mailbox_id",
+            "relay_write_token",
+        ] {
+            if !mine[field].is_null() {
+                handshake[field] = mine[field].clone();
+            }
+        }
+        let answer = reqwest::Client::new()
+            .post(format!("{}/api/peers/incoming", peer.url()))
+            .json(&handshake)
+            .send()
+            .await
+            .expect("handshake");
+        assert!(
+            answer.status().is_success(),
+            "[{}] handshake with {} refused: {}",
+            self.name,
+            peer.name,
+            answer.status()
+        );
+        let answer: serde_json::Value = answer.json().await.expect("handshake json");
+        let mut scan = serde_json::json!({ "name": peer.name, "url": peer.url() });
+        for field in [
+            "ed25519_public_key",
+            "x25519_public_key",
+            "relay_url",
+            "mailbox_id",
+            "relay_write_token",
+        ] {
+            if !answer[field].is_null() {
+                scan[field] = answer[field].clone();
+            }
+        }
+        let app = Router::new()
+            .route("/peers/connect", post(api::peer::connect))
+            .with_state(self.db.clone());
+        let json = self
+            .owner_call(app, "POST", "/peers/connect", Some(scan))
+            .await;
+        json["id"].as_i64().expect("peer id") as i32
+    }
+
+    /// Our row of the peer known by `library_uuid`, if any.
+    pub async fn peer_row(&self, library_uuid: &str) -> Option<peer::Model> {
+        peer::Entity::find()
+            .filter(peer::Column::LibraryUuid.eq(library_uuid))
+            .one(&self.db)
+            .await
+            .expect("peers query")
+    }
+
+    /// The catalog readers row of `node_id`: its revocation reason and the
+    /// pinned X25519 key, empty when the library never was a reader.
+    pub async fn catalog_reader(&self, node_id: &str) -> Option<(Option<String>, String)> {
+        use sea_orm::{ConnectionTrait, Statement};
+        self.db
+            .query_one(Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Sqlite,
+                "SELECT revoke_reason, x25519_public_key FROM catalog_readers WHERE node_id = ?",
+                [node_id.into()],
+            ))
+            .await
+            .expect("catalog_readers query")
+            .map(|row| {
+                (
+                    row.try_get("", "revoke_reason").expect("revoke_reason"),
+                    row.try_get("", "x25519_public_key")
+                        .expect("x25519_public_key"),
+                )
+            })
+    }
+
+    /// Removes a peer, the owner's gesture that ends a pairing.
+    pub async fn delete_peer(&self, peer_id: i32) {
+        let app = Router::new()
+            .route("/peers/:id", delete(api::peer::delete_peer))
+            .with_state(self.state.clone());
+        self.owner_call(app, "DELETE", &format!("/peers/{peer_id}"), None)
+            .await;
+    }
+
+    /// Accepts a pending peer, the owner's gesture that restores an ended
+    /// pairing.
+    pub async fn accept_peer(&self, peer_id: i32) {
+        let app = Router::new()
+            .route("/peers/:id/status", put(api::peer::update_peer_status))
+            .with_state(self.db.clone());
+        self.owner_call(
+            app,
+            "PUT",
+            &format!("/peers/{peer_id}/status"),
+            Some(serde_json::json!({ "status": "accepted" })),
+        )
+        .await;
+    }
+
+    /// Sends an E2EE message to `peer`, direct first then by relay, waiting
+    /// at most `relay_wait` for a relayed answer.
+    pub async fn send_e2ee(
+        &self,
+        peer: &peer::Model,
+        message_type: &str,
+        payload: serde_json::Value,
+        relay_wait: Duration,
+    ) -> Result<Option<Option<ClearMessage>>, String> {
+        api::peer::try_send_e2ee_with_timeout(&self.state, peer, message_type, payload, relay_wait)
+            .await
+    }
+
+    /// One relay poll cycle, as the app's timer or a hub nudge would run.
+    pub async fn poll_relay(&self) {
+        relay_poller::poll_once(&self.state, NudgeSource::Manual)
+            .await
+            .unwrap_or_else(|e| panic!("[{}] relay poll failed: {e}", self.name));
     }
 
     pub async fn relay_config(&self) -> Option<relay_config::Model> {

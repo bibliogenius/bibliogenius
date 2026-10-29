@@ -171,9 +171,11 @@ make test   # runs cargo test + verify_filters.sh
 identity and HTTP port each) against a throwaway dev hub. Assertions cover
 the captured log lines (same filter as the app's debug log file), the local
 databases and the hub database. Today it holds the smoke scenario (relay
-mailboxes, directory profiles, a clear catalog push); the ADR-072
-acceptance scenarios (pairing and the ended-pairing mark, rotation and
-wraps with a real 304, changed keys) come one lot at a time.
+mailboxes, directory profiles, a clear catalog push), the pairing over the
+LAN with an E2EE exchange, and the ended pairing (mark set on deletion,
+ex-peer refused on the LAN and dropped by the relay poller, restored by the
+owner's acceptance); rotation and wraps with a real 304, then changed
+keys, come one lot at a time.
 
 It is not part of `cargo test`: the target needs the `it-loopback` feature
 (loopback addresses accepted by `validate_url`, test-only, never shipped)
@@ -189,7 +191,8 @@ cargo test --features it-loopback --test two_instances_hub
 command the SQL checks go through. Every test resets the hub tables and the
 relay rate limiter first; the reset refuses a compose command outside the
 `bg-it` project unless `BG_IT_ALLOW_RESET=1`, so a dev stack is never
-emptied by mistake. Tests are serial (`HUB_URL` is process-wide). The
+emptied by mistake. Tests are serial (`HUB_URL` is process-wide) and run on
+the multi-thread runtime (the E2EE nonce store blocks in place). The
 feature cannot be built without debug assertions (a `compile_error!` in
 `src/lib.rs`), so `--release` is not an option for this target.
 
