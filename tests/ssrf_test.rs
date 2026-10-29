@@ -36,6 +36,9 @@ fn test_valid_private_network_172_accepted() {
     );
 }
 
+// The `it-loopback` feature lets loopback through for the two-instance
+// integration tests; see `api/peer/helpers.rs`.
+#[cfg(not(feature = "it-loopback"))]
 #[test]
 fn test_localhost_hostname_blocked() {
     let result = validate_url("http://localhost:8000");
@@ -46,6 +49,7 @@ fn test_localhost_hostname_blocked() {
     );
 }
 
+#[cfg(not(feature = "it-loopback"))]
 #[test]
 fn test_loopback_127_0_0_1_blocked() {
     let result = validate_url("http://127.0.0.1:8000");
@@ -56,12 +60,14 @@ fn test_loopback_127_0_0_1_blocked() {
     );
 }
 
+#[cfg(not(feature = "it-loopback"))]
 #[test]
 fn test_loopback_127_0_0_2_blocked() {
     let result = validate_url("http://127.0.0.2:8000");
     assert!(result.is_err(), "127.0.0.2 loopback must be blocked");
 }
 
+#[cfg(not(feature = "it-loopback"))]
 #[test]
 fn test_ipv6_loopback_blocked() {
     let result = validate_url("http://[::1]:8000");

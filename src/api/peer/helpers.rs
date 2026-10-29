@@ -18,7 +18,11 @@ use url::Url;
 ///
 /// Allows:
 /// - Private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) for P2P LAN use
+/// - Loopback and "localhost" ONLY under the `it-loopback` cargo feature:
+///   the two-instance integration tests run both backends and the hub on
+///   one machine. Test-only, never enabled by cargokit or a ship build.
 pub fn validate_url(url_str: &str) -> Result<String, String> {
+    const LOOPBACK_ALLOWED: bool = cfg!(feature = "it-loopback");
     let url = Url::parse(url_str).map_err(|_| "Invalid URL format".to_string())?;
 
     // 1. Check Scheme
@@ -28,11 +32,11 @@ pub fn validate_url(url_str: &str) -> Result<String, String> {
 
     // 2. Check Host
     match url.host() {
-        Some(url::Host::Domain("localhost")) => {
+        Some(url::Host::Domain("localhost")) if !LOOPBACK_ALLOWED => {
             return Err("Localhost access is blocked".to_string());
         }
         Some(url::Host::Ipv4(ip)) => {
-            if ip.is_loopback() {
+            if ip.is_loopback() && !LOOPBACK_ALLOWED {
                 return Err("Loopback addresses blocked".to_string());
             }
             // Link-local: 169.254.0.0/16 (includes AWS metadata endpoint 169.254.169.254)
@@ -52,7 +56,7 @@ pub fn validate_url(url_str: &str) -> Result<String, String> {
             }
         }
         Some(url::Host::Ipv6(ip)) => {
-            if ip.is_loopback() {
+            if ip.is_loopback() && !LOOPBACK_ALLOWED {
                 return Err("Loopback addresses blocked".to_string());
             }
             if ip.is_multicast() {
@@ -213,4 +217,28 @@ pub(crate) async fn is_peer_approved(db: &DatabaseConnection, peer: &peer::Model
         return true;
     }
     peer.connection_status == "accepted"
+}
+
+#[cfg(all(test, feature = "it-loopback"))]
+mod it_loopback_tests {
+    //! With the `it-loopback` feature the two-instance integration tests
+    //! run both backends and the hub on this machine: loopback is let
+    //! through, nothing else moves.
+
+    use super::validate_url;
+
+    #[test]
+    fn loopback_and_localhost_are_let_through() {
+        assert!(validate_url("http://127.0.0.1:8092").is_ok());
+        assert!(validate_url("http://localhost:8092").is_ok());
+        assert!(validate_url("http://[::1]:8092").is_ok());
+    }
+
+    #[test]
+    fn the_other_blocks_still_hold() {
+        assert!(validate_url("http://169.254.169.254/latest").is_err());
+        assert!(validate_url("http://0.0.0.0:8000").is_err());
+        assert!(validate_url("http://224.0.0.1:8000").is_err());
+        assert!(validate_url("ftp://192.168.1.1/file").is_err());
+    }
 }

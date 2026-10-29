@@ -165,6 +165,34 @@ The Makefile also runs `tests/verify_filters.sh`, a shell script that tests API 
 make test   # runs cargo test + verify_filters.sh
 ```
 
+## Two Backends Against the Dev Hub
+
+`tests/two_instances_hub/` runs two instances of the backend (own database,
+identity and HTTP port each) against a throwaway dev hub. Assertions cover
+the captured log lines (same filter as the app's debug log file), the local
+databases and the hub database. Today it holds the smoke scenario (relay
+mailboxes, directory profiles, a clear catalog push); the ADR-072
+acceptance scenarios (pairing and the ended-pairing mark, rotation and
+wraps with a real 304, changed keys) come one lot at a time.
+
+It is not part of `cargo test`: the target needs the `it-loopback` feature
+(loopback addresses accepted by `validate_url`, test-only, never shipped)
+and a hub started from `bibliogenius-hub`:
+
+```bash
+(cd ../bibliogenius-hub && make it-up)      # hub on http://127.0.0.1:8092
+cargo test --features it-loopback --test two_instances_hub
+(cd ../bibliogenius-hub && make it-down)    # stops it, wipes its database
+```
+
+`BG_IT_HUB_URL` and `BG_IT_COMPOSE` override the hub URL and the compose
+command the SQL checks go through. Every test resets the hub tables and the
+relay rate limiter first; the reset refuses a compose command outside the
+`bg-it` project unless `BG_IT_ALLOW_RESET=1`, so a dev stack is never
+emptied by mistake. Tests are serial (`HUB_URL` is process-wide). The
+feature cannot be built without debug assertions (a `compile_error!` in
+`src/lib.rs`), so `--release` is not an option for this target.
+
 ## Helper Functions
 
 ### `api_integration_test.rs`

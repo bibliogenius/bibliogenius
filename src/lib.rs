@@ -10,6 +10,12 @@ compile_error!(
     "feature \"account_sync\" requires a cr-sqlite loader: enable \"crsqlite\" (dynamic dev) or \"crsqlite-static\" (ship)"
 );
 
+// The loopback allowance of `validate_url` exists for the two-instance
+// integration tests only. A build without debug assertions is a shipped
+// one, or close enough: refuse the feature there, whatever enabled it.
+#[cfg(all(feature = "it-loopback", not(debug_assertions)))]
+compile_error!("feature \"it-loopback\" is test-only and cannot be built without debug assertions");
+
 pub mod api;
 pub mod api_docs;
 pub mod crypto;
