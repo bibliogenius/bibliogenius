@@ -19,13 +19,15 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
     // Install panic hook first thing to catch any panics
     install_panic_hook();
 
-    // Initialize tracing for FFI mode (debug builds only).
-    // Release builds produce no log output to avoid leaking sensitive data.
+    // Initialize tracing for FFI mode (debug builds only). Profile and
+    // release builds produce no log output at all, to avoid leaking
+    // sensitive data.
     // Filter targets the lib crate name "rust_lib_app", not the package name.
     //
-    // Log file lives next to the SQLite DB (parent of `db_path`):
+    // Log file lives next to the SQLite DB (parent of `db_path`), which the
+    // app resolves in its Application Support directory on every platform:
     //   macOS: ~/Library/Application Support/com.bibliogenius.app/bibliogenius-rust.log
-    //   iOS:   <app sandbox>/Documents/bibliogenius-rust.log
+    //   iOS:   <app sandbox>/Library/Application Support/bibliogenius-rust.log
     // Both are writable and retrievable via `get_rust_log_tail` FFI.
     // Truncated at each init so the file does not grow indefinitely across
     // launches - within a single session tracing keeps appending.
