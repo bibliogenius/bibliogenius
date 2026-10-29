@@ -40,6 +40,11 @@ crsqlite-static = ["dep:libsqlite3-sys"]
 # Requires a cr-sqlite loader alongside it: `crsqlite` (dynamic dev) or
 # `crsqlite-static` (ship). Enforced by a compile_error in `lib.rs`.
 account_sync = []
+# Writes the debug log file (`bibliogenius-rust.log`, same filter as a debug
+# build) in a build without debug assertions. Meant for on-device profile
+# runs during an acceptance recipe: cargokit.yaml turns it on for the
+# `profile` configuration only, never for `release`.
+profile_log = []
 
 [build-dependencies]
 # Verify the vendored cr-sqlite static archive's SHA-256 against CHECKSUMS.txt

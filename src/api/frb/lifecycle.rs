@@ -13,15 +13,20 @@
 /// that carries the catalog push outcome and the key wrap failures (ADR-072).
 pub(crate) const DEBUG_LOG_FILTER: &str = "rust_lib_app=info,ssrf=warn,hub_directory=info";
 
+/// Whether this build writes the log file: debug builds, and profile builds
+/// made with the `profile_log` feature (see cargokit.yaml). Shipped builds
+/// have neither and log nothing.
+const FILE_LOG_ENABLED: bool = cfg!(any(debug_assertions, feature = "profile_log"));
+
 /// Initialize the FFI backend with database at the given path
 /// Must be called before any other FFI functions
 pub async fn init_backend(db_path: String) -> Result<String, String> {
     // Install panic hook first thing to catch any panics
     install_panic_hook();
 
-    // Initialize tracing for FFI mode (debug builds only). Profile and
-    // release builds produce no log output at all, to avoid leaking
-    // sensitive data.
+    // Initialize tracing for FFI mode: debug builds, and profile builds
+    // with the `profile_log` feature. Release builds produce no log output
+    // at all, to avoid leaking sensitive data.
     // Filter targets the lib crate name "rust_lib_app", not the package name.
     //
     // Log file lives next to the SQLite DB (parent of `db_path`), which the
@@ -49,7 +54,7 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
 
     static TRACING_INIT: std::sync::Once = std::sync::Once::new();
     TRACING_INIT.call_once(|| {
-        if cfg!(debug_assertions) {
+        if FILE_LOG_ENABLED {
             let filter = tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| DEBUG_LOG_FILTER.into());
 

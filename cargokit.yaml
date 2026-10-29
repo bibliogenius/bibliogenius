@@ -24,9 +24,10 @@ cargo:
       - "--features"
       - "account_sync,crsqlite-static"
   # Profile = iOS on-device dogfood (`flutter run --profile`), same features
-  # as release so profile runs exercise the shipped configuration.
+  # as release so profile runs exercise the shipped configuration, plus the
+  # debug log file so a recipe on a real device keeps its Rust evidence.
   profile:
     extra_flags:
       - "--no-default-features"
       - "--features"
-      - "account_sync,crsqlite-static"
+      - "account_sync,crsqlite-static,profile_log"
