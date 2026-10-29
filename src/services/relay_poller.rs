@@ -920,6 +920,7 @@ async fn handle_public_stats_push(
         &sender_peer.name,
         &bundle,
         false,
+        crate::utils::leaderboard_relay::BundleSource::Relay,
     )
     .await;
 

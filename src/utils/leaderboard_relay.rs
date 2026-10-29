@@ -327,16 +327,32 @@ pub async fn fetch_peer_public_stats_via_relay(
     }
 }
 
+/// How a [`PublicStatsBundle`] reached this library, which decides what it
+/// may change on the peer row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BundleSource {
+    /// Opened from the peer's E2EE relay mailbox (phase 2 answer or push):
+    /// bound to the peer's keys, so its display name is the peer's.
+    Relay,
+    /// Fetched in plain HTTP at the address stored on the row. The bundle
+    /// carries no identity (ADR-072 rule g): any library answering there,
+    /// two apps on one phone or an address reassigned by DHCP, could rename
+    /// a trusted contact. The name is refreshed by the catalog sync, which
+    /// passes the identity gate, and by the relay instead.
+    DirectHttp,
+}
+
 /// Apply a [`PublicStatsBundle`] to all local game + gamification caches.
 ///
 /// Upserts scores for enabled modules, optionally deletes cached scores for
 /// disabled modules (set `clear_disabled` for the refresh path; leave false
 /// for push notifications where the absence of a module just means "no update").
 ///
-/// Also updates `peers.name` if the bundle carries a different display name.
+/// Also updates `peers.name` if a bundle from the relay carries a different
+/// display name; a name announced over plain HTTP is logged and ignored.
 ///
 /// Called by:
-/// - [`sync_all_leaderboards`] (relay Phase 2 results)
+/// - [`sync_all_leaderboards`] (LAN Phase 1 and relay Phase 2 results)
 /// - `handle_public_stats_push` in relay_poller (incoming push notifications)
 pub async fn apply_stats_bundle_to_caches(
     db: &sea_orm::DatabaseConnection,
@@ -344,26 +360,38 @@ pub async fn apply_stats_bundle_to_caches(
     peer_name: &str,
     bundle: &PublicStatsBundle,
     clear_disabled: bool,
+    source: BundleSource,
 ) {
-    let display_name = bundle.library_name.as_deref().unwrap_or(peer_name);
+    // The name cached next to the scores follows the same rule as the row.
+    let display_name = match source {
+        BundleSource::Relay => bundle.library_name.as_deref().unwrap_or(peer_name),
+        BundleSource::DirectHttp => peer_name,
+    };
 
     // Update peer display name if changed
     if let Some(ref new_name) = bundle.library_name
         && !new_name.is_empty()
         && *new_name != peer_name
     {
-        let _ = peer::Entity::update_many()
-            .filter(peer::Column::Id.eq(peer_id))
-            .col_expr(
-                peer::Column::Name,
-                sea_orm::sea_query::Expr::value(new_name.to_string()),
-            )
-            .col_expr(
-                peer::Column::UpdatedAt,
-                sea_orm::sea_query::Expr::value(chrono::Utc::now().to_rfc3339()),
-            )
-            .exec(db)
-            .await;
+        if source == BundleSource::DirectHttp {
+            tracing::info!(
+                "Leaderboard: peer {} announced another name over plain HTTP, keeping the stored one",
+                peer_id
+            );
+        } else {
+            let _ = peer::Entity::update_many()
+                .filter(peer::Column::Id.eq(peer_id))
+                .col_expr(
+                    peer::Column::Name,
+                    sea_orm::sea_query::Expr::value(new_name.to_string()),
+                )
+                .col_expr(
+                    peer::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(chrono::Utc::now().to_rfc3339()),
+                )
+                .exec(db)
+                .await;
+        }
     }
 
     // Memory game — prefer per-difficulty list when present, fall back to
@@ -688,7 +716,15 @@ pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
             match outcome {
                 Phase1Outcome::Bundle(bundle) => {
                     direct_ok += 1;
-                    apply_stats_bundle_to_caches(db, peer.id, &peer.name, &bundle, true).await;
+                    apply_stats_bundle_to_caches(
+                        db,
+                        peer.id,
+                        &peer.name,
+                        &bundle,
+                        true,
+                        BundleSource::DirectHttp,
+                    )
+                    .await;
                 }
                 Phase1Outcome::LegacyHandled => {
                     direct_ok += 1;
@@ -757,7 +793,15 @@ pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
                 continue;
             };
             relay_ok += 1;
-            apply_stats_bundle_to_caches(db, peer.id, &peer.name, &bundle, true).await;
+            apply_stats_bundle_to_caches(
+                db,
+                peer.id,
+                &peer.name,
+                &bundle,
+                true,
+                BundleSource::Relay,
+            )
+            .await;
         }
 
         tracing::info!(
@@ -956,17 +1000,8 @@ mod tests {
         model.id
     }
 
-    /// Regression test for the "stale peer name on LAN" bug: applying a bundle
-    /// that carries a different `library_name` must update `peers.name` so the
-    /// leaderboard UI shows the current display name without waiting for a
-    /// relay round-trip.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn apply_stats_bundle_updates_peer_name_when_different() {
-        let state = test_state().await;
-        let db = state.db();
-        let peer_id = insert_peer(db, "Old Name").await;
-
-        let bundle = PublicStatsBundle {
+    fn name_only_bundle(library_name: Option<&str>) -> PublicStatsBundle {
+        PublicStatsBundle {
             share_gamification_stats: false,
             enabled_modules: vec![],
             gamification: None,
@@ -976,17 +1011,73 @@ mod tests {
             memory_scores_per_difficulty: vec![],
             puzzle_scores_per_difficulty: vec![],
             hangman_scores_per_difficulty: vec![],
-            library_name: Some("New Name".to_string()),
-        };
+            library_name: library_name.map(str::to_string),
+        }
+    }
 
-        apply_stats_bundle_to_caches(db, peer_id, "Old Name", &bundle, true).await;
-
-        let refreshed = peer::Entity::find_by_id(peer_id)
+    async fn peer_name(db: &sea_orm::DatabaseConnection, peer_id: i32) -> String {
+        peer::Entity::find_by_id(peer_id)
             .one(db)
             .await
             .expect("query peer")
-            .expect("peer exists");
-        assert_eq!(refreshed.name, "New Name");
+            .expect("peer exists")
+            .name
+    }
+
+    /// A bundle opened from the peer's relay mailbox is bound to its keys:
+    /// a different `library_name` updates `peers.name` so the leaderboard
+    /// shows the current display name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_stats_bundle_from_relay_updates_peer_name_when_different() {
+        let state = test_state().await;
+        let db = state.db();
+        let peer_id = insert_peer(db, "Old Name").await;
+        let bundle = name_only_bundle(Some("New Name"));
+
+        apply_stats_bundle_to_caches(db, peer_id, "Old Name", &bundle, true, BundleSource::Relay)
+            .await;
+
+        assert_eq!(peer_name(db, peer_id).await, "New Name");
+    }
+
+    /// A bundle fetched in plain HTTP at the stored address proves nothing
+    /// about who answered (ADR-072 rule g): another library on the same
+    /// host must not rename a trusted peer. Scores are still applied.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_stats_bundle_from_direct_http_keeps_peer_name() {
+        let state = test_state().await;
+        let db = state.db();
+        let peer_id = insert_peer(db, "Trusted Name").await;
+        let bundle = PublicStatsBundle {
+            enabled_modules: vec!["memory_game".to_string()],
+            memory_game: Some(GameBestScoreEntry {
+                best_score: 42.0,
+                difficulty: "easy".to_string(),
+                played_at: chrono::Utc::now().to_rfc3339(),
+            }),
+            ..name_only_bundle(Some("Impostor Name"))
+        };
+
+        apply_stats_bundle_to_caches(
+            db,
+            peer_id,
+            "Trusted Name",
+            &bundle,
+            true,
+            BundleSource::DirectHttp,
+        )
+        .await;
+
+        assert_eq!(peer_name(db, peer_id).await, "Trusted Name");
+        use crate::modules::memory_game::domain::MemoryGameRepository;
+        let repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
+        let scores = repo.get_peer_scores().await.expect("peer scores");
+        assert_eq!(
+            scores.len(),
+            1,
+            "scores from the direct bundle are still cached"
+        );
+        assert_eq!(scores[0].library_name, "Trusted Name");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -994,28 +1085,19 @@ mod tests {
         let state = test_state().await;
         let db = state.db();
         let peer_id = insert_peer(db, "Stable Name").await;
+        let bundle = name_only_bundle(None);
 
-        let bundle = PublicStatsBundle {
-            share_gamification_stats: false,
-            enabled_modules: vec![],
-            gamification: None,
-            memory_game: None,
-            sliding_puzzle: None,
-            hangman: None,
-            memory_scores_per_difficulty: vec![],
-            puzzle_scores_per_difficulty: vec![],
-            hangman_scores_per_difficulty: vec![],
-            library_name: None,
-        };
+        apply_stats_bundle_to_caches(
+            db,
+            peer_id,
+            "Stable Name",
+            &bundle,
+            true,
+            BundleSource::Relay,
+        )
+        .await;
 
-        apply_stats_bundle_to_caches(db, peer_id, "Stable Name", &bundle, true).await;
-
-        let refreshed = peer::Entity::find_by_id(peer_id)
-            .one(db)
-            .await
-            .expect("query peer")
-            .expect("peer exists");
-        assert_eq!(refreshed.name, "Stable Name");
+        assert_eq!(peer_name(db, peer_id).await, "Stable Name");
     }
 
     /// The `/api/public-stats-bundle` handler must produce a payload that
