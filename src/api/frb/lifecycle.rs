@@ -30,7 +30,8 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
     //   iOS:   <app sandbox>/Library/Application Support/bibliogenius-rust.log
     // Both are writable and retrievable via `get_rust_log_tail` FFI.
     // Truncated at each init so the file does not grow indefinitely across
-    // launches - within a single session tracing keeps appending.
+    // launches - within a single session tracing keeps appending. The log
+    // of the previous launch is kept once as `bibliogenius-rust.prev.log`.
     let log_path = std::path::Path::new(&db_path)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
@@ -52,6 +53,7 @@ pub async fn init_backend(db_path: String) -> Result<String, String> {
             let filter = tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| DEBUG_LOG_FILTER.into());
 
+            keep_previous_log(&log_path);
             if let Ok(file) = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -200,6 +202,59 @@ pub fn get_rust_log_tail(lines: u32) -> String {
 #[frb(sync)]
 pub fn greet(name: String) -> String {
     format!("Hello, {}! Welcome to BiblioGenius.", name)
+}
+
+/// Moves the log of the previous launch to `<name>.prev.log` next to it, so
+/// a relaunch does not erase what the session before it recorded. One
+/// generation only: the older copy is replaced, which keeps the footprint
+/// at two files. Best effort: a failure here must not block the start.
+fn keep_previous_log(log_path: &std::path::Path) {
+    if !log_path.is_file() {
+        return;
+    }
+    let previous = log_path.with_extension("prev.log");
+    // Windows refuses to rename onto an existing file.
+    let _ = std::fs::remove_file(&previous);
+    let _ = std::fs::rename(log_path, &previous);
+}
+
+#[cfg(test)]
+mod previous_log_tests {
+    use super::keep_previous_log;
+
+    #[test]
+    fn the_previous_launch_log_is_kept_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("bibliogenius-rust.log");
+        let previous = dir.path().join("bibliogenius-rust.prev.log");
+
+        std::fs::write(&log, "first launch").unwrap();
+        keep_previous_log(&log);
+        assert!(
+            !log.exists(),
+            "the current log is handed over to the new launch"
+        );
+        assert_eq!(std::fs::read_to_string(&previous).unwrap(), "first launch");
+
+        std::fs::write(&log, "second launch").unwrap();
+        keep_previous_log(&log);
+        assert_eq!(
+            std::fs::read_to_string(&previous).unwrap(),
+            "second launch",
+            "only one previous generation is kept"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_first_launch_has_nothing_to_keep() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("bibliogenius-rust.log");
+
+        keep_previous_log(&log);
+
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 }
 
 #[cfg(test)]
