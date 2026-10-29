@@ -182,6 +182,13 @@ It is not part of `cargo test`: the target needs the `it-loopback` feature
 and a hub started from `bibliogenius-hub`:
 
 ```bash
+make test-two-instances                      # the three steps below
+make test-two-instances ARGS="an_ended_pairing -- --nocapture"   # one scenario, with its log
+```
+
+or by hand:
+
+```bash
 (cd ../bibliogenius-hub && make it-up)      # hub on http://127.0.0.1:8092
 cargo test --features it-loopback --test two_instances_hub
 (cd ../bibliogenius-hub && make it-down)    # stops it, wipes its database
