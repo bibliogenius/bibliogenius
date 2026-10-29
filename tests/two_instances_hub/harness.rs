@@ -125,6 +125,64 @@ impl Hub {
         .to_string()
     }
 
+    /// What the hub stores for `node_id`'s catalog, as the recipe's C1 and
+    /// C1 bis controls read it: format, the catalog key id (hex, from the
+    /// `BGC1` blob header, empty in clear) and a short digest of the
+    /// payload. The key id is read whole: the recipe's six-character head
+    /// only shows four bits of it, which two keys share one time in
+    /// sixteen. None when nothing is stored.
+    pub async fn catalog_fingerprint(&self, node_id: &str) -> Option<(String, String, String)> {
+        let row = self
+            .psql(&format!(
+                "SELECT coalesce(catalog_format, ''),
+                        CASE WHEN catalog_format = 'e2ee-v1'
+                             THEN encode(substring(decode(catalog_payload, 'base64') from 5 for 16), 'hex')
+                             ELSE '' END,
+                        left(md5(catalog_payload), 12)
+                   FROM cached_catalogs WHERE node_id = '{node_id}'"
+            ))
+            .await;
+        if row.is_empty() {
+            return None;
+        }
+        let mut parts = row.split('|').map(str::to_string);
+        Some((
+            parts.next().expect("format"),
+            parts.next().expect("key id"),
+            parts.next().expect("digest"),
+        ))
+    }
+
+    /// Whether `node_id`'s stored catalog carries `title` in clear.
+    pub async fn catalog_shows(&self, node_id: &str, title: &str) -> bool {
+        self.psql(&format!(
+            "SELECT count(*) FROM cached_catalogs
+              WHERE node_id = '{node_id}' AND catalog_payload ILIKE '%{title}%'"
+        ))
+        .await
+            == "1"
+    }
+
+    /// The follow of `follower` toward `followed` on the hub: its status
+    /// and a short digest of the catalog key wrap it holds, empty without
+    /// a wrap. None when the hub holds no such follow.
+    pub async fn follow_state(&self, follower: &str, followed: &str) -> Option<(String, String)> {
+        let row = self
+            .psql(&format!(
+                "SELECT status,
+                        CASE WHEN coalesce(encrypted_catalog_key, '') = '' THEN ''
+                             ELSE left(md5(encrypted_catalog_key), 12) END
+                   FROM follows
+                  WHERE follower_node_id = '{follower}' AND followed_node_id = '{followed}'"
+            ))
+            .await;
+        if row.is_empty() {
+            return None;
+        }
+        let (status, digest) = row.split_once('|').expect("status|digest");
+        Some((status.to_string(), digest.to_string()))
+    }
+
     /// Empties what a test leaves on the hub, and the per-IP token buckets
     /// of the relay routes: every backend here shares the host's address.
     ///
@@ -436,6 +494,95 @@ impl Instance {
             })
     }
 
+    /// Stops answering on the LAN, as a device gone to sleep or in airplane
+    /// mode; the database and the identity stay.
+    pub fn go_offline(&self) {
+        self.server.abort();
+    }
+
+    /// Our X25519 public key, hex, as the hub publishes it.
+    pub fn x25519_public_hex(&self) -> String {
+        self.state
+            .identity_service
+            .get_public_keys_hex()
+            .expect("public keys")
+            .1
+    }
+
+    /// Asks the hub to follow `owner`'s library, with our key so the owner
+    /// can wrap its catalog key for us.
+    pub async fn follow(&self, owner: &Instance) {
+        self.svc
+            .follow(&self.db, owner.node_id(), Some(&self.x25519_public_hex()))
+            .await
+            .unwrap_or_else(|e| panic!("[{}] follow failed: {e}", self.name));
+    }
+
+    /// Stops following `owner`'s library on the hub.
+    pub async fn unfollow(&self, owner: &Instance) {
+        self.svc
+            .unfollow(&self.db, owner.node_id())
+            .await
+            .unwrap_or_else(|e| panic!("[{}] unfollow failed: {e}", self.name));
+    }
+
+    /// Approves the pending follow request of `follower` on the hub. The
+    /// reader joins the catalog readers list at the next encrypted push,
+    /// through the list's bootstrap: the approval-time admission is an FFI
+    /// orchestration the harness does not replay.
+    pub async fn approve_follow_from(&self, follower: &str) {
+        let pending = self
+            .svc
+            .pending_requests(&self.db)
+            .await
+            .unwrap_or_else(|e| panic!("[{}] pending requests failed: {e}", self.name));
+        let request = pending
+            .iter()
+            .find(|f| f.follower_node_id == follower)
+            .unwrap_or_else(|| panic!("[{}] no pending follow from {follower}", self.name));
+        self.svc
+            .resolve_follow(&self.db, request.id, "approve", None, None)
+            .await
+            .unwrap_or_else(|e| panic!("[{}] approval failed: {e}", self.name));
+    }
+
+    /// Reads `owner`'s catalog from the hub, opening it with our wrap when
+    /// it is encrypted.
+    pub async fn read_catalog(
+        &self,
+        owner: &Instance,
+    ) -> Result<Vec<CatalogEntry>, rust_lib_app::services::hub_directory_service::HubDirectoryError>
+    {
+        use zeroize::Zeroize;
+        let (mut ed25519_bytes, mut x25519_bytes) = self
+            .state
+            .identity_service
+            .identity()
+            .expect("identity")
+            .export_secret_bytes();
+        let secret = x25519_dalek::StaticSecret::from(x25519_bytes);
+        ed25519_bytes.zeroize();
+        x25519_bytes.zeroize();
+        self.svc
+            .get_catalog(&self.db, owner.node_id(), Some(&secret))
+            .await
+    }
+
+    /// Forgets the last confirmed push, as the recipe's A12 does by hand:
+    /// the next sync contacts the hub again with the same catalog.
+    pub async fn forget_push_state(&self) {
+        use sea_orm::{ConnectionTrait, Statement};
+        self.db
+            .execute(Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                "UPDATE hub_directory_config
+                    SET last_catalog_hash = NULL, last_catalog_pushed_at = NULL"
+                    .to_string(),
+            ))
+            .await
+            .expect("push state reset");
+    }
+
     /// Removes a peer, the owner's gesture that ends a pairing.
     pub async fn delete_peer(&self, peer_id: i32) {
         let app = Router::new()
@@ -492,11 +639,7 @@ impl Instance {
         listed: bool,
         requires_approval: bool,
     ) -> DirectoryConfig {
-        let (_, x25519) = self
-            .state
-            .identity_service
-            .get_public_keys_hex()
-            .expect("public keys");
+        let x25519 = self.x25519_public_hex();
         let relay = self.relay_config().await;
         let params = RegisterParams {
             node_id: self.library_uuid.clone(),

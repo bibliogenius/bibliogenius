@@ -170,12 +170,21 @@ make test   # runs cargo test + verify_filters.sh
 `tests/two_instances_hub/` runs two instances of the backend (own database,
 identity and HTTP port each) against a throwaway dev hub. Assertions cover
 the captured log lines (same filter as the app's debug log file), the local
-databases and the hub database. Today it holds the smoke scenario (relay
+databases and the hub database. It holds the smoke scenario (relay
 mailboxes, directory profiles, a clear catalog push), the pairing over the
-LAN with an E2EE exchange, and the ended pairing (mark set on deletion,
-ex-peer refused on the LAN and dropped by the relay poller, restored by the
-owner's acceptance); rotation and wraps with a real 304, then changed
-keys, come one lot at a time.
+LAN with an E2EE exchange, the ended pairing (mark set on deletion, ex-peer
+refused on the LAN and dropped by the relay poller, restored by the owner's
+acceptance), and the encrypted catalog (wrap for an approved follower, the
+reader opening it, wraps sent again after a real 304, rotation when a
+reader unfollows and when the owner removes an offline reader). What needs
+a device stays in the manual recipe: sleep, Keychain, mDNS, the real hub
+switch, a reader reinstalled under new keys. The reader joins the readers
+list through the bootstrap of the first encrypted push, not through the
+approval-time admission (an FFI orchestration in `api/frb/hub_follows.rs`
+that the harness does not replay), so that path and a follower known by
+its hub key alone stay uncovered. The usage rule is in
+`.agents/instructions/policies.md` (before every minor, and after any change
+to the peer, catalog or relay code).
 
 It is not part of `cargo test`: the target needs the `it-loopback` feature
 (loopback addresses accepted by `validate_url`, test-only, never shipped)
