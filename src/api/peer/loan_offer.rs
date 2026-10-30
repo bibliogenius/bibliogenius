@@ -204,6 +204,7 @@ pub async fn offer_loan(
             book_title: Set(book.title.clone()),
             status: Set("accepted".to_string()),
             requester_request_id: Set(None),
+            book_id: Set(Some(book.id.clone())),
             created_at: Set(Utc::now().to_rfc3339()),
             updated_at: Set(Utc::now().to_rfc3339()),
         };

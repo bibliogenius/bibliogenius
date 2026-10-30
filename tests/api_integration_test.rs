@@ -122,6 +122,7 @@ async fn create_test_request(
         created_at: Set(now.clone()),
         updated_at: Set(now),
         requester_request_id: Set(None),
+        book_id: Set(None),
     };
     rust_lib_app::models::p2p_request::Entity::insert(request)
         .exec(db)
@@ -316,6 +317,7 @@ async fn test_borrow_request_auto_approve() {
         created_at: Set(chrono::Utc::now().to_rfc3339()),
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
         requester_request_id: Set(None),
+        book_id: Set(None),
     };
     rust_lib_app::models::p2p_request::Entity::insert(request)
         .exec(&db)

@@ -2695,6 +2695,19 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         .await?;
     }
 
+    // Migration 106: link an incoming borrow request to the requested book.
+    // The table only carried `book_isbn`, so a book without an ISBN matched
+    // nothing and every request for one was auto-rejected. Requesters now send
+    // the lender's book id; rows predating the column stay NULL and keep
+    // resolving by ISBN.
+    if !table_has_column(db, "p2p_requests", "book_id").await? {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE p2p_requests ADD COLUMN book_id TEXT".to_owned(),
+        ))
+        .await?;
+    }
+
     Ok(())
 }
 

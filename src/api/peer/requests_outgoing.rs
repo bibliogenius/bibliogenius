@@ -198,6 +198,29 @@ pub(crate) async fn process_borrower_acceptance(
 pub struct BookRequest {
     book_isbn: String,
     book_title: String,
+    /// The lender's book id, from its catalog. Forwarded so the lender can name a
+    /// book without an ISBN; the ISBN stays for lenders on older versions.
+    #[serde(default)]
+    book_id: Option<String>,
+}
+
+/// Matches a borrow request row for the same book, on the given ISBN and title
+/// columns. The ISBN names the book when there is one. Without one, the title is
+/// the only key the borrower holds: an empty ISBN alone would make every book
+/// without an ISBN a duplicate of every other.
+fn same_book_condition(
+    isbn_col: impl ColumnTrait,
+    title_col: impl ColumnTrait,
+    isbn: &str,
+    title: &str,
+) -> Condition {
+    if isbn.is_empty() {
+        Condition::all()
+            .add(isbn_col.eq(""))
+            .add(title_col.eq(title))
+    } else {
+        Condition::all().add(isbn_col.eq(isbn))
+    }
 }
 
 pub async fn request_book(
@@ -227,7 +250,12 @@ pub async fn request_book(
         //     book from this peer (prevents double-borrowing the same copy).
         let already_borrowing = p2p_outgoing_request::Entity::find()
             .filter(p2p_outgoing_request::Column::ToPeerId.eq(peer.id))
-            .filter(p2p_outgoing_request::Column::BookIsbn.eq(&payload.book_isbn))
+            .filter(same_book_condition(
+                p2p_outgoing_request::Column::BookIsbn,
+                p2p_outgoing_request::Column::BookTitle,
+                &payload.book_isbn,
+                &payload.book_title,
+            ))
             .filter(
                 Condition::any()
                     .add(p2p_outgoing_request::Column::Status.eq("pending"))
@@ -242,7 +270,12 @@ pub async fn request_book(
         //     (prevents borrowing back a book that is out on loan to them).
         let currently_lending = p2p_request::Entity::find()
             .filter(p2p_request::Column::FromPeerId.eq(peer.id))
-            .filter(p2p_request::Column::BookIsbn.eq(&payload.book_isbn))
+            .filter(same_book_condition(
+                p2p_request::Column::BookIsbn,
+                p2p_request::Column::BookTitle,
+                &payload.book_isbn,
+                &payload.book_title,
+            ))
             .filter(p2p_request::Column::Status.eq("accepted"))
             .one(db)
             .await
@@ -309,6 +342,7 @@ pub async fn request_book(
         "from_peer_name": my_config.name,
         "book_isbn": payload.book_isbn,
         "book_title": payload.book_title,
+        "book_id": payload.book_id,
         "requester_request_id": outgoing_id
     });
 
@@ -490,6 +524,9 @@ pub struct BookRequestByUrl {
     peer_url: String,
     book_isbn: String,
     book_title: String,
+    /// See [`BookRequest::book_id`].
+    #[serde(default)]
+    book_id: Option<String>,
 }
 
 pub async fn request_book_by_url(
@@ -551,6 +588,7 @@ pub async fn request_book_by_url(
             "from_peer_name": my_config.name,
             "book_isbn": payload.book_isbn,
             "book_title": payload.book_title,
+            "book_id": payload.book_id,
             "requester_request_id": uuid::Uuid::new_v4().to_string()
         });
 
@@ -583,7 +621,12 @@ pub async fn request_book_by_url(
         //     book from this peer (prevents double-borrowing the same copy).
         let already_borrowing = p2p_outgoing_request::Entity::find()
             .filter(p2p_outgoing_request::Column::ToPeerId.eq(peer.id))
-            .filter(p2p_outgoing_request::Column::BookIsbn.eq(&payload.book_isbn))
+            .filter(same_book_condition(
+                p2p_outgoing_request::Column::BookIsbn,
+                p2p_outgoing_request::Column::BookTitle,
+                &payload.book_isbn,
+                &payload.book_title,
+            ))
             .filter(
                 Condition::any()
                     .add(p2p_outgoing_request::Column::Status.eq("pending"))
@@ -598,7 +641,12 @@ pub async fn request_book_by_url(
         //     (prevents borrowing back a book that is out on loan to them).
         let currently_lending = p2p_request::Entity::find()
             .filter(p2p_request::Column::FromPeerId.eq(peer.id))
-            .filter(p2p_request::Column::BookIsbn.eq(&payload.book_isbn))
+            .filter(same_book_condition(
+                p2p_request::Column::BookIsbn,
+                p2p_request::Column::BookTitle,
+                &payload.book_isbn,
+                &payload.book_title,
+            ))
             .filter(p2p_request::Column::Status.eq("accepted"))
             .one(db)
             .await
@@ -663,6 +711,7 @@ pub async fn request_book_by_url(
         "from_peer_name": my_config.name,
         "book_isbn": payload.book_isbn,
         "book_title": payload.book_title,
+        "book_id": payload.book_id,
         "requester_request_id": outgoing_id
     });
 

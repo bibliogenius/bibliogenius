@@ -354,44 +354,29 @@ async fn save_loan_request(
         .get("requester_request_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    // The lender's book id, sent by requesters since books without an ISBN
+    // became lendable. Absent from older requesters.
+    let requested_book_id =
+        crate::api::peer::requested_book_id(msg.payload.get("book_id").and_then(|v| v.as_str()));
+
+    let book_found = crate::api::peer::resolve_requested_book(db, requested_book_id, book_isbn)
+        .await
+        .unwrap_or(None);
 
     // Check copy availability before creating the request
-    let has_available_copy = {
-        use crate::models::{book, copy};
-
-        let book_found = book::Entity::find()
-            .filter(book::Column::Isbn.eq(book_isbn))
-            .one(db)
-            .await
-            .unwrap_or(None);
-
-        if let Some(b) = book_found {
-            copy::Entity::find()
-                .filter(copy::Column::BookId.eq(b.id))
-                .filter(copy::Column::Status.eq("available"))
-                .one(db)
-                .await
-                .unwrap_or(None)
-                .is_some()
-        } else {
-            false
-        }
+    let has_available_copy = match &book_found {
+        Some(b) => crate::api::peer::has_available_copy(db, b).await,
+        None => false,
     };
 
     // Guard: reject if this peer already has a pending or accepted request for this book
     //        (defense-in-depth — borrower side should catch this first).
-    let already_has_active_request = p2p_request::Entity::find()
-        .filter(p2p_request::Column::FromPeerId.eq(sender_peer.id))
-        .filter(p2p_request::Column::BookIsbn.eq(book_isbn))
-        .filter(
-            Condition::any()
-                .add(p2p_request::Column::Status.eq("pending"))
-                .add(p2p_request::Column::Status.eq("accepted")),
-        )
-        .one(db)
-        .await
-        .unwrap_or(None)
-        .is_some();
+    let already_has_active_request = match &book_found {
+        Some(b) => {
+            crate::api::peer::has_active_request_for_book(db, sender_peer.id, b, book_isbn).await
+        }
+        None => false,
+    };
 
     let initial_status = if has_available_copy && !already_has_active_request {
         "pending"
@@ -411,6 +396,9 @@ async fn save_loan_request(
         created_at: Set(now.clone()),
         updated_at: Set(now),
         requester_request_id: Set(requester_request_id),
+        // The resolved id, never the raw payload value: only a book that exists
+        // here is recorded.
+        book_id: Set(book_found.map(|b| b.id)),
     };
 
     new_request
@@ -1060,7 +1048,7 @@ async fn resolve_reclaimed_book_by_lender(
 /// This handler serves two directions:
 /// - Lender → Borrower (accepted/rejected): updates `p2p_outgoing_request`
 /// - Borrower → Lender (returned): updates `p2p_request` + loan + copy
-async fn handle_status_update(
+pub(crate) async fn handle_status_update(
     db: &DatabaseConnection,
     msg: &ClearMessage,
     sender_peer: &peer::Model,
@@ -1229,11 +1217,13 @@ async fn handle_status_update(
                         .unwrap_or(None);
 
                     if let Some(the_contact) = the_contact {
-                        let book = crate::models::book::Entity::find()
-                            .filter(crate::models::book::Column::Isbn.eq(&req.book_isbn))
-                            .one(db)
-                            .await
-                            .unwrap_or(None);
+                        let book = crate::api::peer::resolve_requested_book(
+                            db,
+                            req.book_id.as_deref(),
+                            &req.book_isbn,
+                        )
+                        .await
+                        .unwrap_or(None);
 
                         if let Some(book) = book {
                             let copies = copy::Entity::find()
@@ -1864,26 +1854,34 @@ pub async fn handle_request_status_query(
                     _ => "Unknown Library".to_string(),
                 };
 
-                // Find the associated loan for due_date
-                if let Ok(Some(book)) = crate::models::book::Entity::find()
-                    .filter(crate::models::book::Column::Isbn.eq(&req.book_isbn))
-                    .one(db)
-                    .await
-                {
+                let book = crate::api::peer::resolve_requested_book(
+                    db,
+                    req.book_id.as_deref(),
+                    &req.book_isbn,
+                )
+                .await
+                .unwrap_or(None);
+
+                if let Some(book) = &book {
+                    // The response may travel via the hub relay: a local cover
+                    // path must not leave the device.
+                    let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
                     response["isbn"] = json!(book.isbn);
                     response["title"] = json!(book.title);
-                    response["cover_url"] = json!(book.cover_url);
+                    response["cover_url"] = json!(crate::models::Book::safe_cover_url_for_relay(
+                        book.cover_url.as_deref(),
+                        &book.id,
+                        Some(book.updated_at.as_str()),
+                        hub_prefix.as_deref(),
+                        crate::api::frb::covers_dir().map(|d| d.as_path()),
+                    ));
                 }
 
                 response["lender_name"] = json!(lender_name);
                 response["request_id"] = json!(req.id);
 
                 // Find loan due_date via copy/loan chain
-                if let Ok(Some(book)) = crate::models::book::Entity::find()
-                    .filter(crate::models::book::Column::Isbn.eq(&req.book_isbn))
-                    .one(db)
-                    .await
-                {
+                if let Some(book) = book {
                     let copies = crate::models::copy::Entity::find()
                         .filter(crate::models::copy::Column::BookId.eq(book.id))
                         .all(db)
@@ -2722,6 +2720,7 @@ mod reclaim_tests {
             created_at: Set(now.clone()),
             updated_at: Set(now),
             requester_request_id: Set(None),
+            book_id: Set(None),
         }
         .insert(&db)
         .await

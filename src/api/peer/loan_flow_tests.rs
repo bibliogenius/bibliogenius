@@ -1228,6 +1228,7 @@ mod multi_lender_borrow_tests {
             created_at: Set(now.clone()),
             updated_at: Set(now),
             requester_request_id: Set(None),
+            book_id: Set(None),
         }
         .insert(db)
         .await
@@ -1446,6 +1447,7 @@ mod multi_lender_borrow_tests {
                 book_isbn: "978-x".to_string(),
                 book_title: "Le Livre".to_string(),
                 requester_request_id: None,
+                book_id: None,
             }),
         )
         .await
@@ -1614,6 +1616,7 @@ mod allow_borrowing_does_not_gate_p2p_loans_tests {
                 book_isbn: ISBN.to_string(),
                 book_title: TITLE.to_string(),
                 requester_request_id: None,
+                book_id: None,
             }),
         )
         .await
@@ -1660,6 +1663,606 @@ mod allow_borrowing_does_not_gate_p2p_loans_tests {
             stored_status(&db).await,
             "pending",
             "the relayed request must land pending, not rejected"
+        );
+    }
+}
+
+/// A book without an ISBN (a manual entry, an old or self-published book) must be
+/// lendable to a peer. The request used to identify the book by ISBN alone, so an
+/// empty ISBN matched no book and the lender auto-rejected with `no_available_copy`
+/// although a copy sat on the shelf. The request now carries the lender's `book_id`,
+/// recorded on `p2p_requests.book_id`, and every later step resolves the book by id
+/// first, by ISBN second (older requesters send the ISBN only).
+#[cfg(test)]
+mod isbnless_loan_round_trip_tests {
+    use super::*;
+    use crate::crypto::envelope::ClearMessage;
+    use crate::db;
+    use crate::models::{copy, installation_profile, loan, p2p_request};
+    use sea_orm::{EntityTrait, Set};
+
+    async fn setup_db() -> DatabaseConnection {
+        db::init_db("sqlite::memory:").await.expect("init db")
+    }
+
+    /// An owned book with one available copy. Returns the book id.
+    async fn insert_lendable_book(
+        db: &DatabaseConnection,
+        title: &str,
+        isbn: Option<&str>,
+    ) -> String {
+        let now = chrono::Utc::now().to_rfc3339();
+        let book_id = crate::models::book::ActiveModel {
+            title: Set(title.to_string()),
+            isbn: Set(isbn.map(str::to_string)),
+            owned: Set(true),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert book")
+        .id;
+
+        let lib_id = crate::utils::library_helpers::resolve_library_id(db)
+            .await
+            .expect("library");
+        copy::ActiveModel {
+            book_id: Set(book_id.clone()),
+            library_id: Set(lib_id),
+            status: Set("available".to_string()),
+            is_temporary: Set(false),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert copy");
+        book_id
+    }
+
+    /// A paired borrower with no E2EE keys, so every notification back to it takes
+    /// the plaintext path towards an unroutable address and fails quietly.
+    async fn insert_paired_peer(db: &DatabaseConnection) -> peer::Model {
+        let now = chrono::Utc::now().to_rfc3339();
+        peer::ActiveModel {
+            name: Set("paired-borrower".to_string()),
+            url: Set("http://127.0.0.1:9".to_string()),
+            connection_status: Set("accepted".to_string()),
+            auto_approve: Set(false),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert peer")
+    }
+
+    async fn enable_auto_approve(db: &DatabaseConnection) {
+        let profile = installation_profile::Entity::find()
+            .one(db)
+            .await
+            .expect("query profile")
+            .expect("init_db seeds the installation profile");
+        let mut active: installation_profile::ActiveModel = profile.into();
+        active.enabled_modules = Set(r#"["auto_approve_loans"]"#.to_string());
+        active.update(db).await.expect("enable auto-approve");
+    }
+
+    fn loan_request(payload: serde_json::Value) -> ClearMessage {
+        ClearMessage {
+            message_type: "loan_request".to_string(),
+            payload,
+            timestamp: chrono::Utc::now().timestamp(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            correlation_id: None,
+            reply_to_mailbox: None,
+            reply_to_write_token: None,
+        }
+    }
+
+    async fn request_row(db: &DatabaseConnection, id: &str) -> p2p_request::Model {
+        p2p_request::Entity::find_by_id(id)
+            .one(db)
+            .await
+            .expect("query request")
+            .expect("request recorded")
+    }
+
+    async fn copy_statuses(db: &DatabaseConnection, book_id: &str) -> Vec<String> {
+        copy::Entity::find()
+            .filter(copy::Column::BookId.eq(book_id))
+            .all(db)
+            .await
+            .expect("query copies")
+            .into_iter()
+            .map(|c| c.status)
+            .collect()
+    }
+
+    async fn loan_statuses(db: &DatabaseConnection) -> Vec<String> {
+        loan::Entity::find()
+            .all(db)
+            .await
+            .expect("query loans")
+            .into_iter()
+            .map(|l| l.status)
+            .collect()
+    }
+
+    async fn accept(db: &DatabaseConnection, request_id: &str) {
+        let response = update_request_status(
+            State(crate::infrastructure::AppState::new(db.clone())),
+            axum::extract::Path(request_id.to_string()),
+            Json(RequestAction {
+                status: "accepted".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the owner accepts the loan"
+        );
+    }
+
+    /// The borrower reports the return over E2EE (`status_update`).
+    async fn report_return(db: &DatabaseConnection, borrower: &peer::Model, request_id: &str) {
+        let msg = ClearMessage {
+            message_type: "status_update".to_string(),
+            payload: json!({ "loan_id": request_id, "status": "returned" }),
+            ..loan_request(json!({}))
+        };
+        let response = crate::api::e2ee::handle_status_update(db, &msg, borrower).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_book_without_isbn_is_requested_accepted_and_returned() {
+        let db = setup_db().await;
+        let wanted = insert_lendable_book(&db, "Carnet de voyage", None).await;
+        // A second ISBN-less book: neither an empty ISBN nor a fallback may land on it.
+        let other = insert_lendable_book(&db, "Autre carnet", None).await;
+        let borrower = insert_paired_peer(&db).await;
+
+        let result = crate::api::e2ee::handle_loan_request_for_relay(
+            &db,
+            &borrower,
+            &loan_request(json!({
+                "book_id": wanted,
+                "book_isbn": "",
+                "book_title": "Carnet de voyage",
+                "requester_request_id": "borrower-req-1",
+            })),
+        )
+        .await;
+        assert_eq!(
+            result["status"], "pending",
+            "a copy is on the shelf: {result}"
+        );
+        let request_id = result["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+        assert_eq!(
+            request_row(&db, &request_id).await.book_id.as_deref(),
+            Some(wanted.as_str())
+        );
+
+        accept(&db, &request_id).await;
+        assert_eq!(copy_statuses(&db, &wanted).await, vec!["loaned"]);
+        assert_eq!(copy_statuses(&db, &other).await, vec!["available"]);
+        assert_eq!(loan_statuses(&db).await, vec!["active"]);
+
+        report_return(&db, &borrower, &request_id).await;
+        assert_eq!(copy_statuses(&db, &wanted).await, vec!["available"]);
+        assert_eq!(loan_statuses(&db).await, vec!["returned"]);
+        assert_eq!(request_row(&db, &request_id).await.status, "returned");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_auto_approved_book_without_isbn_lends_the_right_copy() {
+        let db = setup_db().await;
+        enable_auto_approve(&db).await;
+        let other = insert_lendable_book(&db, "Autre carnet", None).await;
+        let wanted = insert_lendable_book(&db, "Carnet de voyage", None).await;
+        let borrower = insert_paired_peer(&db).await;
+
+        let result = crate::api::e2ee::handle_loan_request_for_relay(
+            &db,
+            &borrower,
+            &loan_request(json!({
+                "book_id": wanted,
+                "book_isbn": "",
+                "book_title": "Carnet de voyage",
+            })),
+        )
+        .await;
+
+        assert_eq!(result["status"], "accepted", "{result}");
+        assert_eq!(result["title"], "Carnet de voyage");
+        assert_eq!(copy_statuses(&db, &wanted).await, vec!["loaned"]);
+        assert_eq!(copy_statuses(&db, &other).await, vec!["available"]);
+    }
+
+    /// Two different ISBN-less books from the same lender are two loans, not a
+    /// duplicate: the guard compares book ids, not empty ISBNs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_book_without_isbn_is_not_taken_for_a_duplicate() {
+        let db = setup_db().await;
+        let first = insert_lendable_book(&db, "Carnet de voyage", None).await;
+        let second = insert_lendable_book(&db, "Autre carnet", None).await;
+        let borrower = insert_paired_peer(&db).await;
+
+        for (id, title) in [(&first, "Carnet de voyage"), (&second, "Autre carnet")] {
+            let result = crate::api::e2ee::handle_loan_request_for_relay(
+                &db,
+                &borrower,
+                &loan_request(json!({ "book_id": id, "book_isbn": "", "book_title": title })),
+            )
+            .await;
+            assert_eq!(result["status"], "pending", "{title}: {result}");
+        }
+
+        // The same book asked twice is still a duplicate.
+        let again = crate::api::e2ee::handle_loan_request_for_relay(
+            &db,
+            &borrower,
+            &loan_request(
+                json!({ "book_id": first, "book_isbn": "", "book_title": "Carnet de voyage" }),
+            ),
+        )
+        .await;
+        assert_eq!(again["status"], "rejected");
+    }
+
+    /// A requester on an older version sends the ISBN only. The lender resolves the
+    /// book by ISBN, records its id, and the rest of the flow runs on that id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_older_requester_sending_only_the_isbn_still_borrows_and_returns() {
+        let db = setup_db().await;
+        let book = insert_lendable_book(&db, "Dune", Some("978-2-266-23250-8")).await;
+        let borrower = insert_paired_peer(&db).await;
+
+        let result = crate::api::e2ee::handle_loan_request_for_relay(
+            &db,
+            &borrower,
+            &loan_request(json!({ "book_isbn": "978-2-266-23250-8", "book_title": "Dune" })),
+        )
+        .await;
+        assert_eq!(result["status"], "pending", "{result}");
+        let request_id = result["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+        assert_eq!(
+            request_row(&db, &request_id).await.book_id.as_deref(),
+            Some(book.as_str())
+        );
+
+        accept(&db, &request_id).await;
+        assert_eq!(copy_statuses(&db, &book).await, vec!["loaned"]);
+        report_return(&db, &borrower, &request_id).await;
+        assert_eq!(copy_statuses(&db, &book).await, vec!["available"]);
+    }
+
+    /// A stale catalog may hold an id the lender no longer knows: the ISBN still
+    /// finds the book. An unknown id with no ISBN finds nothing and is rejected.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unknown_book_id_falls_back_to_the_isbn_and_never_to_an_empty_one() {
+        let db = setup_db().await;
+        let dune = insert_lendable_book(&db, "Dune", Some("978-2-266-23250-8")).await;
+        insert_lendable_book(&db, "Carnet de voyage", None).await;
+        let borrower = insert_paired_peer(&db).await;
+        // Well-formed, so it reaches the lookup, but names no book here.
+        let unknown_id = uuid::Uuid::new_v4().to_string();
+
+        let stale = crate::api::e2ee::handle_loan_request_for_relay(
+            &db,
+            &borrower,
+            &loan_request(json!({
+                "book_id": unknown_id,
+                "book_isbn": "978-2-266-23250-8",
+                "book_title": "Dune",
+            })),
+        )
+        .await;
+        assert_eq!(stale["status"], "pending", "{stale}");
+        let request_id = stale["request_id"].as_str().expect("request id");
+        assert_eq!(
+            request_row(&db, request_id).await.book_id.as_deref(),
+            Some(dune.as_str())
+        );
+
+        let unknown = crate::api::e2ee::handle_loan_request_for_relay(
+            &db,
+            &borrower,
+            &loan_request(json!({
+                "book_id": unknown_id,
+                "book_isbn": "",
+                "book_title": "Carnet de voyage",
+            })),
+        )
+        .await;
+        assert_eq!(unknown["status"], "rejected", "{unknown}");
+    }
+
+    /// LAN / plaintext path: `receive_request` takes the same `book_id`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plaintext_request_for_a_book_without_isbn_lands_pending() {
+        let db = setup_db().await;
+        let wanted = insert_lendable_book(&db, "Carnet de voyage", None).await;
+        insert_paired_peer(&db).await;
+
+        let response = receive_request(
+            State(crate::infrastructure::AppState::new(db.clone())),
+            Json(IncomingRequest {
+                from_peer_url: "http://127.0.0.1:9".to_string(),
+                from_peer_name: "paired-borrower".to_string(),
+                book_isbn: String::new(),
+                book_title: "Carnet de voyage".to_string(),
+                requester_request_id: None,
+                book_id: Some(wanted.clone()),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let all = p2p_request::Entity::find().all(&db).await.expect("list");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].status, "pending");
+        assert_eq!(all[0].book_id.as_deref(), Some(wanted.as_str()));
+    }
+
+    /// A book id that is not a uuid is ignored, so it can never be the key a
+    /// lookup runs on. Without an ISBN to fall back to, the request finds nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_book_id_that_is_not_a_uuid_is_ignored() {
+        let db = setup_db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        let odd_id = crate::models::book::ActiveModel {
+            id: Set("not-a-uuid".to_string()),
+            title: Set("Carnet de voyage".to_string()),
+            owned: Set(true),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert book")
+        .id;
+        assert_eq!(
+            odd_id, "not-a-uuid",
+            "the fixture must keep its non-uuid id"
+        );
+        let lib_id = crate::utils::library_helpers::resolve_library_id(&db)
+            .await
+            .expect("library");
+        copy::ActiveModel {
+            book_id: Set(odd_id.clone()),
+            library_id: Set(lib_id),
+            status: Set("available".to_string()),
+            is_temporary: Set(false),
+            created_at: Set(chrono::Utc::now().to_rfc3339()),
+            updated_at: Set(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert copy");
+        let borrower = insert_paired_peer(&db).await;
+
+        let result = crate::api::e2ee::handle_loan_request_for_relay(
+            &db,
+            &borrower,
+            &loan_request(json!({
+                "book_id": odd_id,
+                "book_isbn": "",
+                "book_title": "Carnet de voyage",
+            })),
+        )
+        .await;
+        assert_eq!(result["status"], "rejected", "{result}");
+    }
+
+    /// The owner marks the loan returned from the app (plaintext path).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_book_without_isbn_is_marked_returned_by_the_owner() {
+        let db = setup_db().await;
+        let wanted = insert_lendable_book(&db, "Carnet de voyage", None).await;
+        let borrower = insert_paired_peer(&db).await;
+        let result = crate::api::e2ee::handle_loan_request_for_relay(
+            &db,
+            &borrower,
+            &loan_request(
+                json!({ "book_id": wanted, "book_isbn": "", "book_title": "Carnet de voyage" }),
+            ),
+        )
+        .await;
+        let request_id = result["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+        accept(&db, &request_id).await;
+
+        let response = update_request_status(
+            State(crate::infrastructure::AppState::new(db.clone())),
+            axum::extract::Path(request_id.clone()),
+            Json(RequestAction {
+                status: "returned".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(copy_statuses(&db, &wanted).await, vec!["available"]);
+        assert_eq!(loan_statuses(&db).await, vec!["returned"]);
+    }
+
+    /// A borrower polling the status of an accepted loan gets the right book and
+    /// its due date, and never a local cover path through the relay.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_status_query_answers_for_a_book_without_isbn() {
+        let db = setup_db().await;
+        let wanted = insert_lendable_book(&db, "Carnet de voyage", None).await;
+        insert_lendable_book(&db, "Autre carnet", None).await;
+        let book = crate::models::book::Entity::find_by_id(wanted.as_str())
+            .one(&db)
+            .await
+            .expect("query")
+            .expect("book");
+        let mut active: crate::models::book::ActiveModel = book.into();
+        active.cover_url = Set(Some(
+            "/var/mobile/Containers/Data/covers/carnet.jpg".to_string(),
+        ));
+        active.update(&db).await.expect("set local cover");
+        let borrower = insert_paired_peer(&db).await;
+
+        let result = crate::api::e2ee::handle_loan_request_for_relay(
+            &db,
+            &borrower,
+            &loan_request(json!({
+                "book_id": wanted,
+                "book_isbn": "",
+                "book_title": "Carnet de voyage",
+                "requester_request_id": "borrower-req-1",
+            })),
+        )
+        .await;
+        accept(&db, result["request_id"].as_str().expect("request id")).await;
+
+        let status = crate::api::e2ee::handle_request_status_query(
+            &db,
+            &loan_request(json!({ "requester_request_id": "borrower-req-1" })),
+        )
+        .await;
+
+        assert_eq!(status["status"], "accepted", "{status}");
+        assert_eq!(status["title"], "Carnet de voyage");
+        assert!(
+            status["due_date"].is_string(),
+            "the loan is found: {status}"
+        );
+        assert!(
+            !status["cover_url"].as_str().unwrap_or("").starts_with('/'),
+            "a local cover path must not travel to the peer: {status}"
+        );
+    }
+
+    async fn insert_outgoing(db: &DatabaseConnection, to_peer_id: i32, title: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        crate::models::p2p_outgoing_request::ActiveModel {
+            id: Set(uuid::Uuid::new_v4().to_string()),
+            to_peer_id: Set(to_peer_id),
+            book_isbn: Set(String::new()),
+            book_title: Set(title.to_string()),
+            status: Set("pending".to_string()),
+            lender_request_id: Set(None),
+            book_id: Set(None),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+        }
+        .insert(db)
+        .await
+        .expect("insert outgoing request");
+    }
+
+    async fn insert_lending(db: &DatabaseConnection, from_peer_id: i32, title: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        p2p_request::ActiveModel {
+            id: Set(uuid::Uuid::new_v4().to_string()),
+            from_peer_id: Set(from_peer_id),
+            book_isbn: Set(String::new()),
+            book_title: Set(title.to_string()),
+            status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            requester_request_id: Set(None),
+            book_id: Set(None),
+        }
+        .insert(db)
+        .await
+        .expect("insert incoming request");
+    }
+
+    /// Borrower side: ask the paired lender for a book without an ISBN. The lender
+    /// is unreachable, so a request that clears the guards fails to deliver (502)
+    /// instead of being refused as a duplicate (409).
+    async fn borrow_by_url(db: &DatabaseConnection, title: &str) -> StatusCode {
+        request_book_by_url(
+            State(crate::infrastructure::AppState::new(db.clone())),
+            Json(
+                serde_json::from_value::<BookRequestByUrl>(json!({
+                    "peer_url": "http://127.0.0.1:9",
+                    "book_isbn": "",
+                    "book_title": title,
+                }))
+                .expect("request body"),
+            ),
+        )
+        .await
+        .into_response()
+        .status()
+    }
+
+    /// Titles of the outgoing requests recorded: a request that got past the
+    /// guards is recorded before delivery is attempted.
+    async fn outgoing_titles(db: &DatabaseConnection) -> Vec<String> {
+        crate::models::p2p_outgoing_request::Entity::find()
+            .all(db)
+            .await
+            .expect("query outgoing requests")
+            .into_iter()
+            .map(|r| r.book_title)
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_borrower_asks_for_a_second_book_without_isbn_from_the_same_lender() {
+        let db = setup_db().await;
+        let lender = insert_paired_peer(&db).await;
+        insert_outgoing(&db, lender.id, "Carnet de voyage").await;
+
+        assert_ne!(
+            borrow_by_url(&db, "Autre carnet").await,
+            StatusCode::CONFLICT
+        );
+        assert!(
+            outgoing_titles(&db)
+                .await
+                .contains(&"Autre carnet".to_string())
+        );
+        assert_eq!(
+            borrow_by_url(&db, "Carnet de voyage").await,
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_borrower_cannot_borrow_back_a_book_without_isbn_it_lends_out() {
+        let db = setup_db().await;
+        let peer = insert_paired_peer(&db).await;
+        insert_lending(&db, peer.id, "Carnet de voyage").await;
+
+        assert_ne!(
+            borrow_by_url(&db, "Autre carnet").await,
+            StatusCode::CONFLICT
+        );
+        assert!(
+            outgoing_titles(&db)
+                .await
+                .contains(&"Autre carnet".to_string())
+        );
+        assert_eq!(
+            borrow_by_url(&db, "Carnet de voyage").await,
+            StatusCode::CONFLICT
         );
     }
 }

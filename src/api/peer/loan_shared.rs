@@ -32,6 +32,96 @@ pub(crate) async fn resolve_loan_duration_days(db: &DatabaseConnection, book_id:
     }
 }
 
+/// The book id a peer sent in a loan request, kept only when it is a uuid. Book
+/// ids are uuids; anything else is ignored, so the lookup falls back to the ISBN.
+pub(crate) fn requested_book_id(raw: Option<&str>) -> Option<&str> {
+    raw.filter(|id| uuid::Uuid::try_parse(id).is_ok())
+}
+
+/// Resolve the lender's book that a loan request names.
+///
+/// By `book_id` first: requesters send the lender's book uuid, the only key that
+/// names a book without an ISBN. By ISBN second, for requesters on older versions
+/// and for an id a stale catalog still holds. An empty ISBN is never a search key:
+/// it would match an arbitrary book stored with `""`.
+pub(crate) async fn resolve_requested_book(
+    db: &DatabaseConnection,
+    book_id: Option<&str>,
+    book_isbn: &str,
+) -> Result<Option<crate::models::book::Model>, sea_orm::DbErr> {
+    use crate::models::book;
+
+    if let Some(id) = book_id.filter(|id| !id.is_empty())
+        && let Some(b) = book::Entity::find_by_id(id).one(db).await?
+    {
+        return Ok(Some(b));
+    }
+    if book_isbn.is_empty() {
+        return Ok(None);
+    }
+    book::Entity::find()
+        .filter(book::Column::Isbn.eq(book_isbn))
+        .one(db)
+        .await
+}
+
+/// Whether `book` has a copy on the shelf, available to lend.
+pub(crate) async fn has_available_copy(
+    db: &DatabaseConnection,
+    book: &crate::models::book::Model,
+) -> bool {
+    use crate::models::copy;
+
+    copy::Entity::find()
+        .filter(copy::Column::BookId.eq(book.id.as_str()))
+        .filter(copy::Column::Status.eq("available"))
+        .one(db)
+        .await
+        .unwrap_or(None)
+        .is_some()
+}
+
+/// Whether `from_peer_id` already has a pending or accepted request for `book`.
+///
+/// Requests are matched on the book id, and on the ISBN for rows predating the
+/// `book_id` column. An empty ISBN matches nothing, so two different books without
+/// an ISBN are never taken for the same one.
+pub(crate) async fn has_active_request_for_book(
+    db: &DatabaseConnection,
+    from_peer_id: i32,
+    book: &crate::models::book::Model,
+    book_isbn: &str,
+) -> bool {
+    use crate::models::p2p_request;
+    use sea_orm::Condition;
+
+    let mut same_book = Condition::any().add(p2p_request::Column::BookId.eq(book.id.as_str()));
+    for isbn in [Some(book_isbn), book.isbn.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|isbn| !isbn.is_empty())
+    {
+        same_book = same_book.add(
+            Condition::all()
+                .add(p2p_request::Column::BookId.is_null())
+                .add(p2p_request::Column::BookIsbn.eq(isbn)),
+        );
+    }
+
+    p2p_request::Entity::find()
+        .filter(p2p_request::Column::FromPeerId.eq(from_peer_id))
+        .filter(same_book)
+        .filter(
+            Condition::any()
+                .add(p2p_request::Column::Status.eq("pending"))
+                .add(p2p_request::Column::Status.eq("accepted")),
+        )
+        .one(db)
+        .await
+        .unwrap_or(None)
+        .is_some()
+}
+
 /// Core acceptance logic shared by plaintext and E2EE auto-approve paths.
 ///
 /// Finds book/copy, creates contact/loan, updates copy status and request status.
@@ -45,12 +135,14 @@ pub(crate) async fn perform_loan_acceptance(
 ) -> Result<LoanAcceptResult, String> {
     use crate::models::{book, contact, copy, loan, p2p_request};
 
-    // 1. Find Book by ISBN (fallback to title)
-    let book = match book::Entity::find()
-        .filter(book::Column::Isbn.eq(book_isbn))
+    // 1. Find Book by the id recorded on the request, then ISBN, then title
+    let stored_book_id = p2p_request::Entity::find_by_id(request_id)
         .one(db)
         .await
-    {
+        .ok()
+        .flatten()
+        .and_then(|r| r.book_id);
+    let book = match resolve_requested_book(db, stored_book_id.as_deref(), book_isbn).await {
         Ok(Some(b)) => b,
         Ok(None) => match book::Entity::find()
             .filter(book::Column::Title.eq(book_title))

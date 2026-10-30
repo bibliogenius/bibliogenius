@@ -13,6 +13,10 @@ pub struct Model {
     pub created_at: String,
     pub updated_at: String,
     pub requester_request_id: Option<String>,
+    /// Local `books.uuid` of the requested book, resolved when the request
+    /// arrives. The ISBN alone cannot name a book that has none. NULL on rows
+    /// predating this column, and on requests that named no local book.
+    pub book_id: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

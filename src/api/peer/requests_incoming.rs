@@ -7,9 +7,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter, Set,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
 use serde_json::json;
 use tracing::{error, info};
@@ -45,6 +43,10 @@ pub struct IncomingRequest {
     pub(crate) book_isbn: String,
     pub(crate) book_title: String,
     pub(crate) requester_request_id: Option<String>,
+    /// The lender's book id, the only key naming a book without an ISBN.
+    /// Absent from requesters on older versions.
+    #[serde(default)]
+    pub(crate) book_id: Option<String>,
 }
 
 pub async fn receive_request(
@@ -95,45 +97,24 @@ pub async fn receive_request(
     };
 
     // 2. Check copy availability and guard against duplicate active loans.
-    let has_available_copy = {
-        use crate::models::book;
-        use crate::models::copy;
+    let book_found = resolve_requested_book(
+        &db,
+        requested_book_id(payload.book_id.as_deref()),
+        &payload.book_isbn,
+    )
+    .await
+    .unwrap_or(None);
 
-        let book_found = book::Entity::find()
-            .filter(book::Column::Isbn.eq(&payload.book_isbn))
-            .one(&db)
-            .await
-            .unwrap_or(None);
-
-        if let Some(b) = book_found {
-            copy::Entity::find()
-                .filter(copy::Column::BookId.eq(b.id))
-                .filter(copy::Column::Status.eq("available"))
-                .one(&db)
-                .await
-                .unwrap_or(None)
-                .is_some()
-        } else {
-            false
-        }
+    let has_available_copy = match &book_found {
+        Some(b) => has_available_copy(&db, b).await,
+        None => false,
     };
 
     // Guard: reject if this peer already has a pending or accepted request for this book
     //        (defense-in-depth — borrower side should catch this first).
-    let already_has_active_request = {
-        use crate::models::p2p_request;
-        p2p_request::Entity::find()
-            .filter(p2p_request::Column::FromPeerId.eq(peer.id))
-            .filter(p2p_request::Column::BookIsbn.eq(&payload.book_isbn))
-            .filter(
-                Condition::any()
-                    .add(p2p_request::Column::Status.eq("pending"))
-                    .add(p2p_request::Column::Status.eq("accepted")),
-            )
-            .one(&db)
-            .await
-            .unwrap_or(None)
-            .is_some()
+    let already_has_active_request = match &book_found {
+        Some(b) => has_active_request_for_book(&db, peer.id, b, &payload.book_isbn).await,
+        None => false,
     };
 
     // 3. Check if auto-approve should be used
@@ -158,6 +139,8 @@ pub async fn receive_request(
         created_at: Set(chrono::Utc::now().to_rfc3339()),
         updated_at: Set(chrono::Utc::now().to_rfc3339()),
         requester_request_id: Set(payload.requester_request_id.clone()),
+        // The resolved id, never the raw payload value.
+        book_id: Set(book_found.map(|b| b.id)),
     };
 
     match crate::models::p2p_request::Entity::insert(request)
@@ -327,10 +310,41 @@ pub async fn list_requests(State(db): State<DatabaseConnection>) -> impl IntoRes
         }
     }
 
+    // Requests recorded with a book id resolve through it: the only way to show
+    // the book of a request without an ISBN.
+    let ids: Vec<String> = requests
+        .iter()
+        .filter_map(|(req, _)| req.book_id.clone())
+        .collect();
+    let mut id_book_map: std::collections::HashMap<String, (String, Option<String>)> =
+        std::collections::HashMap::new();
+    if !ids.is_empty()
+        && let Ok(books) = book::Entity::find()
+            .filter(book::Column::Id.is_in(ids))
+            .all(&db)
+            .await
+    {
+        for b in books {
+            let resolved = cover_url::resolve_single(
+                b.cover_url.as_deref(),
+                &b.id,
+                Some(&b.updated_at),
+                hub_prefix.as_deref(),
+                ResolveScope::Lan,
+            )
+            .unwrap_or(None);
+            id_book_map.insert(b.id.clone(), (b.id, resolved));
+        }
+    }
+
     let dtos: Vec<serde_json::Value> = requests
         .into_iter()
         .map(|(req, peer)| {
-            let book_info = isbn_book_map.get(&req.book_isbn);
+            let book_info = req
+                .book_id
+                .as_ref()
+                .and_then(|id| id_book_map.get(id))
+                .or_else(|| isbn_book_map.get(&req.book_isbn));
             json!({
                 "id": req.id,
                 "book_title": req.book_title,
@@ -403,15 +417,12 @@ pub async fn update_request_status(
 
         // 2. Find Book and Available Copy
         tracing::info!(
-            "Looking for book with ISBN: '{}' for request {}",
+            "Looking for book id={:?} ISBN='{}' for request {}",
+            req.book_id,
             req.book_isbn,
             req.id
         );
-        let book = match book::Entity::find()
-            .filter(book::Column::Isbn.eq(&req.book_isbn))
-            .one(&db)
-            .await
-        {
+        let book = match resolve_requested_book(&db, req.book_id.as_deref(), &req.book_isbn).await {
             Ok(Some(b)) => {
                 tracing::info!("Found book: {} (id={})", b.title, b.id);
                 b
@@ -690,9 +701,7 @@ pub async fn update_request_status(
         };
 
         if let Some(contact) = contact {
-            let book = book::Entity::find()
-                .filter(book::Column::Isbn.eq(&req.book_isbn))
-                .one(&db)
+            let book = resolve_requested_book(&db, req.book_id.as_deref(), &req.book_isbn)
                 .await
                 .unwrap_or(None);
 
