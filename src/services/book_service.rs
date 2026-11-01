@@ -1142,8 +1142,8 @@ where
 }
 
 /// Delete a shelf as the user sees it: the `tags` row, its book links, its
-/// children re-parented to the root, and its name out of every book's
-/// subjects, in ONE transaction.
+/// sub-shelves moved up one level (under the deleted shelf's parent), and its
+/// name out of every book's subjects, in ONE transaction.
 ///
 /// The name has to be resolved before the row goes, and the two halves must
 /// commit together: a row dropped while the name stayed in the books is the
@@ -2782,7 +2782,8 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        // The child climbs to the root rather than pointing at a vanished parent.
+        // The shelf was at the first level, so its child moves up to the first
+        // level rather than pointing at a vanished parent.
         let child = tag::Entity::find_by_id(child.id)
             .one(&db)
             .await

@@ -25,7 +25,13 @@ pub struct FrbTag {
 /// Get all tags with hierarchy info
 pub async fn get_all_tags() -> Result<Vec<FrbTag>, String> {
     let db = db().ok_or("Database not initialized")?;
+    get_all_tags_in(db).await
+}
 
+/// [`get_all_tags`] over an explicit connection, so it can be tested without
+/// the global FFI database. A flat list: the tree, and its tolerance of a
+/// cycle merged from sync, are built by the client.
+async fn get_all_tags_in(db: &sea_orm::DatabaseConnection) -> Result<Vec<FrbTag>, String> {
     // 1. Fetch hierarchical tags from DB
     use crate::models::tag;
     use sea_orm::{EntityTrait, QueryOrder};
@@ -117,8 +123,28 @@ pub async fn update_tag(
     parent_id: Option<String>,
 ) -> Result<FrbTag, String> {
     let db = db().ok_or("Database not initialized")?;
+    update_tag_in(db, id, name, parent_id).await
+}
+
+/// [`update_tag`] over an explicit connection, so it can be tested without
+/// the global FFI database. Refuses a move that would put a shelf under
+/// itself or one of its sub-shelves, before anything is written.
+async fn update_tag_in(
+    db: &sea_orm::DatabaseConnection,
+    id: String,
+    name: String,
+    parent_id: Option<String>,
+) -> Result<FrbTag, String> {
     use crate::models::tag;
+    use crate::services::book_service::ServiceError;
     use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+    crate::services::shelf_tree_service::ensure_parent_allowed(db, &id, parent_id.as_deref())
+        .await
+        .map_err(|e| match e {
+            ServiceError::InvalidInput(msg) => msg,
+            other => format!("{other:?}"),
+        })?;
 
     let tag_model = tag::Entity::find_by_id(id)
         .one(db)
@@ -224,4 +250,110 @@ pub async fn remove_subject(name: String) -> Result<(), String> {
         .await
         .map(|_| ())
         .map_err(|e| format!("{e:?}"))
+}
+
+#[cfg(test)]
+mod tag_tree_tests {
+    use super::{get_all_tags_in, update_tag_in};
+    use crate::models::tag;
+    use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+
+    async fn shelf(db: &DatabaseConnection, name: &str, parent: Option<&str>) -> String {
+        let now = chrono::Utc::now().to_rfc3339();
+        tag::ActiveModel {
+            name: Set(name.to_owned()),
+            parent_id: Set(parent.map(str::to_owned)),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap()
+        .id
+    }
+
+    async fn parent_of(db: &DatabaseConnection, id: &str) -> Option<String> {
+        tag::Entity::find_by_id(id.to_owned())
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap()
+            .parent_id
+    }
+
+    #[tokio::test]
+    async fn update_tag_refuses_to_move_a_shelf_under_itself() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let top = shelf(&db, "Living room", None).await;
+
+        let err = update_tag_in(&db, top.clone(), "Living room".into(), Some(top.clone()))
+            .await
+            .err()
+            .expect("a shelf cannot be its own parent");
+
+        assert!(err.contains("cannot be moved under itself"), "{err}");
+        assert_eq!(parent_of(&db, &top).await, None, "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn update_tag_refuses_to_move_a_shelf_under_its_grandchild() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let top = shelf(&db, "Living room", None).await;
+        let middle = shelf(&db, "Novels", Some(&top)).await;
+        let leaf = shelf(&db, "Crime", Some(&middle)).await;
+
+        let err = update_tag_in(&db, top.clone(), "Living room".into(), Some(leaf))
+            .await
+            .err()
+            .expect("a shelf cannot move under its own sub-shelf");
+
+        assert!(err.contains("cannot be moved under itself"), "{err}");
+        assert_eq!(parent_of(&db, &top).await, None, "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn update_tag_still_moves_a_shelf_elsewhere_and_to_the_first_level() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let top = shelf(&db, "Living room", None).await;
+        let other = shelf(&db, "Office", None).await;
+        let middle = shelf(&db, "Novels", Some(&top)).await;
+
+        assert!(
+            update_tag_in(&db, middle.clone(), "Novels".into(), Some(other.clone()))
+                .await
+                .is_ok()
+        );
+        assert_eq!(parent_of(&db, &middle).await, Some(other));
+
+        assert!(
+            update_tag_in(&db, middle.clone(), "Novels".into(), None)
+                .await
+                .is_ok()
+        );
+        assert_eq!(parent_of(&db, &middle).await, None);
+    }
+
+    #[tokio::test]
+    async fn get_all_tags_answers_over_a_cycle_merged_from_sync() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let a = shelf(&db, "A", None).await;
+        let b = shelf(&db, "B", Some(&a)).await;
+        // Close the loop behind the gate, the way a sync merge can.
+        let mut active: tag::ActiveModel = tag::Entity::find_by_id(a.clone())
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+        active.parent_id = Set(Some(b.clone()));
+        active.update(&db).await.unwrap();
+
+        let Ok(tags) = get_all_tags_in(&db).await else {
+            panic!("a cycle is not an error");
+        };
+
+        let ids: Vec<&str> = tags.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&a.as_str()) && ids.contains(&b.as_str()));
+    }
 }

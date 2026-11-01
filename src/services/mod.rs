@@ -54,6 +54,7 @@ pub mod relay_poller;
 pub mod relay_session;
 pub mod relay_transport;
 pub mod sale_service; // Service de vente pour profil Libraire
+pub mod shelf_tree_service;
 pub mod shelving_service;
 pub mod wishlist_service;
 pub mod ws_nudge;
