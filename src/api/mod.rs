@@ -261,6 +261,7 @@ fn owner_routes() -> Router<AppState> {
         .route("/tags", get(tag::list_tags))
         .route("/tags", post(tag::create_tag))
         .route("/tags/tree", get(tag::list_tags_tree))
+        .route("/tags/unshelved-count", get(tag::unshelved_count))
         .route("/tags/:id", get(tag::get_tag))
         .route("/tags/:id", axum::routing::delete(tag::delete_tag))
         // Peer management and orchestration (local UI; several call peers outbound)

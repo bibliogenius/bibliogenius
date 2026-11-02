@@ -28,6 +28,16 @@ pub async fn get_all_tags() -> Result<Vec<FrbTag>, String> {
     get_all_tags_in(db).await
 }
 
+/// Number of books in the default library view that sit on no shelf, for the
+/// "to shelve" card of the shelves screen. Same scope as the `count` of
+/// [`get_all_tags`]: wished books are left out.
+pub async fn count_unshelved_books() -> Result<i64, String> {
+    let db = db().ok_or("Database not initialized")?;
+    crate::services::book_service::unshelved_count(db)
+        .await
+        .map_err(|e| format!("{e:?}"))
+}
+
 /// [`get_all_tags`] over an explicit connection, so it can be tested without
 /// the global FFI database. A flat list: the tree, and its tolerance of a
 /// cycle merged from sync, are built by the client.

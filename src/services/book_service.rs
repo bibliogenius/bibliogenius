@@ -1077,25 +1077,60 @@ pub struct SubjectCount {
 pub async fn subject_counts(
     db: &DatabaseConnection,
 ) -> Result<HashMap<String, SubjectCount>, ServiceError> {
-    let books = BookEntity::find().all(db).await?;
+    let rows = subject_rows(db).await?;
+    Ok(tally_subjects(rows.iter().map(|(subjects, in_view)| {
+        (subjects.as_deref(), *in_view)
+    })))
+}
+
+/// Number of books in the default library view that sit on no shelf.
+///
+/// Feeds the "to shelve" card of the shelves screen. Same scope as the shelf
+/// badges ([`subject_counts`]): wished books are left out, books on loan are
+/// in. A genre is a shelf, so a book carrying only a genre is shelved.
+pub async fn unshelved_count(db: &DatabaseConnection) -> Result<i64, ServiceError> {
+    let rows = subject_rows(db).await?;
+    Ok(tally_unshelved(rows.iter().map(|(subjects, in_view)| {
+        (subjects.as_deref(), *in_view)
+    })))
+}
+
+/// `(subjects JSON, is in the default view)` for every book: the input shared
+/// by the shelf badges and the unshelved count, so both read one scope.
+async fn subject_rows(
+    db: &DatabaseConnection,
+) -> Result<Vec<(Option<String>, bool)>, ServiceError> {
+    use crate::models::book::Column as BookColumn;
+    use crate::models::copy::{Column as CopyColumn, Entity as CopyEntity};
+
+    // Only the three columns the counts read: the shelves screen asks on every
+    // book change, and a full row carries the summary and the rest.
+    let books: Vec<(String, bool, Option<String>)> = BookEntity::find()
+        .select_only()
+        .column(BookColumn::Id)
+        .column(BookColumn::Owned)
+        .column(BookColumn::Subjects)
+        .into_tuple()
+        .all(db)
+        .await?;
 
     // One query for the on-loan book ids: any copy lent out or borrowed keeps
     // its book physically relevant even when `owned` is false (same rule as
     // the `is_borrowed`/`is_lent` flags in `list_books`).
-    let on_loan: std::collections::HashSet<String> = crate::models::copy::Entity::find()
-        .filter(crate::models::copy::Column::Status.is_in(["loaned", "borrowed"]))
+    let on_loan: std::collections::HashSet<String> = CopyEntity::find()
+        .select_only()
+        .column(CopyColumn::BookId)
+        .filter(CopyColumn::Status.is_in(["loaned", "borrowed"]))
+        .into_tuple()
         .all(db)
         .await?
         .into_iter()
-        .map(|c| c.book_id)
         .collect();
 
-    Ok(tally_subjects(books.iter().map(|book| {
-        (
-            book.subjects.as_deref(),
-            book.owned || on_loan.contains(&book.id),
-        )
-    })))
+    Ok(books
+        .into_iter()
+        .map(|(id, owned, subjects)| (subjects, owned || on_loan.contains(&id)))
+        .collect())
 }
 
 /// Drop `name` from every book's `subjects`, returning how many books were
@@ -1175,25 +1210,40 @@ fn tally_subjects<'a>(
     let mut tag_counts: HashMap<String, SubjectCount> = HashMap::new();
 
     for (subjects_json, in_default_view) in rows {
-        if let Some(json) = subjects_json
-            && let Ok(subjects) = serde_json::from_str::<Vec<String>>(json)
-        {
-            for subject in subjects {
-                let trimmed = subject.trim();
-                if !trimmed.is_empty() {
-                    // Subjects carried only by books outside the view still
-                    // get an entry, so the shelf itself stays listed.
-                    let entry = tag_counts.entry(trimmed.to_string()).or_default();
-                    entry.total += 1;
-                    if in_default_view {
-                        entry.in_default_view += 1;
-                    }
-                }
+        for name in shelf_names(subjects_json) {
+            // Subjects carried only by books outside the view still get an
+            // entry, so the shelf itself stays listed.
+            let entry = tag_counts.entry(name).or_default();
+            entry.total += 1;
+            if in_default_view {
+                entry.in_default_view += 1;
             }
         }
     }
 
     tag_counts
+}
+
+/// The counting behind [`unshelved_count`], over the same rows as
+/// [`tally_subjects`]: a book in the default view that the badges credit to
+/// no shelf is a book to shelve.
+fn tally_unshelved<'a>(rows: impl Iterator<Item = (Option<&'a str>, bool)>) -> i64 {
+    rows.filter(|(subjects_json, in_default_view)| {
+        *in_default_view && shelf_names(*subjects_json).is_empty()
+    })
+    .count() as i64
+}
+
+/// The trimmed, non-blank shelf names a `subjects` JSON column carries.
+/// Absent, empty or unparseable JSON carries none.
+fn shelf_names(subjects_json: Option<&str>) -> Vec<String> {
+    subjects_json
+        .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|subject| subject.trim().to_string())
+        .filter(|subject| !subject.is_empty())
+        .collect()
 }
 
 /// List all unique tags with counts (default-view scoped, see [`subject_counts`])
@@ -3223,6 +3273,85 @@ mod tests {
             .expect("shelf must stay listed even when all its books are not owned");
         assert_eq!(envies.count, 0);
     }
+
+    // ── unshelved count (the "to shelve" card) ──────────────────────────
+    //
+    // Same scope as the shelf badges: the default library view. A book on no
+    // shelf counts whatever way "no shelf" is spelled in the row.
+
+    async fn insert_test_book_with_raw_subjects(
+        db: &DatabaseConnection,
+        title: &str,
+        owned: bool,
+        subjects: Option<&str>,
+    ) -> String {
+        use crate::models::book;
+        use sea_orm::Set;
+        let now = chrono::Utc::now().to_rfc3339();
+        let id = uuid::Uuid::new_v4().to_string();
+        book::Entity::insert(book::ActiveModel {
+            id: Set(id.clone()),
+            title: Set(title.to_owned()),
+            owned: Set(owned),
+            subjects: Set(subjects.map(str::to_owned)),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn unshelved_count_counts_null_empty_and_empty_array_subjects() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+
+        insert_test_book_with_raw_subjects(&db, "Null", true, None).await;
+        insert_test_book_with_raw_subjects(&db, "Empty string", true, Some("")).await;
+        insert_test_book_with_raw_subjects(&db, "Empty array", true, Some("[]")).await;
+        insert_test_book_with_raw_subjects(&db, "Blank only", true, Some(r#"["  "]"#)).await;
+        insert_test_book_with_subjects(&db, "Shelved", true, &["Crime"]).await;
+        // A genre is a shelf: a book carrying only one is shelved.
+        insert_test_book_with_subjects(&db, "Genre only", true, &["Genre"]).await;
+
+        assert_eq!(unshelved_count(&db).await.unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn unshelved_count_ignores_wished_books_and_keeps_on_loan_ones() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+
+        insert_test_book_with_raw_subjects(&db, "Wished", false, None).await;
+        insert_test_book_with_raw_subjects(&db, "Wished too", false, Some("[]")).await;
+        let borrowed = insert_test_book_with_raw_subjects(&db, "Borrowed", false, None).await;
+        insert_test_copy(&db, &borrowed, "borrowed", false).await;
+        insert_test_book_with_raw_subjects(&db, "Owned", true, None).await;
+
+        assert_eq!(
+            unshelved_count(&db).await.unwrap(),
+            2,
+            "same scope as the shelf badges: wishes out, books on loan in"
+        );
+    }
+
+    #[test]
+    fn unshelved_tally_follows_the_shelf_badge_parsing() {
+        // A row the badges would credit to no shelf is a row to shelve,
+        // unparseable JSON included: it sits on no shelf the reader can see.
+        let rows = [
+            (None, true),
+            (Some(""), true),
+            (Some("[]"), true),
+            (Some(r#"["", " "]"#), true),
+            (Some("not json at all"), true),
+            (Some(r#"["Crime"]"#), true),
+            (None, false),
+        ];
+        assert_eq!(tally_unshelved(rows.into_iter()), 5);
+    }
+
     /// A reader can take a reading date back off a book: the edit form sends
     /// `Some(None)` for a date it no longer holds, and the row must end up
     /// NULL. Nothing in the domain makes `finished_reading_at` mandatory -
