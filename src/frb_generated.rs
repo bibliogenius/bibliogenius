@@ -10523,12 +10523,14 @@ impl SseDecode for crate::api::frb::FrbTag {
         let mut var_parentId = <Option<String>>::sse_decode(deserializer);
         let mut var_count = <i64>::sse_decode(deserializer);
         let mut var_totalCount = <i64>::sse_decode(deserializer);
+        let mut var_coverPaths = <Vec<String>>::sse_decode(deserializer);
         return crate::api::frb::FrbTag {
             id: var_id,
             name: var_name,
             parent_id: var_parentId,
             count: var_count,
             total_count: var_totalCount,
+            cover_paths: var_coverPaths,
         };
     }
 }
@@ -14016,6 +14018,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbTag {
             self.parent_id.into_into_dart().into_dart(),
             self.count.into_into_dart().into_dart(),
             self.total_count.into_into_dart().into_dart(),
+            self.cover_paths.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -15110,6 +15113,7 @@ impl SseEncode for crate::api::frb::FrbTag {
         <Option<String>>::sse_encode(self.parent_id, serializer);
         <i64>::sse_encode(self.count, serializer);
         <i64>::sse_encode(self.total_count, serializer);
+        <Vec<String>>::sse_encode(self.cover_paths, serializer);
     }
 }
 

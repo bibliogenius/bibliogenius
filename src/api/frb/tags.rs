@@ -20,12 +20,14 @@ pub struct FrbTag {
     /// tap will open. Printing `count` under a "show everything" axis is how
     /// a shelf ends up announcing 0 and then listing ten books.
     pub total_count: i64,
+    /// Up to three covers for the shelf's thumbnail, newest first.
+    pub cover_paths: Vec<String>,
 }
 
 /// Get all tags with hierarchy info
 pub async fn get_all_tags() -> Result<Vec<FrbTag>, String> {
     let db = db().ok_or("Database not initialized")?;
-    get_all_tags_in(db).await
+    get_all_tags_in(db, covers_dir().map(|d| d.as_path())).await
 }
 
 /// Number of books in the default library view that sit on no shelf, for the
@@ -38,35 +40,34 @@ pub async fn count_unshelved_books() -> Result<i64, String> {
         .map_err(|e| format!("{e:?}"))
 }
 
-/// [`get_all_tags`] over an explicit connection, so it can be tested without
-/// the global FFI database. A flat list: the tree, and its tolerance of a
-/// cycle merged from sync, are built by the client.
-async fn get_all_tags_in(db: &sea_orm::DatabaseConnection) -> Result<Vec<FrbTag>, String> {
-    // 1. Fetch hierarchical tags from DB
-    use crate::models::tag;
-    use sea_orm::{EntityTrait, QueryOrder};
-    let db_tags = tag::Entity::find()
-        .order_by_asc(tag::Column::Name)
-        .all(db)
+/// [`get_all_tags`] over an explicit connection and covers directory, so it
+/// can be tested without the FFI globals. A flat list: the tree, and its
+/// tolerance of a cycle merged from sync, are built by the client.
+async fn get_all_tags_in(
+    db: &sea_orm::DatabaseConnection,
+    covers_dir: Option<&std::path::Path>,
+) -> Result<Vec<FrbTag>, String> {
+    use crate::services::book_service::{CoverChannel, shelf_listing};
+
+    // The `tags` rows, the badge counts scoped to the default library view
+    // (ADR-063) and the thumbnail covers, from one read of the books. The
+    // rule lives in the service, shared with `GET /api/books/tags`.
+    let listing = shelf_listing(db, CoverChannel::OnDevice(covers_dir))
         .await
         .map_err(|e| format!("{:?}", e))?;
+    let tag_counts = listing.counts;
+    let covers = listing.covers;
 
-    // 2. Fetch counts from legacy book subjects (JSON), scoped to the default
-    // library view so the badge agrees with the opened shelf (ADR-063). The
-    // rule lives in `book_service::subject_counts`, shared with the HTTP path.
-    let tag_counts = crate::services::book_service::subject_counts(db)
-        .await
-        .map_err(|e| format!("{:?}", e))?;
-
-    // 3. Merge: Prioritize DB hierarchy, add legacy tags as roots if missing
+    // Merge: Prioritize DB hierarchy, add legacy tags as roots if missing
     let mut result = Vec::new();
     let mut processed_names = std::collections::HashSet::new();
 
     // Add DB tags
-    for t in db_tags {
+    for t in listing.tags {
         let counts = tag_counts.get(&t.name).copied().unwrap_or_default();
         processed_names.insert(t.name.clone());
         result.push(FrbTag {
+            cover_paths: covers.get(&t.name).cloned().unwrap_or_default(),
             id: t.id,
             name: t.name,
             parent_id: t.parent_id,
@@ -82,6 +83,7 @@ async fn get_all_tags_in(db: &sea_orm::DatabaseConnection) -> Result<Vec<FrbTag>
         if !processed_names.contains(&name) {
             result.push(FrbTag {
                 id: format!("legacy:{next_legacy_id}"),
+                cover_paths: covers.get(&name).cloned().unwrap_or_default(),
                 name,
                 parent_id: None,
                 count: counts.in_default_view,
@@ -120,6 +122,7 @@ pub async fn create_tag(name: String, parent_id: Option<String>) -> Result<FrbTa
                 parent_id: t.parent_id,
                 count: 0,
                 total_count: 0,
+                cover_paths: Vec::new(),
             })
         }
         Err(e) => Err(format!("{:?}", e)),
@@ -184,6 +187,7 @@ async fn update_tag_in(
                 parent_id: t.parent_id,
                 count: 0,
                 total_count: 0,
+                cover_paths: Vec::new(),
             })
         }
         Err(e) => Err(format!("{:?}", e)),
@@ -359,11 +363,258 @@ mod tag_tree_tests {
         active.parent_id = Set(Some(b.clone()));
         active.update(&db).await.unwrap();
 
-        let Ok(tags) = get_all_tags_in(&db).await else {
+        let Ok(tags) = get_all_tags_in(&db, None).await else {
             panic!("a cycle is not an error");
         };
 
         let ids: Vec<&str> = tags.iter().map(|t| t.id.as_str()).collect();
         assert!(ids.contains(&a.as_str()) && ids.contains(&b.as_str()));
+    }
+
+    // ---- Shelf thumbnails: `cover_paths` ----
+
+    /// A book filed on `shelves`, last modified at `updated_at` (RFC 3339, so
+    /// the order between books is the one the test states).
+    async fn book(
+        db: &DatabaseConnection,
+        shelves: &[&str],
+        cover: Option<&str>,
+        owned: bool,
+        updated_at: &str,
+    ) -> String {
+        use crate::models::book;
+        let id = uuid::Uuid::new_v4().to_string();
+        book::Entity::insert(book::ActiveModel {
+            id: Set(id.clone()),
+            title: Set(format!("Book {updated_at}")),
+            owned: Set(owned),
+            subjects: Set(Some(serde_json::to_string(shelves).unwrap())),
+            cover_url: Set(cover.map(str::to_owned)),
+            created_at: Set(updated_at.to_owned()),
+            updated_at: Set(updated_at.to_owned()),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    fn covers_of<'a>(tags: &'a [super::FrbTag], name: &str) -> Vec<&'a str> {
+        tags.iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("{name} is listed"))
+            .cover_paths
+            .iter()
+            .map(String::as_str)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_shelf_shows_the_three_most_recent_covers_of_its_subtree() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let top = shelf(&db, "Living room", None).await;
+        let middle = shelf(&db, "Novels", Some(&top)).await;
+        shelf(&db, "Crime", Some(&middle)).await;
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        book(&db, &["Crime"], Some("https://c/a.jpg"), true, &t(1)).await;
+        book(&db, &["Novels"], Some("https://c/b.jpg"), true, &t(2)).await;
+        book(&db, &["Living room"], Some("https://c/c.jpg"), true, &t(3)).await;
+        book(&db, &["Crime"], Some("https://c/d.jpg"), true, &t(4)).await;
+        // The newest book has no cover: it is skipped, it takes no slot.
+        book(&db, &["Novels"], None, true, &t(5)).await;
+        book(&db, &["Novels"], Some(""), true, &t(6)).await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(
+            covers_of(&tags, "Living room"),
+            ["https://c/d.jpg", "https://c/c.jpg", "https://c/b.jpg"]
+        );
+        assert_eq!(
+            covers_of(&tags, "Novels"),
+            ["https://c/d.jpg", "https://c/b.jpg", "https://c/a.jpg"]
+        );
+        assert_eq!(
+            covers_of(&tags, "Crime"),
+            ["https://c/d.jpg", "https://c/a.jpg"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_book_outside_the_default_view_gives_no_cover() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        shelf(&db, "Novels", None).await;
+        book(
+            &db,
+            &["Novels"],
+            Some("https://c/own.jpg"),
+            true,
+            "2026-01-01T10:00:00+00:00",
+        )
+        .await;
+        // Newer, but wished: the opened shelf does not show it.
+        book(
+            &db,
+            &["Novels"],
+            Some("https://c/wish.jpg"),
+            false,
+            "2026-01-02T10:00:00+00:00",
+        )
+        .await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(covers_of(&tags, "Novels"), ["https://c/own.jpg"]);
+    }
+
+    #[tokio::test]
+    async fn books_stamped_alike_keep_one_order_between_reloads() {
+        use crate::models::book;
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        shelf(&db, "Novels", None).await;
+        // Bulk shelving gives every book the same `updated_at`.
+        for id in ["a", "b", "c"] {
+            book::Entity::insert(book::ActiveModel {
+                id: Set(id.to_owned()),
+                title: Set(format!("Book {id}")),
+                owned: Set(true),
+                subjects: Set(Some(r#"["Novels"]"#.to_owned())),
+                cover_url: Set(Some(format!("https://c/{id}.jpg"))),
+                created_at: Set("2026-01-01T10:00:00+00:00".to_owned()),
+                updated_at: Set("2026-01-01T10:00:00+00:00".to_owned()),
+                ..Default::default()
+            })
+            .exec(&db)
+            .await
+            .unwrap();
+        }
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(
+            covers_of(&tags, "Novels"),
+            ["https://c/c.jpg", "https://c/b.jpg", "https://c/a.jpg"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_book_on_a_shelf_and_on_its_parent_counts_once_for_the_parent() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let top = shelf(&db, "Living room", None).await;
+        shelf(&db, "Novels", Some(&top)).await;
+        book(
+            &db,
+            &["Novels", "Living room"],
+            Some("https://c/a.jpg"),
+            true,
+            "2026-01-01T10:00:00+00:00",
+        )
+        .await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(covers_of(&tags, "Living room"), ["https://c/a.jpg"]);
+    }
+
+    #[tokio::test]
+    async fn covers_climb_a_cycle_merged_from_sync_without_looping() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let a = shelf(&db, "A", None).await;
+        let b = shelf(&db, "B", Some(&a)).await;
+        let mut active: tag::ActiveModel = tag::Entity::find_by_id(a.clone())
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+        active.parent_id = Set(Some(b));
+        active.update(&db).await.unwrap();
+        book(
+            &db,
+            &["B"],
+            Some("https://c/b.jpg"),
+            true,
+            "2026-01-01T10:00:00+00:00",
+        )
+        .await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(covers_of(&tags, "A"), ["https://c/b.jpg"]);
+        assert_eq!(covers_of(&tags, "B"), ["https://c/b.jpg"]);
+    }
+
+    #[tokio::test]
+    async fn a_local_cover_missing_on_this_device_is_skipped() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        shelf(&db, "Novels", None).await;
+        let here = book(&db, &["Novels"], None, true, "2026-01-01T10:00:00+00:00").await;
+        let gone = book(&db, &["Novels"], None, true, "2026-01-02T10:00:00+00:00").await;
+        // Both rows name a local cover; only the first has its bytes here.
+        // The stored prefix is a dead container: the path returned is the
+        // one derived from the book's identity.
+        for id in [&here, &gone] {
+            use crate::models::book;
+            let mut active: book::ActiveModel = book::Entity::find_by_id(id.clone())
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .into();
+            active.cover_url = Set(Some(format!("/var/mobile/old/covers/{id}.jpg")));
+            active.updated_at = Set(if id == &here {
+                "2026-01-01T10:00:00+00:00".into()
+            } else {
+                "2026-01-02T10:00:00+00:00".into()
+            });
+            active.update(&db).await.unwrap();
+        }
+        std::fs::write(dir.path().join(format!("{here}.jpg")), b"jpg").unwrap();
+
+        let tags = get_all_tags_in(&db, Some(dir.path())).await.unwrap();
+
+        let expected = dir.path().join(format!("{here}.jpg"));
+        assert_eq!(covers_of(&tags, "Novels"), [expected.to_str().unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn two_hundred_shelves_read_the_books_once() {
+        use std::sync::{Arc, Mutex};
+        let mut db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let mut parent: Option<String> = None;
+        for i in 0..200 {
+            // Ten chains of twenty levels: deep enough to make a per-shelf
+            // or per-level read show up.
+            if i % 20 == 0 {
+                parent = None;
+            }
+            let name = format!("Shelf {i}");
+            let id = shelf(&db, &name, parent.as_deref()).await;
+            let at = format!("2026-01-01T10:{:02}:{:02}+00:00", i / 60, i % 60);
+            book(&db, &[&name], Some("https://c/x.jpg"), true, &at).await;
+            parent = Some(id);
+        }
+        let statements: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = statements.clone();
+        db.set_metric_callback(move |info| {
+            seen.lock().unwrap().push(info.statement.sql.clone());
+        });
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(tags.len(), 200);
+        // A leaf holds its own book, a shelf two levels up three.
+        assert!(tags.iter().all(|t| (1..=3).contains(&t.cover_paths.len())));
+        assert_eq!(covers_of(&tags, "Shelf 0").len(), 3);
+        assert_eq!(covers_of(&tags, "Shelf 19").len(), 1);
+        let book_reads = statements
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|sql| sql.contains(r#"FROM "books""#))
+            .count();
+        assert_eq!(book_reads, 1, "{:#?}", statements.lock().unwrap());
     }
 }

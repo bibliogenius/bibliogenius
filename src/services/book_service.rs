@@ -29,6 +29,10 @@ pub struct BookFilter {
 pub struct TagDto {
     pub name: String,
     pub count: usize,
+    /// Every book on the shelf, wished ones included.
+    pub total_count: usize,
+    /// Up to three thumbnail covers, newest first: URLs, never disk paths.
+    pub cover_urls: Vec<String>,
 }
 
 /// A cover candidate from an external source, for the multi-cover picker.
@@ -1078,9 +1082,182 @@ pub async fn subject_counts(
     db: &DatabaseConnection,
 ) -> Result<HashMap<String, SubjectCount>, ServiceError> {
     let rows = subject_rows(db).await?;
-    Ok(tally_subjects(rows.iter().map(|(subjects, in_view)| {
-        (subjects.as_deref(), *in_view)
-    })))
+    Ok(tally_subjects(rows.iter().map(ShelfBookRow::scope)))
+}
+
+/// Most covers a shelf thumbnail shows.
+pub const SHELF_THUMBNAIL_COVERS: usize = 3;
+
+/// Where the covers of a shelf listing are going, which decides their form.
+#[derive(Debug, Clone, Copy)]
+pub enum CoverChannel<'a> {
+    /// The app on this device (FFI): a local cover is the path of the file,
+    /// derived from the book's identity.
+    OnDevice(Option<&'a std::path::Path>),
+    /// An HTTP client: a local cover is the book's cover route, never a path
+    /// on this device's disk.
+    Http(Option<&'a std::path::Path>),
+}
+
+impl CoverChannel<'_> {
+    /// The covers directory registered in app mode, `None` in server mode.
+    fn covers_dir(&self) -> Option<&std::path::Path> {
+        match *self {
+            CoverChannel::OnDevice(dir) | CoverChannel::Http(dir) => dir,
+        }
+    }
+}
+
+/// Everything the shelves screen lists, from ONE read of the books.
+pub struct ShelfListing {
+    /// The `tags` rows, by name.
+    pub tags: Vec<crate::models::tag::Model>,
+    /// Badge counts by shelf name, as [`subject_counts`] reports them.
+    pub counts: HashMap<String, SubjectCount>,
+    /// Up to [`SHELF_THUMBNAIL_COVERS`] covers by shelf name, newest first,
+    /// sub-shelves included. A shelf with none is absent.
+    pub covers: HashMap<String, Vec<String>>,
+}
+
+/// The shelves with their badge counts and their thumbnail covers.
+///
+/// The books are read once, newest first, and both the counts and the
+/// covers are worked out from that read in memory: the shelves screen asks
+/// on every reload, and one query per shelf would grow with the tree. Same
+/// scope as the badges, the default library view.
+pub async fn shelf_listing(
+    db: &DatabaseConnection,
+    channel: CoverChannel<'_>,
+) -> Result<ShelfListing, ServiceError> {
+    use crate::models::tag;
+
+    let tags = tag::Entity::find()
+        .order_by_asc(tag::Column::Name)
+        .all(db)
+        .await?;
+    let rows = subject_rows(db).await?;
+    let counts = tally_subjects(rows.iter().map(ShelfBookRow::scope));
+    let shelf_total = counts
+        .keys()
+        .map(String::as_str)
+        .chain(tags.iter().map(|t| t.name.as_str()))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let covers = recent_covers(&tags, shelf_total, &rows, |row| {
+        thumbnail_cover(row, channel)
+    });
+    Ok(ShelfListing {
+        tags,
+        counts,
+        covers,
+    })
+}
+
+/// The newest covers of each shelf's subtree, over rows sorted newest first.
+///
+/// A book counts for each of its shelves and for their ancestors, once per
+/// shelf even when it sits on a shelf and on its parent. Books outside the
+/// default view, and books without a usable cover, take no slot. `resolve`
+/// runs at most once per book, and only when a shelf still has room, since
+/// it may touch the disk. Stops early only once every shelf holds three
+/// covers; a shelf that never fills keeps the walk going to the end.
+fn recent_covers<'a>(
+    tags: &[crate::models::tag::Model],
+    shelf_total: usize,
+    rows: &'a [ShelfBookRow],
+    mut resolve: impl FnMut(&'a ShelfBookRow) -> Option<String>,
+) -> HashMap<String, Vec<String>> {
+    // Books file shelves by name, so the tree is walked by name.
+    let name_of: HashMap<&str, &str> = tags
+        .iter()
+        .map(|t| (t.id.as_str(), t.name.as_str()))
+        .collect();
+    let parent_of: HashMap<&str, &str> = tags
+        .iter()
+        .filter_map(|t| {
+            let parent = name_of.get(t.parent_id.as_deref()?)?;
+            Some((t.name.as_str(), *parent))
+        })
+        .collect();
+
+    let mut covers: HashMap<String, Vec<String>> = HashMap::new();
+    let mut full = 0;
+    for row in rows {
+        if full >= shelf_total {
+            break;
+        }
+        let has_cover = row.cover_url.as_deref().is_some_and(|c| !c.is_empty());
+        if !row.in_default_view || !has_cover {
+            continue;
+        }
+        let mut shelves: Vec<String> = Vec::new();
+        for name in shelf_names(row.subjects.as_deref()) {
+            let mut current = Some(name);
+            // A shelf already listed had its ancestors listed with it, so
+            // stopping there also ends a climb round a cycle from sync.
+            while let Some(shelf) = current.take() {
+                if shelves.contains(&shelf) {
+                    break;
+                }
+                current = parent_of.get(shelf.as_str()).map(|p| p.to_string());
+                shelves.push(shelf);
+            }
+        }
+        shelves.retain(|shelf| {
+            covers
+                .get(shelf)
+                .is_none_or(|c| c.len() < SHELF_THUMBNAIL_COVERS)
+        });
+        if shelves.is_empty() {
+            continue;
+        }
+        let Some(cover) = resolve(row) else {
+            continue;
+        };
+        for shelf in shelves {
+            let slot = covers.entry(shelf).or_default();
+            slot.push(cover.clone());
+            if slot.len() == SHELF_THUMBNAIL_COVERS {
+                full += 1;
+            }
+        }
+    }
+    covers
+}
+
+/// The form a book's stored cover takes in a shelf thumbnail, or `None`
+/// when it cannot be shown.
+///
+/// A local cover whose bytes are not on this device (a path from an older
+/// iOS container, or a cover the sync has not brought yet) is skipped
+/// rather than handed out as an image that will not draw. In app mode the
+/// file is found from the book's identity, never from the stored value,
+/// which may name another device's disk.
+fn thumbnail_cover(row: &ShelfBookRow, channel: CoverChannel<'_>) -> Option<String> {
+    use crate::utils::cover_url;
+
+    let stored = row.cover_url.as_deref().filter(|c| !c.is_empty())?;
+    if !cover_url::is_local_cover(stored) {
+        return Some(stored.to_owned());
+    }
+    let dir = channel.covers_dir();
+    if cover_url::local_cover_bytes_absent(dir, stored, &row.id) {
+        return None;
+    }
+    match channel {
+        CoverChannel::Http(_) => cover_url::resolve_single(
+            Some(stored),
+            &row.id,
+            row.updated_at.as_deref(),
+            None,
+            cover_url::ResolveScope::Lan,
+        )
+        .ok()
+        .flatten(),
+        CoverChannel::OnDevice(None) => Some(stored.to_owned()),
+        CoverChannel::OnDevice(Some(dir)) => cover_url::own_local_cover_path(dir, &row.id)
+            .map(|path| path.to_string_lossy().into_owned()),
+    }
 }
 
 /// Number of books in the default library view that sit on no shelf.
@@ -1090,26 +1267,45 @@ pub async fn subject_counts(
 /// in. A genre is a shelf, so a book carrying only a genre is shelved.
 pub async fn unshelved_count(db: &DatabaseConnection) -> Result<i64, ServiceError> {
     let rows = subject_rows(db).await?;
-    Ok(tally_unshelved(rows.iter().map(|(subjects, in_view)| {
-        (subjects.as_deref(), *in_view)
-    })))
+    Ok(tally_unshelved(rows.iter().map(ShelfBookRow::scope)))
 }
 
-/// `(subjects JSON, is in the default view)` for every book: the input shared
-/// by the shelf badges and the unshelved count, so both read one scope.
-async fn subject_rows(
-    db: &DatabaseConnection,
-) -> Result<Vec<(Option<String>, bool)>, ServiceError> {
+/// One book as the shelves screen reads it.
+struct ShelfBookRow {
+    id: String,
+    subjects: Option<String>,
+    /// Owned, or physically here on loan: what the default view shows.
+    in_default_view: bool,
+    cover_url: Option<String>,
+    updated_at: Option<String>,
+}
+
+impl ShelfBookRow {
+    /// `(subjects JSON, is in the default view)`, what the counts read.
+    fn scope(&self) -> (Option<&str>, bool) {
+        (self.subjects.as_deref(), self.in_default_view)
+    }
+}
+
+/// Every book, newest first: the input shared by the shelf badges, the
+/// unshelved count and the shelf thumbnails, so all read one scope.
+async fn subject_rows(db: &DatabaseConnection) -> Result<Vec<ShelfBookRow>, ServiceError> {
     use crate::models::book::Column as BookColumn;
     use crate::models::copy::{Column as CopyColumn, Entity as CopyEntity};
 
-    // Only the three columns the counts read: the shelves screen asks on every
-    // book change, and a full row carries the summary and the rest.
-    let books: Vec<(String, bool, Option<String>)> = BookEntity::find()
+    // Only the columns the shelves screen reads: it asks on every book
+    // change, and a full row carries the summary and the rest.
+    type Row = (String, bool, Option<String>, Option<String>, Option<String>);
+    let books: Vec<Row> = BookEntity::find()
         .select_only()
         .column(BookColumn::Id)
         .column(BookColumn::Owned)
         .column(BookColumn::Subjects)
+        .column(BookColumn::CoverUrl)
+        .column(BookColumn::UpdatedAt)
+        .order_by_desc(BookColumn::UpdatedAt)
+        // Bulk shelving stamps many books alike: keep their order stable.
+        .order_by_desc(BookColumn::Id)
         .into_tuple()
         .all(db)
         .await?;
@@ -1129,7 +1325,15 @@ async fn subject_rows(
 
     Ok(books
         .into_iter()
-        .map(|(id, owned, subjects)| (subjects, owned || on_loan.contains(&id)))
+        .map(
+            |(id, owned, subjects, cover_url, updated_at)| ShelfBookRow {
+                in_default_view: owned || on_loan.contains(&id),
+                id,
+                subjects,
+                cover_url,
+                updated_at,
+            },
+        )
         .collect())
 }
 
@@ -1246,17 +1450,27 @@ fn shelf_names(subjects_json: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-/// List all unique tags with counts (default-view scoped, see [`subject_counts`])
-pub async fn list_tags(db: &DatabaseConnection) -> Result<Vec<TagDto>, ServiceError> {
-    let tag_counts = subject_counts(db).await?;
+/// Every shelf the books carry, with its badge count and thumbnail covers,
+/// for `GET /api/books/tags`: the HTTP side of the FFI `get_all_tags`, same
+/// read and same rule ([`shelf_listing`]). `covers_dir` is the one
+/// registered in app mode, `None` in server mode.
+pub async fn list_tags(
+    db: &DatabaseConnection,
+    covers_dir: Option<&std::path::Path>,
+) -> Result<Vec<TagDto>, ServiceError> {
+    let mut listing = shelf_listing(db, CoverChannel::Http(covers_dir)).await?;
 
-    let mut tags: Vec<TagDto> = tag_counts
+    let mut tags: Vec<TagDto> = listing
+        .counts
         .into_iter()
         .map(|(name, count)| TagDto {
+            cover_urls: listing.covers.remove(&name).unwrap_or_default(),
             name,
-            // The HTTP path keeps the default-view number it has always
-            // served: it answers peers, who see the physical library.
+            // The default-view number: the badge must agree with the
+            // shelf a tap opens (ADR-063), and peers see the physical
+            // library.
             count: count.in_default_view as usize,
+            total_count: count.total as usize,
         })
         .collect();
 
@@ -3246,7 +3460,7 @@ mod tests {
         let lent = insert_test_book_with_subjects(&db, "Lent out", true, &["SF"]).await;
         insert_test_copy(&db, &lent, "loaned", false).await;
 
-        let tags = list_tags(&db).await.unwrap();
+        let tags = list_tags(&db, None).await.unwrap();
         let sf = tags
             .iter()
             .find(|t| t.name == "SF")
@@ -3255,6 +3469,29 @@ mod tests {
             sf.count, 3,
             "wishlist books must not inflate the shelf badge"
         );
+    }
+
+    /// The route carries both numbers: the default-view badge, and the total
+    /// the web client reads for its "all books" scope.
+    #[tokio::test]
+    async fn the_tags_route_gives_the_default_view_count_and_the_total() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        insert_test_book_with_subjects(&db, "Owned", true, &["SF"]).await;
+        insert_test_book_with_subjects(&db, "Wished", false, &["SF"]).await;
+
+        let axum::Json(tags) = crate::api::books::list_tags(axum::extract::State(db))
+            .await
+            .unwrap();
+
+        let body = serde_json::to_value(&tags).unwrap();
+        let sf = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "SF")
+            .expect("SF shelf listed");
+        assert_eq!(sf["count"], 1);
+        assert_eq!(sf["total_count"], 2);
     }
 
     /// A shelf whose books are all outside the default view stays listed, with
@@ -3266,12 +3503,55 @@ mod tests {
 
         insert_test_book_with_subjects(&db, "Dream book", false, &["Envies"]).await;
 
-        let tags = list_tags(&db).await.unwrap();
+        let tags = list_tags(&db, None).await.unwrap();
         let envies = tags
             .iter()
             .find(|t| t.name == "Envies")
             .expect("shelf must stay listed even when all its books are not owned");
         assert_eq!(envies.count, 0);
+    }
+
+    /// Over HTTP a shelf's covers never name a file on this device: a local
+    /// cover is served by the book's own cover route, a remote one as is.
+    #[tokio::test]
+    async fn list_tags_serves_covers_as_urls_never_as_disk_paths() {
+        use crate::models::book;
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let local = insert_test_book_with_subjects(&db, "Local", true, &["SF"]).await;
+        let remote = insert_test_book_with_subjects(&db, "Remote", true, &["SF"]).await;
+        for (id, cover, at) in [
+            (
+                &local,
+                format!("/var/mobile/old/covers/{local}.jpg"),
+                "2026-01-02T10:00:00+00:00",
+            ),
+            (
+                &remote,
+                "https://c/r.jpg".to_owned(),
+                "2026-01-01T10:00:00+00:00",
+            ),
+        ] {
+            book::Entity::update_many()
+                .col_expr(book::Column::CoverUrl, cover.into())
+                .col_expr(book::Column::UpdatedAt, at.into())
+                .filter(book::Column::Id.eq(id.as_str()))
+                .exec(&db)
+                .await
+                .unwrap();
+        }
+        std::fs::write(dir.path().join(format!("{local}.jpg")), b"jpg").unwrap();
+
+        let tags = list_tags(&db, Some(dir.path())).await.unwrap();
+
+        let sf = tags.iter().find(|t| t.name == "SF").expect("SF listed");
+        assert_eq!(sf.cover_urls.len(), 2);
+        assert!(
+            sf.cover_urls[0].starts_with(&format!("/api/books/{local}/cover")),
+            "{:?}",
+            sf.cover_urls
+        );
+        assert_eq!(sf.cover_urls[1], "https://c/r.jpg");
     }
 
     // ── unshelved count (the "to shelve" card) ──────────────────────────
