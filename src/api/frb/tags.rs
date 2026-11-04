@@ -411,7 +411,7 @@ mod tag_tree_tests {
     }
 
     #[tokio::test]
-    async fn a_shelf_shows_the_three_most_recent_covers_of_its_subtree() {
+    async fn a_shelf_shows_its_own_books_then_the_newest_of_its_subtree() {
         let db = crate::db::init_db("sqlite::memory:").await.unwrap();
         let top = shelf(&db, "Living room", None).await;
         let middle = shelf(&db, "Novels", Some(&top)).await;
@@ -429,15 +429,79 @@ mod tag_tree_tests {
 
         assert_eq!(
             covers_of(&tags, "Living room"),
-            ["https://c/d.jpg", "https://c/c.jpg", "https://c/b.jpg"]
+            ["https://c/c.jpg", "https://c/d.jpg", "https://c/b.jpg"]
         );
         assert_eq!(
             covers_of(&tags, "Novels"),
-            ["https://c/d.jpg", "https://c/b.jpg", "https://c/a.jpg"]
+            ["https://c/b.jpg", "https://c/d.jpg", "https://c/a.jpg"]
         );
         assert_eq!(
             covers_of(&tags, "Crime"),
             ["https://c/d.jpg", "https://c/a.jpg"]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_old_book_of_the_shelf_comes_before_a_newer_one_of_its_sub_shelf() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let top = shelf(&db, "Living room", None).await;
+        shelf(&db, "Novels", Some(&top)).await;
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        book(
+            &db,
+            &["Living room"],
+            Some("https://c/own.jpg"),
+            true,
+            &t(1),
+        )
+        .await;
+        book(&db, &["Novels"], Some("https://c/sub.jpg"), true, &t(2)).await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(
+            covers_of(&tags, "Living room"),
+            ["https://c/own.jpg", "https://c/sub.jpg"]
+        );
+        // The sub-shelf is not given its parent's book.
+        assert_eq!(covers_of(&tags, "Novels"), ["https://c/sub.jpg"]);
+    }
+
+    #[tokio::test]
+    async fn three_own_covers_leave_no_room_for_a_newer_sub_shelf_book() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let top = shelf(&db, "Living room", None).await;
+        shelf(&db, "Novels", Some(&top)).await;
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        for (d, cover) in [(1, "o1"), (2, "o2"), (3, "o3"), (4, "o4")] {
+            let url = format!("https://c/{cover}.jpg");
+            book(&db, &["Living room"], Some(&url), true, &t(d)).await;
+        }
+        book(&db, &["Novels"], Some("https://c/sub.jpg"), true, &t(5)).await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(
+            covers_of(&tags, "Living room"),
+            ["https://c/o4.jpg", "https://c/o3.jpg", "https://c/o2.jpg"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shelf_without_own_books_shows_those_of_its_descendants() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let top = shelf(&db, "Genre", None).await;
+        let middle = shelf(&db, "Essay", Some(&top)).await;
+        shelf(&db, "Politics", Some(&middle)).await;
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        book(&db, &["Politics"], Some("https://c/p.jpg"), true, &t(1)).await;
+        book(&db, &["Essay"], Some("https://c/e.jpg"), true, &t(2)).await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(
+            covers_of(&tags, "Genre"),
+            ["https://c/e.jpg", "https://c/p.jpg"]
         );
     }
 
@@ -543,6 +607,35 @@ mod tag_tree_tests {
 
         assert_eq!(covers_of(&tags, "A"), ["https://c/b.jpg"]);
         assert_eq!(covers_of(&tags, "B"), ["https://c/b.jpg"]);
+    }
+
+    #[tokio::test]
+    async fn own_books_come_first_round_a_cycle_too() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let a = shelf(&db, "A", None).await;
+        let b = shelf(&db, "B", Some(&a)).await;
+        let mut active: tag::ActiveModel = tag::Entity::find_by_id(a.clone())
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+        active.parent_id = Set(Some(b));
+        active.update(&db).await.unwrap();
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        book(&db, &["A"], Some("https://c/a.jpg"), true, &t(1)).await;
+        book(&db, &["B"], Some("https://c/b.jpg"), true, &t(2)).await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(
+            covers_of(&tags, "A"),
+            ["https://c/a.jpg", "https://c/b.jpg"]
+        );
+        assert_eq!(
+            covers_of(&tags, "B"),
+            ["https://c/b.jpg", "https://c/a.jpg"]
+        );
     }
 
     #[tokio::test]

@@ -859,7 +859,7 @@ pub async fn list_tags(
     State(db): State<DatabaseConnection>,
 ) -> Result<Json<Vec<TagDto>>, StatusCode> {
     // Same read and same rule as the FFI listing: counts on the default
-    // library view, covers of the subtree.
+    // library view, own covers first, then the subtree's.
     let tags = crate::services::book_service::list_tags(
         &db,
         crate::api::frb::covers_dir().map(|d| d.as_path()),

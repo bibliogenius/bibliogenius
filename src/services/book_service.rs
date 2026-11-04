@@ -1114,8 +1114,8 @@ pub struct ShelfListing {
     pub tags: Vec<crate::models::tag::Model>,
     /// Badge counts by shelf name, as [`subject_counts`] reports them.
     pub counts: HashMap<String, SubjectCount>,
-    /// Up to [`SHELF_THUMBNAIL_COVERS`] covers by shelf name, newest first,
-    /// sub-shelves included. A shelf with none is absent.
+    /// Up to [`SHELF_THUMBNAIL_COVERS`] covers by shelf name: the shelf's own
+    /// books newest first, then its sub-shelves'. A shelf with none is absent.
     pub covers: HashMap<String, Vec<String>>,
 }
 
@@ -1153,14 +1153,16 @@ pub async fn shelf_listing(
     })
 }
 
-/// The newest covers of each shelf's subtree, over rows sorted newest first.
+/// The covers of each shelf, over rows sorted newest first: its own books
+/// first, then the newest of its sub-shelves, so a parent does not simply
+/// repeat what its children show.
 ///
 /// A book counts for each of its shelves and for their ancestors, once per
 /// shelf even when it sits on a shelf and on its parent. Books outside the
 /// default view, and books without a usable cover, take no slot. `resolve`
 /// runs at most once per book, and only when a shelf still has room, since
 /// it may touch the disk. Stops early only once every shelf holds three
-/// covers; a shelf that never fills keeps the walk going to the end.
+/// covers; a shelf that never fills keeps the walks going to the end.
 fn recent_covers<'a>(
     tags: &[crate::models::tag::Model],
     shelf_total: usize,
@@ -1181,48 +1183,74 @@ fn recent_covers<'a>(
         .collect();
 
     let mut covers: HashMap<String, Vec<String>> = HashMap::new();
+    let mut resolved: Vec<Option<Option<String>>> = vec![None; rows.len()];
     let mut full = 0;
-    for row in rows {
-        if full >= shelf_total {
-            break;
-        }
-        let has_cover = row.cover_url.as_deref().is_some_and(|c| !c.is_empty());
-        if !row.in_default_view || !has_cover {
-            continue;
-        }
-        let mut shelves: Vec<String> = Vec::new();
-        for name in shelf_names(row.subjects.as_deref()) {
-            let mut current = Some(name);
-            // A shelf already listed had its ancestors listed with it, so
-            // stopping there also ends a climb round a cycle from sync.
-            while let Some(shelf) = current.take() {
-                if shelves.contains(&shelf) {
-                    break;
-                }
-                current = parent_of.get(shelf.as_str()).map(|p| p.to_string());
-                shelves.push(shelf);
+    for own_books in [true, false] {
+        for (index, row) in rows.iter().enumerate() {
+            if full >= shelf_total {
+                return covers;
             }
-        }
-        shelves.retain(|shelf| {
-            covers
-                .get(shelf)
-                .is_none_or(|c| c.len() < SHELF_THUMBNAIL_COVERS)
-        });
-        if shelves.is_empty() {
-            continue;
-        }
-        let Some(cover) = resolve(row) else {
-            continue;
-        };
-        for shelf in shelves {
-            let slot = covers.entry(shelf).or_default();
-            slot.push(cover.clone());
-            if slot.len() == SHELF_THUMBNAIL_COVERS {
-                full += 1;
+            let has_cover = row.cover_url.as_deref().is_some_and(|c| !c.is_empty());
+            if !row.in_default_view || !has_cover {
+                continue;
+            }
+            let own = own_shelves(row.subjects.as_deref());
+            let mut shelves = if own_books {
+                own
+            } else {
+                ancestor_shelves(&own, &parent_of)
+            };
+            shelves.retain(|shelf| {
+                covers
+                    .get(shelf)
+                    .is_none_or(|c| c.len() < SHELF_THUMBNAIL_COVERS)
+            });
+            if shelves.is_empty() {
+                continue;
+            }
+            let Some(cover) = resolved[index].get_or_insert_with(|| resolve(row)).clone() else {
+                continue;
+            };
+            for shelf in shelves {
+                let slot = covers.entry(shelf).or_default();
+                slot.push(cover.clone());
+                if slot.len() == SHELF_THUMBNAIL_COVERS {
+                    full += 1;
+                }
             }
         }
     }
     covers
+}
+
+/// The shelves a book is filed on, each once.
+fn own_shelves(subjects_json: Option<&str>) -> Vec<String> {
+    let mut own: Vec<String> = Vec::new();
+    for name in shelf_names(subjects_json) {
+        if !own.contains(&name) {
+            own.push(name);
+        }
+    }
+    own
+}
+
+/// The shelves above `own`, without `own` itself: a book on a shelf and on
+/// its parent is already the parent's own.
+fn ancestor_shelves(own: &[String], parent_of: &HashMap<&str, &str>) -> Vec<String> {
+    let mut ancestors: Vec<String> = Vec::new();
+    for name in own {
+        let mut current = parent_of.get(name.as_str()).copied();
+        // A shelf already met had its own ancestors walked with it, so
+        // stopping there also ends a climb round a cycle from sync.
+        while let Some(shelf) = current.take() {
+            if own.iter().any(|o| o == shelf) || ancestors.iter().any(|a| a == shelf) {
+                break;
+            }
+            ancestors.push(shelf.to_owned());
+            current = parent_of.get(shelf).copied();
+        }
+    }
+    ancestors
 }
 
 /// The form a book's stored cover takes in a shelf thumbnail, or `None`
@@ -2567,6 +2595,66 @@ fn title_label_relevant(query_title: &str, work_label: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── shelf thumbnails ────────────────────────────────────────────────
+
+    fn shelf_tag(id: &str, name: &str, parent_id: Option<&str>) -> crate::models::tag::Model {
+        crate::models::tag::Model {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            parent_id: parent_id.map(str::to_owned),
+            path: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn shelf_row(id: &str, subjects: &str) -> ShelfBookRow {
+        ShelfBookRow {
+            id: id.to_owned(),
+            subjects: Some(subjects.to_owned()),
+            in_default_view: true,
+            cover_url: Some(format!("https://c/{id}.jpg")),
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn recent_covers_resolves_a_book_once_across_both_walks() {
+        let tags = [
+            shelf_tag("1", "Top", None),
+            shelf_tag("2", "Sub", Some("1")),
+        ];
+        // One cover found, one missing on this device: neither is asked twice.
+        let rows = [
+            shelf_row("found", r#"["Sub"]"#),
+            shelf_row("missing", r#"["Sub"]"#),
+        ];
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let covers = recent_covers(&tags, 2, &rows, |row| {
+            calls.borrow_mut().push(row.id.clone());
+            (row.id == "found").then(|| row.id.clone())
+        });
+
+        assert_eq!(calls.into_inner(), ["found", "missing"]);
+        assert_eq!(covers["Sub"], ["found"]);
+        assert_eq!(covers["Top"], ["found"]);
+    }
+
+    #[test]
+    fn recent_covers_gives_a_book_on_a_shelf_and_its_parent_one_slot_there() {
+        let tags = [
+            shelf_tag("1", "Top", None),
+            shelf_tag("2", "Sub", Some("1")),
+        ];
+        let rows = [shelf_row("both", r#"["Sub", "Top", "Top"]"#)];
+
+        let covers = recent_covers(&tags, 2, &rows, |row| Some(row.id.clone()));
+
+        assert_eq!(covers["Top"], ["both"]);
+        assert_eq!(covers["Sub"], ["both"]);
+    }
 
     // ── isbn normalisation ──────────────────────────────────────────────
 
