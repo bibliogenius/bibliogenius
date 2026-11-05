@@ -1238,10 +1238,17 @@ fn subtree_counts(
     parent_of: &HashMap<&str, &str>,
     rows: &[ShelfBookRow],
 ) -> HashMap<String, SubjectCount> {
+    // The app shows a shelf in a cycle at the first level, holding nothing of
+    // the cycle: the count has to be that of the tree it shows.
+    let parent_of: HashMap<&str, &str> = parent_of
+        .iter()
+        .filter(|(shelf, _)| !in_a_cycle(shelf, parent_of))
+        .map(|(shelf, parent)| (*shelf, *parent))
+        .collect();
     let mut counts: HashMap<String, SubjectCount> = HashMap::new();
     for row in rows {
         let own = own_shelves(row.subjects.as_deref());
-        let ancestors = ancestor_shelves(&own, parent_of);
+        let ancestors = ancestor_shelves(&own, &parent_of);
         for shelf in own.into_iter().chain(ancestors) {
             let entry = counts.entry(shelf).or_default();
             entry.total += 1;
@@ -1251,6 +1258,23 @@ fn subtree_counts(
         }
     }
     counts
+}
+
+/// Whether climbing from `shelf` comes back to it.
+fn in_a_cycle(shelf: &str, parent_of: &HashMap<&str, &str>) -> bool {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut current = parent_of.get(shelf).copied();
+    while let Some(name) = current {
+        if name == shelf {
+            return true;
+        }
+        if seen.contains(&name) {
+            return false;
+        }
+        seen.push(name);
+        current = parent_of.get(name).copied();
+    }
+    false
 }
 
 /// The shelves a book is filed on, each once.

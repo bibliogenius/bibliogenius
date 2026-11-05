@@ -742,10 +742,12 @@ mod tag_tree_tests {
     }
 
     #[tokio::test]
-    async fn a_subtree_round_a_cycle_counts_each_book_once() {
+    async fn shelves_in_a_cycle_count_only_their_own_books_as_the_app_shows_them() {
         let db = crate::db::init_db("sqlite::memory:").await.unwrap();
         let a = shelf(&db, "A", None).await;
         let b = shelf(&db, "B", Some(&a)).await;
+        // Off the cycle, under it: still a sub-shelf of B.
+        shelf(&db, "C", Some(&b)).await;
         let mut active: tag::ActiveModel = tag::Entity::find_by_id(a.clone())
             .one(&db)
             .await
@@ -758,11 +760,15 @@ mod tag_tree_tests {
         book(&db, &["A"], None, true, &t(1)).await;
         book(&db, &["B"], None, true, &t(2)).await;
         book(&db, &["A", "B"], None, true, &t(3)).await;
+        book(&db, &["C"], None, true, &t(4)).await;
 
         let tags = get_all_tags_in(&db, None).await.unwrap();
 
-        assert_eq!(subtree_of(&tags, "A"), (3, 3));
+        // The app breaks a cycle by showing its shelves at the first level
+        // (Tag.effectiveParentId), so neither holds the other.
+        assert_eq!(subtree_of(&tags, "A"), (2, 2));
         assert_eq!(subtree_of(&tags, "B"), (3, 3));
+        assert_eq!(subtree_of(&tags, "C"), (1, 1));
     }
 
     #[tokio::test]
