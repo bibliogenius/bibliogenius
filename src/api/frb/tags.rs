@@ -624,7 +624,7 @@ mod tag_tree_tests {
     }
 
     #[tokio::test]
-    async fn covers_climb_a_cycle_merged_from_sync_without_looping() {
+    async fn a_cycle_merged_from_sync_lends_no_cover_and_does_not_loop() {
         let db = crate::db::init_db("sqlite::memory:").await.unwrap();
         let a = shelf(&db, "A", None).await;
         let b = shelf(&db, "B", Some(&a)).await;
@@ -647,12 +647,13 @@ mod tag_tree_tests {
 
         let tags = get_all_tags_in(&db, None).await.unwrap();
 
-        assert_eq!(covers_of(&tags, "A"), ["https://c/b.jpg"]);
+        // The app shows both at the first level: A holds nothing of B.
+        assert!(covers_of(&tags, "A").is_empty());
         assert_eq!(covers_of(&tags, "B"), ["https://c/b.jpg"]);
     }
 
     #[tokio::test]
-    async fn own_books_come_first_round_a_cycle_too() {
+    async fn round_a_cycle_each_shelf_shows_its_own_books_only() {
         let db = crate::db::init_db("sqlite::memory:").await.unwrap();
         let a = shelf(&db, "A", None).await;
         let b = shelf(&db, "B", Some(&a)).await;
@@ -670,14 +671,8 @@ mod tag_tree_tests {
 
         let tags = get_all_tags_in(&db, None).await.unwrap();
 
-        assert_eq!(
-            covers_of(&tags, "A"),
-            ["https://c/a.jpg", "https://c/b.jpg"]
-        );
-        assert_eq!(
-            covers_of(&tags, "B"),
-            ["https://c/b.jpg", "https://c/a.jpg"]
-        );
+        assert_eq!(covers_of(&tags, "A"), ["https://c/a.jpg"]);
+        assert_eq!(covers_of(&tags, "B"), ["https://c/b.jpg"]);
     }
 
     // ---- Counts of a shelf with its sub-shelves: `subtree_*` ----

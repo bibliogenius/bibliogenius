@@ -1181,7 +1181,7 @@ async fn walk_shelves(
     resolve: impl Fn(&ShelfBookRow) -> Option<String> + Send + 'static,
 ) -> Result<ShelfWalk, ServiceError> {
     let walk = move || {
-        let parent_of = shelf_parents(&tags);
+        let parent_of = shown_parents(&shelf_parents(&tags));
         let subtree_counts = subtree_counts(&parent_of, &rows);
         let covers = recent_covers(&parent_of, shelf_total, &rows, resolve);
         (tags, subtree_counts, covers)
@@ -1270,17 +1270,10 @@ fn subtree_counts(
     parent_of: &HashMap<&str, &str>,
     rows: &[ShelfBookRow],
 ) -> HashMap<String, SubjectCount> {
-    // The app shows a shelf in a cycle at the first level, holding nothing of
-    // the cycle: the count has to be that of the tree it shows.
-    let parent_of: HashMap<&str, &str> = parent_of
-        .iter()
-        .filter(|(shelf, _)| !in_a_cycle(shelf, parent_of))
-        .map(|(shelf, parent)| (*shelf, *parent))
-        .collect();
     let mut counts: HashMap<String, SubjectCount> = HashMap::new();
     for row in rows {
         let own = own_shelves(row.subjects.as_deref());
-        let ancestors = ancestor_shelves(&own, &parent_of);
+        let ancestors = ancestor_shelves(&own, parent_of);
         for shelf in own.into_iter().chain(ancestors) {
             let entry = counts.entry(shelf).or_default();
             entry.total += 1;
@@ -1290,6 +1283,16 @@ fn subtree_counts(
         }
     }
     counts
+}
+
+/// The parents as the app shows them: a shelf in a cycle sits at the first
+/// level, holding nothing of the cycle. Counts and covers both go by this tree.
+fn shown_parents<'a>(parent_of: &HashMap<&'a str, &'a str>) -> HashMap<&'a str, &'a str> {
+    parent_of
+        .iter()
+        .filter(|(shelf, _)| !in_a_cycle(shelf, parent_of))
+        .map(|(shelf, parent)| (*shelf, *parent))
+        .collect()
 }
 
 /// Whether climbing from `shelf` comes back to it.
@@ -2705,6 +2708,26 @@ mod tests {
             cover_url: Some(format!("https://c/{id}.jpg")),
             updated_at: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_shelf_in_a_sync_cycle_shows_the_cover_it_counts() {
+        // A book on A: the app shows A and B at the first level, neither
+        // holding the other, so B announces no book and must show no cover.
+        let tags = vec![
+            shelf_tag("1", "A", Some("2")),
+            shelf_tag("2", "B", Some("1")),
+        ];
+        let rows = vec![shelf_row("one", r#"["A"]"#)];
+
+        let (_, counts, covers) = walk_shelves(tags, rows, 2, |row| Some(row.id.clone()))
+            .await
+            .expect("walk");
+
+        assert_eq!(counts["A"].total, 1);
+        assert!(!counts.contains_key("B"));
+        assert_eq!(covers["A"], ["one"]);
+        assert!(!covers.contains_key("B"), "{covers:?}");
     }
 
     #[tokio::test]
