@@ -1146,17 +1146,49 @@ pub async fn shelf_listing(
         .chain(tags.iter().map(|t| t.name.as_str()))
         .collect::<std::collections::HashSet<_>>()
         .len();
-    let parent_of = shelf_parents(&tags);
-    let subtree_counts = subtree_counts(&parent_of, &rows);
-    let covers = recent_covers(&parent_of, shelf_total, &rows, |row| {
+    let is_http = matches!(channel, CoverChannel::Http(_));
+    let covers_dir = channel.covers_dir().map(std::path::Path::to_path_buf);
+    let (tags, subtree_counts, covers) = walk_shelves(tags, rows, shelf_total, move |row| {
+        let dir = covers_dir.as_deref();
+        let channel = if is_http {
+            CoverChannel::Http(dir)
+        } else {
+            CoverChannel::OnDevice(dir)
+        };
         thumbnail_cover(row, channel)
-    });
+    })
+    .await?;
     Ok(ShelfListing {
         tags,
         counts,
         subtree_counts,
         covers,
     })
+}
+
+type ShelfWalk = (
+    Vec<crate::models::tag::Model>,
+    HashMap<String, SubjectCount>,
+    HashMap<String, Vec<String>>,
+);
+
+/// Counts the shelves' subtrees and finds their covers, which stats a file per
+/// book whose cover has no bytes here: on a blocking thread, off the runtime.
+async fn walk_shelves(
+    tags: Vec<crate::models::tag::Model>,
+    rows: Vec<ShelfBookRow>,
+    shelf_total: usize,
+    resolve: impl Fn(&ShelfBookRow) -> Option<String> + Send + 'static,
+) -> Result<ShelfWalk, ServiceError> {
+    let walk = move || {
+        let parent_of = shelf_parents(&tags);
+        let subtree_counts = subtree_counts(&parent_of, &rows);
+        let covers = recent_covers(&parent_of, shelf_total, &rows, resolve);
+        (tags, subtree_counts, covers)
+    };
+    tokio::task::spawn_blocking(walk)
+        .await
+        .map_err(|e| ServiceError::Database(e.to_string()))
 }
 
 /// The covers of each shelf, over rows sorted newest first: its own books
@@ -2673,6 +2705,23 @@ mod tests {
             cover_url: Some(format!("https://c/{id}.jpg")),
             updated_at: None,
         }
+    }
+
+    #[tokio::test]
+    async fn the_walk_of_the_shelves_stays_off_the_runtime() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen_by_walk = seen.clone();
+        let rows = vec![shelf_row("one", r#"["Top"]"#)];
+
+        walk_shelves(vec![shelf_tag("1", "Top", None)], rows, 1, move |row| {
+            *seen_by_walk.lock().unwrap() = Some(std::thread::current().id());
+            Some(row.id.clone())
+        })
+        .await
+        .expect("walk");
+
+        let walked_on = seen.lock().unwrap().expect("the walk asked for a cover");
+        assert_ne!(walked_on, std::thread::current().id());
     }
 
     #[test]
