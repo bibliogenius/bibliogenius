@@ -64,6 +64,11 @@ pub async fn reset_app() -> Result<String, String> {
     // Delete users too for complete reset
     delete_all!(user);
 
+    // The app deletes its library_uuid right after this call and mints a new
+    // one on the next launch: the identity, the catalog readers and the account
+    // session sealed under the old one would be left undecryptable.
+    crate::services::identity_service::forget_device_secrets(db).await?;
+
     // Forget the hub registration and retire the catalog key with it
     // (ADR-072). Non-fatal: the reset must complete even if these tables
     // are missing on an older install.
