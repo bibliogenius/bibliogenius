@@ -1114,6 +1114,9 @@ pub struct ShelfListing {
     pub tags: Vec<crate::models::tag::Model>,
     /// Badge counts by shelf name, as [`subject_counts`] reports them.
     pub counts: HashMap<String, SubjectCount>,
+    /// By shelf name, the books of the shelf and of its sub-shelves, each book
+    /// once however many of those shelves it sits on.
+    pub subtree_counts: HashMap<String, SubjectCount>,
     /// Up to [`SHELF_THUMBNAIL_COVERS`] covers by shelf name: the shelf's own
     /// books newest first, then its sub-shelves'. A shelf with none is absent.
     pub covers: HashMap<String, Vec<String>>,
@@ -1143,12 +1146,15 @@ pub async fn shelf_listing(
         .chain(tags.iter().map(|t| t.name.as_str()))
         .collect::<std::collections::HashSet<_>>()
         .len();
-    let covers = recent_covers(&tags, shelf_total, &rows, |row| {
+    let parent_of = shelf_parents(&tags);
+    let subtree_counts = subtree_counts(&parent_of, &rows);
+    let covers = recent_covers(&parent_of, shelf_total, &rows, |row| {
         thumbnail_cover(row, channel)
     });
     Ok(ShelfListing {
         tags,
         counts,
+        subtree_counts,
         covers,
     })
 }
@@ -1164,24 +1170,11 @@ pub async fn shelf_listing(
 /// it may touch the disk. Stops early only once every shelf holds three
 /// covers; a shelf that never fills keeps the walks going to the end.
 fn recent_covers<'a>(
-    tags: &[crate::models::tag::Model],
+    parent_of: &HashMap<&str, &str>,
     shelf_total: usize,
     rows: &'a [ShelfBookRow],
     mut resolve: impl FnMut(&'a ShelfBookRow) -> Option<String>,
 ) -> HashMap<String, Vec<String>> {
-    // Books file shelves by name, so the tree is walked by name.
-    let name_of: HashMap<&str, &str> = tags
-        .iter()
-        .map(|t| (t.id.as_str(), t.name.as_str()))
-        .collect();
-    let parent_of: HashMap<&str, &str> = tags
-        .iter()
-        .filter_map(|t| {
-            let parent = name_of.get(t.parent_id.as_deref()?)?;
-            Some((t.name.as_str(), *parent))
-        })
-        .collect();
-
     let mut covers: HashMap<String, Vec<String>> = HashMap::new();
     let mut resolved: Vec<Option<Option<String>>> = vec![None; rows.len()];
     let mut full = 0;
@@ -1198,7 +1191,7 @@ fn recent_covers<'a>(
             let mut shelves = if own_books {
                 own
             } else {
-                ancestor_shelves(&own, &parent_of)
+                ancestor_shelves(&own, parent_of)
             };
             shelves.retain(|shelf| {
                 covers
@@ -1221,6 +1214,43 @@ fn recent_covers<'a>(
         }
     }
     covers
+}
+
+/// Each shelf's parent, by name: books file shelves by name, so the tree is
+/// walked by name.
+fn shelf_parents(tags: &[crate::models::tag::Model]) -> HashMap<&str, &str> {
+    let name_of: HashMap<&str, &str> = tags
+        .iter()
+        .map(|t| (t.id.as_str(), t.name.as_str()))
+        .collect();
+    tags.iter()
+        .filter_map(|t| {
+            let parent = name_of.get(t.parent_id.as_deref()?)?;
+            Some((t.name.as_str(), *parent))
+        })
+        .collect()
+}
+
+/// The books of each shelf and of its descendants. A book counts once per
+/// shelf: adding up the shelves would count twice one that sits on a shelf and
+/// on its sub-shelf.
+fn subtree_counts(
+    parent_of: &HashMap<&str, &str>,
+    rows: &[ShelfBookRow],
+) -> HashMap<String, SubjectCount> {
+    let mut counts: HashMap<String, SubjectCount> = HashMap::new();
+    for row in rows {
+        let own = own_shelves(row.subjects.as_deref());
+        let ancestors = ancestor_shelves(&own, parent_of);
+        for shelf in own.into_iter().chain(ancestors) {
+            let entry = counts.entry(shelf).or_default();
+            entry.total += 1;
+            if row.in_default_view {
+                entry.in_default_view += 1;
+            }
+        }
+    }
+    counts
 }
 
 /// The shelves a book is filed on, each once.
@@ -2625,6 +2655,7 @@ mod tests {
             shelf_tag("1", "Top", None),
             shelf_tag("2", "Sub", Some("1")),
         ];
+        let parents = shelf_parents(&tags);
         // One cover found, one missing on this device: neither is asked twice.
         let rows = [
             shelf_row("found", r#"["Sub"]"#),
@@ -2632,7 +2663,7 @@ mod tests {
         ];
         let calls = std::cell::RefCell::new(Vec::new());
 
-        let covers = recent_covers(&tags, 2, &rows, |row| {
+        let covers = recent_covers(&parents, 2, &rows, |row| {
             calls.borrow_mut().push(row.id.clone());
             (row.id == "found").then(|| row.id.clone())
         });
@@ -2648,9 +2679,10 @@ mod tests {
             shelf_tag("1", "Top", None),
             shelf_tag("2", "Sub", Some("1")),
         ];
+        let parents = shelf_parents(&tags);
         let rows = [shelf_row("both", r#"["Sub", "Top", "Top"]"#)];
 
-        let covers = recent_covers(&tags, 2, &rows, |row| Some(row.id.clone()));
+        let covers = recent_covers(&parents, 2, &rows, |row| Some(row.id.clone()));
 
         assert_eq!(covers["Top"], ["both"]);
         assert_eq!(covers["Sub"], ["both"]);

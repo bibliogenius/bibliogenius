@@ -22,6 +22,11 @@ pub struct FrbTag {
     pub total_count: i64,
     /// Up to three covers for the shelf's thumbnail, newest first.
     pub cover_paths: Vec<String>,
+    /// [`count`](Self::count) with the sub-shelves: the books of the default
+    /// view on this shelf or below it, each once.
+    pub subtree_count: i64,
+    /// [`total_count`](Self::total_count) with the sub-shelves, each book once.
+    pub subtree_total_count: i64,
 }
 
 /// Get all tags with hierarchy info
@@ -56,6 +61,7 @@ async fn get_all_tags_in(
         .await
         .map_err(|e| format!("{:?}", e))?;
     let tag_counts = listing.counts;
+    let subtree_counts = listing.subtree_counts;
     let covers = listing.covers;
 
     // Merge: Prioritize DB hierarchy, add legacy tags as roots if missing
@@ -65,9 +71,12 @@ async fn get_all_tags_in(
     // Add DB tags
     for t in listing.tags {
         let counts = tag_counts.get(&t.name).copied().unwrap_or_default();
+        let subtree = subtree_counts.get(&t.name).copied().unwrap_or_default();
         processed_names.insert(t.name.clone());
         result.push(FrbTag {
             cover_paths: covers.get(&t.name).cloned().unwrap_or_default(),
+            subtree_count: subtree.in_default_view,
+            subtree_total_count: subtree.total,
             id: t.id,
             name: t.name,
             parent_id: t.parent_id,
@@ -81,9 +90,12 @@ async fn get_all_tags_in(
     let mut next_legacy_id = -1;
     for (name, counts) in tag_counts {
         if !processed_names.contains(&name) {
+            let subtree = subtree_counts.get(&name).copied().unwrap_or_default();
             result.push(FrbTag {
                 id: format!("legacy:{next_legacy_id}"),
                 cover_paths: covers.get(&name).cloned().unwrap_or_default(),
+                subtree_count: subtree.in_default_view,
+                subtree_total_count: subtree.total,
                 name,
                 parent_id: None,
                 count: counts.in_default_view,
@@ -123,6 +135,8 @@ pub async fn create_tag(name: String, parent_id: Option<String>) -> Result<FrbTa
                 count: 0,
                 total_count: 0,
                 cover_paths: Vec::new(),
+                subtree_count: 0,
+                subtree_total_count: 0,
             })
         }
         Err(e) => Err(format!("{:?}", e)),
@@ -188,6 +202,8 @@ async fn update_tag_in(
                 count: 0,
                 total_count: 0,
                 cover_paths: Vec::new(),
+                subtree_count: 0,
+                subtree_total_count: 0,
             })
         }
         Err(e) => Err(format!("{:?}", e)),
@@ -636,6 +652,127 @@ mod tag_tree_tests {
             covers_of(&tags, "B"),
             ["https://c/b.jpg", "https://c/a.jpg"]
         );
+    }
+
+    // ---- Counts of a shelf with its sub-shelves: `subtree_*` ----
+
+    fn subtree_of(tags: &[super::FrbTag], name: &str) -> (i64, i64) {
+        let tag = tags
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("{name} is listed"));
+        (tag.subtree_count, tag.subtree_total_count)
+    }
+
+    #[tokio::test]
+    async fn a_book_on_a_shelf_and_its_sub_shelf_counts_once_in_the_subtree() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let essay = shelf(&db, "Essay", None).await;
+        let politics = shelf(&db, "Politics", Some(&essay)).await;
+        shelf(&db, "Crime", Some(&politics)).await;
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        book(&db, &["Essay", "Politics"], None, true, &t(1)).await;
+        book(&db, &["Politics"], None, true, &t(2)).await;
+        book(&db, &["Crime"], None, true, &t(3)).await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        // Four shelf memberships, three books.
+        assert_eq!(subtree_of(&tags, "Essay"), (3, 3));
+        assert_eq!(subtree_of(&tags, "Politics"), (3, 3));
+        assert_eq!(subtree_of(&tags, "Crime"), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn the_two_subtree_counts_follow_the_two_ownership_scopes() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let top = shelf(&db, "Top", None).await;
+        shelf(&db, "Sub", Some(&top)).await;
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        book(&db, &["Sub"], None, true, &t(1)).await;
+        // Wished, on the shelf and its sub-shelf: once, and only in the total.
+        book(&db, &["Top", "Sub"], None, false, &t(2)).await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(subtree_of(&tags, "Top"), (1, 2));
+        assert_eq!(subtree_of(&tags, "Sub"), (1, 2));
+    }
+
+    #[tokio::test]
+    async fn count_and_total_count_keep_meaning_the_shelf_alone() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let top = shelf(&db, "Top", None).await;
+        shelf(&db, "Sub", Some(&top)).await;
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        book(&db, &["Sub"], None, true, &t(1)).await;
+        book(&db, &["Top"], None, false, &t(2)).await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+        let top = tags.iter().find(|t| t.name == "Top").unwrap();
+
+        assert_eq!((top.count, top.total_count), (0, 1));
+        assert_eq!((top.subtree_count, top.subtree_total_count), (1, 2));
+    }
+
+    #[tokio::test]
+    async fn a_subtree_round_a_cycle_counts_each_book_once() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let a = shelf(&db, "A", None).await;
+        let b = shelf(&db, "B", Some(&a)).await;
+        let mut active: tag::ActiveModel = tag::Entity::find_by_id(a.clone())
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+        active.parent_id = Set(Some(b));
+        active.update(&db).await.unwrap();
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        book(&db, &["A"], None, true, &t(1)).await;
+        book(&db, &["B"], None, true, &t(2)).await;
+        book(&db, &["A", "B"], None, true, &t(3)).await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(subtree_of(&tags, "A"), (3, 3));
+        assert_eq!(subtree_of(&tags, "B"), (3, 3));
+    }
+
+    #[tokio::test]
+    async fn a_name_known_only_from_the_books_has_its_own_books_as_subtree() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        book(&db, &["Loose"], None, true, &t(1)).await;
+        book(&db, &["Loose"], None, false, &t(2)).await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(subtree_of(&tags, "Loose"), (1, 2));
+    }
+
+    #[tokio::test]
+    async fn the_subtree_counts_read_the_books_only_once() {
+        use std::sync::{Arc, Mutex};
+        let mut db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let top = shelf(&db, "Top", None).await;
+        shelf(&db, "Sub", Some(&top)).await;
+        book(&db, &["Sub"], None, true, "2026-01-01T10:00:00+00:00").await;
+        let statements: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = statements.clone();
+        db.set_metric_callback(move |info| {
+            seen.lock().unwrap().push(info.statement.sql.clone());
+        });
+
+        get_all_tags_in(&db, None).await.unwrap();
+
+        let book_reads = statements
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|sql| sql.contains(r#"FROM "books""#))
+            .count();
+        assert_eq!(book_reads, 1);
     }
 
     #[tokio::test]
