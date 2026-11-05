@@ -308,6 +308,28 @@ pub(crate) async fn delete_identity_from_db(db: &DatabaseConnection) -> Result<(
     Ok(())
 }
 
+/// Forget everything this device keeps under its `library_uuid`: the identity
+/// (`crypto_keys`), the readers approved for its encrypted catalog, and the
+/// account session, whose trousseau is sealed with an `Argon2(library_uuid)`
+/// key too.
+///
+/// A full reset deletes the `library_uuid` on the Flutter side and a new one is
+/// minted on the next launch: any of these rows left behind can no longer be
+/// decrypted (`Stored identity undecryptable`, `Stored account session could
+/// not be decrypted`). Shared by the HTTP and the FFI `reset_app` so the two
+/// doors cannot drift apart again: the FFI one, which the app uses, had kept
+/// all three.
+pub(crate) async fn forget_device_secrets(db: &DatabaseConnection) -> Result<(), String> {
+    delete_identity_from_db(db).await?;
+    crate::services::hub_catalog_readers::clear(db)
+        .await
+        .map_err(|e| format!("Failed to clear catalog readers: {e}"))?;
+    crate::services::account_session_service::clear(db)
+        .await
+        .map_err(|e| format!("Failed to clear account session: {e}"))?;
+    Ok(())
+}
+
 /// Derive Argon2 key from library_uuid + salt.
 pub(crate) fn derive_argon2_key(library_uuid: &str, salt: &[u8]) -> Result<[u8; 32], String> {
     let salt_array: [u8; 32] = salt
@@ -438,6 +460,77 @@ mod tests {
         let svc2 = IdentityService::new(db.clone());
         svc2.init("brand-new-uuid").await.unwrap();
         assert_eq!(count_crypto_keys(&db).await, 2);
+    }
+
+    async fn count_rows(db: &DatabaseConnection, table: &str) -> i64 {
+        db.query_one(Statement::from_string(
+            db.get_database_backend(),
+            format!("SELECT COUNT(*) AS n FROM {table}"),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "n")
+        .unwrap()
+    }
+
+    /// The state a full reset starts from: an identity, an approved catalog
+    /// reader and an account session, all under the device's old library_uuid.
+    async fn seed_device_secrets(db: &DatabaseConnection) {
+        IdentityService::new(db.clone())
+            .init("old-uuid")
+            .await
+            .unwrap();
+        for sql in [
+            "INSERT INTO catalog_readers (node_id, x25519_public_key, source, approved_at) \
+             VALUES ('peer-node', 'peer-x25519', 'paired', '2026-11-01T00:00:00Z')",
+            "INSERT INTO account_session (id, account_id, email, device_id, encrypted_bundle, salt) \
+             VALUES (0, 'account', 'reader@example.org', 'device', x'00', x'00')",
+        ] {
+            db.execute_unprepared(sql).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn forget_device_secrets_lets_a_new_library_uuid_start_clean() {
+        // A full reset deletes the library_uuid on the Flutter side, and the
+        // next launch mints a new one. Everything sealed under the old one
+        // must go, or that launch fails to decrypt it.
+        let db = setup_test_db().await;
+        seed_device_secrets(&db).await;
+
+        forget_device_secrets(&db).await.unwrap();
+
+        assert_eq!(count_crypto_keys(&db).await, 0);
+        assert_eq!(count_rows(&db, "catalog_readers").await, 0);
+        assert!(
+            !crate::services::account_session_service::exists(&db)
+                .await
+                .unwrap(),
+            "the account session must not outlive the reset",
+        );
+        IdentityService::new(db.clone())
+            .init("new-uuid")
+            .await
+            .expect("a new library_uuid starts from a fresh identity");
+        assert_eq!(count_crypto_keys(&db).await, 2);
+    }
+
+    #[tokio::test]
+    async fn an_identity_left_behind_is_undecryptable_under_a_new_library_uuid() {
+        // What a reset that skips forget_device_secrets leaves the device
+        // with: the error the app then shows on every launch.
+        let db = setup_test_db().await;
+        seed_device_secrets(&db).await;
+
+        let err = IdentityService::new(db.clone())
+            .init("new-uuid")
+            .await
+            .expect_err("keys sealed under the old library_uuid cannot be opened");
+        assert!(
+            matches!(err, IdentityError::DecryptionFailed(_)),
+            "expected DecryptionFailed, got {err:?}",
+        );
     }
 
     async fn count_crypto_keys(db: &DatabaseConnection) -> i64 {
