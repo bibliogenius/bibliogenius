@@ -1386,7 +1386,7 @@ async fn subject_rows(db: &DatabaseConnection) -> Result<Vec<ShelfBookRow>, Serv
         .column(BookColumn::CoverUrl)
         .column(BookColumn::UpdatedAt)
         // By the date of adding: editing a book must not bring it to the front
-        // of the fan, and the app's "last arrived here" reads the same date.
+        // of the fan.
         .order_by_desc(BookColumn::CreatedAt)
         // An import stamps many books alike: keep their order stable.
         .order_by_desc(BookColumn::Id)
