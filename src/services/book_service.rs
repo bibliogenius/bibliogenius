@@ -492,33 +492,31 @@ pub async fn create_book(db: &DatabaseConnection, book: Book) -> Result<Book, Se
     // on a fresh install: a plain lookup silently skipped the copy for every book
     // created before the first row existed (a CSV import on a new device), and those
     // books then showed as unlendable to peers (`available_copies == 0`).
+    // A failure here is returned, not swallowed: the app relies on this copy
+    // since it stopped adding one over HTTP, and an owned book without a copy
+    // stays unlendable with no error. No transaction: the description fetch
+    // above makes a network call, and holding the SQLite write lock across it
+    // would block every other write. The book row stays when this fails.
     if model.owned {
-        if let Ok(library_id) = crate::utils::library_helpers::resolve_library_id(db).await {
-            let copy = crate::models::copy::ActiveModel {
-                book_id: Set(model.id.clone()),
-                library_id: Set(library_id),
-                status: Set("available".to_string()),
-                is_temporary: Set(false),
-                created_at: Set(now.to_rfc3339()),
-                updated_at: Set(now.to_rfc3339()),
-                ..Default::default()
-            };
-            if let Ok(saved_copy) = copy.insert(db).await {
-                let _ = crate::sync::log_operation(
-                    db,
-                    "copy",
-                    &saved_copy.id,
-                    "INSERT",
-                    Some(serde_json::json!({ "book_id": model.id })),
-                )
-                .await;
-            }
-        } else {
-            tracing::warn!(
-                "Skipping auto-copy creation: no library could be resolved for book {}",
-                model.id
-            );
-        }
+        let library_id = crate::utils::library_helpers::resolve_library_id(db).await?;
+        let copy = crate::models::copy::ActiveModel {
+            book_id: Set(model.id.clone()),
+            library_id: Set(library_id),
+            status: Set("available".to_string()),
+            is_temporary: Set(false),
+            created_at: Set(now.to_rfc3339()),
+            updated_at: Set(now.to_rfc3339()),
+            ..Default::default()
+        };
+        let saved_copy = copy.insert(db).await?;
+        let _ = crate::sync::log_operation(
+            db,
+            "copy",
+            &saved_copy.id,
+            "INSERT",
+            Some(serde_json::json!({ "book_id": model.id })),
+        )
+        .await;
     }
 
     // Reverse wishlist trigger: a wish just entered the library, scan the

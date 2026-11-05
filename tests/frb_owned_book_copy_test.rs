@@ -1,18 +1,22 @@
 //! An owned book created through the FFI path gets its copy, even on a fresh
-//! install.
+//! install, and a failure to create that copy reaches the caller.
 //!
-//! The Flutter app forces `owned: false` on FFI creation and then adds the
+//! The Flutter app used to force `owned: false` on FFI creation and add the
 //! copy over HTTP, because the native path once failed with NotFound
 //! ("missing Library Context"). `book_service::create_book` now resolves the
-//! library through `resolve_library_id`, which bootstraps the row: this test
-//! drives the same conversion the bridge uses (`FrbBook` -> `models::Book`)
-//! on an empty database to check the native path stands on its own.
+//! library through `resolve_library_id`, which bootstraps the row, so the app
+//! relies on the native path alone. These tests drive the same conversion the
+//! bridge uses (`FrbBook` -> `models::Book`) on an empty database.
+//!
+//! The failure cases use a SQLite trigger to make one insert fail: without
+//! the workaround, a swallowed error would leave an owned book with no copy
+//! (unlendable to peers) and nothing to tell the user.
 
 use rust_lib_app::api::frb::FrbBook;
 use rust_lib_app::db;
-use rust_lib_app::models::copy;
-use rust_lib_app::services::book_service;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use rust_lib_app::models::{book, copy};
+use rust_lib_app::services::book_service::{self, ServiceError};
+use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
 async fn setup_test_db() -> DatabaseConnection {
     db::init_db("sqlite::memory:")
@@ -88,4 +92,60 @@ async fn unowned_frb_book_gets_no_copy() {
 
     assert_eq!(created.owned, Some(false));
     assert!(copies_of(&db, &book_id).await.is_empty());
+}
+
+/// Makes every insert into `table` fail, as a full disk or a locked database
+/// would.
+async fn fail_inserts_into(db: &DatabaseConnection, table: &str) {
+    db.execute_unprepared(&format!(
+        "CREATE TRIGGER fail_{table}_insert BEFORE INSERT ON {table} \
+         BEGIN SELECT RAISE(ABORT, 'simulated {table} insert failure'); END;"
+    ))
+    .await
+    .expect("create failing trigger");
+}
+
+/// No transaction around the two inserts (a network call sits between them),
+/// so the book row stays when the copy fails: the error is what tells the
+/// caller.
+async fn assert_copy_failure_is_returned(db: &DatabaseConnection) {
+    let err = book_service::create_book(db, frb_book(true).into())
+        .await
+        .expect_err("a failed copy must fail the creation of an owned book");
+    assert!(
+        matches!(err, ServiceError::Database(_)),
+        "expected Database, got {err:?}",
+    );
+
+    let books = book::Entity::find().all(db).await.expect("query books");
+    assert_eq!(books.len(), 1, "the book row is kept");
+    assert!(copies_of(db, &books[0].id).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_copy_insert_is_returned() {
+    let db = setup_test_db().await;
+    fail_inserts_into(&db, "copies").await;
+
+    assert_copy_failure_is_returned(&db).await;
+}
+
+#[tokio::test]
+async fn a_library_that_cannot_be_resolved_is_returned() {
+    // Fresh database: no library row yet, so `resolve_library_id` has to
+    // insert one, and that insert fails.
+    let db = setup_test_db().await;
+    fail_inserts_into(&db, "libraries").await;
+
+    assert_copy_failure_is_returned(&db).await;
+}
+
+#[tokio::test]
+async fn a_failing_copy_does_not_concern_an_unowned_book() {
+    let db = setup_test_db().await;
+    fail_inserts_into(&db, "copies").await;
+
+    book_service::create_book(&db, frb_book(false).into())
+        .await
+        .expect("a wished-for book needs no copy");
 }
