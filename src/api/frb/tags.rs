@@ -389,8 +389,8 @@ mod tag_tree_tests {
 
     // ---- Shelf thumbnails: `cover_paths` ----
 
-    /// A book filed on `shelves`, last modified at `updated_at` (RFC 3339, so
-    /// the order between books is the one the test states).
+    /// A book filed on `shelves`, added and last modified at `updated_at` (RFC
+    /// 3339, so the order between books is the one the test states).
     async fn book(
         db: &DatabaseConnection,
         shelves: &[&str],
@@ -518,6 +518,32 @@ mod tag_tree_tests {
         assert_eq!(
             covers_of(&tags, "Genre"),
             ["https://c/e.jpg", "https://c/p.jpg"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_fan_follows_the_date_of_adding_not_the_last_edit() {
+        use crate::models::book;
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        shelf(&db, "Novels", None).await;
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        let old = book(&db, &["Novels"], Some("https://c/old.jpg"), true, &t(1)).await;
+        book(&db, &["Novels"], Some("https://c/new.jpg"), true, &t(2)).await;
+        // Added first, edited last: it stays behind the one added after it.
+        let mut active: book::ActiveModel = book::Entity::find_by_id(old)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+        active.updated_at = Set(t(9));
+        book::Entity::update(active).exec(&db).await.unwrap();
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        assert_eq!(
+            covers_of(&tags, "Novels"),
+            ["https://c/new.jpg", "https://c/old.jpg"]
         );
     }
 

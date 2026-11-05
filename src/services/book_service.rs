@@ -1345,7 +1345,7 @@ impl ShelfBookRow {
     }
 }
 
-/// Every book, newest first: the input shared by the shelf badges, the
+/// Every book, last added first: the input shared by the shelf badges, the
 /// unshelved count and the shelf thumbnails, so all read one scope.
 async fn subject_rows(db: &DatabaseConnection) -> Result<Vec<ShelfBookRow>, ServiceError> {
     use crate::models::book::Column as BookColumn;
@@ -1361,8 +1361,10 @@ async fn subject_rows(db: &DatabaseConnection) -> Result<Vec<ShelfBookRow>, Serv
         .column(BookColumn::Subjects)
         .column(BookColumn::CoverUrl)
         .column(BookColumn::UpdatedAt)
-        .order_by_desc(BookColumn::UpdatedAt)
-        // Bulk shelving stamps many books alike: keep their order stable.
+        // By the date of adding: editing a book must not bring it to the front
+        // of the fan, and the app's "last arrived here" reads the same date.
+        .order_by_desc(BookColumn::CreatedAt)
+        // An import stamps many books alike: keep their order stable.
         .order_by_desc(BookColumn::Id)
         .into_tuple()
         .all(db)
@@ -3654,6 +3656,7 @@ mod tests {
         ] {
             book::Entity::update_many()
                 .col_expr(book::Column::CoverUrl, cover.into())
+                .col_expr(book::Column::CreatedAt, at.into())
                 .col_expr(book::Column::UpdatedAt, at.into())
                 .filter(book::Column::Id.eq(id.as_str()))
                 .exec(&db)
