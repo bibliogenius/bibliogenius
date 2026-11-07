@@ -84,6 +84,7 @@ use crate::crypto::envelope::ClearMessage;
 use crate::infrastructure::AppState;
 use crate::models::peer;
 use crate::services::catalog_events::{self, CatalogChangedEvent};
+use crate::services::crypto_service::MAX_TIMESTAMP_DRIFT_SECS;
 use crate::services::e2ee_transport::E2eeTransportError;
 use crate::services::nudge_events::{self, NudgeEvent, NudgeSource};
 use crate::services::profile_events::{self, ProfileChangedEvent};
@@ -337,6 +338,26 @@ async fn poll_inner(state: &AppState, source: NudgeSource) -> Result<(), String>
     Ok(())
 }
 
+/// Message types that carry state and stay worth handling after waiting in the
+/// mailbox of an offline recipient, along with `RESPONSE_TYPES`. Any other type
+/// is dropped past `MAX_TIMESTAMP_DRIFT_SECS`: nobody waits for the answer to an
+/// old question any more, and a backlog of answers would fill the requester's
+/// mailbox, where the oldest messages are evicted.
+const LATE_DELIVERY_TYPES: &[&str] = &[
+    "loan_request",
+    "loan_confirmation",
+    "loan_offer",
+    "status_update",
+    "peer_disconnect",
+    "relay_credential_update",
+];
+
+/// Past this age, the borrower may no longer be waiting for the answer to its loan
+/// request (`DEFAULT_E2EE_RELAY_TIMEOUT`, 90 seconds). The margin covers a small
+/// clock difference. A larger one only costs an automatic approval, or lets one
+/// through as it could before.
+const LATE_LOAN_REQUEST_SECS: i64 = 60;
+
 /// Message types that produce a response payload (request-response pattern).
 const REQUEST_RESPONSE_TYPES: &[&str] = &[
     "book_sync_request",
@@ -385,7 +406,7 @@ async fn process_relay_message(
 
     // Open the envelope
     let (clear_message, peer_index) = crypto_service
-        .open(envelope, known_peers)
+        .open_relayed(envelope, known_peers)
         .map_err(|e| format!("failed to open envelope: {e}"))?;
 
     let sender_peer = &peer_models[peer_index];
@@ -395,6 +416,21 @@ async fn process_relay_message(
         sender_peer.name,
         sender_peer.id
     );
+
+    let age_secs = chrono::Utc::now()
+        .timestamp()
+        .saturating_sub(clear_message.timestamp);
+    let message_type = clear_message.message_type.as_str();
+    if age_secs > MAX_TIMESTAMP_DRIFT_SECS
+        && !LATE_DELIVERY_TYPES.contains(&message_type)
+        && !RESPONSE_TYPES.contains(&message_type)
+    {
+        tracing::info!(
+            "Relay poller: dropped '{message_type}' from peer {}, {age_secs}s old",
+            sender_peer.id
+        );
+        return Ok(());
+    }
 
     // An ex-peer still holds our write token: until the owner restores the
     // pairing it may only leave or move its own mailbox (ADR-072 D4). The
@@ -540,6 +576,18 @@ async fn process_relay_message(
         return Ok(());
     }
 
+    if message_type == "loan_request" && age_secs > LATE_LOAN_REQUEST_SECS {
+        return handle_late_loan_request(
+            state.db(),
+            relay_url,
+            crypto_service,
+            &clear_message,
+            &known_peers[peer_index],
+            sender_peer,
+        )
+        .await;
+    }
+
     // ADR-012: For request-response types with reply_to fields,
     // compute the response and deposit it in the requester's mailbox.
     let has_reply_to =
@@ -581,6 +629,78 @@ async fn process_relay_message(
     }
 
     Ok(())
+}
+
+/// Handle a loan request the borrower has stopped waiting for.
+///
+/// Nobody waits for the synchronous answer any more, so it would be dropped on
+/// arrival. A request that waited is therefore never approved automatically: that
+/// would lend a book the borrower never hears about. The lender decides, and accepting sends the
+/// usual `loan_confirmation`. An automatic refusal travels as a `status_update`,
+/// which needs nobody waiting.
+async fn handle_late_loan_request(
+    db: &sea_orm::DatabaseConnection,
+    relay_url: &str,
+    crypto_service: &Arc<
+        crate::services::crypto_service::CryptoService<
+            crate::infrastructure::nonce_store::SqliteNonceStore,
+        >,
+    >,
+    clear_message: &ClearMessage,
+    sender_info: &crate::services::crypto_service::PeerInfo,
+    sender_peer: &peer::Model,
+) -> Result<(), String> {
+    let reply_to = clear_message
+        .reply_to_mailbox
+        .as_deref()
+        .zip(clear_message.reply_to_write_token.as_deref());
+    if let Some((mailbox, write_token)) = reply_to {
+        update_peer_relay_from_reply_to(db, sender_peer.id, relay_url, mailbox, write_token).await;
+    }
+
+    let outcome =
+        crate::api::e2ee::handle_late_loan_request_for_relay(db, sender_peer, clear_message).await;
+    if let Some(error) = outcome.get("error").and_then(|v| v.as_str()) {
+        return Err(format!("late loan request not saved: {error}"));
+    }
+    if outcome.get("status").and_then(|v| v.as_str()) != Some("rejected") {
+        return Ok(());
+    }
+
+    let Some(requester_request_id) = clear_message
+        .payload
+        .get("requester_request_id")
+        .and_then(|v| v.as_str())
+    else {
+        return Ok(());
+    };
+    let target = match reply_to {
+        Some((mailbox, write_token)) => Some((relay_url, mailbox, write_token)),
+        None => sender_peer
+            .relay_url
+            .as_deref()
+            .zip(sender_peer.mailbox_id.as_deref())
+            .zip(sender_peer.relay_write_token.as_deref())
+            .map(|((url, mailbox), write_token)| (url, mailbox, write_token)),
+    };
+    let Some((url, mailbox, write_token)) = target else {
+        return Err("no mailbox to report a late refusal to".to_string());
+    };
+
+    let refusal = crate::services::e2ee_transport::DirectTransport::build_message(
+        "status_update",
+        serde_json::json!({ "loan_id": requester_request_id, "status": "rejected" }),
+    );
+    RelayTransport::new(Some(crypto_service.clone()))
+        .deposit_response(
+            url,
+            mailbox,
+            write_token,
+            &sender_info.x25519_public,
+            &refusal,
+        )
+        .await
+        .map_err(|e| format!("failed to deposit late refusal: {e}"))
 }
 
 /// Handle a request-response message that arrived via relay with reply_to fields (ADR-012).

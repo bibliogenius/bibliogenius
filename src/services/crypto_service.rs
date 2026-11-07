@@ -13,7 +13,13 @@ use crate::crypto::key_exchange::{
 const PAD_BLOCK_SIZE: usize = 256;
 
 /// Maximum allowed timestamp drift in seconds (B4).
-const MAX_TIMESTAMP_DRIFT_SECS: i64 = 300; // ±5 minutes
+pub(crate) const MAX_TIMESTAMP_DRIFT_SECS: i64 = 300; // ±5 minutes
+
+/// How old a message collected from a relay mailbox may be: the time the Hub
+/// keeps it for an offline recipient. Replay protection rests on the nonce, so
+/// `seen_envelopes` must keep nonces for longer than this plus
+/// `MAX_TIMESTAMP_DRIFT_SECS`, the most a message may be dated ahead.
+const RELAY_MAX_AGE_SECS: i64 = 7 * 24 * 60 * 60;
 
 /// Trait for anti-replay nonce storage (B4).
 ///
@@ -112,6 +118,25 @@ impl<N: NonceStore> CryptoService<N> {
         envelope: &EncryptedEnvelope,
         known_peers: &[PeerInfo],
     ) -> Result<(ClearMessage, usize), CryptoError> {
+        self.open_within(envelope, known_peers, MAX_TIMESTAMP_DRIFT_SECS)
+    }
+
+    /// Open an envelope collected from a relay mailbox, where it may have waited
+    /// for an offline recipient. Only the accepted age differs from [`Self::open`].
+    pub fn open_relayed(
+        &self,
+        envelope: &EncryptedEnvelope,
+        known_peers: &[PeerInfo],
+    ) -> Result<(ClearMessage, usize), CryptoError> {
+        self.open_within(envelope, known_peers, RELAY_MAX_AGE_SECS)
+    }
+
+    fn open_within(
+        &self,
+        envelope: &EncryptedEnvelope,
+        known_peers: &[PeerInfo],
+        max_age_secs: i64,
+    ) -> Result<(ClearMessage, usize), CryptoError> {
         // 0. Version check
         if envelope.version != 1 {
             return Err(CryptoError::Serialization(format!(
@@ -177,10 +202,12 @@ impl<N: NonceStore> CryptoService<N> {
         let message: ClearMessage =
             serde_json::from_slice(&json).map_err(|e| CryptoError::Serialization(e.to_string()))?;
 
-        // 10. Check timestamp window (B4: ±5 min)
-        let now = chrono::Utc::now().timestamp();
-        let drift = (now - message.timestamp).abs();
-        if drift > MAX_TIMESTAMP_DRIFT_SECS {
+        // 10. Check timestamp window (B4). The timestamp is signed, so neither the
+        // Hub nor the network can make a message look younger than it is.
+        let age = chrono::Utc::now()
+            .timestamp()
+            .saturating_sub(message.timestamp);
+        if age > max_age_secs || age < -MAX_TIMESTAMP_DRIFT_SECS {
             return Err(CryptoError::MessageExpired);
         }
 

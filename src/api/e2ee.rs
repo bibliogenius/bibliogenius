@@ -177,7 +177,7 @@ pub async fn dispatch_clear_message(
     match clear_message.message_type.as_str() {
         "loan_request" => {
             let response_payload =
-                handle_loan_request_payload(db, sender_peer, clear_message).await;
+                handle_loan_request_payload(db, sender_peer, clear_message, true).await;
             seal_response(
                 crypto_service,
                 &known_peers[peer_index],
@@ -437,11 +437,13 @@ async fn handle_loan_request_payload(
     db: &DatabaseConnection,
     sender_peer: &peer::Model,
     msg: &ClearMessage,
+    may_auto_approve: bool,
 ) -> serde_json::Value {
     match save_loan_request(db, sender_peer, msg).await {
         Ok((request_id, status)) => {
             // Check auto-approve: if enabled and peer is accepted, accept inline
             if status == "pending"
+                && may_auto_approve
                 && crate::api::peer::is_auto_approve_loans_enabled(db).await
                 && sender_peer.connection_status == "accepted"
             {
@@ -537,7 +539,17 @@ pub async fn handle_loan_request_for_relay(
     sender_peer: &peer::Model,
     msg: &ClearMessage,
 ) -> serde_json::Value {
-    handle_loan_request_payload(db, sender_peer, msg).await
+    handle_loan_request_payload(db, sender_peer, msg, true).await
+}
+
+/// Relay variant for a request the borrower no longer waits on: it is recorded
+/// and refused if need be, but never approved automatically.
+pub async fn handle_late_loan_request_for_relay(
+    db: &DatabaseConnection,
+    sender_peer: &peer::Model,
+    msg: &ClearMessage,
+) -> serde_json::Value {
+    handle_loan_request_payload(db, sender_peer, msg, false).await
 }
 
 /// Handle an encrypted loan confirmation (delegates to `create_borrowed_copy` helper).

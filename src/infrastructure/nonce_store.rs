@@ -19,7 +19,10 @@ impl SqliteNonceStore {
         Self { db }
     }
 
-    /// Delete envelopes older than 7 days.
+    /// Delete envelopes older than 8 days. A relayed message stays acceptable for
+    /// 7 days and may be dated 5 minutes ahead (`crypto_service`): its nonce must
+    /// outlive that, or a copy kept by the Hub could be replayed. The rest of the
+    /// day is a margin for the device clock.
     fn cleanup(&self) -> Result<(), CryptoError> {
         // Use tokio::task::block_in_place since NonceStore trait is sync
         tokio::task::block_in_place(|| {
@@ -27,7 +30,7 @@ impl SqliteNonceStore {
                 self.db
                     .execute(Statement::from_string(
                         sea_orm::DatabaseBackend::Sqlite,
-                        "DELETE FROM seen_envelopes WHERE received_at < datetime('now', '-7 days')"
+                        "DELETE FROM seen_envelopes WHERE received_at < datetime('now', '-8 days')"
                             .to_string(),
                     ))
                     .await
@@ -125,7 +128,7 @@ mod tests {
         let old_nonce: [u8; 12] = [1; 12];
         db.execute(Statement::from_sql_and_values(
             sea_orm::DatabaseBackend::Sqlite,
-            "INSERT INTO seen_envelopes (nonce, received_at) VALUES (?, datetime('now', '-8 days'))",
+            "INSERT INTO seen_envelopes (nonce, received_at) VALUES (?, datetime('now', '-9 days'))",
             vec![old_nonce.to_vec().into()],
         ))
         .await
@@ -141,5 +144,45 @@ mod tests {
         // Old nonce should be gone, recent should remain
         assert!(!store.exists(&old_nonce).unwrap());
         assert!(store.exists(&recent_nonce).unwrap());
+    }
+
+    /// A relayed message stays acceptable for 7 days, plus the 5 minutes it may
+    /// be dated ahead: its nonce must outlive that, with a margin for the clock.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_nonce_outlives_the_relay_window() {
+        let db = setup_test_db().await;
+        let store = SqliteNonceStore::new(db.clone());
+        let nonce: [u8; 12] = [3; 12];
+        db.execute(Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "INSERT INTO seen_envelopes (nonce, received_at) \
+             VALUES (?, datetime('now', '-7 days', '-23 hours'))",
+            vec![nonce.to_vec().into()],
+        ))
+        .await
+        .unwrap();
+
+        store.cleanup().unwrap();
+
+        assert!(store.exists(&nonce).unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_nonce_past_the_retention_is_purged() {
+        let db = setup_test_db().await;
+        let store = SqliteNonceStore::new(db.clone());
+        let nonce: [u8; 12] = [4; 12];
+        db.execute(Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "INSERT INTO seen_envelopes (nonce, received_at) \
+             VALUES (?, datetime('now', '-8 days', '-1 hours'))",
+            vec![nonce.to_vec().into()],
+        ))
+        .await
+        .unwrap();
+
+        store.cleanup().unwrap();
+
+        assert!(!store.exists(&nonce).unwrap());
     }
 }

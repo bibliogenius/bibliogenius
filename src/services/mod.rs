@@ -50,8 +50,14 @@ pub mod peer_identity_sync;
 pub mod profile_events;
 pub mod profile_notification;
 pub mod recommendation_service;
+#[cfg(test)]
+mod relay_burst_tests;
+#[cfg(test)]
+mod relay_late_delivery_tests;
 pub mod relay_poller;
 pub mod relay_session;
+#[cfg(test)]
+mod relay_test_support;
 pub mod relay_transport;
 pub mod sale_service; // Service de vente pour profil Libraire
 pub mod shelving_service;
