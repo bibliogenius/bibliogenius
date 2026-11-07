@@ -1,11 +1,15 @@
 //! A borrower cancels a loan request the lender may not have collected yet.
 //! The cancellation must follow the request, and asking again must work.
 
+use std::time::{Duration, Instant};
+
 use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use sea_orm::{ActiveModelTrait, Set};
+use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use serde_json::json;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::api::peer::{
     RequestAction, cancel_request, delete_outgoing_request, update_request_status,
@@ -99,6 +103,219 @@ async fn cancelling_and_asking_again_while_the_lender_is_offline() {
             .contains(&"borrow_rejected".to_string()),
         "no false refusal"
     );
+}
+
+async fn set_lender_url(p: &Pair, url: &str) {
+    let row = peer::Entity::find_by_id(p.bruno_on_alice)
+        .one(&p.alice.db)
+        .await
+        .expect("query")
+        .expect("peer");
+    let mut active: peer::ActiveModel = row.into();
+    active.url = Set(url.to_string());
+    active.update(&p.alice.db).await.expect("update peer");
+}
+
+async fn remove_lender_mailbox(p: &Pair) {
+    let row = peer::Entity::find_by_id(p.bruno_on_alice)
+        .one(&p.alice.db)
+        .await
+        .expect("query")
+        .expect("peer");
+    let mut active: peer::ActiveModel = row.into();
+    active.relay_write_token = Set(None);
+    active.update(&p.alice.db).await.expect("update peer");
+}
+
+async fn answering_lender(status: u16) -> MockServer {
+    let lender = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/e2ee/message"))
+        .respond_with(ResponseTemplate::new(status).set_body_json(json!({})))
+        .mount(&lender)
+        .await;
+    lender
+}
+
+/// Requests a lender received, waiting a little for the expected number: what goes
+/// direct leaves in the background.
+async fn requests_received(lender: &MockServer, expected: usize) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let received = lender
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .len();
+        if received >= expected || Instant::now() > deadline {
+            return received;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The lender is back and reachable, but has not collected its mailbox yet. A
+/// direct cancellation would arrive first and find nothing to cancel.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancellation_stays_behind_the_request_when_the_lender_is_reachable() {
+    let p = paired().await;
+    p.bruno.add_book("available").await;
+    let request = p
+        .alice
+        .ask_for_book(p.bruno_on_alice, FIRST, 2 * HOUR)
+        .await;
+    p.alice.deposit(&p.bruno, &request).await;
+    let lender = MockServer::start().await;
+    set_lender_url(&p, &lender.uri()).await;
+
+    cancel(&p, FIRST).await;
+    p.bruno.poll().await;
+
+    assert_eq!(p.hub.deposited(&p.bruno), 2, "request, then cancellation");
+    assert_eq!(
+        p.bruno.incoming().await,
+        Vec::<(Option<String>, String)>::new()
+    );
+}
+
+/// The borrower may hold a mailbox the lender no longer reads, which the hub still
+/// accepts. The copy sent directly is what reaches a lender in that case.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancellation_also_goes_direct_in_case_the_mailbox_is_no_longer_read() {
+    let p = paired().await;
+    let _ = p.alice.ask_for_book(p.bruno_on_alice, FIRST, 0).await;
+    let lender = answering_lender(200).await;
+    set_lender_url(&p, &lender.uri()).await;
+
+    cancel(&p, FIRST).await;
+
+    assert_eq!(p.hub.deposited(&p.bruno), 1);
+    assert_eq!(requests_received(&lender, 1).await, 1);
+}
+
+/// A lender on the previous version answers 404 to the copy sent directly. That
+/// says nothing about whether it can be reached.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_older_lender_answering_404_is_not_marked_unreachable() {
+    let p = paired().await;
+    let _ = p.alice.ask_for_book(p.bruno_on_alice, FIRST, 0).await;
+    let lender = answering_lender(404).await;
+    set_lender_url(&p, &lender.uri()).await;
+
+    cancel(&p, FIRST).await;
+
+    assert_eq!(requests_received(&lender, 1).await, 1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!p.alice.state.is_peer_direct_unreachable(p.bruno_on_alice));
+    assert_eq!(
+        p.hub.deposited(&p.bruno),
+        1,
+        "no second copy in the mailbox"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lender_known_to_be_unreachable_only_gets_the_mailbox_copy() {
+    let p = paired().await;
+    let _ = p.alice.ask_for_book(p.bruno_on_alice, FIRST, 0).await;
+    let lender = answering_lender(200).await;
+    set_lender_url(&p, &lender.uri()).await;
+    p.alice.state.mark_peer_direct_failed(p.bruno_on_alice);
+
+    cancel(&p, FIRST).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(requests_received(&lender, 0).await, 0);
+    assert_eq!(p.hub.deposited(&p.bruno), 1);
+}
+
+/// The screen waits on this call, and only the deposit has to be in order.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_does_not_wait_for_a_slow_direct_route() {
+    let p = paired().await;
+    let _ = p.alice.ask_for_book(p.bruno_on_alice, FIRST, 0).await;
+    let lender = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/e2ee/message"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({}))
+                .set_delay(Duration::from_millis(2500)),
+        )
+        .mount(&lender)
+        .await;
+    set_lender_url(&p, &lender.uri()).await;
+    remove_lender_mailbox(&p).await;
+
+    let started = Instant::now();
+    cancel(&p, FIRST).await;
+
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+/// No relay credentials: the direct route is all there is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancellation_goes_direct_to_a_lender_without_a_mailbox() {
+    let p = paired().await;
+    let _ = p.alice.ask_for_book(p.bruno_on_alice, FIRST, 0).await;
+    let lender = answering_lender(200).await;
+    set_lender_url(&p, &lender.uri()).await;
+    remove_lender_mailbox(&p).await;
+
+    cancel(&p, FIRST).await;
+
+    assert_eq!(requests_received(&lender, 1).await, 1);
+    assert_eq!(p.hub.deposited(&p.bruno), 0);
+}
+
+/// The lender has new keys: a sealed cancellation could never be opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancellation_is_not_deposited_for_keys_the_lender_left() {
+    let p = paired().await;
+    let _ = p.alice.ask_for_book(p.bruno_on_alice, FIRST, 0).await;
+    let pinned = p
+        .alice
+        .peer_row(p.bruno_on_alice)
+        .await
+        .expect("peer")
+        .x25519_public_key
+        .expect("keys");
+    p.alice
+        .state
+        .mark_peer_keys_changed(p.bruno_on_alice, &pinned);
+
+    cancel(&p, FIRST).await;
+
+    assert_eq!(p.alice.outgoing_status(FIRST).await, None, "still deleted");
+    assert_eq!(p.hub.deposited(&p.bruno), 0);
+}
+
+/// Dismissing an answered request from the history tells nobody anything, and
+/// takes no slot in a mailbox capped at 100 messages.
+#[tokio::test(flavor = "multi_thread")]
+async fn dismissing_an_answered_request_sends_nothing() {
+    let p = paired().await;
+    let _ = p.alice.ask_for_book(p.bruno_on_alice, FIRST, 0).await;
+    let refusal = message(
+        "status_update",
+        json!({ "loan_id": FIRST, "status": "rejected" }),
+        0,
+    );
+    p.bruno.deposit(&p.alice, &refusal).await;
+    p.alice.poll().await;
+    assert_eq!(
+        p.alice.outgoing_status(FIRST).await.as_deref(),
+        Some("rejected")
+    );
+
+    cancel(&p, FIRST).await;
+
+    assert_eq!(p.alice.outgoing_status(FIRST).await, None, "dismissed");
+    assert_eq!(p.hub.deposited(&p.bruno), 0);
 }
 
 /// Known limit: once the lender accepted, the loan stands.
@@ -204,7 +421,6 @@ async fn a_plaintext_cancel_finds_the_request_by_the_borrower_id() {
     .into_response();
 
     assert_eq!(response.status(), StatusCode::OK);
-    use sea_orm::EntityTrait;
     assert!(
         p2p_request::Entity::find_by_id("lender-own-id")
             .one(&db)

@@ -1060,6 +1060,7 @@ async fn resolve_reclaimed_book_by_lender(
 /// This handler serves two directions:
 /// - Lender → Borrower (accepted/rejected): updates `p2p_outgoing_request`
 /// - Borrower → Lender (returned): updates `p2p_request` + loan + copy
+/// - Borrower → Lender (cancelled): removes its `p2p_request` while still pending
 pub(crate) async fn handle_status_update(
     db: &DatabaseConnection,
     msg: &ClearMessage,
@@ -1195,7 +1196,31 @@ pub(crate) async fn handle_status_update(
         return (StatusCode::OK, Json(json!({ "message": "Status updated" }))).into_response();
     }
 
-    // 2. Try lender-side: update incoming request (borrower sent us return)
+    // 2. Lender-side. The borrower cancelling names its own request id. Only a
+    // request still pending is removed: once accepted, the loan stands. The sender
+    // is part of the query, so a peer cannot cancel someone else's request.
+    if status == "cancelled" {
+        return match p2p_request::Entity::delete_many()
+            .filter(p2p_request::Column::RequesterRequestId.eq(loan_id))
+            .filter(p2p_request::Column::FromPeerId.eq(sender_peer.id))
+            .filter(p2p_request::Column::Status.eq("pending"))
+            .exec(db)
+            .await
+        {
+            Ok(_) => (
+                StatusCode::OK,
+                Json(json!({ "message": "Request cancelled" })),
+            )
+                .into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Failed to cancel: {e}") })),
+            )
+                .into_response(),
+        };
+    }
+
+    // Then an update of an incoming request (borrower sent us return)
     let incoming = p2p_request::Entity::find_by_id(loan_id).one(db).await;
     match incoming {
         Ok(Some(req)) => {

@@ -1112,36 +1112,10 @@ pub async fn delete_outgoing_request(
         }
     };
 
-    // 3. Notify the peer about the cancellation (best effort)
-    let client = get_safe_client();
-    let cancel_url = format!("{}/api/peers/requests/cancel/{}", peer.url, id);
-    // Assert our own identity so the lender's ownership check accepts the cancel:
-    // it resolves this uuid and requires it to name the borrower that made the request.
-    let our_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
-
-    tracing::info!(
-        "📡 Notifying peer {} of request cancellation: {}",
-        peer.name,
-        cancel_url
-    );
-
-    match client
-        .delete(&cancel_url)
-        .json(&json!({ "library_uuid": our_uuid }))
-        .send()
-        .await
-    {
-        Ok(res) => {
-            if res.status().is_success() {
-                tracing::info!("✅ Peer notified successfully");
-            } else {
-                tracing::warn!("⚠️ Peer notification returned: {}", res.status());
-            }
-        }
-        Err(e) => {
-            tracing::warn!("⚠️ Failed to notify peer (may be offline): {}", e);
-            // Continue with local deletion anyway
-        }
+    // 3. Notify the peer about the cancellation (best effort). This route also
+    // dismisses answered requests from the history: those have nothing to cancel.
+    if request.status == "pending" {
+        notify_lender_of_cancellation(&state, &peer, &id).await;
     }
 
     // 4. Delete locally
@@ -1155,6 +1129,155 @@ pub async fn delete_outgoing_request(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+/// Deposit a message in the peer's relay mailbox, without trying it directly.
+/// Returns whether the hub took it.
+async fn deposit_in_peer_mailbox(
+    state: &crate::infrastructure::AppState,
+    peer: &peer::Model,
+    message: &crate::crypto::envelope::ClearMessage,
+) -> bool {
+    let (Some(relay_url), Some(mailbox_id), Some(write_token), Some(x25519_hex), Some(crypto)) = (
+        peer.relay_url.as_deref(),
+        peer.mailbox_id.as_deref(),
+        peer.relay_write_token.as_deref(),
+        peer.x25519_public_key.as_deref(),
+        state.crypto_service(),
+    ) else {
+        return false;
+    };
+    let Some(x25519_bytes) = hex::decode(x25519_hex)
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+    else {
+        return false;
+    };
+    // The gate on a stale token, and keys the lender no longer holds: the caller
+    // falls back on `try_send_e2ee`, which reports both.
+    if !peer.relay_gate_allows_send() || state.peer_still_on_changed_keys(peer.id, Some(x25519_hex))
+    {
+        return false;
+    }
+    crate::services::relay_transport::RelayTransport::new(Some(crypto.clone()))
+        .send(
+            relay_url,
+            mailbox_id,
+            write_token,
+            &x25519_dalek::PublicKey::from(x25519_bytes),
+            message,
+        )
+        .await
+        .is_ok()
+}
+
+/// Tell the lender that a pending request is cancelled.
+///
+/// The mailbox keeps the cancellation behind the request, which the lender may not
+/// have collected yet, and ahead of any new request: this deposit is awaited, so
+/// that asking again cannot overtake it. A copy then goes direct in the background,
+/// for a lender that no longer reads the mailbox the borrower knows. Handling the
+/// same cancellation twice is harmless.
+async fn notify_lender_of_cancellation(
+    state: &crate::infrastructure::AppState,
+    peer: &peer::Model,
+    id: &str,
+) {
+    let cancellation = json!({ "loan_id": id, "status": "cancelled" });
+    let message = crate::services::e2ee_transport::DirectTransport::build_message(
+        "status_update",
+        cancellation.clone(),
+    );
+    let deposited = deposit_in_peer_mailbox(state, peer, &message).await;
+    if deposited {
+        tracing::info!(
+            "Relay: Cancellation of request {} sent to {}",
+            id,
+            peer.name
+        );
+    }
+
+    let state = state.clone();
+    let peer = peer.clone();
+    let id = id.to_string();
+    tokio::spawn(async move {
+        if deposited {
+            send_direct_copy_of_cancellation(&state, peer, cancellation).await;
+            return;
+        }
+        send_cancellation_without_mailbox(&state, &peer, &id, cancellation).await;
+    });
+}
+
+/// Best effort, as the mailbox already holds the cancellation. The result says
+/// nothing about the lender: one on the previous version answers 404, which would
+/// otherwise mark it unreachable for its other messages.
+async fn send_direct_copy_of_cancellation(
+    state: &crate::infrastructure::AppState,
+    peer: peer::Model,
+    cancellation: serde_json::Value,
+) {
+    if state.is_peer_direct_unreachable(peer.id) {
+        return;
+    }
+    let peer_id = peer.id;
+    let direct_only = peer::Model {
+        relay_url: None,
+        mailbox_id: None,
+        relay_write_token: None,
+        ..peer
+    };
+    let _ = try_send_e2ee(state, &direct_only, "status_update", cancellation).await;
+    state.clear_peer_direct_failed(peer_id);
+}
+
+async fn send_cancellation_without_mailbox(
+    state: &crate::infrastructure::AppState,
+    peer: &peer::Model,
+    id: &str,
+    cancellation: serde_json::Value,
+) {
+    match try_send_e2ee(state, peer, "status_update", cancellation).await {
+        Ok(Some(_)) => {
+            tracing::info!("E2EE: Cancellation of request {} sent to {}", id, peer.name);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to notify peer of cancellation (may be offline): {e}");
+            // Continue with local deletion anyway
+        }
+        Ok(None) => {
+            let client = get_safe_client();
+            let cancel_url = format!("{}/api/peers/requests/cancel/{}", peer.url, id);
+            // Assert our own identity so the lender's ownership check accepts the cancel:
+            // it resolves this uuid and requires it to name the borrower that made the request.
+            let our_uuid = state.identity_service.library_uuid().map(|s| s.to_string());
+
+            tracing::info!(
+                "📡 Notifying peer {} of request cancellation: {}",
+                peer.name,
+                cancel_url
+            );
+
+            match client
+                .delete(&cancel_url)
+                .json(&json!({ "library_uuid": our_uuid }))
+                .send()
+                .await
+            {
+                Ok(res) => {
+                    if res.status().is_success() {
+                        tracing::info!("✅ Peer notified successfully");
+                    } else {
+                        tracing::warn!("⚠️ Peer notification returned: {}", res.status());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ Failed to notify peer (may be offline): {}", e);
+                    // Continue with local deletion anyway
+                }
+            }
+        }
     }
 }
 
@@ -1173,7 +1296,20 @@ pub async fn cancel_request(
     // Ownership: a cancellation deletes an incoming request, so a guessed id would
     // otherwise let any host on the LAN drop any pending loan request. Only the borrower
     // that created the request may cancel it, mirroring the encrypted path's sender check.
-    let request = match p2p_request::Entity::find_by_id(&id).one(&db).await {
+    // A borrower names the request by its own id, recorded here as
+    // `requester_request_id`. Through that id, only a pending request can be
+    // cancelled: once the lender answered, the loan stands.
+    let found = match p2p_request::Entity::find_by_id(&id).one(&db).await {
+        Ok(None) => {
+            p2p_request::Entity::find()
+                .filter(p2p_request::Column::RequesterRequestId.eq(&id))
+                .filter(p2p_request::Column::Status.eq("pending"))
+                .one(&db)
+                .await
+        }
+        other => other,
+    };
+    let request = match found {
         Ok(Some(req)) => req,
         // Idempotent: nothing to cancel, and nothing to leak about who asked.
         Ok(None) => {
@@ -1230,7 +1366,10 @@ pub async fn cancel_request(
     }
 
     // Delete the incoming request that matches this ID
-    match p2p_request::Entity::delete_by_id(&id).exec(&db).await {
+    match p2p_request::Entity::delete_by_id(&request.id)
+        .exec(&db)
+        .await
+    {
         Ok(res) => {
             if res.rows_affected == 0 {
                 tracing::warn!("Cancellation target not found: {}", id);

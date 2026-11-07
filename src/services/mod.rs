@@ -53,6 +53,8 @@ pub mod recommendation_service;
 #[cfg(test)]
 mod relay_burst_tests;
 #[cfg(test)]
+mod relay_cancel_tests;
+#[cfg(test)]
 mod relay_late_delivery_tests;
 pub mod relay_poller;
 pub mod relay_session;
