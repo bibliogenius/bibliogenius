@@ -981,8 +981,8 @@ pub async fn clear_outgoing_requests(State(db): State<DatabaseConnection>) -> im
 
 /// Sync pending outgoing requests by querying each lender for current status.
 ///
-/// For each pending outgoing request, sends a `request_status_query` via E2EE
-/// (with relay fallback) to the lender. If the lender reports the request has been
+/// For each pending outgoing request, sends a `request_status_query` directly to
+/// the lender. If the lender reports the request has been
 /// accepted/rejected, updates the local outgoing request accordingly and creates
 /// the borrowed copy if accepted.
 pub async fn sync_outgoing_requests(
@@ -1015,8 +1015,30 @@ pub async fn sync_outgoing_requests(
             "requester_request_id": outgoing.id,
         });
 
-        // Try E2EE (with relay fallback)
-        let result = try_send_e2ee(&state, &lender, "request_status_query", query_payload).await;
+        // This question only goes direct. The lender does not answer it through the
+        // relay, and the loans screen asks every 30 seconds for each pending request:
+        // deposits would pile up in the mailbox of an offline lender until they evict
+        // the oldest message, which can be the loan request itself.
+        // A lender marked unreachable waits for the mark to expire, as it did when its
+        // mailbox could take the question. Without a usable mailbox, direct is the only
+        // chance left and keeps being tried, as in `try_send_e2ee`.
+        let has_usable_mailbox = lender.relay_url.is_some()
+            && lender.mailbox_id.is_some()
+            && lender.relay_write_token.is_some()
+            && lender.relay_gate_allows_send();
+        if state.is_peer_direct_unreachable(lender.id) && has_usable_mailbox {
+            continue;
+        }
+        // `try_send_e2ee` reads the relay credentials only from the row it is given,
+        // so without them it stops after the direct attempt, hub refresh included.
+        let direct_only = peer::Model {
+            relay_url: None,
+            mailbox_id: None,
+            relay_write_token: None,
+            ..lender
+        };
+        let result =
+            try_send_e2ee(&state, &direct_only, "request_status_query", query_payload).await;
         synced += 1;
 
         if let Ok(Some(Some(ref clear_msg))) = result {

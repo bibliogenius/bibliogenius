@@ -138,6 +138,15 @@ impl FakeHub {
             .unwrap_or(0)
     }
 
+    /// Every request the hub received, whatever the route.
+    pub(crate) async fn requests_seen(&self) -> usize {
+        self.server
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .len()
+    }
+
     /// Deposit an envelope untouched, the way a hub could serve it twice.
     pub(crate) fn deposit_envelope(&self, device: &Device, envelope: &EncryptedEnvelope) {
         let bytes = serde_json::to_vec(envelope).expect("serialize envelope");

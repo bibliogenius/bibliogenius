@@ -63,6 +63,8 @@ mod relay_test_support;
 pub mod relay_transport;
 pub mod sale_service; // Service de vente pour profil Libraire
 pub mod shelving_service;
+#[cfg(test)]
+mod status_query_relay_tests;
 pub mod wishlist_service;
 pub mod ws_nudge;
 

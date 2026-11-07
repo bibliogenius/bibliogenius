@@ -66,7 +66,7 @@ async fn checking_on_a_request_leaves_nothing_in_an_unreachable_lenders_mailbox(
 }
 
 /// A failed direct attempt marks the lender unreachable: the next checks skip it
-/// until the mark expires, as sending did before.
+/// until the mark expires, as they did when they could use its mailbox.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_lender_known_to_be_unreachable_is_not_asked_again() {
     let p = paired().await;
@@ -88,6 +88,70 @@ async fn a_lender_known_to_be_unreachable_is_not_asked_again() {
             .is_empty()
     );
     assert_eq!(p.hub.deposited(&p.bruno), 0);
+}
+
+/// Without a mailbox, the direct route is the only one: it keeps being tried.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lender_without_a_mailbox_is_asked_even_after_a_failure() {
+    let p = paired().await;
+    let _ = p.alice.ask_for_book(p.bruno_on_alice, REQUEST, 0).await;
+    let lender = MockServer::start().await;
+    set_lender_url(&p, &lender.uri()).await;
+    let row = peer::Entity::find_by_id(p.bruno_on_alice)
+        .one(&p.alice.db)
+        .await
+        .expect("query")
+        .expect("peer");
+    let mut active: peer::ActiveModel = row.into();
+    active.relay_write_token = Set(None);
+    active.update(&p.alice.db).await.expect("update peer");
+    p.alice.state.mark_peer_direct_failed(p.bruno_on_alice);
+
+    let response = sync_outgoing_requests(State(p.alice.state.clone()))
+        .await
+        .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        lender
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .len(),
+        1
+    );
+}
+
+/// A write token flagged stale leaves no usable mailbox either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lender_with_a_stale_token_is_asked_even_after_a_failure() {
+    let p = paired().await;
+    let _ = p.alice.ask_for_book(p.bruno_on_alice, REQUEST, 0).await;
+    let lender = MockServer::start().await;
+    set_lender_url(&p, &lender.uri()).await;
+    let row = peer::Entity::find_by_id(p.bruno_on_alice)
+        .one(&p.alice.db)
+        .await
+        .expect("query")
+        .expect("peer");
+    let mut active: peer::ActiveModel = row.into();
+    active.relay_write_token_invalid_at = Set(Some(chrono::Utc::now().to_rfc3339()));
+    active.update(&p.alice.db).await.expect("update peer");
+    p.alice.state.mark_peer_direct_failed(p.bruno_on_alice);
+
+    let response = sync_outgoing_requests(State(p.alice.state.clone()))
+        .await
+        .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        lender
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .len(),
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
