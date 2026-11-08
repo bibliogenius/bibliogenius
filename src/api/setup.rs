@@ -483,6 +483,13 @@ pub async fn reset_app(
     State(db): State<DatabaseConnection>,
     _claims: crate::auth::Claims,
 ) -> impl IntoResponse {
+    // Before anything is wiped: deletes made while the account is still on this
+    // device would reach its other devices.
+    if let Err(e) = crate::services::account_session_service::ensure_reset_stays_local(&db).await {
+        tracing::warn!("Reset refused: {e}");
+        return (StatusCode::CONFLICT, Json(json!({ "error": e }))).into_response();
+    }
+
     use crate::models::{
         author, book, book_authors, book_tags, collection, collection_book, contact, copy,
         installation_profile, library, library_config, loan, notification, operation_log,
@@ -613,5 +620,49 @@ mod tests {
             .try_get::<i64>("", "n")
             .unwrap();
         assert_eq!(count_after, 0, "crypto_keys must be empty after reset_app");
+    }
+
+    #[tokio::test]
+    async fn reset_app_refuses_while_signed_in_to_an_account() {
+        // The deletes would replicate to every device of the account: nothing
+        // may be wiped, not even the identity.
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        crate::infrastructure::db::run_migrations(&db)
+            .await
+            .unwrap();
+        let svc = crate::services::IdentityService::new(db.clone());
+        svc.init("seed-uuid").await.unwrap();
+        let bundle = crate::crypto::account_keys::AccountKeyBundle::generate();
+        crate::services::account_session_service::persist(
+            &db,
+            "seed-uuid",
+            "acct-1",
+            "r@e.org",
+            "dev-a",
+            &bundle,
+        )
+        .await
+        .unwrap();
+
+        let claims = crate::infrastructure::auth::Claims {
+            sub: "test".to_string(),
+            role: "admin".to_string(),
+            exp: 0,
+        };
+        let response = reset_app(axum::extract::State(db.clone()), claims).await;
+        assert_eq!(response.into_response().status(), StatusCode::CONFLICT);
+
+        let keys: i64 = db
+            .query_one(Statement::from_sql_and_values(
+                db.get_database_backend(),
+                "SELECT COUNT(*) AS n FROM crypto_keys WHERE user_id = 0",
+                [],
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<i64>("", "n")
+            .unwrap();
+        assert_eq!(keys, 2, "a refused reset must leave the identity in place");
     }
 }

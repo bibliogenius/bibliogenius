@@ -396,6 +396,26 @@ mod tests {
         // dropped (the static extension is loaded process-wide).
         finalize(&db).await.expect("crsql_finalize");
     }
+
+    // A sign-out whose teardown failed leaves the replicated tables as CRRs with
+    // no session. The reset guard demotes them again instead of refusing, so the
+    // device is not stuck unable to reset.
+    #[tokio::test]
+    async fn crr_teardown_retried_by_the_reset_guard() {
+        crsqlite_static::register();
+        let db = connect_pinned().await;
+        crate::db::run_migrations(&db)
+            .await
+            .expect("run_migrations");
+        setup_crrs(&db).await.expect("setup_crrs");
+
+        crate::services::account_session_service::ensure_reset_stays_local(&db)
+            .await
+            .expect("the guard demotes the leftover CRRs");
+        assert!(!crrs_present(&db).await.expect("crrs_present"));
+
+        finalize(&db).await.expect("crsql_finalize");
+    }
 }
 
 #[cfg(test)]

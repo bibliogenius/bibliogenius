@@ -11,6 +11,10 @@
 pub async fn reset_app() -> Result<String, String> {
     let db = db().ok_or("Database not initialized")?;
 
+    // Before anything is wiped, the hub profile included: deletes made while the
+    // account is still on this device would reach its other devices.
+    crate::services::account_session_service::ensure_reset_stays_local(db).await?;
+
     // Unregister from hub directory BEFORE deleting local data (needs write_token).
     // Fire-and-forget: failure should not block local reset.
     {

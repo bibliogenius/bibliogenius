@@ -251,6 +251,55 @@ pub async fn clear(db: &DatabaseConnection) -> Result<(), SessionStoreError> {
     Ok(())
 }
 
+/// Refuse a full reset unless its deletes stay on this device.
+///
+/// A reset deletes rows from the replicated tables. While an account session
+/// is persisted, or while those tables are still CRRs, cr-sqlite records the
+/// deletes as tombstones that reach every device of the account: at once, or
+/// on the next sign-in to the same account. The app signs out before a full
+/// reset; this guard covers the doors that skip it and a sign-out whose CRR
+/// teardown failed (it is best-effort). In that last case the teardown is
+/// retried, so a signed-out device is not left unable to reset.
+///
+/// Must run before anything is wiped, the hub deregistration included.
+pub(crate) async fn ensure_reset_stays_local(db: &DatabaseConnection) -> Result<(), String> {
+    if exists(db)
+        .await
+        .map_err(|e| format!("Cannot read the account session: {e}"))?
+    {
+        return Err(
+            "This device is still signed in to an account: sign out first, or the reset \
+             would empty every device of the account"
+                .to_string(),
+        );
+    }
+    // CRRs exist only in a cr-sqlite build: elsewhere a replicated table cannot
+    // be written at all, so the reset fails before it could record anything.
+    #[cfg(any(feature = "crsqlite", feature = "crsqlite-static"))]
+    {
+        use crate::infrastructure::crsqlite_crr::{crrs_present, teardown_crrs};
+        let still_replicated = || async {
+            crrs_present(db)
+                .await
+                .map_err(|e| format!("Cannot inspect the replicated tables: {e}"))
+        };
+        if still_replicated().await? {
+            tracing::warn!("Replicated tables still present before a reset, demoting them again");
+            if let Err(e) = teardown_crrs(db).await {
+                tracing::warn!("CRR teardown before reset failed: {e}");
+            }
+            if still_replicated().await? {
+                return Err(
+                    "The replicated tables could not be demoted: the reset would reach the \
+                     account's other devices"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +448,51 @@ mod tests {
             .unwrap();
         clear(&db).await.unwrap();
         assert_eq!(store.lane_hlc("acct-1", "oid-1", "devB").await.unwrap(), 7);
+    }
+
+    // A reset deletes rows from the replicated tables. While a session or the
+    // CRR machinery remains, those deletes become tombstones that reach every
+    // device of the account, at once or on the next sign-in.
+
+    #[tokio::test]
+    async fn reset_guard_lets_a_device_without_an_account_reset() {
+        let db = setup_db().await;
+        ensure_reset_stays_local(&db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reset_guard_refuses_while_a_session_remains() {
+        let db = setup_db().await;
+        let bundle = AccountKeyBundle::generate();
+        persist(&db, "lib-uuid", "acct-1", "r@e.org", "dev-a", &bundle)
+            .await
+            .unwrap();
+
+        let err = ensure_reset_stays_local(&db).await.unwrap_err();
+        assert!(err.contains("signed in"), "unexpected error: {err}");
+        assert!(
+            exists(&db).await.unwrap(),
+            "the guard must not touch the session"
+        );
+    }
+
+    #[cfg(any(feature = "crsqlite", feature = "crsqlite-static"))]
+    #[tokio::test]
+    async fn reset_guard_refuses_when_replicated_tables_survive_the_teardown() {
+        // A clock table the teardown does not demote stands in for a teardown
+        // that fails again: the reset must refuse rather than record tombstones.
+        let db = setup_db().await;
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE TABLE not_replicated__crsql_clock (id INTEGER)".to_owned(),
+        ))
+        .await
+        .unwrap();
+
+        let err = ensure_reset_stays_local(&db).await.unwrap_err();
+        assert!(
+            err.contains("could not be demoted"),
+            "unexpected error: {err}"
+        );
     }
 }
