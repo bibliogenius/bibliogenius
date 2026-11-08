@@ -133,14 +133,37 @@ pub async fn available_difficulties(
     Ok(available)
 }
 
+/// A dealt board, plus the books that can stand in for a pair.
+#[derive(Debug, Clone)]
+pub struct MemoryGameDeal {
+    /// Two cards per selected book, shuffled.
+    pub cards: Vec<MemoryGameCard>,
+    /// Every other book with a distinct cover, in random order.
+    ///
+    /// A stored cover URL says nothing about whether it will draw: a dead
+    /// Open Library ISBN, a timeout, a local file absent on this device all
+    /// render the same grey placeholder, and two such pairs cannot be told
+    /// apart. Only the device can find out, so it checks the covers before
+    /// play and swaps a failing pair for the next book of this reserve.
+    pub reserve: Vec<MemoryGameCard>,
+}
+
 /// Set up a new game: pick random books, duplicate into pairs, shuffle
 pub async fn setup_game(
     repo: &dyn MemoryGameRepository,
     difficulty: MemoryDifficulty,
-) -> Result<Vec<MemoryGameCard>, DomainError> {
+) -> Result<MemoryGameDeal, DomainError> {
     let books = repo.find_books_with_covers().await?;
-    let pairs = difficulty.pairs_count();
+    deal(books, difficulty.pairs_count(), &mut thread_rng())
+}
 
+/// Picks `pairs` books with distinct covers, duplicates them into a shuffled
+/// board, and keeps the remaining distinct-cover books as the reserve.
+fn deal(
+    books: Vec<MemoryGameCard>,
+    pairs: usize,
+    rng: &mut impl rand::Rng,
+) -> Result<MemoryGameDeal, DomainError> {
     // Deduplicate by cover_url so two books sharing the same cover
     // never appear as separate pairs on the board.
     let mut seen_covers = HashSet::new();
@@ -157,18 +180,17 @@ pub async fn setup_game(
         )));
     }
 
-    let mut rng = thread_rng();
-    unique_books.shuffle(&mut rng);
-    let selected: Vec<MemoryGameCard> = unique_books.into_iter().take(pairs).collect();
+    unique_books.shuffle(rng);
+    let reserve = unique_books.split_off(pairs);
 
     let mut cards: Vec<MemoryGameCard> = Vec::with_capacity(pairs * 2);
-    for card in &selected {
+    for card in &unique_books {
         cards.push(card.clone());
         cards.push(card.clone());
     }
-    cards.shuffle(&mut rng);
+    cards.shuffle(rng);
 
-    Ok(cards)
+    Ok(MemoryGameDeal { cards, reserve })
 }
 
 /// Compute the normalized score for a completed game
@@ -214,6 +236,58 @@ pub async fn finish_game(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn book(id: &str, cover: &str) -> MemoryGameCard {
+        MemoryGameCard {
+            book_id: id.to_string(),
+            title: format!("Book {id}"),
+            cover_url: cover.to_string(),
+        }
+    }
+
+    #[test]
+    fn deal_keeps_every_other_distinct_cover_book_as_reserve() {
+        let books = vec![
+            book("1", "https://a/1.jpg"),
+            book("2", "https://a/2.jpg"),
+            book("3", "https://a/3.jpg"),
+            // Same cover as book 1: never a separate pair, never in reserve.
+            book("4", "https://a/1.jpg"),
+            book("5", "https://a/5.jpg"),
+        ];
+
+        let deal = deal(books, 2, &mut thread_rng()).unwrap();
+
+        assert_eq!(deal.cards.len(), 4);
+        let on_board: HashSet<_> = deal.cards.iter().map(|c| c.book_id.clone()).collect();
+        assert_eq!(on_board.len(), 2);
+        for id in &on_board {
+            assert_eq!(deal.cards.iter().filter(|c| &c.book_id == id).count(), 2);
+        }
+        assert_eq!(deal.reserve.len(), 2);
+        let covers: HashSet<_> = deal
+            .cards
+            .iter()
+            .chain(&deal.reserve)
+            .map(|c| c.cover_url.clone())
+            .collect();
+        assert_eq!(covers.len(), 4, "board and reserve share no cover");
+        assert!(deal.reserve.iter().all(|b| !on_board.contains(&b.book_id)));
+    }
+
+    #[test]
+    fn deal_with_exactly_enough_books_has_an_empty_reserve() {
+        let books = vec![book("1", "https://a/1.jpg"), book("2", "https://a/2.jpg")];
+        let deal = deal(books, 2, &mut thread_rng()).unwrap();
+        assert_eq!(deal.cards.len(), 4);
+        assert!(deal.reserve.is_empty());
+    }
+
+    #[test]
+    fn deal_refuses_too_few_distinct_covers() {
+        let books = vec![book("1", "https://a/1.jpg"), book("2", "https://a/1.jpg")];
+        assert!(deal(books, 2, &mut thread_rng()).is_err());
+    }
 
     fn make_result(difficulty: &str, elapsed: f64, errors: i32, pairs: i32) -> MemoryGameResult {
         MemoryGameResult {

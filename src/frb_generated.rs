@@ -26,7 +26,7 @@
 // Section: imports
 
 use flutter_rust_bridge::for_generated::byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
-use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
+use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
 use flutter_rust_bridge::{Handler, IntoIntoDart};
 
 // Section: boilerplate
@@ -10050,6 +10050,18 @@ impl SseDecode for crate::api::frb::FrbMemoryCard {
     }
 }
 
+impl SseDecode for crate::api::frb::FrbMemoryDeal {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_cards = <Vec<crate::api::frb::FrbMemoryCard>>::sse_decode(deserializer);
+        let mut var_reserve = <Vec<crate::api::frb::FrbMemoryCard>>::sse_decode(deserializer);
+        return crate::api::frb::FrbMemoryDeal {
+            cards: var_cards,
+            reserve: var_reserve,
+        };
+    }
+}
+
 impl SseDecode for crate::api::frb::FrbMemoryLeaderboardEntry {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -13413,6 +13425,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbMemoryCard>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbMemoryDeal {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.cards.into_into_dart().into_dart(),
+            self.reserve.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbMemoryDeal
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbMemoryDeal>
+    for crate::api::frb::FrbMemoryDeal
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbMemoryDeal {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbMemoryLeaderboardEntry {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -14827,6 +14860,14 @@ impl SseEncode for crate::api::frb::FrbMemoryCard {
     }
 }
 
+impl SseEncode for crate::api::frb::FrbMemoryDeal {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::frb::FrbMemoryCard>>::sse_encode(self.cards, serializer);
+        <Vec<crate::api::frb::FrbMemoryCard>>::sse_encode(self.reserve, serializer);
+    }
+}
+
 impl SseEncode for crate::api::frb::FrbMemoryLeaderboardEntry {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -15864,7 +15905,7 @@ mod io {
     use flutter_rust_bridge::for_generated::byteorder::{
         NativeEndian, ReadBytesExt, WriteBytesExt,
     };
-    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
+    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate
@@ -15888,7 +15929,7 @@ mod web {
     };
     use flutter_rust_bridge::for_generated::wasm_bindgen;
     use flutter_rust_bridge::for_generated::wasm_bindgen::prelude::*;
-    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
+    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate

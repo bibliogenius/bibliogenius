@@ -54,7 +54,8 @@ pub async fn setup_game(
     };
 
     match service::setup_game(&repo(&state), difficulty).await {
-        Ok(cards) => (StatusCode::OK, Json(cards)).into_response(),
+        // The HTTP response keeps its historical shape, the board only.
+        Ok(deal) => (StatusCode::OK, Json(deal.cards)).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),

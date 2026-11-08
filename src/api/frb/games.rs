@@ -50,23 +50,36 @@ pub async fn memory_game_available_difficulties() -> Result<Vec<String>, String>
         .collect())
 }
 
+/// A dealt memory board plus its stand-in books (FFI-safe)
+pub struct FrbMemoryDeal {
+    /// Two cards per selected book, shuffled.
+    pub cards: Vec<FrbMemoryCard>,
+    /// Other books with a distinct cover, in random order, to replace a
+    /// pair whose cover fails to draw on this device.
+    pub reserve: Vec<FrbMemoryCard>,
+}
+
+fn to_frb_memory_card(c: crate::modules::memory_game::domain::MemoryGameCard) -> FrbMemoryCard {
+    FrbMemoryCard {
+        book_id: c.book_id,
+        title: c.title,
+        cover_url: c.cover_url,
+    }
+}
+
 /// Set up a new memory game with the given difficulty
-pub async fn memory_game_setup(difficulty: String) -> Result<Vec<FrbMemoryCard>, String> {
+pub async fn memory_game_setup(difficulty: String) -> Result<FrbMemoryDeal, String> {
     let db = db().ok_or("Database not initialized")?;
     let repo = crate::modules::memory_game::repository::SeaOrmGameRepository::new(db.clone());
     let diff = crate::modules::memory_game::service::MemoryDifficulty::parse(&difficulty)
         .map_err(|e| e.to_string())?;
-    let cards = crate::modules::memory_game::service::setup_game(&repo, diff)
+    let deal = crate::modules::memory_game::service::setup_game(&repo, diff)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(cards
-        .into_iter()
-        .map(|c| FrbMemoryCard {
-            book_id: c.book_id,
-            title: c.title,
-            cover_url: c.cover_url,
-        })
-        .collect())
+    Ok(FrbMemoryDeal {
+        cards: deal.cards.into_iter().map(to_frb_memory_card).collect(),
+        reserve: deal.reserve.into_iter().map(to_frb_memory_card).collect(),
+    })
 }
 
 /// Submit a completed game and get the score back
