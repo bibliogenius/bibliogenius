@@ -841,49 +841,42 @@ pub async fn update_book(
 pub struct TagDto {
     pub name: String,
     pub count: usize,
+    /// Every book on the shelf, wished ones included.
+    pub total_count: usize,
+    /// Up to three thumbnail covers, newest first. URLs only: a local cover
+    /// is this book's cover route, never a path on the device's disk.
+    pub cover_urls: Vec<String>,
 }
 
 #[utoipa::path(
     get,
     path = "/api/books/tags",
     responses(
-        (status = 200, description = "List all tags with counts")
+        (status = 200, description = "List all tags with counts and thumbnail covers")
     )
 )]
 pub async fn list_tags(
     State(db): State<DatabaseConnection>,
 ) -> Result<Json<Vec<TagDto>>, StatusCode> {
-    use std::collections::HashMap;
+    // Same read and same rule as the FFI listing: counts on the default
+    // library view, own covers first, then the subtree's.
+    let tags = crate::services::book_service::list_tags(
+        &db,
+        crate::api::frb::covers_dir().map(|d| d.as_path()),
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Fetch all books
-    let books = BookEntity::find()
-        .all(&db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut tag_counts: HashMap<String, usize> = HashMap::new();
-
-    for book in books {
-        if let Some(subjects_json) = book.subjects
-            && let Ok(subjects) = serde_json::from_str::<Vec<String>>(&subjects_json)
-        {
-            for subject in subjects {
-                if !subject.trim().is_empty() {
-                    *tag_counts.entry(subject.trim().to_string()).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-
-    let mut tags: Vec<TagDto> = tag_counts
-        .into_iter()
-        .map(|(name, count)| TagDto { name, count })
-        .collect();
-
-    // Sort by count descending, then name ascending
-    tags.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
-
-    Ok(Json(tags))
+    Ok(Json(
+        tags.into_iter()
+            .map(|t| TagDto {
+                name: t.name,
+                count: t.count,
+                total_count: t.total_count,
+                cover_urls: t.cover_urls,
+            })
+            .collect(),
+    ))
 }
 #[utoipa::path(
     get,

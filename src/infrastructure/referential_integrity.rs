@@ -154,10 +154,15 @@ where
     Ok(result.rows_affected > 0)
 }
 
-/// Delete a tag together with the book-tag links that referenced it, and clear
-/// the `parent_id` of its child tags. Mirrors the `tag -> book_tags` cascade
-/// and the self-referential `tags.parent_id` ON DELETE SET NULL, both dropped
-/// by the UUID-PK rebuild (ADR-044).
+/// Delete a tag together with the book-tag links that referenced it, and move
+/// its child tags up one level, under the deleted tag's own parent. Replaces
+/// the `tag -> book_tags` cascade and the self-referential `tags.parent_id`
+/// link, both dropped by the UUID-PK rebuild (ADR-044).
+///
+/// Deleting a shelf never deletes its sub-shelves: they take the deleted
+/// shelf's place in the tree. This is the LOCAL delete; a delete merged in
+/// from another device goes through [`delete_tag_links`] instead (see
+/// [`cascade_inbound_delete`]).
 ///
 /// Returns `true` if a tag row was actually removed, so callers can keep their
 /// not-found semantics. Pass a transaction.
@@ -165,23 +170,58 @@ pub async fn delete_tag_cascade<C>(conn: &C, tag_uuid: &str) -> Result<bool, DbE
 where
     C: ConnectionTrait,
 {
-    // Re-parent the children to root: the parent link used to be SET NULL when
-    // the parent tag was deleted, so a deleted tag must not leave its children
-    // pointing at a vanished parent.
-    tag::Entity::update_many()
+    let grandparent = tag::Entity::find_by_id(tag_uuid.to_owned())
+        .one(conn)
+        .await?
+        .and_then(|t| t.parent_id)
+        // A tag that is its own parent (a cycle merged in from sync) has no
+        // level above it to hand down.
+        .filter(|parent| parent != tag_uuid);
+
+    // A child that is itself the grandparent sits in a cycle through the
+    // deleted tag: handing it its own id would close the loop, so it goes to
+    // the root instead.
+    let mut to_root = tag::Entity::update_many()
         .col_expr(tag::Column::ParentId, Expr::value(Option::<String>::None))
-        .filter(tag::Column::ParentId.eq(tag_uuid))
-        .exec(conn)
-        .await?;
-    book_tags::Entity::delete_many()
-        .filter(book_tags::Column::TagId.eq(tag_uuid))
-        .exec(conn)
-        .await?;
+        .filter(tag::Column::ParentId.eq(tag_uuid));
+    if let Some(grandparent) = &grandparent {
+        to_root = to_root.filter(tag::Column::Id.eq(grandparent.as_str()));
+        tag::Entity::update_many()
+            .col_expr(tag::Column::ParentId, Expr::value(grandparent.clone()))
+            .filter(tag::Column::ParentId.eq(tag_uuid))
+            .filter(tag::Column::Id.ne(grandparent.as_str()))
+            .exec(conn)
+            .await?;
+    }
+    to_root.exec(conn).await?;
+    delete_tag_links(conn, tag_uuid).await?;
 
     let result = tag::Entity::delete_by_id(tag_uuid.to_owned())
         .exec(conn)
         .await?;
     Ok(result.rows_affected > 0)
+}
+
+/// Delete the book-tag links of a tag, and nothing else.
+///
+/// This is all the inbound repair does for a shelf deleted on another device.
+/// It deliberately leaves the sub-shelves pointing at the vanished shelf: the
+/// sender rewrote their parent in the same transaction as the delete, but the
+/// merge ships one lane per entity in no fixed order, so the delete can land
+/// first. Rewriting the children here would be a local write that replicates
+/// back and races the sender's own lane (convergence then hangs on cr-sqlite's
+/// tie-break between equal column versions). Leaving them alone lets the
+/// sender's lane set the right parent whenever it lands; until then the app
+/// shows a shelf whose parent is gone at the first level.
+pub async fn delete_tag_links<C>(conn: &C, tag_uuid: &str) -> Result<(), DbErr>
+where
+    C: ConnectionTrait,
+{
+    book_tags::Entity::delete_many()
+        .filter(book_tags::Column::TagId.eq(tag_uuid))
+        .exec(conn)
+        .await?;
+    Ok(())
 }
 
 /// Delete every `collection_books` junction row for a collection. Mirrors the
@@ -264,9 +304,9 @@ where
         Parent::Author => {
             delete_author_cascade(conn, entity_uuid).await?;
         }
-        Parent::Tag => {
-            delete_tag_cascade(conn, entity_uuid).await?;
-        }
+        // Only the links: the sub-shelves are left for the sender's own lane
+        // (see `delete_tag_links`).
+        Parent::Tag => delete_tag_links(conn, entity_uuid).await?,
         Parent::Collection => delete_collection_links(conn, entity_uuid).await?,
     }
     Ok(true)
@@ -699,6 +739,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_tag_cascade_moves_children_up_one_level() {
+        let db = setup_db().await;
+        insert_tag(&db, "top", "Top", None).await;
+        insert_tag(&db, "middle", "Middle", Some("top")).await;
+        insert_tag(&db, "leaf", "Leaf", Some("middle")).await;
+
+        let existed = delete_tag_cascade(&db, "middle").await.unwrap();
+
+        assert!(existed);
+        let leaf = tag::Entity::find_by_id("leaf".to_owned())
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("the sub-shelf must survive");
+        assert_eq!(
+            leaf.parent_id.as_deref(),
+            Some("top"),
+            "a sub-shelf moves up to the deleted shelf's parent, not to the root"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_tag_cascade_in_a_two_shelf_cycle_sends_the_survivor_to_the_root() {
+        let db = setup_db().await;
+        // A <-> B, merged from sync. B's parent is A, which is also B's child:
+        // handing A its grandparent would make it its own parent.
+        insert_tag(&db, "a", "A", Some("b")).await;
+        insert_tag(&db, "b", "B", Some("a")).await;
+
+        assert!(delete_tag_cascade(&db, "b").await.unwrap());
+
+        let a = tag::Entity::find_by_id("a".to_owned())
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("the other shelf survives");
+        assert_eq!(
+            a.parent_id, None,
+            "no self-loop: the survivor goes to the root"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_tag_cascade_of_a_self_parented_shelf_sends_children_to_the_root() {
+        let db = setup_db().await;
+        insert_tag(&db, "loop", "Loop", Some("loop")).await;
+        insert_tag(&db, "child", "Child", Some("loop")).await;
+
+        assert!(delete_tag_cascade(&db, "loop").await.unwrap());
+
+        let child = tag::Entity::find_by_id("child".to_owned())
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("the sub-shelf survives");
+        assert_eq!(
+            child.parent_id, None,
+            "a shelf that is its own parent hands nothing down"
+        );
+    }
+
+    #[tokio::test]
     async fn delete_tag_cascade_on_unknown_tag_returns_false() {
         let db = setup_db().await;
         insert_tag(&db, "kept", "Kept", None).await;
@@ -730,6 +832,64 @@ mod tests {
         assert_eq!(count::<book_tags::Entity>(&db).await, 0);
         assert_eq!(count::<collection_book::Entity>(&db).await, 0);
         assert_eq!(count::<book_note::Entity>(&db).await, 0);
+    }
+
+    #[tokio::test]
+    async fn cascade_inbound_delete_of_a_shelf_leaves_its_children_untouched() {
+        let db = setup_db().await;
+        let book_id = insert_book(&db, "book").await;
+        insert_tag(&db, "top", "Top", None).await;
+        insert_tag(&db, "middle", "Middle", Some("top")).await;
+        insert_tag(&db, "leaf", "Leaf", Some("middle")).await;
+        attach_tag(&db, &book_id, "middle").await;
+        // The merge removed the shelf row: a delete arrived from another device.
+        tag::Entity::delete_by_id("middle".to_owned())
+            .exec(&db)
+            .await
+            .unwrap();
+
+        let ran = cascade_inbound_delete(&db, "tags", "middle").await.unwrap();
+
+        assert!(ran, "an absent shelf must trigger the repair");
+        let leaf = tag::Entity::find_by_id("leaf".to_owned())
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("the sub-shelf must survive");
+        // No local write on the child: the sender ships the child's new parent
+        // in its own lane, and a local write here would replicate back and race
+        // it. The app shows a child whose parent is gone at the first level.
+        assert_eq!(
+            leaf.parent_id.as_deref(),
+            Some("middle"),
+            "the inbound repair must not rewrite a sub-shelf's parent"
+        );
+        assert_eq!(
+            count::<book_tags::Entity>(&db).await,
+            0,
+            "the deleted shelf's book links are still cleaned"
+        );
+    }
+
+    #[tokio::test]
+    async fn cascade_inbound_delete_of_a_collection_still_removes_its_links() {
+        let db = setup_db().await;
+        let book_id = insert_book(&db, "book").await;
+        attach_collection(&db, "gone-collection", &book_id).await;
+        attach_collection(&db, "kept-collection", &book_id).await;
+
+        // No collection row exists: it was merged away.
+        let ran = cascade_inbound_delete(&db, "collections", "gone-collection")
+            .await
+            .unwrap();
+
+        assert!(ran, "an absent collection must trigger the cascade");
+        assert_eq!(
+            count::<collection_book::Entity>(&db).await,
+            1,
+            "only the merged-away collection's links are removed"
+        );
+        assert_eq!(count::<book::Entity>(&db).await, 1, "the book stays");
     }
 
     #[tokio::test]

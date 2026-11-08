@@ -62,6 +62,8 @@ pub mod relay_session;
 mod relay_test_support;
 pub mod relay_transport;
 pub mod sale_service; // Service de vente pour profil Libraire
+pub mod shelf_spelling;
+pub mod shelf_tree_service;
 pub mod shelving_service;
 #[cfg(test)]
 mod status_query_relay_tests;

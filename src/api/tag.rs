@@ -101,6 +101,19 @@ pub async fn delete_tag(
     }
 }
 
+/// Number of books in the default library view that sit on no shelf. HTTP
+/// mirror of the FFI `count_unshelved_books`, same service, same scope.
+pub async fn unshelved_count(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+    match crate::services::book_service::unshelved_count(&db).await {
+        Ok(count) => (StatusCode::OK, Json(json!({ "count": count }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("{e:?}") })),
+        )
+            .into_response(),
+    }
+}
+
 use serde::Serialize;
 
 #[derive(Serialize)]

@@ -1038,4 +1038,169 @@ mod tests {
 
         eng.finalize().await.unwrap();
     }
+
+    // Deleting a shelf moves its sub-shelves up one level: the sender rewrites
+    // the children's `parent_id` to the deleted shelf's own parent, in the same
+    // local transaction as the delete. That transaction still leaves as TWO
+    // lanes, because the merge ships one lane per entity (the deleted shelf, the
+    // moved child), and their order is not fixed: `changes_since` sorts by
+    // packed primary key, so it follows the uuids, and the receiver applies and
+    // repairs each lane before the next one.
+    //
+    // When the delete lands first, the child still points at the vanished
+    // shelf. The inbound repair used to send it to the root right there: a
+    // local write, with this device's site id, that went back out and met the
+    // sender's lane at an equal column version, so the result hung on
+    // cr-sqlite's tie-break (a non-null value beats NULL). The repair now
+    // leaves shelves' children alone (`delete_tag_links`): nothing is written
+    // locally, nothing echoes, and the sender's lane sets the parent whenever
+    // it lands. Both arrival orders are played here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deleted_middle_shelf_child_converges_under_grandparent_in_any_lane_order() {
+        let top = "019f0000-0000-7000-8000-0000000000a1";
+        let middle = "019f0000-0000-7000-8000-0000000000b2";
+        let leaf = "019f0000-0000-7000-8000-0000000000c3";
+
+        for delete_lane_first in [true, false] {
+            let sender = CrSqliteMergeEngine::open_real_schema_in_memory()
+                .await
+                .unwrap();
+            let receiver = CrSqliteMergeEngine::open_real_schema_in_memory()
+                .await
+                .unwrap();
+            for (uuid, name, parent) in [
+                (top, "Living room", None),
+                (middle, "Novels", Some(top)),
+                (leaf, "Crime", Some(middle)),
+            ] {
+                crate::models::tag::ActiveModel {
+                    id: Set(uuid.to_owned()),
+                    name: Set(name.to_owned()),
+                    parent_id: Set(parent.map(str::to_owned)),
+                    path: Set(String::new()),
+                    created_at: Set("2026-11-01T00:00:00Z".to_owned()),
+                    updated_at: Set("2026-11-01T00:00:00Z".to_owned()),
+                }
+                .insert(sender.db())
+                .await
+                .unwrap();
+            }
+
+            // Both devices start from the same tree.
+            for change in sender.changes_since(0).await.unwrap() {
+                let inbound = InboundChange {
+                    entity: change.entity.clone(),
+                    deleted: change.deleted,
+                    changeset: change.changeset.clone(),
+                };
+                receiver.apply(&inbound).await.unwrap();
+                receiver
+                    .repair_after_apply(&inbound.entity.entity_type, &inbound.entity.entity_uuid)
+                    .await
+                    .unwrap();
+            }
+            let sender_mark = sender.local_version().await.unwrap();
+            let receiver_mark = receiver.local_version().await.unwrap();
+
+            // The sender deletes the middle shelf through the real cascade.
+            {
+                use sea_orm::TransactionTrait;
+                let txn = sender.db().begin().await.unwrap();
+                crate::infrastructure::referential_integrity::delete_tag_cascade(&txn, middle)
+                    .await
+                    .unwrap();
+                txn.commit().await.unwrap();
+            }
+
+            let mut lanes: Vec<InboundChange> = sender
+                .changes_since(sender_mark)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|c| c.entity.entity_type == "tags")
+                .map(|c| InboundChange {
+                    entity: c.entity,
+                    deleted: c.deleted,
+                    changeset: c.changeset,
+                })
+                .collect();
+            let uuids: Vec<&str> = lanes
+                .iter()
+                .map(|l| l.entity.entity_uuid.as_str())
+                .collect();
+            assert!(
+                uuids.contains(&middle) && uuids.contains(&leaf),
+                "the delete and the re-parenting each ship their own lane: {uuids:?}"
+            );
+            lanes.sort_by_key(|l| (l.entity.entity_uuid == middle) != delete_lane_first);
+
+            for lane in &lanes {
+                receiver.apply(lane).await.unwrap();
+                receiver
+                    .repair_after_apply(&lane.entity.entity_type, &lane.entity.entity_uuid)
+                    .await
+                    .unwrap();
+
+                if delete_lane_first && lane.entity.entity_uuid == middle {
+                    // Between the two lanes: the child is left pointing at the
+                    // vanished shelf (the app shows it at the first level) ...
+                    let between = crate::models::tag::Entity::find_by_id(leaf.to_owned())
+                        .one(receiver.db())
+                        .await
+                        .unwrap()
+                        .expect("the sub-shelf survives the delete lane");
+                    assert_eq!(
+                        between.parent_id.as_deref(),
+                        Some(middle),
+                        "the inbound repair must not rewrite the child's parent"
+                    );
+                    // ... and the repair authored nothing that could echo.
+                    let authored = receiver.changes_since(receiver_mark).await.unwrap();
+                    assert!(
+                        authored.iter().all(|c| c.entity.entity_type != "tags"),
+                        "the repair must not author a shelf change"
+                    );
+                }
+            }
+
+            let on_receiver = crate::models::tag::Entity::find_by_id(leaf.to_owned())
+                .one(receiver.db())
+                .await
+                .unwrap()
+                .expect("the sub-shelf survives on the receiver");
+            assert_eq!(
+                on_receiver.parent_id.as_deref(),
+                Some(top),
+                "delete lane first = {delete_lane_first}: the receiver must keep the child \
+                 under the grandparent"
+            );
+
+            // Whatever the receiver wrote locally while repairing goes back out.
+            for change in receiver.changes_since(receiver_mark).await.unwrap() {
+                let inbound = InboundChange {
+                    entity: change.entity.clone(),
+                    deleted: change.deleted,
+                    changeset: change.changeset.clone(),
+                };
+                sender.apply(&inbound).await.unwrap();
+                sender
+                    .repair_after_apply(&inbound.entity.entity_type, &inbound.entity.entity_uuid)
+                    .await
+                    .unwrap();
+            }
+            let on_sender = crate::models::tag::Entity::find_by_id(leaf.to_owned())
+                .one(sender.db())
+                .await
+                .unwrap()
+                .expect("the sub-shelf survives on the sender");
+            assert_eq!(
+                on_sender.parent_id.as_deref(),
+                Some(top),
+                "delete lane first = {delete_lane_first}: the echo must not undo the move"
+            );
+
+            sender.finalize().await.unwrap();
+            receiver.finalize().await.unwrap();
+        }
+    }
 }

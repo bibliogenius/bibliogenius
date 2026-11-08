@@ -29,6 +29,10 @@ pub struct BookFilter {
 pub struct TagDto {
     pub name: String,
     pub count: usize,
+    /// Every book on the shelf, wished ones included.
+    pub total_count: usize,
+    /// Up to three thumbnail covers, newest first: URLs, never disk paths.
+    pub cover_urls: Vec<String>,
 }
 
 /// A cover candidate from an external source, for the multi-cover picker.
@@ -1077,25 +1081,407 @@ pub struct SubjectCount {
 pub async fn subject_counts(
     db: &DatabaseConnection,
 ) -> Result<HashMap<String, SubjectCount>, ServiceError> {
-    let books = BookEntity::find().all(db).await?;
+    let rows = subject_rows(db).await?;
+    Ok(tally_subjects(rows.iter().map(ShelfBookRow::scope)))
+}
+
+/// Most covers a shelf thumbnail shows.
+pub const SHELF_THUMBNAIL_COVERS: usize = 3;
+
+/// Where the covers of a shelf listing are going, which decides their form.
+#[derive(Debug, Clone, Copy)]
+pub enum CoverChannel<'a> {
+    /// The app on this device (FFI): a local cover is the path of the file,
+    /// derived from the book's identity.
+    OnDevice(Option<&'a std::path::Path>),
+    /// An HTTP client: a local cover is the book's cover route, never a path
+    /// on this device's disk.
+    Http(Option<&'a std::path::Path>),
+}
+
+impl CoverChannel<'_> {
+    /// The covers directory registered in app mode, `None` in server mode.
+    fn covers_dir(&self) -> Option<&std::path::Path> {
+        match *self {
+            CoverChannel::OnDevice(dir) | CoverChannel::Http(dir) => dir,
+        }
+    }
+}
+
+/// Everything the shelves screen lists, from ONE read of the books.
+pub struct ShelfListing {
+    /// The `tags` rows, by name.
+    pub tags: Vec<crate::models::tag::Model>,
+    /// Badge counts by shelf name, as [`subject_counts`] reports them.
+    pub counts: HashMap<String, SubjectCount>,
+    /// By shelf name, the books of the shelf and of its sub-shelves, each book
+    /// once however many of those shelves it sits on.
+    pub subtree_counts: HashMap<String, SubjectCount>,
+    /// Up to [`SHELF_THUMBNAIL_COVERS`] covers by shelf name: the shelf's own
+    /// books newest first, then its sub-shelves'. A shelf with none is absent.
+    pub covers: HashMap<String, Vec<String>>,
+}
+
+/// The shelves with their badge counts and their thumbnail covers.
+///
+/// The books are read once, newest first, and both the counts and the
+/// covers are worked out from that read in memory: the shelves screen asks
+/// on every reload, and one query per shelf would grow with the tree. Same
+/// scope as the badges, the default library view.
+pub async fn shelf_listing(
+    db: &DatabaseConnection,
+    channel: CoverChannel<'_>,
+) -> Result<ShelfListing, ServiceError> {
+    use crate::models::tag;
+
+    let tags = tag::Entity::find()
+        .order_by_asc(tag::Column::Name)
+        .all(db)
+        .await?;
+    let mut rows = subject_rows(db).await?;
+    file_under_shelf_spelling(&tags, &mut rows);
+    let counts = tally_subjects(rows.iter().map(ShelfBookRow::scope));
+    let shelf_total = counts
+        .keys()
+        .map(String::as_str)
+        .chain(tags.iter().map(|t| t.name.as_str()))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let is_http = matches!(channel, CoverChannel::Http(_));
+    let covers_dir = channel.covers_dir().map(std::path::Path::to_path_buf);
+    let (tags, subtree_counts, covers) = walk_shelves(tags, rows, shelf_total, move |row| {
+        let dir = covers_dir.as_deref();
+        let channel = if is_http {
+            CoverChannel::Http(dir)
+        } else {
+            CoverChannel::OnDevice(dir)
+        };
+        thumbnail_cover(row, channel)
+    })
+    .await?;
+    Ok(ShelfListing {
+        tags,
+        counts,
+        subtree_counts,
+        covers,
+    })
+}
+
+/// Spells each book's shelves as their `tags` row does ([`ShelfSpelling`]),
+/// so the counts and covers of a shelf take in every book its page shows, and
+/// another spelling of it does not show up as a second shelf.
+///
+/// [`ShelfSpelling`]: crate::services::shelf_spelling::ShelfSpelling
+fn file_under_shelf_spelling(tags: &[crate::models::tag::Model], rows: &mut [ShelfBookRow]) {
+    let spelling =
+        crate::services::shelf_spelling::ShelfSpelling::new(tags.iter().map(|t| t.name.as_str()));
+    for row in rows {
+        let names = shelf_names(row.subjects.as_deref());
+        if names.iter().all(|name| spelling.shelf_of(name) == name) {
+            continue;
+        }
+        let mut spelled: Vec<&str> = Vec::new();
+        for name in &names {
+            let name = spelling.shelf_of(name);
+            // Two spellings on one book are one shelf, counted once.
+            if !spelled.contains(&name) {
+                spelled.push(name);
+            }
+        }
+        if let Ok(json) = serde_json::to_string(&spelled) {
+            row.subjects = Some(json);
+        }
+    }
+}
+
+type ShelfWalk = (
+    Vec<crate::models::tag::Model>,
+    HashMap<String, SubjectCount>,
+    HashMap<String, Vec<String>>,
+);
+
+/// Counts the shelves' subtrees and finds their covers, which stats a file per
+/// book whose cover has no bytes here: on a blocking thread, off the runtime.
+async fn walk_shelves(
+    tags: Vec<crate::models::tag::Model>,
+    rows: Vec<ShelfBookRow>,
+    shelf_total: usize,
+    resolve: impl Fn(&ShelfBookRow) -> Option<String> + Send + 'static,
+) -> Result<ShelfWalk, ServiceError> {
+    let walk = move || {
+        let parent_of = shown_parents(&shelf_parents(&tags));
+        let subtree_counts = subtree_counts(&parent_of, &rows);
+        let covers = recent_covers(&parent_of, shelf_total, &rows, resolve);
+        (tags, subtree_counts, covers)
+    };
+    tokio::task::spawn_blocking(walk)
+        .await
+        .map_err(|e| ServiceError::Database(e.to_string()))
+}
+
+/// The covers of each shelf, over rows sorted newest first: its own books
+/// first, then the newest of its sub-shelves, so a parent does not simply
+/// repeat what its children show.
+///
+/// A book counts for each of its shelves and for their ancestors, once per
+/// shelf even when it sits on a shelf and on its parent. Books outside the
+/// default view, and books without a usable cover, take no slot. `resolve`
+/// runs at most once per book, and only when a shelf still has room, since
+/// it may touch the disk. Stops early only once every shelf holds three
+/// covers; a shelf that never fills keeps the walks going to the end.
+fn recent_covers<'a>(
+    parent_of: &HashMap<&str, &str>,
+    shelf_total: usize,
+    rows: &'a [ShelfBookRow],
+    mut resolve: impl FnMut(&'a ShelfBookRow) -> Option<String>,
+) -> HashMap<String, Vec<String>> {
+    let mut covers: HashMap<String, Vec<String>> = HashMap::new();
+    let mut resolved: Vec<Option<Option<String>>> = vec![None; rows.len()];
+    let mut full = 0;
+    for own_books in [true, false] {
+        for (index, row) in rows.iter().enumerate() {
+            if full >= shelf_total {
+                return covers;
+            }
+            let has_cover = row.cover_url.as_deref().is_some_and(|c| !c.is_empty());
+            if !row.in_default_view || !has_cover {
+                continue;
+            }
+            let own = own_shelves(row.subjects.as_deref());
+            let mut shelves = if own_books {
+                own
+            } else {
+                ancestor_shelves(&own, parent_of)
+            };
+            shelves.retain(|shelf| {
+                covers
+                    .get(shelf)
+                    .is_none_or(|c| c.len() < SHELF_THUMBNAIL_COVERS)
+            });
+            if shelves.is_empty() {
+                continue;
+            }
+            let Some(cover) = resolved[index].get_or_insert_with(|| resolve(row)).clone() else {
+                continue;
+            };
+            for shelf in shelves {
+                let slot = covers.entry(shelf).or_default();
+                slot.push(cover.clone());
+                if slot.len() == SHELF_THUMBNAIL_COVERS {
+                    full += 1;
+                }
+            }
+        }
+    }
+    covers
+}
+
+/// Each shelf's parent, by name: books file shelves by name, so the tree is
+/// walked by name.
+fn shelf_parents(tags: &[crate::models::tag::Model]) -> HashMap<&str, &str> {
+    let name_of: HashMap<&str, &str> = tags
+        .iter()
+        .map(|t| (t.id.as_str(), t.name.as_str()))
+        .collect();
+    tags.iter()
+        .filter_map(|t| {
+            let parent = name_of.get(t.parent_id.as_deref()?)?;
+            Some((t.name.as_str(), *parent))
+        })
+        .collect()
+}
+
+/// The books of each shelf and of its descendants. A book counts once per
+/// shelf: adding up the shelves would count twice one that sits on a shelf and
+/// on its sub-shelf.
+fn subtree_counts(
+    parent_of: &HashMap<&str, &str>,
+    rows: &[ShelfBookRow],
+) -> HashMap<String, SubjectCount> {
+    let mut counts: HashMap<String, SubjectCount> = HashMap::new();
+    for row in rows {
+        let own = own_shelves(row.subjects.as_deref());
+        let ancestors = ancestor_shelves(&own, parent_of);
+        for shelf in own.into_iter().chain(ancestors) {
+            let entry = counts.entry(shelf).or_default();
+            entry.total += 1;
+            if row.in_default_view {
+                entry.in_default_view += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// The parents as the app shows them: a shelf in a cycle sits at the first
+/// level, holding nothing of the cycle. Counts and covers both go by this tree.
+fn shown_parents<'a>(parent_of: &HashMap<&'a str, &'a str>) -> HashMap<&'a str, &'a str> {
+    parent_of
+        .iter()
+        .filter(|(shelf, _)| !in_a_cycle(shelf, parent_of))
+        .map(|(shelf, parent)| (*shelf, *parent))
+        .collect()
+}
+
+/// Whether climbing from `shelf` comes back to it.
+fn in_a_cycle(shelf: &str, parent_of: &HashMap<&str, &str>) -> bool {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut current = parent_of.get(shelf).copied();
+    while let Some(name) = current {
+        if name == shelf {
+            return true;
+        }
+        if seen.contains(&name) {
+            return false;
+        }
+        seen.push(name);
+        current = parent_of.get(name).copied();
+    }
+    false
+}
+
+/// The shelves a book is filed on, each once.
+fn own_shelves(subjects_json: Option<&str>) -> Vec<String> {
+    let mut own: Vec<String> = Vec::new();
+    for name in shelf_names(subjects_json) {
+        if !own.contains(&name) {
+            own.push(name);
+        }
+    }
+    own
+}
+
+/// The shelves above `own`, without `own` itself: a book on a shelf and on
+/// its parent is already the parent's own.
+fn ancestor_shelves(own: &[String], parent_of: &HashMap<&str, &str>) -> Vec<String> {
+    let mut ancestors: Vec<String> = Vec::new();
+    for name in own {
+        let mut current = parent_of.get(name.as_str()).copied();
+        // A shelf already met had its own ancestors walked with it, so
+        // stopping there also ends a climb round a cycle from sync.
+        while let Some(shelf) = current.take() {
+            if own.iter().any(|o| o == shelf) || ancestors.iter().any(|a| a == shelf) {
+                break;
+            }
+            ancestors.push(shelf.to_owned());
+            current = parent_of.get(shelf).copied();
+        }
+    }
+    ancestors
+}
+
+/// The form a book's stored cover takes in a shelf thumbnail, or `None`
+/// when it cannot be shown.
+///
+/// A local cover whose bytes are not on this device (a path from an older
+/// iOS container, or a cover the sync has not brought yet) is skipped
+/// rather than handed out as an image that will not draw. In app mode the
+/// file is found from the book's identity, never from the stored value,
+/// which may name another device's disk.
+fn thumbnail_cover(row: &ShelfBookRow, channel: CoverChannel<'_>) -> Option<String> {
+    use crate::utils::cover_url;
+
+    let stored = row.cover_url.as_deref().filter(|c| !c.is_empty())?;
+    if !cover_url::is_local_cover(stored) {
+        return Some(stored.to_owned());
+    }
+    let dir = channel.covers_dir();
+    if cover_url::local_cover_bytes_absent(dir, stored, &row.id) {
+        return None;
+    }
+    match channel {
+        CoverChannel::Http(_) => cover_url::resolve_single(
+            Some(stored),
+            &row.id,
+            row.updated_at.as_deref(),
+            None,
+            cover_url::ResolveScope::Lan,
+        )
+        .ok()
+        .flatten(),
+        CoverChannel::OnDevice(None) => Some(stored.to_owned()),
+        CoverChannel::OnDevice(Some(dir)) => cover_url::own_local_cover_path(dir, &row.id)
+            .map(|path| path.to_string_lossy().into_owned()),
+    }
+}
+
+/// Number of books in the default library view that sit on no shelf.
+///
+/// Feeds the "to shelve" card of the shelves screen. Same scope as the shelf
+/// badges ([`subject_counts`]): wished books are left out, books on loan are
+/// in. A genre is a shelf, so a book carrying only a genre is shelved.
+pub async fn unshelved_count(db: &DatabaseConnection) -> Result<i64, ServiceError> {
+    let rows = subject_rows(db).await?;
+    Ok(tally_unshelved(rows.iter().map(ShelfBookRow::scope)))
+}
+
+/// One book as the shelves screen reads it.
+struct ShelfBookRow {
+    id: String,
+    subjects: Option<String>,
+    /// Owned, or physically here on loan: what the default view shows.
+    in_default_view: bool,
+    cover_url: Option<String>,
+    updated_at: Option<String>,
+}
+
+impl ShelfBookRow {
+    /// `(subjects JSON, is in the default view)`, what the counts read.
+    fn scope(&self) -> (Option<&str>, bool) {
+        (self.subjects.as_deref(), self.in_default_view)
+    }
+}
+
+/// Every book, last added first: the input shared by the shelf badges, the
+/// unshelved count and the shelf thumbnails, so all read one scope.
+async fn subject_rows(db: &DatabaseConnection) -> Result<Vec<ShelfBookRow>, ServiceError> {
+    use crate::models::book::Column as BookColumn;
+    use crate::models::copy::{Column as CopyColumn, Entity as CopyEntity};
+
+    // Only the columns the shelves screen reads: it asks on every book
+    // change, and a full row carries the summary and the rest.
+    type Row = (String, bool, Option<String>, Option<String>, Option<String>);
+    let books: Vec<Row> = BookEntity::find()
+        .select_only()
+        .column(BookColumn::Id)
+        .column(BookColumn::Owned)
+        .column(BookColumn::Subjects)
+        .column(BookColumn::CoverUrl)
+        .column(BookColumn::UpdatedAt)
+        // By the date of adding: editing a book must not bring it to the front
+        // of the fan.
+        .order_by_desc(BookColumn::CreatedAt)
+        // An import stamps many books alike: keep their order stable.
+        .order_by_desc(BookColumn::Id)
+        .into_tuple()
+        .all(db)
+        .await?;
 
     // One query for the on-loan book ids: any copy lent out or borrowed keeps
     // its book physically relevant even when `owned` is false (same rule as
     // the `is_borrowed`/`is_lent` flags in `list_books`).
-    let on_loan: std::collections::HashSet<String> = crate::models::copy::Entity::find()
-        .filter(crate::models::copy::Column::Status.is_in(["loaned", "borrowed"]))
+    let on_loan: std::collections::HashSet<String> = CopyEntity::find()
+        .select_only()
+        .column(CopyColumn::BookId)
+        .filter(CopyColumn::Status.is_in(["loaned", "borrowed"]))
+        .into_tuple()
         .all(db)
         .await?
         .into_iter()
-        .map(|c| c.book_id)
         .collect();
 
-    Ok(tally_subjects(books.iter().map(|book| {
-        (
-            book.subjects.as_deref(),
-            book.owned || on_loan.contains(&book.id),
+    Ok(books
+        .into_iter()
+        .map(
+            |(id, owned, subjects, cover_url, updated_at)| ShelfBookRow {
+                in_default_view: owned || on_loan.contains(&id),
+                id,
+                subjects,
+                cover_url,
+                updated_at,
+            },
         )
-    })))
+        .collect())
 }
 
 /// Drop `name` from every book's `subjects`, returning how many books were
@@ -1105,20 +1491,23 @@ pub async fn subject_counts(
 /// entry, membership lives in the books. Left in place, the name comes back
 /// on the next listing as a synthetic orphan (see `get_all_tags`), which is a
 /// shelf the user cannot delete and did not ask to keep. The counterpart of
-/// the rename that `update_tag` performs. Exact, case-sensitive match: a
-/// shelf named "Roman" leaves "Roman classique" untouched.
+/// the rename that `update_tag` performs. A whole name, whatever its case
+/// ([`ShelfSpelling`]): a shelf named "Roman" takes "roman" with it and leaves
+/// "Roman classique" untouched.
+///
+/// [`ShelfSpelling`]: crate::services::shelf_spelling::ShelfSpelling
 pub async fn remove_subject_from_books<C>(db: &C, name: &str) -> Result<usize, ServiceError>
 where
     C: sea_orm::ConnectionTrait,
 {
-    use crate::models::book::Column as BookColumn;
+    use crate::services::shelf_spelling::ShelfSpelling;
 
-    // `contains` is a LIKE prefilter; the exact match happens on the parsed
-    // array below, so wildcard characters in a name only widen the candidates.
-    let books = BookEntity::find()
-        .filter(BookColumn::Subjects.contains(name))
-        .all(db)
-        .await?;
+    // The row may already be gone (a delete drops it first): `name` is a
+    // shelf all the same.
+    let mut names = ShelfSpelling::row_names(db).await?;
+    names.push(name.to_owned());
+    let spelling = ShelfSpelling::new(names);
+    let books = books_possibly_filed_under(db, name).await?;
 
     let mut touched = 0;
     for book in books {
@@ -1128,7 +1517,10 @@ where
         let Ok(subjects) = serde_json::from_str::<Vec<String>>(subjects_str) else {
             continue;
         };
-        let kept: Vec<&String> = subjects.iter().filter(|s| *s != name).collect();
+        let kept: Vec<&String> = subjects
+            .iter()
+            .filter(|s| spelling.shelf_of(s) != name)
+            .collect();
         if kept.len() == subjects.len() {
             continue;
         }
@@ -1141,9 +1533,33 @@ where
     Ok(touched)
 }
 
+/// The books that may carry `shelf` in their subjects, under any case: the
+/// caller matches on the parsed array. SQLite's LIKE folds ASCII letters only,
+/// so every other character goes in as `_`, its one-character wildcard:
+/// "Étrangers" is looked for as `_trangers`, which "étrangers" matches.
+/// Wildcards only widen the candidates.
+pub(crate) async fn books_possibly_filed_under<C>(
+    db: &C,
+    shelf: &str,
+) -> Result<Vec<crate::models::book::Model>, sea_orm::DbErr>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    use crate::models::book::Column as BookColumn;
+
+    let pattern: String = shelf
+        .chars()
+        .map(|c| if c.is_ascii() { c } else { '_' })
+        .collect();
+    BookEntity::find()
+        .filter(BookColumn::Subjects.contains(pattern))
+        .all(db)
+        .await
+}
+
 /// Delete a shelf as the user sees it: the `tags` row, its book links, its
-/// children re-parented to the root, and its name out of every book's
-/// subjects, in ONE transaction.
+/// sub-shelves moved up one level (under the deleted shelf's parent), and its
+/// name out of every book's subjects, in ONE transaction.
 ///
 /// The name has to be resolved before the row goes, and the two halves must
 /// commit together: a row dropped while the name stayed in the books is the
@@ -1175,20 +1591,13 @@ fn tally_subjects<'a>(
     let mut tag_counts: HashMap<String, SubjectCount> = HashMap::new();
 
     for (subjects_json, in_default_view) in rows {
-        if let Some(json) = subjects_json
-            && let Ok(subjects) = serde_json::from_str::<Vec<String>>(json)
-        {
-            for subject in subjects {
-                let trimmed = subject.trim();
-                if !trimmed.is_empty() {
-                    // Subjects carried only by books outside the view still
-                    // get an entry, so the shelf itself stays listed.
-                    let entry = tag_counts.entry(trimmed.to_string()).or_default();
-                    entry.total += 1;
-                    if in_default_view {
-                        entry.in_default_view += 1;
-                    }
-                }
+        for name in shelf_names(subjects_json) {
+            // Subjects carried only by books outside the view still get an
+            // entry, so the shelf itself stays listed.
+            let entry = tag_counts.entry(name).or_default();
+            entry.total += 1;
+            if in_default_view {
+                entry.in_default_view += 1;
             }
         }
     }
@@ -1196,17 +1605,49 @@ fn tally_subjects<'a>(
     tag_counts
 }
 
-/// List all unique tags with counts (default-view scoped, see [`subject_counts`])
-pub async fn list_tags(db: &DatabaseConnection) -> Result<Vec<TagDto>, ServiceError> {
-    let tag_counts = subject_counts(db).await?;
+/// The counting behind [`unshelved_count`], over the same rows as
+/// [`tally_subjects`]: a book in the default view that the badges credit to
+/// no shelf is a book to shelve.
+fn tally_unshelved<'a>(rows: impl Iterator<Item = (Option<&'a str>, bool)>) -> i64 {
+    rows.filter(|(subjects_json, in_default_view)| {
+        *in_default_view && shelf_names(*subjects_json).is_empty()
+    })
+    .count() as i64
+}
 
-    let mut tags: Vec<TagDto> = tag_counts
+/// The trimmed, non-blank shelf names a `subjects` JSON column carries.
+/// Absent, empty or unparseable JSON carries none.
+fn shelf_names(subjects_json: Option<&str>) -> Vec<String> {
+    subjects_json
+        .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|subject| subject.trim().to_string())
+        .filter(|subject| !subject.is_empty())
+        .collect()
+}
+
+/// Every shelf the books carry, with its badge count and thumbnail covers,
+/// for `GET /api/books/tags`: the HTTP side of the FFI `get_all_tags`, same
+/// read and same rule ([`shelf_listing`]). `covers_dir` is the one
+/// registered in app mode, `None` in server mode.
+pub async fn list_tags(
+    db: &DatabaseConnection,
+    covers_dir: Option<&std::path::Path>,
+) -> Result<Vec<TagDto>, ServiceError> {
+    let mut listing = shelf_listing(db, CoverChannel::Http(covers_dir)).await?;
+
+    let mut tags: Vec<TagDto> = listing
+        .counts
         .into_iter()
         .map(|(name, count)| TagDto {
+            cover_urls: listing.covers.remove(&name).unwrap_or_default(),
             name,
-            // The HTTP path keeps the default-view number it has always
-            // served: it answers peers, who see the physical library.
+            // The default-view number: the badge must agree with the
+            // shelf a tap opens (ADR-063), and peers see the physical
+            // library.
             count: count.in_default_view as usize,
+            total_count: count.total as usize,
         })
         .collect();
 
@@ -2304,6 +2745,105 @@ fn title_label_relevant(query_title: &str, work_label: &str) -> bool {
 mod tests {
     use super::*;
 
+    // ── shelf thumbnails ────────────────────────────────────────────────
+
+    fn shelf_tag(id: &str, name: &str, parent_id: Option<&str>) -> crate::models::tag::Model {
+        crate::models::tag::Model {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            parent_id: parent_id.map(str::to_owned),
+            path: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn shelf_row(id: &str, subjects: &str) -> ShelfBookRow {
+        ShelfBookRow {
+            id: id.to_owned(),
+            subjects: Some(subjects.to_owned()),
+            in_default_view: true,
+            cover_url: Some(format!("https://c/{id}.jpg")),
+            updated_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_shelf_in_a_sync_cycle_shows_the_cover_it_counts() {
+        // A book on A: the app shows A and B at the first level, neither
+        // holding the other, so B announces no book and must show no cover.
+        let tags = vec![
+            shelf_tag("1", "A", Some("2")),
+            shelf_tag("2", "B", Some("1")),
+        ];
+        let rows = vec![shelf_row("one", r#"["A"]"#)];
+
+        let (_, counts, covers) = walk_shelves(tags, rows, 2, |row| Some(row.id.clone()))
+            .await
+            .expect("walk");
+
+        assert_eq!(counts["A"].total, 1);
+        assert!(!counts.contains_key("B"));
+        assert_eq!(covers["A"], ["one"]);
+        assert!(!covers.contains_key("B"), "{covers:?}");
+    }
+
+    #[tokio::test]
+    async fn the_walk_of_the_shelves_stays_off_the_runtime() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen_by_walk = seen.clone();
+        let rows = vec![shelf_row("one", r#"["Top"]"#)];
+
+        walk_shelves(vec![shelf_tag("1", "Top", None)], rows, 1, move |row| {
+            *seen_by_walk.lock().unwrap() = Some(std::thread::current().id());
+            Some(row.id.clone())
+        })
+        .await
+        .expect("walk");
+
+        let walked_on = seen.lock().unwrap().expect("the walk asked for a cover");
+        assert_ne!(walked_on, std::thread::current().id());
+    }
+
+    #[test]
+    fn recent_covers_resolves_a_book_once_across_both_walks() {
+        let tags = [
+            shelf_tag("1", "Top", None),
+            shelf_tag("2", "Sub", Some("1")),
+        ];
+        let parents = shelf_parents(&tags);
+        // One cover found, one missing on this device: neither is asked twice.
+        let rows = [
+            shelf_row("found", r#"["Sub"]"#),
+            shelf_row("missing", r#"["Sub"]"#),
+        ];
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let covers = recent_covers(&parents, 2, &rows, |row| {
+            calls.borrow_mut().push(row.id.clone());
+            (row.id == "found").then(|| row.id.clone())
+        });
+
+        assert_eq!(calls.into_inner(), ["found", "missing"]);
+        assert_eq!(covers["Sub"], ["found"]);
+        assert_eq!(covers["Top"], ["found"]);
+    }
+
+    #[test]
+    fn recent_covers_gives_a_book_on_a_shelf_and_its_parent_one_slot_there() {
+        let tags = [
+            shelf_tag("1", "Top", None),
+            shelf_tag("2", "Sub", Some("1")),
+        ];
+        let parents = shelf_parents(&tags);
+        let rows = [shelf_row("both", r#"["Sub", "Top", "Top"]"#)];
+
+        let covers = recent_covers(&parents, 2, &rows, |row| Some(row.id.clone()));
+
+        assert_eq!(covers["Top"], ["both"]);
+        assert_eq!(covers["Sub"], ["both"]);
+    }
+
     // ── isbn normalisation ──────────────────────────────────────────────
 
     #[test]
@@ -2782,7 +3322,8 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        // The child climbs to the root rather than pointing at a vanished parent.
+        // The shelf was at the first level, so its child moves up to the first
+        // level rather than pointing at a vanished parent.
         let child = tag::Entity::find_by_id(child.id)
             .one(&db)
             .await
@@ -3195,7 +3736,7 @@ mod tests {
         let lent = insert_test_book_with_subjects(&db, "Lent out", true, &["SF"]).await;
         insert_test_copy(&db, &lent, "loaned", false).await;
 
-        let tags = list_tags(&db).await.unwrap();
+        let tags = list_tags(&db, None).await.unwrap();
         let sf = tags
             .iter()
             .find(|t| t.name == "SF")
@@ -3204,6 +3745,29 @@ mod tests {
             sf.count, 3,
             "wishlist books must not inflate the shelf badge"
         );
+    }
+
+    /// The route carries both numbers: the default-view badge, and the total
+    /// the web client reads for its "all books" scope.
+    #[tokio::test]
+    async fn the_tags_route_gives_the_default_view_count_and_the_total() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        insert_test_book_with_subjects(&db, "Owned", true, &["SF"]).await;
+        insert_test_book_with_subjects(&db, "Wished", false, &["SF"]).await;
+
+        let axum::Json(tags) = crate::api::books::list_tags(axum::extract::State(db))
+            .await
+            .unwrap();
+
+        let body = serde_json::to_value(&tags).unwrap();
+        let sf = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "SF")
+            .expect("SF shelf listed");
+        assert_eq!(sf["count"], 1);
+        assert_eq!(sf["total_count"], 2);
     }
 
     /// A shelf whose books are all outside the default view stays listed, with
@@ -3215,13 +3779,136 @@ mod tests {
 
         insert_test_book_with_subjects(&db, "Dream book", false, &["Envies"]).await;
 
-        let tags = list_tags(&db).await.unwrap();
+        let tags = list_tags(&db, None).await.unwrap();
         let envies = tags
             .iter()
             .find(|t| t.name == "Envies")
             .expect("shelf must stay listed even when all its books are not owned");
         assert_eq!(envies.count, 0);
     }
+
+    /// Over HTTP a shelf's covers never name a file on this device: a local
+    /// cover is served by the book's own cover route, a remote one as is.
+    #[tokio::test]
+    async fn list_tags_serves_covers_as_urls_never_as_disk_paths() {
+        use crate::models::book;
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let local = insert_test_book_with_subjects(&db, "Local", true, &["SF"]).await;
+        let remote = insert_test_book_with_subjects(&db, "Remote", true, &["SF"]).await;
+        for (id, cover, at) in [
+            (
+                &local,
+                format!("/var/mobile/old/covers/{local}.jpg"),
+                "2026-01-02T10:00:00+00:00",
+            ),
+            (
+                &remote,
+                "https://c/r.jpg".to_owned(),
+                "2026-01-01T10:00:00+00:00",
+            ),
+        ] {
+            book::Entity::update_many()
+                .col_expr(book::Column::CoverUrl, cover.into())
+                .col_expr(book::Column::CreatedAt, at.into())
+                .col_expr(book::Column::UpdatedAt, at.into())
+                .filter(book::Column::Id.eq(id.as_str()))
+                .exec(&db)
+                .await
+                .unwrap();
+        }
+        std::fs::write(dir.path().join(format!("{local}.jpg")), b"jpg").unwrap();
+
+        let tags = list_tags(&db, Some(dir.path())).await.unwrap();
+
+        let sf = tags.iter().find(|t| t.name == "SF").expect("SF listed");
+        assert_eq!(sf.cover_urls.len(), 2);
+        assert!(
+            sf.cover_urls[0].starts_with(&format!("/api/books/{local}/cover")),
+            "{:?}",
+            sf.cover_urls
+        );
+        assert_eq!(sf.cover_urls[1], "https://c/r.jpg");
+    }
+
+    // ── unshelved count (the "to shelve" card) ──────────────────────────
+    //
+    // Same scope as the shelf badges: the default library view. A book on no
+    // shelf counts whatever way "no shelf" is spelled in the row.
+
+    async fn insert_test_book_with_raw_subjects(
+        db: &DatabaseConnection,
+        title: &str,
+        owned: bool,
+        subjects: Option<&str>,
+    ) -> String {
+        use crate::models::book;
+        use sea_orm::Set;
+        let now = chrono::Utc::now().to_rfc3339();
+        let id = uuid::Uuid::new_v4().to_string();
+        book::Entity::insert(book::ActiveModel {
+            id: Set(id.clone()),
+            title: Set(title.to_owned()),
+            owned: Set(owned),
+            subjects: Set(subjects.map(str::to_owned)),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn unshelved_count_counts_null_empty_and_empty_array_subjects() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+
+        insert_test_book_with_raw_subjects(&db, "Null", true, None).await;
+        insert_test_book_with_raw_subjects(&db, "Empty string", true, Some("")).await;
+        insert_test_book_with_raw_subjects(&db, "Empty array", true, Some("[]")).await;
+        insert_test_book_with_raw_subjects(&db, "Blank only", true, Some(r#"["  "]"#)).await;
+        insert_test_book_with_subjects(&db, "Shelved", true, &["Crime"]).await;
+        // A genre is a shelf: a book carrying only one is shelved.
+        insert_test_book_with_subjects(&db, "Genre only", true, &["Genre"]).await;
+
+        assert_eq!(unshelved_count(&db).await.unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn unshelved_count_ignores_wished_books_and_keeps_on_loan_ones() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+
+        insert_test_book_with_raw_subjects(&db, "Wished", false, None).await;
+        insert_test_book_with_raw_subjects(&db, "Wished too", false, Some("[]")).await;
+        let borrowed = insert_test_book_with_raw_subjects(&db, "Borrowed", false, None).await;
+        insert_test_copy(&db, &borrowed, "borrowed", false).await;
+        insert_test_book_with_raw_subjects(&db, "Owned", true, None).await;
+
+        assert_eq!(
+            unshelved_count(&db).await.unwrap(),
+            2,
+            "same scope as the shelf badges: wishes out, books on loan in"
+        );
+    }
+
+    #[test]
+    fn unshelved_tally_follows_the_shelf_badge_parsing() {
+        // A row the badges would credit to no shelf is a row to shelve,
+        // unparseable JSON included: it sits on no shelf the reader can see.
+        let rows = [
+            (None, true),
+            (Some(""), true),
+            (Some("[]"), true),
+            (Some(r#"["", " "]"#), true),
+            (Some("not json at all"), true),
+            (Some(r#"["Crime"]"#), true),
+            (None, false),
+        ];
+        assert_eq!(tally_unshelved(rows.into_iter()), 5);
+    }
+
     /// A reader can take a reading date back off a book: the edit form sends
     /// `Some(None)` for a date it no longer holds, and the row must end up
     /// NULL. Nothing in the domain makes `finished_reading_at` mandatory -
