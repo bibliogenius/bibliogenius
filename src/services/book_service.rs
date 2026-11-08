@@ -145,13 +145,45 @@ pub async fn populate_available_copies(
 /// `=""` used to be stored as `=`, published to the hub and matched against
 /// nothing. No length check here: the edit form warns about a mistyped ISBN
 /// without refusing it, and the imports validate the length before calling.
+///
+/// A leading `ISBN`, `ISBN-10` or `ISBN-13` label is dropped first. Any other
+/// letter means the value is not an ISBN but the reference of the site it came
+/// from: Babelio writes `SIE293945_579` or `978B00M5MRLY4` for a book without
+/// ISBN. Its digits alone would be a false ISBN that matches no book.
 pub(crate) fn normalize_isbn(isbn: Option<String>) -> Option<String> {
-    isbn.map(|s| {
-        s.chars()
-            .filter(|c| c.is_ascii_digit() || *c == 'X' || *c == 'x')
-            .collect::<String>()
-    })
+    let isbn = isbn?;
+    let body = without_isbn_label(isbn.trim());
+    if body
+        .chars()
+        .any(|c| c.is_alphabetic() && !matches!(c, 'X' | 'x'))
+    {
+        return None;
+    }
+    Some(
+        body.chars()
+            .filter(|c| c.is_ascii_digit() || matches!(c, 'X' | 'x'))
+            .collect::<String>(),
+    )
     .filter(|s| !s.is_empty())
+}
+
+/// `value` without a leading `ISBN`, `ISBN-10` or `ISBN-13` label, and the
+/// separators that follow it.
+fn without_isbn_label(value: &str) -> &str {
+    let Some(prefix) = value.get(..4) else {
+        return value;
+    };
+    if !prefix.eq_ignore_ascii_case("isbn") {
+        return value;
+    }
+    let rest = value[4..].trim_start_matches(['-', ' ']);
+    // "13" or "10" is the label's only when no digit follows: "ISBN 1300000000"
+    // is an ISBN that starts with 13.
+    let rest = match rest.get(..2) {
+        Some("10" | "13") if !rest[2..].starts_with(|c: char| c.is_ascii_digit()) => &rest[2..],
+        _ => rest,
+    };
+    rest.trim_start_matches([':', ' '])
 }
 
 /// List all books with optional filters
@@ -2860,6 +2892,65 @@ mod tests {
             normalize_isbn(Some("226402484X".into())).as_deref(),
             Some("226402484X")
         );
+    }
+
+    #[test]
+    fn an_isbn_label_is_not_part_of_the_isbn() {
+        assert_eq!(
+            normalize_isbn(Some("ISBN 978-2-264-02484-8".into())).as_deref(),
+            Some("9782264024848")
+        );
+        // The "13" of the label must not end up in front of the number.
+        assert_eq!(
+            normalize_isbn(Some("ISBN-13: 978-2-264-02484-8".into())).as_deref(),
+            Some("9782264024848")
+        );
+        assert_eq!(
+            normalize_isbn(Some("isbn10 2264024844".into())).as_deref(),
+            Some("2264024844")
+        );
+        // An ISBN-10 that happens to start with 13 keeps its digits.
+        assert_eq!(
+            normalize_isbn(Some("ISBN 1300000000".into())).as_deref(),
+            Some("1300000000")
+        );
+    }
+
+    /// Babelio writes its own references in the ISBN column of a book without
+    /// ISBN. Keeping their digits made false ISBNs: `SI1035858976` passed for
+    /// the ISBN-10 `1035858976`. A letter other than the check character means
+    /// the value is not an ISBN at all.
+    #[test]
+    fn a_source_identifier_is_not_an_isbn() {
+        for source_id in [
+            "SIE293945_579",
+            "SI1035858976",
+            "978B00M5MRLY4",
+            "B00M5MRLY4",
+        ] {
+            assert_eq!(normalize_isbn(Some(source_id.into())), None, "{source_id}");
+        }
+        assert_eq!(
+            normalize_isbn(Some("226402484x".into())).as_deref(),
+            Some("226402484x"),
+            "a lower-case check character is still one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_book_created_with_a_source_identifier_has_no_isbn() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let created = create_book(
+            &db,
+            Book {
+                title: "Britannicus".to_owned(),
+                isbn: Some("SI1035858976".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.isbn, None);
     }
 
     #[test]

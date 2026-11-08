@@ -405,6 +405,51 @@ mod tests {
         );
     }
 
+    /// Babelio writes its own reference (`SIE293945_579`) in the ISBN column of
+    /// a book without ISBN, and older imports stored it verbatim. Keeping its
+    /// digits made a false ISBN that matched nothing, so every import of the
+    /// readings created the book again. It is no ISBN: the title finds it.
+    #[tokio::test]
+    async fn a_source_identifier_finds_the_book_by_title_not_by_its_digits() {
+        let db = migrated_db().await;
+        let id = book_service::create_book(
+            &db,
+            Book {
+                title: "Madame Bovary".to_owned(),
+                author: Some("Gustave Flaubert".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .id
+        .unwrap();
+        // The identifier as an import from before this rule stored it.
+        let mut legacy: BookActiveModel = BookEntity::find_by_id(id.clone())
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+        legacy.isbn = Set(Some("SIE293945_579".to_owned()));
+        legacy.update(&db).await.unwrap();
+        household_service::create_reader(&db, "Alice")
+            .await
+            .unwrap();
+
+        let export = r#"{"books": [{"title": "Madame Bovary",
+            "author": "Flaubert Gustave", "isbn": "SIE293945_579",
+            "reading_status": "read"}]}"#;
+        let report = import_readings(&db, export).await.unwrap();
+
+        assert_eq!(report.matched, 1);
+        assert_eq!(report.created, 0, "no duplicate under 293945579");
+        assert_eq!(
+            status_of(&db, &id).await.reading_status.as_deref(),
+            Some("read")
+        );
+    }
+
     #[tokio::test]
     async fn a_shared_wish_survives_the_import_of_a_reading() {
         let db = migrated_db().await;
