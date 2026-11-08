@@ -218,18 +218,24 @@ pub async fn rename_subject(old_name: String, new_name: String) -> Result<(), St
 }
 
 /// Rename a subject across all books' subjects JSON array.
-/// Used when renaming a tag/shelf to keep book associations in sync.
+/// Used when renaming a tag/shelf to keep book associations in sync. Every
+/// spelling of the old shelf goes ([`ShelfSpelling`]), not only the exact one.
+///
+/// [`ShelfSpelling`]: crate::services::shelf_spelling::ShelfSpelling
 async fn rename_subject_in_books(db: &sea_orm::DatabaseConnection, old_name: &str, new_name: &str) {
-    use crate::models::book::{Column as BookColumn, Entity as BookEntity};
-    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+    use crate::services::shelf_spelling::ShelfSpelling;
+    use sea_orm::{ActiveModelTrait, Set};
 
-    let books = match BookEntity::find()
-        .filter(BookColumn::Subjects.contains(old_name))
-        .all(db)
-        .await
-    {
-        Ok(b) => b,
-        Err(_) => return,
+    // The row may already carry the new name: the books still say the old.
+    let Ok(mut names) = ShelfSpelling::row_names(db).await else {
+        return;
+    };
+    names.retain(|name| name != new_name);
+    names.push(old_name.to_owned());
+    let spelling = ShelfSpelling::new(names);
+    let Ok(books) = crate::services::book_service::books_possibly_filed_under(db, old_name).await
+    else {
+        return;
     };
 
     for book in books {
@@ -241,12 +247,16 @@ async fn rename_subject_in_books(db: &sea_orm::DatabaseConnection, old_name: &st
         };
         let mut changed = false;
         for s in &mut subjects {
-            if s == old_name {
+            // A rename of the case alone finds some books already spelled so.
+            if spelling.shelf_of(s) == old_name && s != new_name {
                 *s = new_name.to_string();
                 changed = true;
             }
         }
         if changed {
+            // Two spellings of the old shelf are now one name.
+            let mut seen = std::collections::HashSet::new();
+            subjects.retain(|s| seen.insert(s.clone()));
             let new_subjects = serde_json::to_string(&subjects).unwrap_or_default();
             let mut active: crate::models::book::ActiveModel = book.into();
             active.subjects = Set(Some(new_subjects));
@@ -834,6 +844,160 @@ mod tag_tree_tests {
 
         let expected = dir.path().join(format!("{here}.jpg"));
         assert_eq!(covers_of(&tags, "Novels"), [expected.to_str().unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn a_book_filed_under_another_case_counts_for_the_shelf_it_opens_in() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let fiction = shelf(&db, "Fiction", None).await;
+        shelf(&db, "Polar", Some(&fiction)).await;
+        shelf(&db, "Étrangers", None).await;
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        book(&db, &["polar"], Some("https://c/a.jpg"), true, &t(1)).await;
+        book(&db, &["Polar"], None, true, &t(2)).await;
+        // Both spellings on one book: still one book.
+        book(&db, &["POLAR", " polar "], None, true, &t(3)).await;
+        book(&db, &["étrangers"], None, false, &t(4)).await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        let polar = tags.iter().find(|t| t.name == "Polar").unwrap();
+        assert_eq!((polar.count, polar.total_count), (3, 3));
+        assert_eq!(subtree_of(&tags, "Polar"), (3, 3));
+        assert_eq!(subtree_of(&tags, "Fiction"), (3, 3));
+        assert_eq!(covers_of(&tags, "Polar"), ["https://c/a.jpg"]);
+        let strangers = tags.iter().find(|t| t.name == "Étrangers").unwrap();
+        assert_eq!((strangers.count, strangers.total_count), (0, 1));
+        // No second card for the other spelling.
+        let names: Vec<&str> = tags.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Fiction", "Polar", "Étrangers"]);
+    }
+
+    async fn subjects_of(db: &DatabaseConnection, id: &str) -> Option<String> {
+        crate::models::book::Entity::find_by_id(id.to_owned())
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap()
+            .subjects
+    }
+
+    #[tokio::test]
+    async fn deleting_a_shelf_takes_it_off_its_books_whatever_the_case() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let polar = shelf(&db, "Polar", None).await;
+        let strangers = shelf(&db, "Étrangers", None).await;
+        shelf(&db, "Étagère", None).await;
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        let lower = book(&db, &["polar", "Roman"], None, true, &t(1)).await;
+        let upper = book(&db, &["POLAR"], None, true, &t(2)).await;
+        let longer = book(&db, &["Polar noir"], None, true, &t(3)).await;
+        let accented = book(&db, &["étrangers", "etagere"], None, true, &t(4)).await;
+
+        crate::services::book_service::delete_shelf(&db, &polar)
+            .await
+            .unwrap();
+        crate::services::book_service::delete_shelf(&db, &strangers)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            subjects_of(&db, &lower).await.as_deref(),
+            Some(r#"["Roman"]"#)
+        );
+        assert_eq!(subjects_of(&db, &upper).await.as_deref(), Some("[]"));
+        assert_eq!(
+            subjects_of(&db, &longer).await.as_deref(),
+            Some(r#"["Polar noir"]"#)
+        );
+        // "etagere" is not "Étagère": accents stay apart.
+        assert_eq!(
+            subjects_of(&db, &accented).await.as_deref(),
+            Some(r#"["etagere"]"#)
+        );
+        // Nothing of the deleted shelves comes back as an orphan.
+        let names: Vec<String> = get_all_tags_in(&db, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, ["Polar noir", "Roman", "etagere", "Étagère"]);
+    }
+
+    #[tokio::test]
+    async fn renaming_a_shelf_renames_it_on_its_books_whatever_the_case() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let polar = shelf(&db, "Polar", None).await;
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        let lower = book(&db, &["polar"], None, true, &t(1)).await;
+        let both = book(&db, &["Polar", "POLAR"], None, true, &t(2)).await;
+        let longer = book(&db, &["Polar noir"], None, true, &t(3)).await;
+
+        update_tag_in(&db, polar, "Noir".into(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            subjects_of(&db, &lower).await.as_deref(),
+            Some(r#"["Noir"]"#)
+        );
+        assert_eq!(
+            subjects_of(&db, &both).await.as_deref(),
+            Some(r#"["Noir"]"#)
+        );
+        assert_eq!(
+            subjects_of(&db, &longer).await.as_deref(),
+            Some(r#"["Polar noir"]"#)
+        );
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+        let names: Vec<&str> = tags.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Noir", "Polar noir"]);
+        assert_eq!(tags[0].count, 2);
+    }
+
+    #[tokio::test]
+    async fn a_rename_of_the_case_alone_leaves_the_books_already_spelled_so() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let polar = shelf(&db, "Polar", None).await;
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        let already = book(&db, &["polar"], None, true, &t(1)).await;
+        let exact = book(&db, &["Polar"], None, true, &t(2)).await;
+
+        update_tag_in(&db, polar, "polar".into(), None)
+            .await
+            .unwrap();
+
+        let book_of = |id: String| {
+            let db = &db;
+            async move {
+                crate::models::book::Entity::find_by_id(id)
+                    .one(db)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let untouched = book_of(already).await;
+        assert_eq!(untouched.subjects.as_deref(), Some(r#"["polar"]"#));
+        // Nothing changed: not written, so not sent to the other devices.
+        assert_eq!(untouched.updated_at, t(1));
+        let renamed = book_of(exact).await;
+        assert_eq!(renamed.subjects.as_deref(), Some(r#"["polar"]"#));
+        assert_ne!(renamed.updated_at, t(2));
+    }
+
+    #[tokio::test]
+    async fn a_name_no_shelf_row_carries_is_still_listed_as_spelled() {
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let t = |d: u32| format!("2026-01-{d:02}T10:00:00+00:00");
+        book(&db, &["polar"], None, true, &t(1)).await;
+
+        let tags = get_all_tags_in(&db, None).await.unwrap();
+
+        let names: Vec<&str> = tags.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["polar"]);
+        assert_eq!(tags[0].count, 1);
     }
 
     #[tokio::test]

@@ -18,6 +18,7 @@ use sea_orm::{
 use crate::models::book::{ActiveModel as BookActiveModel, Entity as BookEntity};
 use crate::models::{book, collection, collection_book};
 use crate::services::book_service::ServiceError;
+use crate::services::shelf_spelling::ShelfSpelling;
 
 /// Upper bound on one request. Far above any hand-made selection ("select
 /// all" on a large library), low enough to keep one transaction bounded.
@@ -30,7 +31,7 @@ const MAX_SHELF_NAME_CHARS: usize = 200;
 const ID_CHUNK_SIZE: usize = 500;
 
 /// What to do with a selection of books. Additions are idempotent; removals
-/// are exact matches. A name or id present on both sides is kept (the
+/// match whole names, whatever their case. A name or id present on both sides is kept (the
 /// addition wins), so "move to the shelf it is already on" is a no-op.
 #[derive(Debug, Default, Clone)]
 pub struct BulkAssignment {
@@ -92,6 +93,7 @@ pub async fn assign_books(
         }
     }
 
+    let spelling = ShelfSpelling::new(ShelfSpelling::row_names(&txn).await?);
     let mut changed: HashSet<String> = HashSet::new();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -104,9 +106,12 @@ pub async fn assign_books(
 
         if !add_shelves.is_empty() || !remove_shelves.is_empty() {
             for book in books {
-                let Some(subjects) =
-                    refiled_subjects(book.subjects.as_deref(), &add_shelves, &remove_shelves)
-                else {
+                let Some(subjects) = refiled_subjects(
+                    book.subjects.as_deref(),
+                    &add_shelves,
+                    &remove_shelves,
+                    &spelling,
+                ) else {
                     continue;
                 };
                 let id = book.id.clone();
@@ -184,21 +189,30 @@ async fn unlink_from_collection<C: ConnectionTrait>(
 /// A column that does not parse as a JSON string array is left alone when
 /// there is nothing to add, and replaced by the additions otherwise: the
 /// listing already ignores such a value, so nothing readable is lost.
+///
+/// A name stands for its shelf whatever its case ([`ShelfSpelling`]): it goes
+/// with the shelf it is removed from, and a book already on a shelf under
+/// another case is not filed there twice.
 fn refiled_subjects(
     current: Option<&str>,
     add: &[String],
     remove: &[String],
+    spelling: &ShelfSpelling,
 ) -> Option<Option<String>> {
     let parsed = current.and_then(|json| serde_json::from_str::<Vec<String>>(json).ok());
     let before = parsed.clone().unwrap_or_default();
 
     let mut after: Vec<String> = before
         .iter()
-        .filter(|s| !remove.contains(s))
+        .filter(|s| {
+            let shelf = spelling.shelf_of(s);
+            !remove.iter().any(|r| spelling.shelf_of(r) == shelf)
+        })
         .cloned()
         .collect();
     for name in add {
-        if !after.contains(name) {
+        let shelf = spelling.shelf_of(name);
+        if !after.iter().any(|s| spelling.shelf_of(s) == shelf) {
             after.push(name.clone());
         }
     }
@@ -411,6 +425,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn moving_strips_the_source_shelf_whatever_the_case_of_the_book() {
+        let db = setup_db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        for name in ["Polar", "Thriller", "Étagère"] {
+            crate::models::tag::ActiveModel {
+                name: Set(name.to_owned()),
+                created_at: Set(now.clone()),
+                updated_at: Set(now.clone()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .unwrap();
+        }
+        let lower = insert_book(&db, "Lower", Some(r#"["polar","Polar noir"]"#)).await;
+        let already = insert_book(&db, "Already", Some(r#"["POLAR","thriller"]"#)).await;
+        let accented = insert_book(&db, "Accented", Some(r#"["etagere"]"#)).await;
+
+        assign_books(
+            &db,
+            BulkAssignment {
+                book_ids: vec![lower.clone(), already.clone(), accented.clone()],
+                add_shelves: vec!["Thriller".to_owned()],
+                remove_shelves: vec!["Polar".to_owned(), "Étagère".to_owned()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            subjects_of(&db, &lower).await.as_deref(),
+            Some(r#"["Polar noir","Thriller"]"#)
+        );
+        // Already on "Thriller" under another case: not filed twice.
+        assert_eq!(
+            subjects_of(&db, &already).await.as_deref(),
+            Some(r#"["thriller"]"#)
+        );
+        // Accents stay apart: "etagere" is not "Étagère".
+        assert_eq!(
+            subjects_of(&db, &accented).await.as_deref(),
+            Some(r#"["etagere","Thriller"]"#)
+        );
+    }
+
+    #[tokio::test]
     async fn moving_to_the_source_itself_keeps_the_books_there() {
         let db = setup_db().await;
         let book = insert_book(&db, "Stays", Some(r#"["Roman"]"#)).await;
@@ -539,13 +600,27 @@ mod tests {
     }
 
     #[test]
+    fn a_source_sent_in_another_case_takes_every_spelling_of_its_shelf() {
+        let spelling = ShelfSpelling::new(["Polar"]);
+        let remove = ["polar".to_owned()];
+        for current in [r#"["polar","Roman"]"#, r#"["Polar","Roman"]"#] {
+            assert_eq!(
+                refiled_subjects(Some(current), &[], &remove, &spelling),
+                Some(Some(r#"["Roman"]"#.to_owned())),
+                "{current}"
+            );
+        }
+    }
+
+    #[test]
     fn an_unparseable_subjects_column_is_only_replaced_when_adding() {
+        let spelling = ShelfSpelling::default();
         assert_eq!(
-            refiled_subjects(Some("not json"), &[], &["Roman".to_owned()]),
+            refiled_subjects(Some("not json"), &[], &["Roman".to_owned()], &spelling),
             None
         );
         assert_eq!(
-            refiled_subjects(Some("not json"), &["Roman".to_owned()], &[]),
+            refiled_subjects(Some("not json"), &["Roman".to_owned()], &[], &spelling),
             Some(Some(r#"["Roman"]"#.to_owned()))
         );
     }

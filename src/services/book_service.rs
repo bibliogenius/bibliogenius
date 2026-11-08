@@ -1138,7 +1138,8 @@ pub async fn shelf_listing(
         .order_by_asc(tag::Column::Name)
         .all(db)
         .await?;
-    let rows = subject_rows(db).await?;
+    let mut rows = subject_rows(db).await?;
+    file_under_shelf_spelling(&tags, &mut rows);
     let counts = tally_subjects(rows.iter().map(ShelfBookRow::scope));
     let shelf_total = counts
         .keys()
@@ -1164,6 +1165,33 @@ pub async fn shelf_listing(
         subtree_counts,
         covers,
     })
+}
+
+/// Spells each book's shelves as their `tags` row does ([`ShelfSpelling`]),
+/// so the counts and covers of a shelf take in every book its page shows, and
+/// another spelling of it does not show up as a second shelf.
+///
+/// [`ShelfSpelling`]: crate::services::shelf_spelling::ShelfSpelling
+fn file_under_shelf_spelling(tags: &[crate::models::tag::Model], rows: &mut [ShelfBookRow]) {
+    let spelling =
+        crate::services::shelf_spelling::ShelfSpelling::new(tags.iter().map(|t| t.name.as_str()));
+    for row in rows {
+        let names = shelf_names(row.subjects.as_deref());
+        if names.iter().all(|name| spelling.shelf_of(name) == name) {
+            continue;
+        }
+        let mut spelled: Vec<&str> = Vec::new();
+        for name in &names {
+            let name = spelling.shelf_of(name);
+            // Two spellings on one book are one shelf, counted once.
+            if !spelled.contains(&name) {
+                spelled.push(name);
+            }
+        }
+        if let Ok(json) = serde_json::to_string(&spelled) {
+            row.subjects = Some(json);
+        }
+    }
 }
 
 type ShelfWalk = (
@@ -1463,20 +1491,23 @@ async fn subject_rows(db: &DatabaseConnection) -> Result<Vec<ShelfBookRow>, Serv
 /// entry, membership lives in the books. Left in place, the name comes back
 /// on the next listing as a synthetic orphan (see `get_all_tags`), which is a
 /// shelf the user cannot delete and did not ask to keep. The counterpart of
-/// the rename that `update_tag` performs. Exact, case-sensitive match: a
-/// shelf named "Roman" leaves "Roman classique" untouched.
+/// the rename that `update_tag` performs. A whole name, whatever its case
+/// ([`ShelfSpelling`]): a shelf named "Roman" takes "roman" with it and leaves
+/// "Roman classique" untouched.
+///
+/// [`ShelfSpelling`]: crate::services::shelf_spelling::ShelfSpelling
 pub async fn remove_subject_from_books<C>(db: &C, name: &str) -> Result<usize, ServiceError>
 where
     C: sea_orm::ConnectionTrait,
 {
-    use crate::models::book::Column as BookColumn;
+    use crate::services::shelf_spelling::ShelfSpelling;
 
-    // `contains` is a LIKE prefilter; the exact match happens on the parsed
-    // array below, so wildcard characters in a name only widen the candidates.
-    let books = BookEntity::find()
-        .filter(BookColumn::Subjects.contains(name))
-        .all(db)
-        .await?;
+    // The row may already be gone (a delete drops it first): `name` is a
+    // shelf all the same.
+    let mut names = ShelfSpelling::row_names(db).await?;
+    names.push(name.to_owned());
+    let spelling = ShelfSpelling::new(names);
+    let books = books_possibly_filed_under(db, name).await?;
 
     let mut touched = 0;
     for book in books {
@@ -1486,7 +1517,10 @@ where
         let Ok(subjects) = serde_json::from_str::<Vec<String>>(subjects_str) else {
             continue;
         };
-        let kept: Vec<&String> = subjects.iter().filter(|s| *s != name).collect();
+        let kept: Vec<&String> = subjects
+            .iter()
+            .filter(|s| spelling.shelf_of(s) != name)
+            .collect();
         if kept.len() == subjects.len() {
             continue;
         }
@@ -1497,6 +1531,30 @@ where
         touched += 1;
     }
     Ok(touched)
+}
+
+/// The books that may carry `shelf` in their subjects, under any case: the
+/// caller matches on the parsed array. SQLite's LIKE folds ASCII letters only,
+/// so every other character goes in as `_`, its one-character wildcard:
+/// "Étrangers" is looked for as `_trangers`, which "étrangers" matches.
+/// Wildcards only widen the candidates.
+pub(crate) async fn books_possibly_filed_under<C>(
+    db: &C,
+    shelf: &str,
+) -> Result<Vec<crate::models::book::Model>, sea_orm::DbErr>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    use crate::models::book::Column as BookColumn;
+
+    let pattern: String = shelf
+        .chars()
+        .map(|c| if c.is_ascii() { c } else { '_' })
+        .collect();
+    BookEntity::find()
+        .filter(BookColumn::Subjects.contains(pattern))
+        .all(db)
+        .await
 }
 
 /// Delete a shelf as the user sees it: the `tags` row, its book links, its
