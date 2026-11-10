@@ -475,13 +475,26 @@ async fn upsert_directory_catalog_cache(
     // row is deleted. The in-memory fold is never lost because every kept row
     // is persisted afterwards, either by the UPDATE branch (book still in the
     // catalog) or by the prune pass (book gone). Unparseable keys keep the
-    // historical last-wins overwrite without deleting: two ISBN-less rows are
-    // different books, folding them would destroy one.
+    // historical last-wins overwrite without deleting: two rows under the
+    // same malformed ISBN may be different books, folding them would destroy
+    // one.
+    //
+    // ISBN-less rows stay out of the map: they would all share the empty key,
+    // so the map would keep one of them and the additive merge would fill
+    // every ISBN-less book's missing cover and author from that one row. They
+    // have no identity to match on, so they are rebuilt from the catalog on
+    // every sync instead (deleted here, re-inserted from the entries below).
     let mut existing_map: std::collections::HashMap<String, peer_book::Model> =
         std::collections::HashMap::new();
     let mut shadowed_duplicate_ids: Vec<i32> = Vec::new();
+    let mut isbnless_row_ids: Vec<i32> = Vec::new();
     for row in existing {
-        let Some(raw_isbn) = row.isbn.clone() else {
+        let Some(raw_isbn) = row
+            .isbn
+            .clone()
+            .filter(|isbn| !crate::utils::isbn::plain(isbn).is_empty())
+        else {
+            isbnless_row_ids.push(row.id);
             continue;
         };
         let canonical = crate::utils::isbn::to_isbn13(&raw_isbn);
@@ -512,8 +525,15 @@ async fn upsert_directory_catalog_cache(
             }
         }
     }
-    for id in shadowed_duplicate_ids {
-        let _ = peer_book::Entity::delete_by_id(id).exec(db).await;
+    let stale_ids: Vec<i32> = shadowed_duplicate_ids
+        .into_iter()
+        .chain(isbnless_row_ids)
+        .collect();
+    if !stale_ids.is_empty() {
+        let _ = peer_book::Entity::delete_many()
+            .filter(peer_book::Column::Id.is_in(stale_ids))
+            .exec(db)
+            .await;
     }
 
     let mut fresh_isbns = std::collections::HashSet::new();
@@ -532,13 +552,31 @@ async fn upsert_directory_catalog_cache(
     )> = Vec::new();
 
     for entry in entries {
+        if crate::utils::isbn::plain(&entry.isbn).is_empty() {
+            // Its row was deleted above: insert it back with its own data only.
+            to_insert.push((
+                entry.title.clone(),
+                entry.isbn.clone(),
+                entry.author.clone(),
+                entry.cover_url.clone(),
+                entry.added_at.clone(),
+            ));
+            result.push(FrbCatalogEntry {
+                isbn: entry.isbn.clone(),
+                title: entry.title.clone(),
+                author: entry.author.clone(),
+                cover_url: entry.cover_url.clone(),
+                added_at: entry.added_at.clone(),
+            });
+            continue;
+        }
         let canonical = crate::utils::isbn::to_isbn13(&entry.isbn);
         let entry_is_valid_isbn = canonical.is_some();
         let entry_key = canonical.unwrap_or_else(|| entry.isbn.clone());
         // A catalog listing the same book under both ISBN forms would
         // re-create the duplicate the fold above just cleaned, so only its
         // first occurrence is processed. Unparseable keys are exempt: two
-        // ISBN-less entries are different books, not duplicates.
+        // entries under the same malformed ISBN may be different books.
         if !fresh_isbns.insert(entry_key.clone()) && entry_is_valid_isbn {
             continue;
         }
@@ -603,6 +641,12 @@ async fn upsert_directory_catalog_cache(
                     .execute(&mut *conn)
                     .await;
                 for (title, isbn, author, cover_url, added_at) in &to_insert {
+                    // An ISBN-less row can match no wish, and it is re-inserted
+                    // on every sync: born notified, it skips the wishlist pass
+                    // instead of costing it one update per row each time.
+                    let notified_at = crate::utils::isbn::plain(isbn)
+                        .is_empty()
+                        .then_some(now.as_str());
                     // remote_book_id is TEXT: the sentinel id must be written
                     // as text, an integer value in that column breaks every
                     // `String` decode of the row (migration 095).
@@ -610,7 +654,7 @@ async fn upsert_directory_catalog_cache(
                         "INSERT INTO peer_books \
                          (peer_id, remote_book_id, title, isbn, author, cover_url, \
                           summary, synced_at, node_id, first_seen_at, added_at, notified_at) \
-                         VALUES (0, '0', ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL)",
+                         VALUES (0, '0', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
                     )
                     .bind(title.as_str())
                     .bind(crate::utils::isbn::plain(isbn).as_str())
@@ -620,6 +664,7 @@ async fn upsert_directory_catalog_cache(
                     .bind(node_id)
                     .bind(now.as_str())
                     .bind(added_at.as_deref())
+                    .bind(notified_at)
                     .execute(&mut *conn)
                     .await
                     {

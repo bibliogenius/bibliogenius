@@ -250,6 +250,78 @@ mod upsert_directory_catalog_cache_tests {
         assert_eq!(cached_rows(&db).await.len(), 1);
     }
 
+    fn isbnless(title: &str, author: Option<&str>, cover: Option<&str>) -> CatalogEntry {
+        CatalogEntry {
+            author: author.map(str::to_string),
+            cover_url: cover.map(str::to_string),
+            ..entry("", title)
+        }
+    }
+
+    fn row_titled<'a>(rows: &'a [peer_book::Model], title: &str) -> &'a peer_book::Model {
+        rows.iter()
+            .find(|r| r.title == title)
+            .unwrap_or_else(|| panic!("no cached row titled {title}"))
+    }
+
+    /// Every ISBN-less book used to share the empty key: the cache kept one of
+    /// their rows, and the additive merge filled each book's missing cover and
+    /// author from it. One book with a cover then lent it, and its author, to
+    /// all the others.
+    #[tokio::test]
+    async fn isbnless_books_never_borrow_each_others_cover_or_author() {
+        let db = test_db().await;
+        // The book with a cover is the last one cached, as on the reported
+        // device where it was added weeks after the others: the shared key
+        // kept the last ISBN-less row.
+        let catalog = [
+            isbnless("La distinction", None, None),
+            isbnless("la cantatrice chauve", None, None),
+            isbnless(
+                "Martin Eden",
+                Some("Jack London"),
+                Some("https://inv/me.jpg"),
+            ),
+        ];
+
+        // The first sync fills an empty cache; the bug needs a cached row.
+        upsert_directory_catalog_cache(&db, NODE, &catalog).await;
+        let result = upsert_directory_catalog_cache(&db, NODE, &catalog).await;
+
+        for title in ["La distinction", "la cantatrice chauve"] {
+            let shown = result.iter().find(|e| e.title == title).unwrap();
+            assert_eq!(shown.cover_url, None, "{title} shown with a foreign cover");
+            assert_eq!(shown.author, None, "{title} shown with a foreign author");
+        }
+        let rows = cached_rows(&db).await;
+        assert_eq!(rows.len(), 3);
+        assert_eq!(row_titled(&rows, "La distinction").cover_url, None);
+        assert_eq!(
+            row_titled(&rows, "Martin Eden").cover_url.as_deref(),
+            Some("https://inv/me.jpg")
+        );
+    }
+
+    /// A cache already polluted by the shared key heals on the next sync: its
+    /// ISBN-less rows are rebuilt from the catalog, stale ones included.
+    #[tokio::test]
+    async fn polluted_isbnless_rows_are_rebuilt_from_the_catalog() {
+        let db = test_db().await;
+        seed_row(&db, "", "La distinction", Some("https://inv/me.jpg")).await;
+        seed_row(&db, "", "Frozen since September", None).await;
+
+        upsert_directory_catalog_cache(&db, NODE, &[isbnless("La distinction", None, None)]).await;
+
+        let rows = cached_rows(&db).await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "a book gone from the catalog must not linger"
+        );
+        assert_eq!(rows[0].title, "La distinction");
+        assert_eq!(rows[0].cover_url, None);
+    }
+
     #[tokio::test]
     async fn empty_catalog_does_not_wipe_existing_cache() {
         let db = test_db().await;
