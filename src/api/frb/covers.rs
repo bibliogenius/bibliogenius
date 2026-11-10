@@ -141,3 +141,37 @@ pub async fn search_all_covers_by_title(
     .map(FrbCoverSearchResult::from)
     .map_err(|e| format!("{:?}", e))
 }
+
+/// A cover found on a web page: the raw image bytes and the image's address.
+pub struct FrbWebCover {
+    pub bytes: Vec<u8>,
+    pub image_url: String,
+}
+
+/// Fetch the cover of the book shown at `url`, a publisher's book page or the
+/// image itself. The bytes are returned unprocessed: the app runs them through
+/// its cover photo pipeline before saving.
+///
+/// On failure the error is a stable code (`invalid_url`, `blocked_address`,
+/// `network`, `too_many_redirects`, `http_status`, `too_large`,
+/// `no_image_found`, `unsupported_image`) for the app to translate.
+///
+/// FFI only, with no Axum route on purpose: an HTTP endpoint that fetches an
+/// arbitrary URL would let any peer make this device issue requests.
+pub async fn fetch_cover_from_web_page(url: String) -> Result<FrbWebCover, String> {
+    crate::modules::integrations::web_cover::fetch_cover_from_page(&url)
+        .await
+        .map(|c| FrbWebCover {
+            bytes: c.bytes,
+            image_url: c.image_url,
+        })
+        .map_err(|e| e.code().to_string())
+}
+
+/// Record that the cover file just saved for `book_id` came from `image_url`,
+/// so it can later be offered to Open Library by address. Device-local.
+pub async fn record_web_cover_origin(book_id: String, image_url: String) -> Result<(), String> {
+    let db = db().ok_or("Database not initialized")?;
+    let dir = covers_dir().ok_or("Covers directory not registered")?;
+    crate::services::web_cover_service::record_cover_origin(db, dir, &book_id, &image_url).await
+}

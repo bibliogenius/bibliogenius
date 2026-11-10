@@ -2708,6 +2708,22 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         .await?;
     }
 
+    // Migration 107: where a cover picked from a web page came from, so it can
+    // later be handed to Open Library as a URL rather than as our copy. Kept
+    // with the SHA-256 of the cover file it describes: replacing the cover
+    // rewrites the same `<uuid>.jpg`, so only the digest tells a stale origin
+    // from a current one. On `book_local` because `books` is a cr-sqlite CRR
+    // (ADR-044 addendum A.3); `book_local` is created by migration 084 above.
+    for column in ["cover_origin_url", "cover_origin_sha256"] {
+        if !table_has_column(db, "book_local", column).await? {
+            db.execute(Statement::from_string(
+                db.get_database_backend(),
+                format!("ALTER TABLE book_local ADD COLUMN {column} TEXT"),
+            ))
+            .await?;
+        }
+    }
+
     Ok(())
 }
 

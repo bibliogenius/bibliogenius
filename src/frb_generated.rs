@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 169039304;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1254810240;
 
 // Section: executor
 
@@ -1899,6 +1899,42 @@ fn wire__crate__api__frb__enrich_missing_covers_impl(
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let output_ok = crate::api::frb::enrich_missing_covers().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__frb__fetch_cover_from_web_page_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "fetch_cover_from_web_page",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_url = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::fetch_cover_from_web_page(api_url).await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -7069,6 +7105,45 @@ fn wire__crate__api__frb__record_read_book_impl(
         },
     )
 }
+fn wire__crate__api__frb__record_web_cover_origin_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "record_web_cover_origin",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_book_id = <String>::sse_decode(&mut deserializer);
+            let api_image_url = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::frb::record_web_cover_origin(api_book_id, api_image_url)
+                                .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__frb__refresh_all_leaderboards_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -10567,6 +10642,18 @@ impl SseDecode for crate::api::frb::FrbTrackProgress {
     }
 }
 
+impl SseDecode for crate::api::frb::FrbWebCover {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_bytes = <Vec<u8>>::sse_decode(deserializer);
+        let mut var_imageUrl = <String>::sse_decode(deserializer);
+        return crate::api::frb::FrbWebCover {
+            bytes: var_bytes,
+            image_url: var_imageUrl,
+        };
+    }
+}
+
 impl SseDecode for crate::api::frb::FrbWishlistProvider {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -11629,557 +11716,563 @@ fn pde_ffi_dispatcher_primary_impl(
             wire__crate__api__frb__emit_welcome_notification_impl(port, ptr, rust_vec_len, data_len)
         }
         50 => wire__crate__api__frb__enrich_missing_covers_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__frb__gamification_check_achievements_impl(
+        51 => {
+            wire__crate__api__frb__fetch_cover_from_web_page_impl(port, ptr, rust_vec_len, data_len)
+        }
+        52 => wire__crate__api__frb__gamification_check_achievements_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        52 => wire__crate__api__frb__gamification_get_leaderboard_impl(
+        53 => wire__crate__api__frb__gamification_get_leaderboard_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        53 => {
+        54 => {
             wire__crate__api__frb__gamification_get_status_impl(port, ptr, rust_vec_len, data_len)
         }
-        54 => wire__crate__api__frb__gamification_refresh_leaderboard_impl(
+        55 => wire__crate__api__frb__gamification_refresh_leaderboard_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        55 => wire__crate__api__frb__gamification_update_config_impl(
+        56 => wire__crate__api__frb__gamification_update_config_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        56 => wire__crate__api__frb__gamification_update_streak_impl(
+        57 => wire__crate__api__frb__gamification_update_streak_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        57 => {
+        58 => {
             wire__crate__api__frb__generate_invite_link_ffi_impl(port, ptr, rust_vec_len, data_len)
         }
-        58 => {
+        59 => {
             wire__crate__api__frb__generate_qr_payload_ffi_impl(port, ptr, rust_vec_len, data_len)
         }
-        59 => wire__crate__api__frb__get_all_books_impl(port, ptr, rust_vec_len, data_len),
-        60 => wire__crate__api__frb__get_all_collections_impl(port, ptr, rust_vec_len, data_len),
-        61 => wire__crate__api__frb__get_all_contacts_impl(port, ptr, rust_vec_len, data_len),
-        62 => wire__crate__api__frb__get_all_loans_impl(port, ptr, rust_vec_len, data_len),
-        63 => wire__crate__api__frb__get_all_tags_impl(port, ptr, rust_vec_len, data_len),
-        64 => wire__crate__api__frb__get_book_by_uuid_impl(port, ptr, rust_vec_len, data_len),
-        65 => wire__crate__api__frb__get_book_collections_impl(port, ptr, rust_vec_len, data_len),
-        66 => wire__crate__api__frb__get_book_collections_by_book_uuid_impl(
+        60 => wire__crate__api__frb__get_all_books_impl(port, ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__frb__get_all_collections_impl(port, ptr, rust_vec_len, data_len),
+        62 => wire__crate__api__frb__get_all_contacts_impl(port, ptr, rust_vec_len, data_len),
+        63 => wire__crate__api__frb__get_all_loans_impl(port, ptr, rust_vec_len, data_len),
+        64 => wire__crate__api__frb__get_all_tags_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__frb__get_book_by_uuid_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__frb__get_book_collections_impl(port, ptr, rust_vec_len, data_len),
+        67 => wire__crate__api__frb__get_book_collections_by_book_uuid_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        67 => wire__crate__api__frb__get_book_loan_duration_impl(port, ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__frb__get_book_loan_duration_by_book_uuid_impl(
+        68 => wire__crate__api__frb__get_book_loan_duration_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__frb__get_book_loan_duration_by_book_uuid_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        69 => wire__crate__api__frb__get_book_notes_impl(port, ptr, rust_vec_len, data_len),
-        70 => wire__crate__api__frb__get_book_notes_by_book_uuid_impl(
+        70 => wire__crate__api__frb__get_book_notes_impl(port, ptr, rust_vec_len, data_len),
+        71 => wire__crate__api__frb__get_book_notes_by_book_uuid_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        71 => {
+        72 => {
             wire__crate__api__frb__get_book_recommendations_impl(port, ptr, rust_vec_len, data_len)
         }
-        72 => wire__crate__api__frb__get_collection_impl(port, ptr, rust_vec_len, data_len),
-        73 => wire__crate__api__frb__get_collection_books_impl(port, ptr, rust_vec_len, data_len),
-        74 => wire__crate__api__frb__get_collection_deletion_preview_impl(
+        73 => wire__crate__api__frb__get_collection_impl(port, ptr, rust_vec_len, data_len),
+        74 => wire__crate__api__frb__get_collection_books_impl(port, ptr, rust_vec_len, data_len),
+        75 => wire__crate__api__frb__get_collection_deletion_preview_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        75 => wire__crate__api__frb__get_contact_by_uuid_impl(port, ptr, rust_vec_len, data_len),
-        76 => wire__crate__api__frb__get_current_household_reader_impl(
+        76 => wire__crate__api__frb__get_contact_by_uuid_impl(port, ptr, rust_vec_len, data_len),
+        77 => wire__crate__api__frb__get_current_household_reader_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        77 => wire__crate__api__frb__get_discovery_lookup_inputs_impl(
+        78 => wire__crate__api__frb__get_discovery_lookup_inputs_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        78 => wire__crate__api__frb__get_effective_loan_duration_impl(
+        79 => wire__crate__api__frb__get_effective_loan_duration_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        79 => wire__crate__api__frb__get_effective_loan_duration_by_book_uuid_impl(
+        80 => wire__crate__api__frb__get_effective_loan_duration_by_book_uuid_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        80 => wire__crate__api__frb__get_favorite_book_ids_impl(port, ptr, rust_vec_len, data_len),
-        81 => wire__crate__api__frb__get_favorites_adoption_candidate_impl(
+        81 => wire__crate__api__frb__get_favorite_book_ids_impl(port, ptr, rust_vec_len, data_len),
+        82 => wire__crate__api__frb__get_favorites_adoption_candidate_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        82 => wire__crate__api__frb__get_isbn_providers_impl(port, ptr, rust_vec_len, data_len),
-        83 => {
+        83 => wire__crate__api__frb__get_isbn_providers_impl(port, ptr, rust_vec_len, data_len),
+        84 => {
             wire__crate__api__frb__get_library_isbn_status_impl(port, ptr, rust_vec_len, data_len)
         }
-        84 => wire__crate__api__frb__get_library_view_stats_impl(port, ptr, rust_vec_len, data_len),
-        85 => wire__crate__api__frb__get_loan_settings_impl(port, ptr, rust_vec_len, data_len),
-        86 => wire__crate__api__frb__get_local_peers_ffi_impl(port, ptr, rust_vec_len, data_len),
-        87 => wire__crate__api__frb__get_local_x25519_public_key_impl(
+        85 => wire__crate__api__frb__get_library_view_stats_impl(port, ptr, rust_vec_len, data_len),
+        86 => wire__crate__api__frb__get_loan_settings_impl(port, ptr, rust_vec_len, data_len),
+        87 => wire__crate__api__frb__get_local_peers_ffi_impl(port, ptr, rust_vec_len, data_len),
+        88 => wire__crate__api__frb__get_local_x25519_public_key_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        89 => wire__crate__api__frb__get_personal_recommendations_impl(
+        90 => wire__crate__api__frb__get_personal_recommendations_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        90 => wire__crate__api__frb__get_public_keys_ffi_impl(port, ptr, rust_vec_len, data_len),
-        91 => wire__crate__api__frb__get_relay_config_ffi_impl(port, ptr, rust_vec_len, data_len),
-        94 => wire__crate__api__frb__get_wishlist_providers_impl(port, ptr, rust_vec_len, data_len),
-        95 => wire__crate__api__frb__get_wishlist_seekers_impl(port, ptr, rust_vec_len, data_len),
-        97 => wire__crate__api__frb__hangman_available_difficulties_impl(
+        91 => wire__crate__api__frb__get_public_keys_ffi_impl(port, ptr, rust_vec_len, data_len),
+        92 => wire__crate__api__frb__get_relay_config_ffi_impl(port, ptr, rust_vec_len, data_len),
+        95 => wire__crate__api__frb__get_wishlist_providers_impl(port, ptr, rust_vec_len, data_len),
+        96 => wire__crate__api__frb__get_wishlist_seekers_impl(port, ptr, rust_vec_len, data_len),
+        98 => wire__crate__api__frb__hangman_available_difficulties_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        98 => wire__crate__api__frb__hangman_finish_impl(port, ptr, rust_vec_len, data_len),
-        99 => wire__crate__api__frb__hangman_leaderboard_impl(port, ptr, rust_vec_len, data_len),
-        100 => wire__crate__api__frb__hangman_refresh_leaderboard_impl(
+        99 => wire__crate__api__frb__hangman_finish_impl(port, ptr, rust_vec_len, data_len),
+        100 => wire__crate__api__frb__hangman_leaderboard_impl(port, ptr, rust_vec_len, data_len),
+        101 => wire__crate__api__frb__hangman_refresh_leaderboard_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        101 => wire__crate__api__frb__hangman_reset_scores_impl(port, ptr, rust_vec_len, data_len),
-        102 => wire__crate__api__frb__hangman_setup_impl(port, ptr, rust_vec_len, data_len),
-        103 => wire__crate__api__frb__hangman_top_scores_impl(port, ptr, rust_vec_len, data_len),
-        105 => wire__crate__api__frb__hub_directory_cancel_borrow_request_impl(
+        102 => wire__crate__api__frb__hangman_reset_scores_impl(port, ptr, rust_vec_len, data_len),
+        103 => wire__crate__api__frb__hangman_setup_impl(port, ptr, rust_vec_len, data_len),
+        104 => wire__crate__api__frb__hangman_top_scores_impl(port, ptr, rust_vec_len, data_len),
+        106 => wire__crate__api__frb__hub_directory_cancel_borrow_request_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        106 => wire__crate__api__frb__hub_directory_create_borrow_request_impl(
+        107 => wire__crate__api__frb__hub_directory_create_borrow_request_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        107 => wire__crate__api__frb__hub_directory_export_write_token_impl(
+        108 => wire__crate__api__frb__hub_directory_export_write_token_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        108 => wire__crate__api__frb__hub_directory_follow_impl(port, ptr, rust_vec_len, data_len),
-        109 => {
+        109 => wire__crate__api__frb__hub_directory_follow_impl(port, ptr, rust_vec_len, data_len),
+        110 => {
             wire__crate__api__frb__hub_directory_get_catalog_impl(port, ptr, rust_vec_len, data_len)
         }
-        110 => wire__crate__api__frb__hub_directory_get_catalog_detailed_impl(
+        111 => wire__crate__api__frb__hub_directory_get_catalog_detailed_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        111 => {
+        112 => {
             wire__crate__api__frb__hub_directory_get_config_impl(port, ptr, rust_vec_len, data_len)
         }
-        112 => {
+        113 => {
             wire__crate__api__frb__hub_directory_get_profile_impl(port, ptr, rust_vec_len, data_len)
         }
-        113 => wire__crate__api__frb__hub_directory_get_recovery_code_impl(
+        114 => wire__crate__api__frb__hub_directory_get_recovery_code_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        114 => wire__crate__api__frb__hub_directory_import_write_token_impl(
+        115 => wire__crate__api__frb__hub_directory_import_write_token_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        115 => wire__crate__api__frb__hub_directory_incoming_borrow_requests_impl(
+        116 => wire__crate__api__frb__hub_directory_incoming_borrow_requests_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        116 => wire__crate__api__frb__hub_directory_list_impl(port, ptr, rust_vec_len, data_len),
-        117 => wire__crate__api__frb__hub_directory_list_followers_impl(
+        117 => wire__crate__api__frb__hub_directory_list_impl(port, ptr, rust_vec_len, data_len),
+        118 => wire__crate__api__frb__hub_directory_list_followers_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        118 => wire__crate__api__frb__hub_directory_list_following_impl(
+        119 => wire__crate__api__frb__hub_directory_list_following_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        119 => wire__crate__api__frb__hub_directory_outgoing_borrow_requests_impl(
+        120 => wire__crate__api__frb__hub_directory_outgoing_borrow_requests_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        120 => wire__crate__api__frb__hub_directory_pending_requests_impl(
+        121 => wire__crate__api__frb__hub_directory_pending_requests_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        121 => wire__crate__api__frb__hub_directory_purge_config_impl(
+        122 => wire__crate__api__frb__hub_directory_purge_config_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        122 => wire__crate__api__frb__hub_directory_recover_impl(port, ptr, rust_vec_len, data_len),
-        123 => {
+        123 => wire__crate__api__frb__hub_directory_recover_impl(port, ptr, rust_vec_len, data_len),
+        124 => {
             wire__crate__api__frb__hub_directory_register_impl(port, ptr, rust_vec_len, data_len)
         }
-        124 => wire__crate__api__frb__hub_directory_resolve_borrow_request_impl(
+        125 => wire__crate__api__frb__hub_directory_resolve_borrow_request_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        125 => wire__crate__api__frb__hub_directory_resolve_follow_impl(
+        126 => wire__crate__api__frb__hub_directory_resolve_follow_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        126 => wire__crate__api__frb__hub_directory_sync_catalog_impl(
+        127 => wire__crate__api__frb__hub_directory_sync_catalog_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        127 => wire__crate__api__frb__hub_directory_sync_catalog_encrypted_impl(
+        128 => wire__crate__api__frb__hub_directory_sync_catalog_encrypted_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        128 => wire__crate__api__frb__hub_directory_sync_contacts_impl(
+        129 => wire__crate__api__frb__hub_directory_sync_contacts_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        129 => {
+        130 => {
             wire__crate__api__frb__hub_directory_unfollow_impl(port, ptr, rust_vec_len, data_len)
         }
-        131 => {
+        132 => {
             wire__crate__api__frb__import_complete_from_rows_impl(port, ptr, rust_vec_len, data_len)
         }
-        132 => {
+        133 => {
             wire__crate__api__frb__import_household_readings_impl(port, ptr, rust_vec_len, data_len)
         }
-        133 => {
+        134 => {
             wire__crate__api__frb__import_no_isbn_cluster_impl(port, ptr, rust_vec_len, data_len)
         }
-        134 => wire__crate__api__frb__init_backend_impl(port, ptr, rust_vec_len, data_len),
-        135 => wire__crate__api__frb__init_identity_ffi_impl(port, ptr, rust_vec_len, data_len),
-        136 => wire__crate__api__frb__init_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
-        137 => wire__crate__api__frb__installation_profile_get_search_settings_impl(
+        135 => wire__crate__api__frb__init_backend_impl(port, ptr, rust_vec_len, data_len),
+        136 => wire__crate__api__frb__init_identity_ffi_impl(port, ptr, rust_vec_len, data_len),
+        137 => wire__crate__api__frb__init_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
+        138 => wire__crate__api__frb__installation_profile_get_search_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        138 => wire__crate__api__frb__installation_profile_set_search_settings_impl(
+        139 => wire__crate__api__frb__installation_profile_set_search_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        140 => wire__crate__api__frb__latest_user_data_change_at_ffi_impl(
+        141 => wire__crate__api__frb__latest_user_data_change_at_ffi_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        141 => wire__crate__api__frb__list_available_rollbacks_ffi_impl(
+        142 => wire__crate__api__frb__list_available_rollbacks_ffi_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        142 => {
+        143 => {
             wire__crate__api__frb__list_household_readers_impl(port, ptr, rust_vec_len, data_len)
         }
-        143 => wire__crate__api__frb__lookup_book_metadata_impl(port, ptr, rust_vec_len, data_len),
-        144 => {
+        144 => wire__crate__api__frb__lookup_book_metadata_impl(port, ptr, rust_vec_len, data_len),
+        145 => {
             wire__crate__api__frb__mark_collection_as_series_impl(port, ptr, rust_vec_len, data_len)
         }
-        145 => wire__crate__api__frb__memory_game_available_difficulties_impl(
+        146 => wire__crate__api__frb__memory_game_available_difficulties_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        146 => wire__crate__api__frb__memory_game_finish_impl(port, ptr, rust_vec_len, data_len),
-        147 => {
+        147 => wire__crate__api__frb__memory_game_finish_impl(port, ptr, rust_vec_len, data_len),
+        148 => {
             wire__crate__api__frb__memory_game_leaderboard_impl(port, ptr, rust_vec_len, data_len)
         }
-        148 => wire__crate__api__frb__memory_game_refresh_leaderboard_impl(
+        149 => wire__crate__api__frb__memory_game_refresh_leaderboard_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        149 => {
+        150 => {
             wire__crate__api__frb__memory_game_reset_scores_impl(port, ptr, rust_vec_len, data_len)
         }
-        150 => wire__crate__api__frb__memory_game_setup_impl(port, ptr, rust_vec_len, data_len),
-        151 => {
+        151 => wire__crate__api__frb__memory_game_setup_impl(port, ptr, rust_vec_len, data_len),
+        152 => {
             wire__crate__api__frb__memory_game_top_scores_impl(port, ptr, rust_vec_len, data_len)
         }
-        152 => wire__crate__api__frb__merge_duplicate_books_impl(port, ptr, rust_vec_len, data_len),
-        153 => wire__crate__api__frb__merge_duplicate_group_impl(port, ptr, rust_vec_len, data_len),
-        154 => wire__crate__api__frb__metadata_fill_books_without_author_impl(
+        153 => wire__crate__api__frb__merge_duplicate_books_impl(port, ptr, rust_vec_len, data_len),
+        154 => wire__crate__api__frb__merge_duplicate_group_impl(port, ptr, rust_vec_len, data_len),
+        155 => wire__crate__api__frb__metadata_fill_books_without_author_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        155 => wire__crate__api__frb__metadata_fill_books_without_isbn_impl(
+        156 => wire__crate__api__frb__metadata_fill_books_without_isbn_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        156 => wire__crate__api__frb__metadata_fill_cancel_impl(port, ptr, rust_vec_len, data_len),
-        157 => wire__crate__api__frb__metadata_fill_covers_sources_have_not_impl(
+        157 => wire__crate__api__frb__metadata_fill_cancel_impl(port, ptr, rust_vec_len, data_len),
+        158 => wire__crate__api__frb__metadata_fill_covers_sources_have_not_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        158 => {
+        159 => {
             wire__crate__api__frb__metadata_fill_incomplete_impl(port, ptr, rust_vec_len, data_len)
         }
-        159 => {
+        160 => {
             wire__crate__api__frb__metadata_fill_processable_impl(port, ptr, rust_vec_len, data_len)
         }
-        160 => {
+        161 => {
             wire__crate__api__frb__metadata_fill_progress_impl(port, ptr, rust_vec_len, data_len)
         }
-        161 => wire__crate__api__frb__metadata_fill_recent_impl(port, ptr, rust_vec_len, data_len),
-        162 => wire__crate__api__frb__metadata_fill_start_impl(port, ptr, rust_vec_len, data_len),
-        163 => wire__crate__api__frb__metadata_fill_stats_impl(port, ptr, rust_vec_len, data_len),
-        164 => {
+        162 => wire__crate__api__frb__metadata_fill_recent_impl(port, ptr, rust_vec_len, data_len),
+        163 => wire__crate__api__frb__metadata_fill_start_impl(port, ptr, rust_vec_len, data_len),
+        164 => wire__crate__api__frb__metadata_fill_stats_impl(port, ptr, rust_vec_len, data_len),
+        165 => {
             wire__crate__api__frb__metadata_fill_undo_book_impl(port, ptr, rust_vec_len, data_len)
         }
-        165 => wire__crate__api__frb__metadata_fill_undo_book_by_uuid_impl(
+        166 => wire__crate__api__frb__metadata_fill_undo_book_by_uuid_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        166 => {
+        167 => {
             wire__crate__api__frb__metadata_fill_undo_field_impl(port, ptr, rust_vec_len, data_len)
         }
-        167 => {
+        168 => {
             wire__crate__api__frb__metadata_fill_undo_run_impl(port, ptr, rust_vec_len, data_len)
         }
-        168 => wire__crate__api__frb__notifications_dismiss_impl(port, ptr, rust_vec_len, data_len),
-        169 => {
+        169 => wire__crate__api__frb__notifications_dismiss_impl(port, ptr, rust_vec_len, data_len),
+        170 => {
             wire__crate__api__frb__notifications_dismiss_all_impl(port, ptr, rust_vec_len, data_len)
         }
-        170 => wire__crate__api__frb__notifications_list_impl(port, ptr, rust_vec_len, data_len),
-        171 => wire__crate__api__frb__notifications_mark_all_read_impl(
+        171 => wire__crate__api__frb__notifications_list_impl(port, ptr, rust_vec_len, data_len),
+        172 => wire__crate__api__frb__notifications_mark_all_read_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        172 => {
+        173 => {
             wire__crate__api__frb__notifications_mark_read_impl(port, ptr, rust_vec_len, data_len)
         }
-        173 => wire__crate__api__frb__notifications_prune_impl(port, ptr, rust_vec_len, data_len),
-        174 => wire__crate__api__frb__notifications_unread_count_impl(
+        174 => wire__crate__api__frb__notifications_prune_impl(port, ptr, rust_vec_len, data_len),
+        175 => wire__crate__api__frb__notifications_unread_count_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        175 => wire__crate__api__frb__open_blob_impl(port, ptr, rust_vec_len, data_len),
-        176 => wire__crate__api__frb__operation_log_entity_types_impl(
+        176 => wire__crate__api__frb__open_blob_impl(port, ptr, rust_vec_len, data_len),
+        177 => wire__crate__api__frb__operation_log_entity_types_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        177 => wire__crate__api__frb__operation_log_list_impl(port, ptr, rust_vec_len, data_len),
-        178 => wire__crate__api__frb__operation_log_stats_impl(port, ptr, rust_vec_len, data_len),
-        179 => wire__crate__api__frb__parse_invite_link_ffi_impl(port, ptr, rust_vec_len, data_len),
-        180 => wire__crate__api__frb__parse_qr_payload_ffi_impl(port, ptr, rust_vec_len, data_len),
-        181 => {
+        178 => wire__crate__api__frb__operation_log_list_impl(port, ptr, rust_vec_len, data_len),
+        179 => wire__crate__api__frb__operation_log_stats_impl(port, ptr, rust_vec_len, data_len),
+        180 => wire__crate__api__frb__parse_invite_link_ffi_impl(port, ptr, rust_vec_len, data_len),
+        181 => wire__crate__api__frb__parse_qr_payload_ffi_impl(port, ptr, rust_vec_len, data_len),
+        182 => {
             wire__crate__api__frb__peers_relay_debug_info_impl(port, ptr, rust_vec_len, data_len)
         }
-        182 => wire__crate__api__frb__puzzle_available_difficulties_impl(
+        183 => wire__crate__api__frb__puzzle_available_difficulties_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        183 => wire__crate__api__frb__puzzle_finish_impl(port, ptr, rust_vec_len, data_len),
-        184 => {
+        184 => wire__crate__api__frb__puzzle_finish_impl(port, ptr, rust_vec_len, data_len),
+        185 => {
             wire__crate__api__frb__puzzle_game_leaderboard_impl(port, ptr, rust_vec_len, data_len)
         }
-        185 => wire__crate__api__frb__puzzle_game_refresh_leaderboard_impl(
+        186 => wire__crate__api__frb__puzzle_game_refresh_leaderboard_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        186 => {
+        187 => {
             wire__crate__api__frb__puzzle_game_reset_scores_impl(port, ptr, rust_vec_len, data_len)
         }
-        187 => wire__crate__api__frb__puzzle_setup_impl(port, ptr, rust_vec_len, data_len),
-        188 => wire__crate__api__frb__puzzle_top_scores_impl(port, ptr, rust_vec_len, data_len),
-        189 => wire__crate__api__frb__read_manifest_ffi_impl(port, ptr, rust_vec_len, data_len),
-        190 => wire__crate__api__frb__record_read_book_impl(port, ptr, rust_vec_len, data_len),
-        191 => {
+        188 => wire__crate__api__frb__puzzle_setup_impl(port, ptr, rust_vec_len, data_len),
+        189 => wire__crate__api__frb__puzzle_top_scores_impl(port, ptr, rust_vec_len, data_len),
+        190 => wire__crate__api__frb__read_manifest_ffi_impl(port, ptr, rust_vec_len, data_len),
+        191 => wire__crate__api__frb__record_read_book_impl(port, ptr, rust_vec_len, data_len),
+        192 => {
+            wire__crate__api__frb__record_web_cover_origin_impl(port, ptr, rust_vec_len, data_len)
+        }
+        193 => {
             wire__crate__api__frb__refresh_all_leaderboards_impl(port, ptr, rust_vec_len, data_len)
         }
-        192 => wire__crate__api__frb__remove_book_from_collection_impl(
+        194 => wire__crate__api__frb__remove_book_from_collection_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        193 => {
+        195 => {
             wire__crate__api__frb__remove_book_from_wishlist_impl(port, ptr, rust_vec_len, data_len)
         }
-        194 => wire__crate__api__frb__remove_subject_impl(port, ptr, rust_vec_len, data_len),
-        195 => wire__crate__api__frb__rename_collection_impl(port, ptr, rust_vec_len, data_len),
-        196 => {
+        196 => wire__crate__api__frb__remove_subject_impl(port, ptr, rust_vec_len, data_len),
+        197 => wire__crate__api__frb__rename_collection_impl(port, ptr, rust_vec_len, data_len),
+        198 => {
             wire__crate__api__frb__rename_household_reader_impl(port, ptr, rust_vec_len, data_len)
         }
-        197 => wire__crate__api__frb__rename_subject_impl(port, ptr, rust_vec_len, data_len),
-        198 => wire__crate__api__frb__reorder_books_impl(port, ptr, rust_vec_len, data_len),
-        199 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
-        200 => wire__crate__api__frb__restore_backup_ffi_impl(port, ptr, rust_vec_len, data_len),
-        201 => {
+        199 => wire__crate__api__frb__rename_subject_impl(port, ptr, rust_vec_len, data_len),
+        200 => wire__crate__api__frb__reorder_books_impl(port, ptr, rust_vec_len, data_len),
+        201 => wire__crate__api__frb__reset_app_impl(port, ptr, rust_vec_len, data_len),
+        202 => wire__crate__api__frb__restore_backup_ffi_impl(port, ptr, rust_vec_len, data_len),
+        203 => {
             wire__crate__api__frb__restore_from_rollback_ffi_impl(port, ptr, rust_vec_len, data_len)
         }
-        202 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
-        203 => wire__crate__api__frb__return_loan_by_uuid_impl(port, ptr, rust_vec_len, data_len),
-        204 => wire__crate__api__frb__scan_duplicate_books_impl(port, ptr, rust_vec_len, data_len),
-        205 => wire__crate__api__frb__seal_blob_impl(port, ptr, rust_vec_len, data_len),
-        206 => wire__crate__api__frb__search_all_covers_by_title_impl(
+        204 => wire__crate__api__frb__return_loan_impl(port, ptr, rust_vec_len, data_len),
+        205 => wire__crate__api__frb__return_loan_by_uuid_impl(port, ptr, rust_vec_len, data_len),
+        206 => wire__crate__api__frb__scan_duplicate_books_impl(port, ptr, rust_vec_len, data_len),
+        207 => wire__crate__api__frb__seal_blob_impl(port, ptr, rust_vec_len, data_len),
+        208 => wire__crate__api__frb__search_all_covers_by_title_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        207 => wire__crate__api__frb__search_all_covers_for_book_impl(
+        209 => wire__crate__api__frb__search_all_covers_for_book_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        208 => wire__crate__api__frb__search_cover_by_title_impl(port, ptr, rust_vec_len, data_len),
-        209 => wire__crate__api__frb__search_cover_for_book_impl(port, ptr, rust_vec_len, data_len),
-        210 => {
+        210 => wire__crate__api__frb__search_cover_by_title_impl(port, ptr, rust_vec_len, data_len),
+        211 => wire__crate__api__frb__search_cover_for_book_impl(port, ptr, rust_vec_len, data_len),
+        212 => {
             wire__crate__api__frb__seed_favorites_collection_impl(port, ptr, rust_vec_len, data_len)
         }
-        211 => {
+        213 => {
             wire__crate__api__frb__set_book_loan_duration_impl(port, ptr, rust_vec_len, data_len)
         }
-        212 => wire__crate__api__frb__set_book_loan_duration_by_book_uuid_impl(
+        214 => wire__crate__api__frb__set_book_loan_duration_by_book_uuid_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        213 => {
+        215 => {
             wire__crate__api__frb__set_book_volume_number_impl(port, ptr, rust_vec_len, data_len)
         }
-        214 => wire__crate__api__frb__set_current_household_reader_impl(
+        216 => wire__crate__api__frb__set_current_household_reader_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        215 => wire__crate__api__frb__set_hub_url_ffi_impl(port, ptr, rust_vec_len, data_len),
-        216 => wire__crate__api__frb__set_peer_delta_cursor_impl(port, ptr, rust_vec_len, data_len),
-        217 => wire__crate__api__frb__shutdown_backend_ffi_impl(port, ptr, rust_vec_len, data_len),
-        218 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
-        219 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
-        220 => {
+        217 => wire__crate__api__frb__set_hub_url_ffi_impl(port, ptr, rust_vec_len, data_len),
+        218 => wire__crate__api__frb__set_peer_delta_cursor_impl(port, ptr, rust_vec_len, data_len),
+        219 => wire__crate__api__frb__shutdown_backend_ffi_impl(port, ptr, rust_vec_len, data_len),
+        220 => wire__crate__api__frb__start_server_impl(port, ptr, rust_vec_len, data_len),
+        221 => wire__crate__api__frb__stop_mdns_ffi_impl(port, ptr, rust_vec_len, data_len),
+        222 => {
             wire__crate__api__frb__subscribe_catalog_changes_impl(port, ptr, rust_vec_len, data_len)
         }
-        221 => wire__crate__api__frb__subscribe_leaderboard_changes_impl(
+        223 => wire__crate__api__frb__subscribe_leaderboard_changes_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        222 => {
+        224 => {
             wire__crate__api__frb__subscribe_profile_changes_impl(port, ptr, rust_vec_len, data_len)
         }
-        223 => {
+        225 => {
             wire__crate__api__frb__subscribe_relay_nudges_impl(port, ptr, rust_vec_len, data_len)
         }
-        224 => wire__crate__api__frb__toggle_favorite_book_impl(port, ptr, rust_vec_len, data_len),
-        225 => wire__crate__api__frb__try_peer_avatar_pull_impl(port, ptr, rust_vec_len, data_len),
-        226 => {
+        226 => wire__crate__api__frb__toggle_favorite_book_impl(port, ptr, rust_vec_len, data_len),
+        227 => wire__crate__api__frb__try_peer_avatar_pull_impl(port, ptr, rust_vec_len, data_len),
+        228 => {
             wire__crate__api__frb__try_peer_catalog_delta_impl(port, ptr, rust_vec_len, data_len)
         }
-        227 => wire__crate__api__frb__try_peer_catalog_delta_detailed_impl(
+        229 => wire__crate__api__frb__try_peer_catalog_delta_detailed_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        228 => wire__crate__api__frb__update_book_by_uuid_impl(port, ptr, rust_vec_len, data_len),
-        229 => {
+        230 => wire__crate__api__frb__update_book_by_uuid_impl(port, ptr, rust_vec_len, data_len),
+        231 => {
             wire__crate__api__frb__update_book_collections_impl(port, ptr, rust_vec_len, data_len)
         }
-        230 => wire__crate__api__frb__update_book_note_impl(port, ptr, rust_vec_len, data_len),
-        231 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
-        232 => {
+        232 => wire__crate__api__frb__update_book_note_impl(port, ptr, rust_vec_len, data_len),
+        233 => wire__crate__api__frb__update_contact_impl(port, ptr, rust_vec_len, data_len),
+        234 => {
             wire__crate__api__frb__update_library_name_ffi_impl(port, ptr, rust_vec_len, data_len)
         }
-        233 => wire__crate__api__frb__update_loan_settings_impl(port, ptr, rust_vec_len, data_len),
-        234 => {
+        235 => wire__crate__api__frb__update_loan_settings_impl(port, ptr, rust_vec_len, data_len),
+        236 => {
             wire__crate__api__frb__update_peer_library_uuid_impl(port, ptr, rust_vec_len, data_len)
         }
-        235 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
-        236 => wire__crate__api__frb__update_tag_by_uuid_impl(port, ptr, rust_vec_len, data_len),
-        237 => wire__crate__api__frb__write_backup_ffi_impl(port, ptr, rust_vec_len, data_len),
+        237 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
+        238 => wire__crate__api__frb__update_tag_by_uuid_impl(port, ptr, rust_vec_len, data_len),
+        239 => wire__crate__api__frb__write_backup_ffi_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -12192,13 +12285,13 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        88 => wire__crate__api__frb__get_mdns_service_type_impl(ptr, rust_vec_len, data_len),
-        92 => wire__crate__api__frb__get_rust_log_tail_impl(ptr, rust_vec_len, data_len),
-        93 => wire__crate__api__frb__get_version_impl(ptr, rust_vec_len, data_len),
-        96 => wire__crate__api__frb__greet_impl(ptr, rust_vec_len, data_len),
-        104 => wire__crate__api__frb__health_check_impl(ptr, rust_vec_len, data_len),
-        130 => wire__crate__api__frb__hub_effective_url_impl(ptr, rust_vec_len, data_len),
-        139 => wire__crate__api__frb__is_mdns_available_impl(ptr, rust_vec_len, data_len),
+        89 => wire__crate__api__frb__get_mdns_service_type_impl(ptr, rust_vec_len, data_len),
+        93 => wire__crate__api__frb__get_rust_log_tail_impl(ptr, rust_vec_len, data_len),
+        94 => wire__crate__api__frb__get_version_impl(ptr, rust_vec_len, data_len),
+        97 => wire__crate__api__frb__greet_impl(ptr, rust_vec_len, data_len),
+        105 => wire__crate__api__frb__health_check_impl(ptr, rust_vec_len, data_len),
+        131 => wire__crate__api__frb__hub_effective_url_impl(ptr, rust_vec_len, data_len),
+        140 => wire__crate__api__frb__is_mdns_available_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -14092,6 +14185,24 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbTrackProgress>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbWebCover {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.bytes.into_into_dart().into_dart(),
+            self.image_url.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::frb::FrbWebCover {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbWebCover>
+    for crate::api::frb::FrbWebCover
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbWebCover {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbWishlistProvider {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -15173,6 +15284,14 @@ impl SseEncode for crate::api::frb::FrbTrackProgress {
         <f32>::sse_encode(self.progress, serializer);
         <i64>::sse_encode(self.current, serializer);
         <i32>::sse_encode(self.next_threshold, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbWebCover {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<u8>>::sse_encode(self.bytes, serializer);
+        <String>::sse_encode(self.image_url, serializer);
     }
 }
 

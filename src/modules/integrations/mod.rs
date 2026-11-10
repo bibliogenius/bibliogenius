@@ -4,6 +4,7 @@ pub mod inventaire;
 pub mod openlibrary;
 pub mod sudoc;
 pub mod unimarc;
+pub mod web_cover;
 
 /// Identifying User-Agent sent on outbound requests to external bibliographic
 /// APIs. A non-empty UA is REQUIRED by OpenLibrary — it returns 403 on its

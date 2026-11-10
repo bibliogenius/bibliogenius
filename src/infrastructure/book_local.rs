@@ -3,7 +3,7 @@
 //! `book_local` is a sibling regular (non-CRR) table keyed by the book `uuid`.
 //! cr-sqlite replicates every non-PK column of a CRR (it has no per-column
 //! opt-out), so any genuinely per-device fact about a book lives here, out of
-//! the `books` CRR. See ADR-044. It holds two independent negative flags:
+//! the `books` CRR. See ADR-044. It holds independent facts:
 //!
 //! - `hub_cover_upload_failed_at`: a timestamp of *this* device's last failed
 //!   hub cover upload, which would produce false "upload failed" badges on
@@ -12,14 +12,17 @@
 //!   that no external source carries a cover for this book. Device-local by
 //!   necessity rather than by choice — the fact itself is about the world, not
 //!   the device, but `books` is a CRR and cannot take a new column.
+//! - `cover_origin_url` + `cover_origin_sha256`: the web address a cover picked
+//!   from a web page came from, and the digest of the cover file it describes.
+//!   Device-local by necessity too: only this device saw the page.
 //!
 //! This module is the single access point for the table, so the hub-upload
 //! writer, the cover sweep and the owner-facing read path share one set of
 //! statements.
 //!
-//! Because the two flags are independent, clearing one must never delete the
+//! Because the facts are independent, clearing one must never delete the
 //! row: it nulls its own column and drops the row only once every column is
-//! null, so the table keeps holding one row per *pending* fact and no more.
+//! null, so the table keeps holding one row per recorded fact and no more.
 
 use std::collections::HashMap;
 
@@ -79,7 +82,8 @@ async fn prune_empty_rows(db: &DatabaseConnection) -> Result<(), DbErr> {
     db.execute(Statement::from_string(
         db.get_database_backend(),
         "DELETE FROM book_local \
-         WHERE hub_cover_upload_failed_at IS NULL AND cover_lookup_failed_at IS NULL"
+         WHERE hub_cover_upload_failed_at IS NULL AND cover_lookup_failed_at IS NULL \
+         AND cover_origin_url IS NULL"
             .to_owned(),
     ))
     .await?;
@@ -150,6 +154,72 @@ pub async fn cover_lookup_failures(
     Ok(out)
 }
 
+/// The web origin recorded for a book's cover: the image URL and the SHA-256
+/// (lowercase hex) of the cover file it was recorded for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverOrigin {
+    pub url: String,
+    pub sha256: String,
+}
+
+/// Record (or replace) where the current cover of `book_uuid` came from.
+pub async fn set_cover_origin(
+    db: &DatabaseConnection,
+    book_uuid: &str,
+    origin: &CoverOrigin,
+) -> Result<(), DbErr> {
+    db.execute(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "INSERT INTO book_local (book_uuid, cover_origin_url, cover_origin_sha256) \
+         VALUES (?, ?, ?) \
+         ON CONFLICT(book_uuid) DO UPDATE SET \
+         cover_origin_url = excluded.cover_origin_url, \
+         cover_origin_sha256 = excluded.cover_origin_sha256",
+        [
+            book_uuid.into(),
+            origin.url.clone().into(),
+            origin.sha256.clone().into(),
+        ],
+    ))
+    .await?;
+    Ok(())
+}
+
+/// The recorded cover origin of one book, if any. Whether it still describes
+/// the cover on disk is the caller's check (compare the digest).
+pub async fn cover_origin(
+    db: &DatabaseConnection,
+    book_uuid: &str,
+) -> Result<Option<CoverOrigin>, DbErr> {
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "SELECT cover_origin_url, cover_origin_sha256 FROM book_local WHERE book_uuid = ?",
+            [book_uuid.into()],
+        ))
+        .await?;
+    let Some(r) = row else {
+        return Ok(None);
+    };
+    let url: Option<String> = r.try_get("", "cover_origin_url")?;
+    let sha256: Option<String> = r.try_get("", "cover_origin_sha256")?;
+    Ok(url
+        .zip(sha256)
+        .map(|(url, sha256)| CoverOrigin { url, sha256 }))
+}
+
+/// Forget the cover origin of one book, leaving its other facts untouched.
+pub async fn clear_cover_origin(db: &DatabaseConnection, book_uuid: &str) -> Result<(), DbErr> {
+    db.execute(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "UPDATE book_local SET cover_origin_url = NULL, cover_origin_sha256 = NULL \
+         WHERE book_uuid = ?",
+        [book_uuid.into()],
+    ))
+    .await?;
+    prune_empty_rows(db).await
+}
+
 /// The pending hub-cover-upload-failure timestamp for one book, if any.
 pub async fn cover_upload_failed_at(
     db: &DatabaseConnection,
@@ -172,12 +242,13 @@ pub async fn cover_upload_failed_at(
 /// failed_at`. For list endpoints: callers look up their page's ids in the
 /// returned map.
 ///
-/// `book_local` only ever holds rows carrying a pending fact (every column is
-/// nulled on clear and the empty row pruned), so this scans a small table with
-/// no parameters, rather than binding a whole page of ids into an `IN (...)`
+/// `book_local` only ever holds rows carrying a fact (every column is nulled on
+/// clear and the empty row pruned): pending flags, plus one lasting cover
+/// origin per cover taken from a web page. So this scans a small table with no
+/// parameters, rather than binding a whole page of ids into an `IN (...)`
 /// (which would also hit SQLite's bound-parameter ceiling on large libraries).
-/// The `WHERE` is what keeps it correct now that a row may exist for a
-/// cover-lookup marker alone.
+/// The `WHERE` is what keeps it correct now that a row may exist for another
+/// fact alone.
 pub async fn pending_cover_upload_failures(
     db: &DatabaseConnection,
 ) -> Result<HashMap<String, String>, DbErr> {
@@ -331,6 +402,50 @@ mod tests {
 
         // A book that never failed carries no marker at all.
         assert!(!map.contains_key("book-2"));
+    }
+
+    #[tokio::test]
+    async fn cover_origin_roundtrip_and_independence() {
+        let db = setup().await;
+        assert_eq!(cover_origin(&db, "book-1").await.unwrap(), None);
+
+        let origin = CoverOrigin {
+            url: "https://cdn.example.org/a.jpg".into(),
+            sha256: "ab".repeat(32),
+        };
+        set_cover_origin(&db, "book-1", &origin).await.unwrap();
+        set_cover_upload_failed_at(&db, "book-1", "t")
+            .await
+            .unwrap();
+        assert_eq!(cover_origin(&db, "book-1").await.unwrap(), Some(origin));
+
+        let replaced = CoverOrigin {
+            url: "https://cdn.example.org/b.jpg".into(),
+            sha256: "cd".repeat(32),
+        };
+        set_cover_origin(&db, "book-1", &replaced).await.unwrap();
+        assert_eq!(
+            cover_origin(&db, "book-1").await.unwrap(),
+            Some(replaced.clone())
+        );
+
+        // Clearing a hub flag keeps the origin, and the row with it.
+        clear_cover_upload_failed_at(&db, "book-1").await.unwrap();
+        assert_eq!(cover_origin(&db, "book-1").await.unwrap(), Some(replaced));
+        // The origin is not a pending upload failure.
+        assert!(pending_cover_upload_failures(&db).await.unwrap().is_empty());
+
+        clear_cover_origin(&db, "book-1").await.unwrap();
+        assert_eq!(cover_origin(&db, "book-1").await.unwrap(), None);
+        let rows = db
+            .query_one(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT COUNT(*) AS n FROM book_local".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rows.try_get::<i64>("", "n").unwrap(), 0, "empty row pruned");
     }
 
     #[tokio::test]

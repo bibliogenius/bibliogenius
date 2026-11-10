@@ -172,6 +172,11 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # flate2 + a couple of others; the compile cost is acceptable and we want
 # a simple, well-tested feature set for archive interop.
 zip = "2"
+# HTML parsing for the "cover from a web page" picker: reads the og:image /
+# JSON-LD / image_src hints of a publisher page. No default features: "main"
+# is the CLI binary (getopts) and "errors" keeps parse-error strings we never
+# read.
+scraper = { version = "0.29", default-features = false }
 
 [profile.release]
 strip = true

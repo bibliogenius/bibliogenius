@@ -69,6 +69,7 @@ pub mod shelf_tree_service;
 pub mod shelving_service;
 #[cfg(test)]
 mod status_query_relay_tests;
+pub mod web_cover_service;
 pub mod wishlist_service;
 pub mod ws_nudge;
 
