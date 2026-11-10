@@ -196,14 +196,18 @@ fn upgrade_to_https(mut url: Url) -> Option<Url> {
 }
 
 /// The image format of `bytes`, from its magic number, among the formats the
-/// app's cover pipeline decodes.
+/// app's cover pipeline accepts from the web. An animated WebP is not one of
+/// them: its frame sizes are out of reach of a header read.
 pub fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Some("jpeg")
     } else if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
         Some("png")
     } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("webp")
+        // Extended format: a VP8X chunk whose flags byte carries the
+        // animation bit (0x02).
+        let animated = bytes.len() > 20 && &bytes[12..16] == b"VP8X" && bytes[20] & 0x02 != 0;
+        (!animated).then_some("webp")
     } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
         Some("gif")
     } else {
@@ -562,6 +566,53 @@ mod tests {
         );
         assert_eq!(sniff_image(b"<!doctype html>"), None);
         assert_eq!(sniff_image(b""), None);
+    }
+
+    #[test]
+    fn an_animated_webp_is_not_a_usable_image() {
+        // The app's pipeline refuses an animated WebP from the web (its frame
+        // sizes are out of reach of a header read); calling it usable here
+        // would stop the search on it instead of trying the next candidate.
+        let vp8x = |flags: u8| {
+            let mut b = b"RIFF\x1e\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00".to_vec();
+            b.extend_from_slice(&[flags, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            b
+        };
+        assert_eq!(sniff_image(&vp8x(0x02)), None, "animation flag");
+        assert_eq!(sniff_image(&vp8x(0x12)), None, "animation with alpha");
+        assert_eq!(sniff_image(&vp8x(0x10)), Some("webp"), "alpha only");
+    }
+
+    #[tokio::test]
+    async fn skips_an_animated_webp_candidate() {
+        let server = MockServer::start().await;
+        let animated = {
+            let mut b = b"RIFF\x1e\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00".to_vec();
+            b.extend_from_slice(&[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            b
+        };
+        Mock::given(method("GET"))
+            .and(path("/livre"))
+            .respond_with(html(format!(
+                r#"<meta property="og:image" content="{0}/anim.webp">
+                   <meta name="twitter:image" content="{0}/couv.jpg">"#,
+                server.uri()
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/anim.webp"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(animated, "image/webp"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/couv.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(JPEG.to_vec(), "image/jpeg"))
+            .mount(&server)
+            .await;
+
+        let cover = fetch_test(format!("{}/livre", server.uri())).await.unwrap();
+        assert_eq!(cover.image_url, format!("{}/couv.jpg", server.uri()));
     }
 
     #[test]
