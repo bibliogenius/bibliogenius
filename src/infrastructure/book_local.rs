@@ -220,6 +220,19 @@ pub async fn clear_cover_origin(db: &DatabaseConnection, book_uuid: &str) -> Res
     prune_empty_rows(db).await
 }
 
+/// Drop every device-local fact about a book that is being deleted. Generic
+/// over the connection so the book deletion cascade runs it in its own
+/// transaction.
+pub async fn delete_for_book<C: ConnectionTrait>(conn: &C, book_uuid: &str) -> Result<(), DbErr> {
+    conn.execute(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "DELETE FROM book_local WHERE book_uuid = ?",
+        [book_uuid.into()],
+    ))
+    .await?;
+    Ok(())
+}
+
 /// The pending hub-cover-upload-failure timestamp for one book, if any.
 pub async fn cover_upload_failed_at(
     db: &DatabaseConnection,

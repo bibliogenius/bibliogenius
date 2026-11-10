@@ -30,7 +30,8 @@ use crate::modules::book_notes::models as book_note;
 /// Delete a book and every row that referenced it through a foreign key that
 /// existed before the UUID-PK rebuild (ADR-044): its copies (and, transitively,
 /// the loans and sales of those copies), its author/tag/collection junction
-/// rows, and its notes. Idempotent: deleting an unknown book is a no-op.
+/// rows, its notes and its device-local `book_local` row. Idempotent: deleting
+/// an unknown book is a no-op.
 ///
 /// Runs in the caller-provided connection so the whole cascade is one atomic
 /// unit; pass a transaction.
@@ -63,6 +64,9 @@ where
         conn, book_uuid,
     )
     .await?;
+
+    // Device-local facts (book_local is not a CRR, nothing to replicate).
+    crate::infrastructure::book_local::delete_for_book(conn, book_uuid).await?;
 
     // Finally the book row itself.
     book::Entity::delete_by_id(book_uuid.to_owned())
@@ -544,6 +548,34 @@ mod tests {
             "collection_books"
         );
         assert_eq!(count::<book_note::Entity>(&db).await, 1, "book_notes");
+    }
+
+    #[tokio::test]
+    async fn delete_book_cascade_drops_the_device_local_row() {
+        use crate::infrastructure::book_local::{self, CoverOrigin};
+
+        let db = setup_db().await;
+        let (doomed, _) = seed_full_book(&db, "doomed").await;
+        let (survivor, _) = seed_full_book(&db, "survivor").await;
+        let origin = CoverOrigin {
+            url: "https://cdn.example.org/a.jpg".into(),
+            sha256: "ab".repeat(32),
+        };
+        for id in [&doomed, &survivor] {
+            book_local::set_cover_origin(&db, id, &origin)
+                .await
+                .unwrap();
+        }
+
+        delete_book_cascade(&db, &doomed).await.unwrap();
+
+        // A cover origin is a lasting fact: left behind, it would outlive the
+        // book for ever.
+        assert_eq!(book_local::cover_origin(&db, &doomed).await.unwrap(), None);
+        assert_eq!(
+            book_local::cover_origin(&db, &survivor).await.unwrap(),
+            Some(origin)
+        );
     }
 
     #[tokio::test]

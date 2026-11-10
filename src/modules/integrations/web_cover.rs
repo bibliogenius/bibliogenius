@@ -17,6 +17,7 @@
 //! photographed one end up as the same kind of file.
 
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use scraper::{Html, Selector};
 use serde_json::Value;
@@ -28,6 +29,11 @@ use crate::utils::public_fetch::{self, FetchPolicy, PublicFetchError};
 /// Cap on an HTML page. A publisher's book page is far below this; the cap
 /// only bounds what a hostile or broken server can make us hold in memory.
 pub const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Declared images tried, in order, before giving up: the first one may be
+/// gone (404) or a format we cannot use while the next one is the cover.
+/// Bounded so a page cannot make us fire a request per tag.
+pub const MAX_IMAGE_CANDIDATES: usize = 3;
 
 /// JSON-LD nesting walked before giving up on a block.
 const MAX_JSON_LD_DEPTH: usize = 8;
@@ -77,13 +83,26 @@ impl From<PublicFetchError> for WebCoverError {
 /// page or the image itself.
 pub async fn fetch_cover_from_page(raw_url: &str) -> Result<WebCover, WebCoverError> {
     let url = public_fetch::parse_public_https_url(raw_url)?;
-    fetch_cover_with_policy(url, FetchPolicy::PublicInternet).await
+    fetch_cover_with_policy(url, FetchPolicy::PublicInternet, PICK_DEADLINE).await
 }
+
+/// Ceiling on a whole pick (page, redirects, up to [`MAX_IMAGE_CANDIDATES`]
+/// images). The app's dialog cannot be dismissed while it runs, so a slow or
+/// hostile server must not hold it longer than this. Leaves room for a 10 MB
+/// image over a 1 Mbit/s link.
+pub const PICK_DEADLINE: Duration = Duration::from_secs(120);
 
 pub(crate) async fn fetch_cover_with_policy(
     url: Url,
     policy: FetchPolicy,
+    deadline: Duration,
 ) -> Result<WebCover, WebCoverError> {
+    tokio::time::timeout(deadline, pick_cover(url, policy))
+        .await
+        .unwrap_or(Err(PublicFetchError::Network.into()))
+}
+
+async fn pick_cover(url: Url, policy: FetchPolicy) -> Result<WebCover, WebCoverError> {
     let page = public_fetch::fetch_with_policy(url.clone(), &body_cap, policy).await?;
     if sniff_image(&page.bytes).is_some() {
         return Ok(WebCover {
@@ -99,6 +118,11 @@ pub(crate) async fn fetch_cover_with_policy(
         // An image, but not one we can decode (SVG, AVIF...).
         return Err(WebCoverError::UnsupportedImage);
     }
+    // An untyped body was read up to the image cap; as a page it gets the
+    // page cap.
+    if page.bytes.len() > MAX_PAGE_BYTES {
+        return Err(PublicFetchError::TooLarge.into());
+    }
 
     // Parsing a page of up to MAX_PAGE_BYTES is CPU work: keep it off the
     // async runtime's worker threads.
@@ -108,7 +132,7 @@ pub(crate) async fn fetch_cover_with_policy(
         tokio::task::spawn_blocking(move || extract_cover_candidates(&html, &page_url))
             .await
             .map_err(|_| WebCoverError::NoImageFound)?;
-    let image_url = candidates
+    let usable: Vec<Url> = candidates
         .into_iter()
         .filter_map(|candidate| {
             let candidate = if policy.upgrades_http() {
@@ -118,17 +142,26 @@ pub(crate) async fn fetch_cover_with_policy(
             };
             policy.check(&candidate).ok().map(|()| candidate)
         })
-        .next()
-        .ok_or(WebCoverError::NoImageFound)?;
+        .take(MAX_IMAGE_CANDIDATES)
+        .collect();
 
-    let image =
-        public_fetch::fetch_with_policy(image_url.clone(), &|_| COVER_MAX_INPUT_BYTES, policy)
-            .await?;
-    sniff_image(&image.bytes).ok_or(WebCoverError::UnsupportedImage)?;
-    Ok(WebCover {
-        bytes: image.bytes,
-        image_url: image_url.to_string(),
-    })
+    // The last failure is reported when none works.
+    let mut error = WebCoverError::NoImageFound;
+    for image_url in usable {
+        match public_fetch::fetch_with_policy(image_url.clone(), &|_| COVER_MAX_INPUT_BYTES, policy)
+            .await
+        {
+            Ok(image) if sniff_image(&image.bytes).is_some() => {
+                return Ok(WebCover {
+                    bytes: image.bytes,
+                    image_url: image_url.to_string(),
+                });
+            }
+            Ok(_) => error = WebCoverError::UnsupportedImage,
+            Err(e) => error = e.into(),
+        }
+    }
+    Err(error)
 }
 
 /// Body cap by content type: HTML pages get the page cap, anything else may be
@@ -469,6 +502,7 @@ mod tests {
         fetch_cover_with_policy(
             Url::parse(&url).unwrap(),
             FetchPolicy::PublicOrLoopbackForTests,
+            PICK_DEADLINE,
         )
         .await
     }
@@ -512,6 +546,109 @@ mod tests {
         let cover = fetch_test(url.clone()).await.unwrap();
         assert_eq!(cover.bytes, JPEG);
         assert_eq!(cover.image_url, url);
+    }
+
+    #[tokio::test]
+    async fn holds_an_untyped_page_to_the_page_cap() {
+        // Without a Content-Type the body may be an image, so it is read up to
+        // the image cap; once it turns out not to be one, the page cap applies.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; MAX_PAGE_BYTES + 1]))
+            .mount(&server)
+            .await;
+        let err = fetch_test(format!("{}/livre", server.uri()))
+            .await
+            .unwrap_err();
+        assert_eq!(err, WebCoverError::Fetch(PublicFetchError::TooLarge));
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_the_next_candidate_when_one_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/livre"))
+            .respond_with(html(format!(
+                r#"<script type="application/ld+json">
+                   {{"@type":"Book","image":"{0}/gone.jpg"}}</script>
+                   <meta property="og:image" content="{0}/logo.svg">
+                   <meta name="twitter:image" content="{0}/couv.jpg">"#,
+                server.uri()
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gone.jpg"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/logo.svg"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(b"<svg/>".to_vec(), "image/svg+xml"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/couv.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(JPEG.to_vec(), "image/jpeg"))
+            .mount(&server)
+            .await;
+
+        let cover = fetch_test(format!("{}/livre", server.uri())).await.unwrap();
+        assert_eq!(cover.image_url, format!("{}/couv.jpg", server.uri()));
+    }
+
+    #[tokio::test]
+    async fn tries_a_bounded_number_of_candidates() {
+        let server = MockServer::start().await;
+        let metas: String = (0..6)
+            .map(|i| {
+                format!(
+                    r#"<meta property="og:image" content="{}/c{i}.jpg">"#,
+                    server.uri()
+                )
+            })
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/livre"))
+            .respond_with(html(metas))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path_regex(r"^/c\d\.jpg$"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(MAX_IMAGE_CANDIDATES as u64)
+            .mount(&server)
+            .await;
+
+        let err = fetch_test(format!("{}/livre", server.uri()))
+            .await
+            .unwrap_err();
+        assert_eq!(err, WebCoverError::Fetch(PublicFetchError::HttpStatus(404)));
+    }
+
+    #[tokio::test]
+    async fn gives_up_at_the_overall_deadline() {
+        // Each request stays under its own timeouts, but the dialog waiting on
+        // the whole pick cannot be dismissed: the pick as a whole is bounded.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(JPEG.to_vec(), "image/jpeg")
+                    .set_delay(std::time::Duration::from_secs(2)),
+            )
+            .mount(&server)
+            .await;
+        let err = fetch_cover_with_policy(
+            Url::parse(&format!("{}/couv.jpg", server.uri())).unwrap(),
+            FetchPolicy::PublicOrLoopbackForTests,
+            std::time::Duration::from_millis(200),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, WebCoverError::Fetch(PublicFetchError::Network));
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@
 //! - the host must not be a local name (`localhost`, `*.local`, single-label);
 //! - every address the name resolves to must be public (no loopback, private,
 //!   link-local, CGNAT, ULA, documentation or reserved range), and the
-//!   connection is pinned to the checked address, so a DNS answer that changes
+//!   connection is pinned to the checked addresses, so a DNS answer that changes
 //!   between the check and the connect (DNS rebinding) cannot redirect it;
 //! - redirects are followed by hand, at most [`MAX_REDIRECTS`], and every hop
 //!   goes through the same checks;
@@ -28,8 +28,13 @@ use crate::modules::integrations::API_USER_AGENT;
 /// Redirect hops followed before giving up.
 pub const MAX_REDIRECTS: usize = 3;
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Time allowed to open a connection, and without receiving a single byte
+/// once connected: what tells a dead server from a slow link.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// Whole-request ceiling. Generous on purpose: a 10 MB image over a rural
+/// 1 Mbit/s link takes over a minute, and a steady transfer must not be cut.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Why a public fetch failed. Callers map these to user-facing messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +45,7 @@ pub enum PublicFetchError {
     BlockedAddress,
     /// DNS failure, connection failure or timeout.
     Network,
-    /// More than [`MAX_REDIRECTS`] redirects, or a redirect without target.
+    /// More than [`MAX_REDIRECTS`] redirects.
     TooManyRedirects,
     /// The server answered with a non-success status.
     HttpStatus(u16),
@@ -200,17 +205,18 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     !blocked
 }
 
-/// Resolve the URL's host and return an address every resolved answer agrees
-/// is public. IP literals were already judged by the policy check. Refusing
-/// when ANY answer is non-public (rather than picking a public one) keeps a
-/// name with mixed answers from being half-trusted.
-async fn resolve_checked(url: &Url) -> Result<SocketAddr, PublicFetchError> {
+/// Resolve the URL's host and return its addresses, all of them public. IP
+/// literals were already judged by the policy check. Refusing when ANY answer
+/// is non-public (rather than keeping the public ones) keeps a name with mixed
+/// answers from being half-trusted. All addresses are kept so the connection
+/// can fall back from IPv6 to IPv4 (or the reverse) like a normal client.
+async fn resolve_checked(url: &Url) -> Result<Vec<SocketAddr>, PublicFetchError> {
     let port = url
         .port_or_known_default()
         .ok_or(PublicFetchError::InvalidUrl)?;
     let domain = match url.host() {
-        Some(Host::Ipv4(ip)) => return Ok(SocketAddr::new(IpAddr::V4(ip), port)),
-        Some(Host::Ipv6(ip)) => return Ok(SocketAddr::new(IpAddr::V6(ip), port)),
+        Some(Host::Ipv4(ip)) => return Ok(vec![SocketAddr::new(IpAddr::V4(ip), port)]),
+        Some(Host::Ipv6(ip)) => return Ok(vec![SocketAddr::new(IpAddr::V6(ip), port)]),
         Some(Host::Domain(d)) => d.to_owned(),
         None => return Err(PublicFetchError::InvalidUrl),
     };
@@ -218,14 +224,14 @@ async fn resolve_checked(url: &Url) -> Result<SocketAddr, PublicFetchError> {
         .await
         .map_err(|_| PublicFetchError::Network)?
         .collect();
-    let Some(first) = addrs.first().copied() else {
+    if addrs.is_empty() {
         return Err(PublicFetchError::Network);
-    };
+    }
     if addrs.iter().any(|a| !is_public_ip(a.ip())) {
         tracing::warn!(target: "ssrf", "public fetch refused: {domain} resolves to a non-public address");
         return Err(PublicFetchError::BlockedAddress);
     }
-    Ok(first)
+    Ok(addrs)
 }
 
 /// Fetch `start` (checked with [`parse_public_https_url`] by the caller) under
@@ -243,17 +249,18 @@ pub(crate) async fn fetch_with_policy(
     let mut url = start;
     for _hop in 0..=MAX_REDIRECTS {
         policy.check(&url)?;
-        let addr = resolve_checked(&url).await?;
+        let addrs = resolve_checked(&url).await?;
 
         let mut builder = reqwest::Client::builder()
             .user_agent(API_USER_AGENT)
             .timeout(REQUEST_TIMEOUT)
             .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy();
         if let Some(Host::Domain(domain)) = url.host() {
-            // Pin the connection to the address checked above.
-            builder = builder.resolve(domain, addr);
+            // Pin the connection to the addresses checked above.
+            builder = builder.resolve_to_addrs(domain, &addrs);
         }
         let client = builder.build().map_err(|_| PublicFetchError::Network)?;
 
@@ -265,12 +272,13 @@ pub(crate) async fn fetch_with_policy(
         let status = resp.status();
 
         if status.is_redirection() {
+            // A 3xx without a usable target (300, 304) is an answer, not a hop.
             let next = resp
                 .headers()
                 .get(reqwest::header::LOCATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|loc| url.join(loc).ok())
-                .ok_or(PublicFetchError::TooManyRedirects)?;
+                .ok_or(PublicFetchError::HttpStatus(status.as_u16()))?;
             url = next;
             continue;
         }
@@ -517,6 +525,19 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, PublicFetchError::InvalidUrl);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_without_target_is_an_http_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(300))
+            .mount(&server)
+            .await;
+        let err = fetch_test(format!("{}/choices", server.uri()), &no_cap)
+            .await
+            .unwrap_err();
+        assert_eq!(err, PublicFetchError::HttpStatus(300));
     }
 
     #[tokio::test]
