@@ -6,9 +6,11 @@
 //! the image. It reads the hints a page publishes for link previews and search
 //! engines, most specific first:
 //!
-//! 1. the `image` of a schema.org `Book` in a JSON-LD block;
+//! 1. the `image` of a schema.org `Book` in a JSON-LD block, then of a
+//!    `Product` carrying an ISBN or GTIN (how bookshops describe a book);
 //! 2. `og:image` (Open Graph), then `twitter:image`;
-//! 3. `<link rel="image_src">`.
+//! 3. `<link rel="image_src">`;
+//! 4. the `image` of any other `Product`.
 //!
 //! Every request goes through `utils::public_fetch` (public https only, checked
 //! after DNS resolution and on every redirect, bounded size and time). The image
@@ -233,12 +235,15 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
     let doc = Html::parse_document(html);
     let mut raw: Vec<String> = Vec::new();
 
+    let mut json_ld = JsonLdImages::default();
     for script in doc.select(&JSON_LD) {
         let text: String = script.text().collect();
         if let Ok(value) = serde_json::from_str::<Value>(&text) {
-            collect_book_images(&value, 0, &mut raw);
+            json_ld.collect(&value, 0);
         }
     }
+    raw.append(&mut json_ld.books);
+    raw.append(&mut json_ld.identified_products);
     for selector in META_IMAGE.iter() {
         raw.extend(
             doc.select(selector)
@@ -251,6 +256,7 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
             .filter_map(|el| el.value().attr("href"))
             .map(str::to_owned),
     );
+    raw.append(&mut json_ld.other_products);
 
     let mut out: Vec<Url> = Vec::new();
     for candidate in raw {
@@ -268,47 +274,65 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
     out
 }
 
-/// Collect the `image` of every schema.org `Book` found in a JSON-LD value,
-/// including inside `@graph` arrays and nested objects.
-fn collect_book_images(value: &Value, depth: usize, out: &mut Vec<String>) {
-    if depth > MAX_JSON_LD_DEPTH {
-        return;
-    }
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                collect_book_images(item, depth + 1, out);
-            }
+/// The images a page's JSON-LD declares for what it sells or describes,
+/// sorted by how surely they are the book's cover.
+#[derive(Default)]
+struct JsonLdImages {
+    /// A schema.org `Book`.
+    books: Vec<String>,
+    /// A `Product` with an ISBN or GTIN: a bookshop's book page.
+    identified_products: Vec<String>,
+    /// Any other `Product`, which may be anything sold on the page.
+    other_products: Vec<String>,
+}
+
+impl JsonLdImages {
+    /// Walk a JSON-LD value, `@graph` arrays and nested objects included.
+    fn collect(&mut self, value: &Value, depth: usize) {
+        if depth > MAX_JSON_LD_DEPTH {
+            return;
         }
-        Value::Object(map) => {
-            if map.get("@type").is_some_and(is_book_type)
-                && let Some(image) = map.get("image")
-            {
-                collect_image_urls(image, out);
-            }
-            for (key, child) in map {
-                if key != "image" {
-                    collect_book_images(child, depth + 1, out);
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    self.collect(item, depth + 1);
                 }
             }
+            Value::Object(map) => {
+                if let (Some(t), Some(image)) = (map.get("@type"), map.get("image")) {
+                    if has_type(t, "Book") {
+                        collect_image_urls(image, &mut self.books);
+                    } else if has_type(t, "Product") {
+                        let identified = ["isbn", "gtin13", "gtin"]
+                            .iter()
+                            .any(|k| map.get(*k).is_some_and(|v| !v.is_null()));
+                        let target = if identified {
+                            &mut self.identified_products
+                        } else {
+                            &mut self.other_products
+                        };
+                        collect_image_urls(image, target);
+                    }
+                }
+                for (key, child) in map {
+                    if key != "image" {
+                        self.collect(child, depth + 1);
+                    }
+                }
+            }
+            _ => {}
         }
-        _ => {}
     }
 }
 
-fn is_book_type(t: &Value) -> bool {
+/// Whether a JSON-LD `@type` (a name, a URL or an array of them) is `name`.
+fn has_type(t: &Value, name: &str) -> bool {
+    let matches = |s: &str| s.rsplit(['/', ':']).next().unwrap_or(s) == name;
     match t {
-        Value::String(s) => is_book_type_name(s),
-        Value::Array(items) => items
-            .iter()
-            .any(|i| i.as_str().is_some_and(is_book_type_name)),
+        Value::String(s) => matches(s),
+        Value::Array(items) => items.iter().any(|i| i.as_str().is_some_and(matches)),
         _ => false,
     }
-}
-
-fn is_book_type_name(s: &str) -> bool {
-    let name = s.rsplit(['/', ':']).next().unwrap_or(s);
-    name == "Book"
 }
 
 /// A schema.org `image` is a URL string, an `ImageObject` (`url` or
@@ -429,6 +453,57 @@ mod tests {
             ],
             "only Book images, never the WebPage one"
         );
+    }
+
+    #[test]
+    fn a_bookshop_product_with_an_isbn_wins_over_a_generic_og_image() {
+        // Shape of a real bookshop page: the og:image is the site's generic
+        // banner, the book is a schema.org Product carrying its ISBN.
+        let html = r#"<html><head>
+            <meta property="og:image" content="https://shop.example.org/img/og-default.jpg">
+            <script type="application/ld+json">
+              {"@context":"https://schema.org","@graph":[{"@type":"Organization",
+               "logo":"https://shop.example.org/img/logo.png"}]}
+            </script>
+            <script type="application/ld+json">
+              {"@context":"https://schema.org","@type":"Product","name":"Le Vendeur de Saris",
+               "image":"https://images.example.net/9782290003299-475x500-1.jpg",
+               "gtin13":"9782290003299","isbn":"9782290003299"}
+            </script></head></html>"#;
+        assert_eq!(
+            first(html).as_deref(),
+            Some("https://images.example.net/9782290003299-475x500-1.jpg")
+        );
+    }
+
+    #[test]
+    fn a_product_without_identifier_comes_after_the_page_hints() {
+        // Without an ISBN or GTIN, a Product may be anything sold on the
+        // page (a tote bag in a sidebar): the page's own hints come first.
+        let html = r#"<meta property="og:image" content="https://example.org/og.jpg">
+            <script type="application/ld+json">
+              {"@type":"Product","image":"https://example.org/tote-bag.jpg"}
+            </script>"#;
+        let all: Vec<String> = extract_cover_candidates(html, &page())
+            .into_iter()
+            .map(|u| u.to_string())
+            .collect();
+        assert_eq!(
+            all,
+            vec![
+                "https://example.org/og.jpg",
+                "https://example.org/tote-bag.jpg"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_book_still_wins_over_a_product() {
+        let html = r#"<script type="application/ld+json">
+              [{"@type":"Product","isbn":"9782290003299","image":"https://example.org/p.jpg"},
+               {"@type":"Book","image":"https://example.org/b.jpg"}]
+            </script>"#;
+        assert_eq!(first(html).as_deref(), Some("https://example.org/b.jpg"));
     }
 
     #[test]
