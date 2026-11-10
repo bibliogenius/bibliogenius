@@ -7,13 +7,24 @@ use sea_orm::DatabaseConnection;
 
 use crate::openlibrary::BookMetadata;
 
+/// True when `isbn` holds nothing to look up once separators are stripped.
+///
+/// A book without an ISBN travels as an empty string (hub catalog entries
+/// carry a non-optional field). Sent to the sources as is, the empty query
+/// can come back with an unrelated book, whose cover, title and author then
+/// stand in for the real one.
+fn is_blank_isbn(isbn: &str) -> bool {
+    crate::utils::isbn::plain(isbn).is_empty()
+}
+
 /// Resolve book metadata by ISBN, querying multiple sources in priority order.
 ///
 /// Source priority depends on ISBN origin and user language:
 /// - French ISBNs (978-2…): BNF SPARQL → SUDOC → BNF SRU → Inventaire → OpenLibrary → Google
 /// - Others: Inventaire → OpenLibrary → BNF (if user lang is French) → Google
 ///
-/// Returns `Ok(None)` when no source has data for this ISBN.
+/// Returns `Ok(None)` when no source has data for this ISBN, and without
+/// querying any source when the ISBN is blank (see [`is_blank_isbn`]).
 pub async fn lookup_metadata_by_isbn(
     db: &DatabaseConnection,
     isbn: &str,
@@ -21,6 +32,10 @@ pub async fn lookup_metadata_by_isbn(
 ) -> Result<Option<BookMetadata>, String> {
     use crate::models::installation_profile::Entity as ProfileEntity;
     use sea_orm::EntityTrait;
+
+    if is_blank_isbn(isbn) {
+        return Ok(None);
+    }
 
     // Load profile config to check enabled providers and API keys
     let (enable_openlibrary, enable_google, enable_inventaire, enable_bnf, google_api_key) =
@@ -682,6 +697,32 @@ async fn try_openlibrary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blank_isbn_is_not_a_lookup_key() {
+        assert!(is_blank_isbn(""));
+        assert!(is_blank_isbn("   "));
+        assert!(is_blank_isbn(" - - "));
+        assert!(!is_blank_isbn("978-2-264-07195-8"));
+    }
+
+    /// A book without an ISBN reached the sources with an empty query, and one
+    /// of them answered with an unrelated book that was then shown, and added,
+    /// in its place. This checks the guard is wired in; it is not hermetic:
+    /// without the guard, the failed profile read falls back to the default
+    /// providers and the lookup goes to the live sources.
+    #[tokio::test]
+    async fn a_blank_isbn_resolves_to_nothing_without_querying_any_source() {
+        let db = DatabaseConnection::Disconnected;
+        assert!(matches!(
+            lookup_metadata_by_isbn(&db, "", None).await,
+            Ok(None)
+        ));
+        assert!(matches!(
+            lookup_metadata_by_isbn(&db, " - ", None).await,
+            Ok(None)
+        ));
+    }
 
     fn book(
         summary: Option<&str>,
