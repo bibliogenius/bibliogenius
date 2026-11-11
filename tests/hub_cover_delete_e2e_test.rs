@@ -39,6 +39,27 @@ async fn setup_db_with_hub_config() -> DatabaseConnection {
     db
 }
 
+/// Seed books and return their uuids, read back from the inserted rows:
+/// `Insert::exec(...).last_insert_id` yields the SQLite rowid ("1"), not the
+/// uuid primary key, so a test deleting that value removes nothing.
+async fn seed_books(db: &DatabaseConnection, titles: &[&str]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for title in titles {
+        let now = chrono::Utc::now().to_rfc3339();
+        let inserted = book::ActiveModel {
+            title: Set((*title).to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert book");
+        ids.push(inserted.id);
+    }
+    ids
+}
+
 /// 204 on DELETE → `Ok(())`, exactly one call, correct URL + auth.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
@@ -109,7 +130,7 @@ async fn delete_cover_401_surfaces_hub_error() {
     unsafe { std::env::set_var("HUB_URL", hub.uri()) };
 
     Mock::given(method("DELETE"))
-        .and(path_regex(r"^/api/directory/my-node/covers/\d+$"))
+        .and(path_regex(r"^/api/directory/my-node/covers/[0-9a-f-]+$"))
         .respond_with(ResponseTemplate::new(401))
         .expect(1)
         .mount(&hub)
@@ -139,17 +160,7 @@ async fn delete_book_triggers_hub_cleanup() {
     let db = setup_db_with_hub_config().await;
 
     // Seed a book so the service has something to delete.
-    let now = chrono::Utc::now().to_rfc3339();
-    let book_id = book::Entity::insert(book::ActiveModel {
-        title: Set("Martin Eden".to_string()),
-        created_at: Set(now.clone()),
-        updated_at: Set(now),
-        ..Default::default()
-    })
-    .exec(&db)
-    .await
-    .expect("insert book")
-    .last_insert_id;
+    let book_id = seed_books(&db, &["Martin Eden"]).await.remove(0);
 
     let hub = MockServer::start().await;
     unsafe { std::env::set_var("HUB_URL", hub.uri()) };
@@ -189,23 +200,13 @@ async fn delete_book_triggers_hub_cleanup() {
 async fn delete_book_succeeds_even_when_hub_cleanup_fails() {
     let db = setup_db_with_hub_config().await;
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let book_id = book::Entity::insert(book::ActiveModel {
-        title: Set("1984".to_string()),
-        created_at: Set(now.clone()),
-        updated_at: Set(now),
-        ..Default::default()
-    })
-    .exec(&db)
-    .await
-    .expect("insert book")
-    .last_insert_id;
+    let book_id = seed_books(&db, &["1984"]).await.remove(0);
 
     let hub = MockServer::start().await;
     unsafe { std::env::set_var("HUB_URL", hub.uri()) };
 
     Mock::given(method("DELETE"))
-        .and(path_regex(r"^/api/directory/my-node/covers/\d+$"))
+        .and(path_regex(r"^/api/directory/my-node/covers/[0-9a-f-]+$"))
         .respond_with(ResponseTemplate::new(500))
         .expect(1)
         .mount(&hub)
@@ -251,24 +252,6 @@ async fn delete_cover_not_registered_short_circuits() {
         matches!(err, HubDirectoryError::NotRegistered),
         "expected NotRegistered, got {err:?}"
     );
-}
-
-async fn seed_books(db: &DatabaseConnection, titles: &[&str]) -> Vec<String> {
-    let mut ids = Vec::new();
-    for title in titles {
-        let now = chrono::Utc::now().to_rfc3339();
-        let inserted = book::ActiveModel {
-            title: Set((*title).to_string()),
-            created_at: Set(now.clone()),
-            updated_at: Set(now),
-            ..Default::default()
-        }
-        .insert(db)
-        .await
-        .expect("insert book");
-        ids.push(inserted.id);
-    }
-    ids
 }
 
 /// A batch delete cleans the cover of every book it removes, one hub DELETE
