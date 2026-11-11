@@ -137,9 +137,9 @@ pub(crate) async fn fetch_image_with_policy(
     let image = tokio::time::timeout(PICK_DEADLINE, fetch)
         .await
         .unwrap_or(Err(PublicFetchError::Network))?;
-    check_usable_image(&image.bytes)?;
+    let bytes = check_usable_image_blocking(image.bytes).await?;
     Ok(WebCover {
-        bytes: image.bytes,
+        bytes,
         image_url: url.to_string(),
         candidates: Vec::new(),
     })
@@ -169,9 +169,9 @@ async fn pick_cover(
 ) -> Result<WebCover, WebCoverError> {
     let page = public_fetch::fetch_with_policy(url.clone(), &body_cap, policy).await?;
     if sniff_image(&page.bytes).is_some() {
-        check_usable_image(&page.bytes)?;
+        let bytes = check_usable_image_blocking(page.bytes).await?;
         return Ok(WebCover {
-            bytes: page.bytes,
+            bytes,
             image_url: url.to_string(),
             candidates: vec![url.to_string()],
         });
@@ -223,18 +223,16 @@ async fn pick_cover(
         )
         .await
         {
-            Ok(image) if check_usable_image(&image.bytes).is_ok() => {
-                return Ok(WebCover {
-                    bytes: image.bytes,
-                    image_url: image_url.to_string(),
-                    candidates,
-                });
-            }
-            Ok(image) => {
-                error = check_usable_image(&image.bytes)
-                    .err()
-                    .unwrap_or(WebCoverError::UnsupportedImage)
-            }
+            Ok(image) => match check_usable_image_blocking(image.bytes).await {
+                Ok(bytes) => {
+                    return Ok(WebCover {
+                        bytes,
+                        image_url: image_url.to_string(),
+                        candidates,
+                    });
+                }
+                Err(e) => error = e,
+            },
             Err(e) => error = e.into(),
         }
     }
@@ -285,6 +283,15 @@ fn check_usable_image(bytes: &[u8]) -> Result<(), WebCoverError> {
         Some(_) => Ok(()),
         None => Err(WebCoverError::UnsupportedImage),
     }
+}
+
+/// [`check_usable_image`] off the async runtime's worker threads: walking
+/// the chunks of a PNG up to the input cap is CPU work, like parsing the
+/// page. The bytes come back for the caller to keep.
+async fn check_usable_image_blocking(bytes: Vec<u8>) -> Result<Vec<u8>, WebCoverError> {
+    tokio::task::spawn_blocking(move || check_usable_image(&bytes).map(|()| bytes))
+        .await
+        .map_err(|_| WebCoverError::UnsupportedImage)?
 }
 
 /// Refuses a PNG whose image data inflates to more than its header allows.
@@ -1097,6 +1104,54 @@ mod tests {
         let url = format!("{}/couv.jpg", server.uri());
         let cover = fetch_test(url.clone()).await.unwrap();
         assert_eq!(cover.candidates, vec![url]);
+    }
+
+    #[tokio::test]
+    async fn a_png_bomb_served_as_the_cover_is_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(png(100, 100, 50 * 1024 * 1024, false), "image/png"),
+            )
+            .mount(&server)
+            .await;
+
+        let err = fetch_test(format!("{}/couv.png", server.uri()))
+            .await
+            .unwrap_err();
+        assert_eq!(err, WebCoverError::Fetch(PublicFetchError::TooLarge));
+    }
+
+    #[tokio::test]
+    async fn a_page_whose_first_image_is_a_png_bomb_falls_through_to_the_next() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/livre"))
+            .respond_with(html(format!(
+                r#"<meta property="og:image" content="{0}/bomb.png">
+                   <meta property="og:image" content="{0}/couv.jpg">"#,
+                server.uri()
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/bomb.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(png(100, 100, 50 * 1024 * 1024, false), "image/png"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/couv.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(JPEG.to_vec(), "image/jpeg"))
+            .mount(&server)
+            .await;
+
+        let cover = fetch_test(format!("{}/livre", server.uri())).await.unwrap();
+        assert_eq!(cover.image_url, format!("{}/couv.jpg", server.uri()));
+        assert_eq!(cover.bytes, JPEG);
     }
 
     #[tokio::test]
