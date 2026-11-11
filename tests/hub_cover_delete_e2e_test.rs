@@ -16,7 +16,7 @@ use rust_lib_app::db;
 use rust_lib_app::models::book;
 use rust_lib_app::services::book_service;
 use rust_lib_app::services::hub_directory_service::{HubDirectoryError, HubDirectoryService};
-use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, Set, Statement};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, EntityTrait, Set, Statement};
 use serial_test::serial;
 use wiremock::matchers::{header, method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -250,5 +250,91 @@ async fn delete_cover_not_registered_short_circuits() {
     assert!(
         matches!(err, HubDirectoryError::NotRegistered),
         "expected NotRegistered, got {err:?}"
+    );
+}
+
+async fn seed_books(db: &DatabaseConnection, titles: &[&str]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for title in titles {
+        let now = chrono::Utc::now().to_rfc3339();
+        let inserted = book::ActiveModel {
+            title: Set((*title).to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert book");
+        ids.push(inserted.id);
+    }
+    ids
+}
+
+/// A batch delete cleans the cover of every book it removes, one hub DELETE
+/// per book, as long as the hub answers (here with a 404: the cover never
+/// existed, which is an answer, not an outage).
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn delete_books_cleans_each_cover_on_the_hub() {
+    let db = setup_db_with_hub_config().await;
+    let ids = seed_books(&db, &["Martin Eden", "1984", "Ulysses"]).await;
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+
+    Mock::given(method("DELETE"))
+        .and(path_regex(r"^/api/directory/my-node/covers/[0-9a-f-]+$"))
+        .and(header("authorization", "Bearer tok-abc"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(3)
+        .mount(&hub)
+        .await;
+
+    let deleted = book_service::delete_books(&db, &ids)
+        .await
+        .expect("hub 404s must not fail the batch");
+
+    assert_eq!(deleted, 3);
+    assert_eq!(book::Entity::find().all(&db).await.unwrap().len(), 0);
+    hub.verify().await;
+}
+
+/// When the hub cannot be reached, a batch delete asks it once and gives up
+/// for the rest of the batch instead of waiting out one timeout per book.
+/// The local deletions still all happen.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn delete_books_stops_asking_an_unreachable_hub() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let db = setup_db_with_hub_config().await;
+    let ids = seed_books(&db, &["Martin Eden", "1984", "Ulysses"]).await;
+
+    // A listener that closes every connection without answering: reqwest
+    // reports that as a transport error, which is what an outage looks like.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counter = connections.clone();
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            drop(socket);
+        }
+    });
+    unsafe { std::env::set_var("HUB_URL", format!("http://{addr}")) };
+
+    let deleted = book_service::delete_books(&db, &ids)
+        .await
+        .expect("an unreachable hub must not fail the batch");
+
+    assert_eq!(deleted, 3);
+    assert_eq!(book::Entity::find().all(&db).await.unwrap().len(), 0);
+    let attempts = connections.load(Ordering::SeqCst);
+    assert!(
+        attempts < 3,
+        "the hub must not be asked once per book after it failed, got {attempts} connections"
     );
 }

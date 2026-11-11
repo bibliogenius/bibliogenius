@@ -33,9 +33,12 @@ use crate::modules::book_notes::models as book_note;
 /// rows, its notes and its device-local `book_local` row. Idempotent: deleting
 /// an unknown book is a no-op.
 ///
+/// Returns `true` if a book row was actually removed, so callers can tell a
+/// deletion from a no-op on an unknown id.
+///
 /// Runs in the caller-provided connection so the whole cascade is one atomic
 /// unit; pass a transaction.
-pub async fn delete_book_cascade<C>(conn: &C, book_uuid: &str) -> Result<(), DbErr>
+pub async fn delete_book_cascade<C>(conn: &C, book_uuid: &str) -> Result<bool, DbErr>
 where
     C: ConnectionTrait,
 {
@@ -69,11 +72,11 @@ where
     crate::infrastructure::book_local::delete_for_book(conn, book_uuid).await?;
 
     // Finally the book row itself.
-    book::Entity::delete_by_id(book_uuid.to_owned())
+    let book_rows = book::Entity::delete_by_id(book_uuid.to_owned())
         .exec(conn)
         .await?;
 
-    Ok(())
+    Ok(book_rows.rows_affected > 0)
 }
 
 /// Delete every copy of a book together with the loans and sales that
@@ -301,7 +304,9 @@ where
     }
 
     match parent {
-        Parent::Book => delete_book_cascade(conn, entity_uuid).await?,
+        Parent::Book => {
+            delete_book_cascade(conn, entity_uuid).await?;
+        }
         Parent::Copy => {
             delete_copy_cascade(conn, entity_uuid).await?;
         }

@@ -1,6 +1,6 @@
 use crate::models::book;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -28,35 +28,45 @@ pub enum SortCriteria {
     Year,
 }
 
+/// Apply one action to a selection of books.
+///
+/// `Delete` goes through the book service so each book is removed exactly as
+/// a single delete removes it: copies, loans, sales, links and notes go with
+/// it (nothing cascades in the database since ADR-044), the deletion is logged
+/// and the hub cover is cleaned up.
 pub async fn batch_edit(
-    State(db): State<DatabaseConnection>,
+    State(state): State<crate::infrastructure::AppState>,
     Json(payload): Json<BatchEditRequest>,
 ) -> impl IntoResponse {
+    use crate::services::book_service;
+
     match payload.action {
-        BatchAction::Delete => {
-            let ids_to_log = payload.ids.clone();
-            match book::Entity::delete_many()
-                .filter(book::Column::Id.is_in(payload.ids))
-                .exec(&db)
-                .await
-            {
-                Ok(res) => {
-                    for id in &ids_to_log {
-                        let _ = crate::sync::log_operation(&db, "book", id, "DELETE", None).await;
-                    }
-                    (
-                        StatusCode::OK,
-                        Json(serde_json::json!({ "deleted": res.rows_affected })),
-                    )
-                        .into_response()
+        BatchAction::Delete => match book_service::delete_books(state.db(), &payload.ids).await {
+            Ok(deleted) => {
+                if deleted > 0 {
+                    // Notify accepted peers that our catalog changed (debounced).
+                    crate::services::catalog_notification::schedule_catalog_changed_notification(
+                        state.clone(),
+                    );
                 }
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "deleted": deleted })),
                 )
-                    .into_response(),
+                    .into_response()
             }
-        }
+            Err(e) => {
+                let msg = match e {
+                    book_service::ServiceError::Database(msg) => msg,
+                    other => format!("{other:?}"),
+                };
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": msg })),
+                )
+                    .into_response()
+            }
+        },
     }
 }
 

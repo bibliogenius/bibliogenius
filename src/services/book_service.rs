@@ -14,6 +14,7 @@ use crate::domain::HouseholdRepository;
 use crate::infrastructure::repositories::SeaOrmHouseholdRepository;
 use crate::models::Book;
 use crate::models::book::{ActiveModel as BookActiveModel, Entity as BookEntity};
+use crate::services::hub_directory_service::HubDirectoryService;
 
 /// Filter parameters for listing books
 #[derive(Debug, Default, Clone)]
@@ -1064,22 +1065,71 @@ fn outranks(candidate: &LibraryIsbnStatus, kept: &LibraryIsbnStatus) -> bool {
 /// replicated tables were rebuilt without foreign keys (ADR-044), so the
 /// cascade is performed at the application level.
 pub async fn delete_book(db: &DatabaseConnection, id: &str) -> Result<(), ServiceError> {
+    remove_book_rows(db, id).await?;
+    delete_hub_cover(db, &HubDirectoryService::new(), id).await;
+    Ok(())
+}
+
+/// Delete several books, each one exactly as [`delete_book`] would: its own
+/// transaction for the cascade, an operation-log row and the hub cover cleanup.
+///
+/// Returns how many book rows were actually removed; unknown ids are skipped
+/// without error. Stops at the first database error: the books handled before
+/// it stay deleted, each in its own committed transaction.
+///
+/// The hub cover cleanup is best effort and bounded: once the hub cannot be
+/// reached (or this library is not registered), the remaining books skip it,
+/// so a batch never waits out one network timeout per book.
+pub async fn delete_books(db: &DatabaseConnection, ids: &[String]) -> Result<u64, ServiceError> {
+    let hub = HubDirectoryService::new();
+    let mut deleted = 0;
+    let mut clean_covers = true;
+    for id in ids {
+        if remove_book_rows(db, id).await? {
+            deleted += 1;
+        }
+        if clean_covers {
+            clean_covers = delete_hub_cover(db, &hub, id).await;
+        }
+    }
+    Ok(deleted)
+}
+
+/// Cascade-delete a book in one transaction and log the deletion, telling
+/// whether a book row was there to remove.
+async fn remove_book_rows(db: &DatabaseConnection, id: &str) -> Result<bool, ServiceError> {
     let txn = db.begin().await?;
-    crate::infrastructure::referential_integrity::delete_book_cascade(&txn, id).await?;
+    let removed =
+        crate::infrastructure::referential_integrity::delete_book_cascade(&txn, id).await?;
     txn.commit().await?;
 
     let _ = crate::sync::log_operation(db, "book", id, "DELETE", None).await;
+    Ok(removed)
+}
 
-    // Best-effort: remove the orphaned cover from the hub so storage
-    // does not grow indefinitely. A failure here (hub unreachable, not
-    // registered, cover never existed) must not fail the deletion
-    // itself — the book is already gone from the local DB.
-    let hub_svc = crate::services::hub_directory_service::HubDirectoryService::new();
-    if let Err(e) = hub_svc.delete_cover(db, id).await {
-        tracing::debug!("hub cover cleanup skipped for book {id}: {e}");
+/// Best-effort removal of the orphaned cover from the hub, so storage does
+/// not grow indefinitely. A failure here (hub unreachable, not registered,
+/// cover never existed) must not fail the deletion itself: the book is
+/// already gone from the local DB.
+///
+/// Returns whether the hub was worth asking again: `false` when it could not
+/// be reached or this library is not registered, `true` otherwise (including
+/// a hub answer such as 404 for a book that never had a cover).
+async fn delete_hub_cover(db: &DatabaseConnection, hub: &HubDirectoryService, id: &str) -> bool {
+    use crate::services::hub_directory_service::HubDirectoryError;
+
+    match hub.delete_cover(db, id).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::debug!("hub cover cleanup skipped for book {id}: {e}");
+            !matches!(
+                e,
+                HubDirectoryError::Network(_)
+                    | HubDirectoryError::NotRegistered
+                    | HubDirectoryError::Config(_)
+            )
+        }
     }
-
-    Ok(())
 }
 
 /// Per-subject book counts, scoped to the default library view (ADR-063).
