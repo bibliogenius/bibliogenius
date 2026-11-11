@@ -1427,6 +1427,18 @@ async fn handle_peer_disconnect(
 
 // ── Delta sync handler (ADR-029) ──────────────────────────────────────
 
+/// Number of operation-log rows a `catalog_delta_request` asks for, clamped
+/// to what the responder accepts.
+pub fn catalog_delta_request_limit(msg: &ClearMessage) -> i64 {
+    use crate::api::books::{DELTA_DEFAULT_LIMIT, DELTA_MAX_LIMIT};
+
+    msg.payload
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .map(|n| n.clamp(1, DELTA_MAX_LIMIT))
+        .unwrap_or(DELTA_DEFAULT_LIMIT)
+}
+
 /// Handle a `catalog_delta_request` over E2EE (direct LAN or relay).
 ///
 /// Mirrors the HTTP `list_books_delta` path: reuses `build_book_delta_response`
@@ -1442,15 +1454,9 @@ pub async fn handle_catalog_delta_request(
     msg: &ClearMessage,
 ) -> serde_json::Value {
     use crate::api::books::BookDeltaOutcome;
-    use crate::api::books::{DELTA_DEFAULT_LIMIT, DELTA_MAX_LIMIT};
 
     let since = msg.payload.get("since").and_then(|v| v.as_i64());
-    let limit = msg
-        .payload
-        .get("limit")
-        .and_then(|v| v.as_i64())
-        .map(|n| n.clamp(1, DELTA_MAX_LIMIT))
-        .unwrap_or(DELTA_DEFAULT_LIMIT);
+    let limit = catalog_delta_request_limit(msg);
 
     // Peer callers are never "owner" — the E1 privacy pipeline must run.
     // Relay cover-rewrite: peer may have no LAN route back (5G), so absolute

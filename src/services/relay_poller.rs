@@ -88,7 +88,7 @@ use crate::services::crypto_service::MAX_TIMESTAMP_DRIFT_SECS;
 use crate::services::e2ee_transport::E2eeTransportError;
 use crate::services::nudge_events::{self, NudgeEvent, NudgeSource};
 use crate::services::profile_events::{self, ProfileChangedEvent};
-use crate::services::relay_transport::{RelayBlob, RelayTransport};
+use crate::services::relay_transport::{BLOB_TOO_LARGE_STATUS, RelayBlob, RelayTransport};
 
 /// Start the background relay polling loop.
 ///
@@ -836,16 +836,83 @@ async fn handle_relay_request_response(
 
     // Deposit encrypted response in requester's mailbox
     let relay = RelayTransport::new(Some(crypto_service.clone()));
-    relay
+    let requester_key = &known_peers[peer_index].x25519_public;
+    let mut deposited = relay
         .deposit_response(
             relay_url,
             reply_to_mailbox,
             reply_to_write_token,
-            &known_peers[peer_index].x25519_public,
+            requester_key,
             &response_msg,
         )
-        .await
-        .map_err(|e| format!("failed to deposit relay response: {e}"))?;
+        .await;
+
+    let too_large = |deposited: &Result<(), E2eeTransportError>| {
+        matches!(
+            deposited,
+            Err(E2eeTransportError::PeerError(BLOB_TOO_LARGE_STATUS, _))
+        )
+    };
+
+    // A delta window that does not fit in one relay blob is rebuilt with
+    // half the rows until it does. The requester applies what it receives
+    // and stores the cursor of the last row covered, and `has_more` tells it
+    // the rest is still to come: nothing is skipped.
+    if response_type == "catalog_delta_response" {
+        let since = clear_message.payload.get("since").and_then(|v| v.as_i64());
+        let mut limit = crate::api::e2ee::catalog_delta_request_limit(clear_message);
+        while too_large(&deposited) && limit > 1 {
+            limit /= 2;
+            tracing::info!(
+                "Relay poller: delta too large for one relay blob, retrying with {limit} rows for peer {}",
+                sender_peer.name
+            );
+            let smaller_request = ClearMessage {
+                payload: serde_json::json!({ "since": since, "limit": limit }),
+                ..clear_message.clone()
+            };
+            let smaller_msg = ClearMessage {
+                payload: crate::api::e2ee::handle_catalog_delta_request(state, &smaller_request)
+                    .await,
+                message_id: uuid::Uuid::new_v4().to_string(),
+                ..response_msg.clone()
+            };
+            deposited = relay
+                .deposit_response(
+                    relay_url,
+                    reply_to_mailbox,
+                    reply_to_write_token,
+                    requester_key,
+                    &smaller_msg,
+                )
+                .await;
+        }
+    }
+
+    // A whole catalog that does not fit in one relay blob can never be
+    // delivered this way. Answer with a short message instead of nothing, so
+    // the requester does not wait for a response that will not come.
+    if response_type == "book_sync_response" && too_large(&deposited) {
+        tracing::warn!(
+            "Relay poller: catalog too large for one relay blob, telling peer {} to keep its cache",
+            sender_peer.name
+        );
+        let fallback_msg = ClearMessage {
+            payload: oversized_book_sync_fallback(&response_msg.payload),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            ..response_msg
+        };
+        deposited = relay
+            .deposit_response(
+                relay_url,
+                reply_to_mailbox,
+                reply_to_write_token,
+                requester_key,
+                &fallback_msg,
+            )
+            .await;
+    }
+    deposited.map_err(|e| format!("failed to deposit relay response: {e}"))?;
 
     tracing::info!(
         "Relay poller: Deposited '{}' response for peer {} (correlation: {:?})",
@@ -855,6 +922,24 @@ async fn handle_relay_request_response(
     );
 
     Ok(())
+}
+
+/// Answer to a `book_sync_request` whose full catalog does not fit in one
+/// relay blob.
+///
+/// The requester treats any status other than "unchanged" as a full snapshot
+/// and would wipe its cache on an empty book list, so the answer says
+/// "unchanged". It carries no `catalog_hash`: the requester must not record a
+/// hash for books it never received. The profile fields are kept so a
+/// relay-only peer still refreshes the name and avatar.
+fn oversized_book_sync_fallback(full_payload: &serde_json::Value) -> serde_json::Value {
+    let mut fallback = serde_json::json!({ "status": "unchanged" });
+    for key in ["avatar_config", "library_name"] {
+        if let Some(value) = full_payload.get(key) {
+            fallback[key] = value.clone();
+        }
+    }
+    fallback
 }
 
 /// Recreate a relay mailbox on the hub when the existing one has expired or been deleted.

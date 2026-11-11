@@ -28,6 +28,9 @@ pub(crate) const HOUR: i64 = 60 * MINUTE;
 pub(crate) const DAY: i64 = 24 * HOUR;
 
 pub(crate) const ISBN: &str = "9782070360024";
+
+/// The hub refuses any relay blob above this size (`RelayController::MAX_BLOB_SIZE`).
+pub(crate) const HUB_MAX_BLOB_SIZE: usize = 64 * 1024;
 pub(crate) const TITLE: &str = "Le Livre";
 
 #[derive(Default)]
@@ -35,6 +38,7 @@ struct Mailboxes {
     next_id: i64,
     messages: HashMap<String, Vec<(i64, String)>>,
     deposits: HashMap<String, usize>,
+    rejected: HashMap<String, usize>,
     acks_failing: bool,
     latency: Duration,
 }
@@ -63,6 +67,12 @@ impl Respond for HubResponder {
                     .unwrap_or_default();
                 ResponseTemplate::new(200)
                     .set_body_json(serde_json::json!({ "messages": messages }))
+            }
+            "POST" if request.body.len() > HUB_MAX_BLOB_SIZE => {
+                *hub.rejected.entry(mailbox).or_default() += 1;
+                ResponseTemplate::new(413).set_body_json(serde_json::json!({
+                    "error": format!("Blob exceeds maximum size of {HUB_MAX_BLOB_SIZE} bytes")
+                }))
             }
             "POST" => {
                 hub.next_id += 1;
@@ -136,6 +146,37 @@ impl FakeHub {
             .get(&device.mailbox)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Deposits refused for exceeding the blob size limit.
+    pub(crate) fn rejected(&self, device: &Device) -> usize {
+        self.mailboxes
+            .0
+            .lock()
+            .expect("hub lock")
+            .rejected
+            .get(&device.mailbox)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The envelopes waiting in a mailbox, oldest first, left in place.
+    pub(crate) fn envelopes(&self, device: &Device) -> Vec<EncryptedEnvelope> {
+        let hub = self.mailboxes.0.lock().expect("hub lock");
+        hub.messages
+            .get(&device.mailbox)
+            .map(|queue| {
+                queue
+                    .iter()
+                    .map(|(_, blob)| {
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(blob)
+                            .expect("base64 blob");
+                        serde_json::from_slice(&bytes).expect("envelope")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Every request the hub received, whatever the route.
@@ -255,6 +296,58 @@ impl Device {
             )
             .await
             .expect("deposit");
+    }
+
+    /// Open the messages `from` left in this mailbox, skipping the first
+    /// `skip`. Opening records each nonce, so an envelope opened once cannot
+    /// be opened again: pass the count already read.
+    pub(crate) fn read_from(&self, hub: &FakeHub, from: &Device, skip: usize) -> Vec<ClearMessage> {
+        let sender = crate::services::crypto_service::PeerInfo {
+            verifying_key: ed25519_dalek::VerifyingKey::from_bytes(
+                &hex::decode(&from.ed_hex)
+                    .expect("hex")
+                    .try_into()
+                    .expect("32 bytes"),
+            )
+            .expect("verifying key"),
+            x25519_public: from.x25519,
+        };
+        let crypto = self.state.crypto_service().expect("crypto");
+        hub.envelopes(self)
+            .iter()
+            .skip(skip)
+            .map(|envelope| {
+                crypto
+                    .open_relayed(envelope, std::slice::from_ref(&sender))
+                    .expect("open")
+                    .0
+            })
+            .collect()
+    }
+
+    /// `count` public books with the fields a real catalog carries, each with
+    /// its own uuid (incompressible, like the real ids).
+    pub(crate) async fn add_catalog(&self, count: usize) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = (0..count).map(|i| book::ActiveModel {
+            id: Set(uuid::Uuid::new_v4().to_string()),
+            title: Set(format!("Titre du livre numero {i}")),
+            isbn: Set(Some(format!("978207{i:07}"))),
+            publisher: Set(Some("Gallimard".to_string())),
+            publication_year: Set(Some(1950 + (i % 70) as i32)),
+            cover_url: Set(Some(format!(
+                "https://covers.openlibrary.org/b/isbn/978207{i:07}-M.jpg"
+            ))),
+            owned: Set(true),
+            private: Set(false),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        });
+        book::Entity::insert_many(rows)
+            .exec(&self.db)
+            .await
+            .expect("insert catalog");
     }
 
     pub(crate) fn seal(&self, to: &Device, message: &ClearMessage) -> EncryptedEnvelope {

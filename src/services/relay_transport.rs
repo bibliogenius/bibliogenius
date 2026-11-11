@@ -23,6 +23,13 @@ pub enum RelayBlob {
     Raw(i64, Vec<u8>),
 }
 
+/// Largest blob the hub relay accepts in a mailbox. Mirrors the hub's own
+/// limit: a larger deposit is refused with [`BLOB_TOO_LARGE_STATUS`].
+pub(crate) const MAX_RELAY_BLOB_SIZE: usize = 64 * 1024;
+
+/// HTTP status the hub answers to a blob above [`MAX_RELAY_BLOB_SIZE`].
+pub(crate) const BLOB_TOO_LARGE_STATUS: u16 = 413;
+
 /// Relay transport for sending/receiving messages via a hub mailbox.
 ///
 /// The crypto service is optional: `poll()`, `ack()` and `deposit_raw()` work
@@ -285,6 +292,18 @@ impl RelayTransport {
         // 2. Serialize envelope to bytes
         let blob =
             serde_json::to_vec(&envelope).map_err(|e| E2eeTransportError::Crypto(e.to_string()))?;
+
+        // The hub would refuse this blob: fail here, with the status the hub
+        // would have answered, instead of uploading it for nothing.
+        if blob.len() > MAX_RELAY_BLOB_SIZE {
+            return Err(E2eeTransportError::PeerError(
+                BLOB_TOO_LARGE_STATUS,
+                format!(
+                    "response of {} bytes exceeds the relay blob limit of {MAX_RELAY_BLOB_SIZE} bytes (not sent)",
+                    blob.len()
+                ),
+            ));
+        }
 
         // 3. POST to requester's mailbox
         let url = format!(
