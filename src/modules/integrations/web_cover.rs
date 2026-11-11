@@ -81,6 +81,12 @@ impl WebCoverError {
             WebCoverError::Fetch(PublicFetchError::BlockedAddress) => "blocked_address",
             WebCoverError::Fetch(PublicFetchError::Network) => "network",
             WebCoverError::Fetch(PublicFetchError::TooManyRedirects) => "too_many_redirects",
+            // Sites that turn away automated clients (bot walls, rate limits
+            // aimed at non-browsers) answer with these: the user can still
+            // copy the image address from their browser.
+            WebCoverError::Fetch(PublicFetchError::HttpStatus(401 | 403 | 429)) => {
+                "blocked_by_site"
+            }
             WebCoverError::Fetch(PublicFetchError::HttpStatus(_)) => "http_status",
             WebCoverError::Fetch(PublicFetchError::TooLarge) => "too_large",
             WebCoverError::NoImageFound => "no_image_found",
@@ -1135,6 +1141,16 @@ mod tests {
             WebCoverError::Fetch(PublicFetchError::HttpStatus(503)).code(),
             "http_status"
         );
+        assert_eq!(
+            WebCoverError::Fetch(PublicFetchError::HttpStatus(404)).code(),
+            "http_status"
+        );
+        for status in [401, 403, 429] {
+            assert_eq!(
+                WebCoverError::Fetch(PublicFetchError::HttpStatus(status)).code(),
+                "blocked_by_site"
+            );
+        }
     }
 
     async fn fetch_test(url: String) -> Result<WebCover, WebCoverError> {

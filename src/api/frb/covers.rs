@@ -167,8 +167,9 @@ impl From<crate::modules::integrations::web_cover::WebCover> for FrbWebCover {
 /// cover photo pipeline before saving.
 ///
 /// On failure the error is a stable code (`invalid_url`, `blocked_address`,
-/// `network`, `too_many_redirects`, `http_status`, `too_large`,
-/// `no_image_found`, `unsupported_image`) for the app to translate.
+/// `network`, `too_many_redirects`, `blocked_by_site`, `http_status`,
+/// `too_large`, `no_image_found`, `unsupported_image`) for the app to
+/// translate.
 ///
 /// FFI only, with no Axum route on purpose: an HTTP endpoint that fetches an
 /// arbitrary URL would let any peer make this device issue requests.
