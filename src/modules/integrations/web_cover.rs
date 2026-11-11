@@ -23,6 +23,7 @@
 //! resizing happen in the app's cover photo pipeline, so a web cover and a
 //! photographed one end up as the same kind of file.
 
+use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -47,6 +48,11 @@ pub const MAX_LISTED_CANDIDATES: usize = 12;
 /// An `<img>` declaring a smaller side than this is a pixel, an icon or a
 /// logo, not a cover.
 const MIN_IMG_SIDE: u32 = 100;
+
+/// `<img>` tags looked at on a page, in document order. A book page shows far
+/// fewer; the bound keeps a page stuffed with tags from costing CPU time long
+/// after the pick's deadline has passed.
+const MAX_IMG_TAGS: usize = 200;
 
 /// JSON-LD nesting walked before giving up on a block.
 const MAX_JSON_LD_DEPTH: usize = 8;
@@ -436,7 +442,9 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
     // which a page without hints often lists first.
     let (chrome, content): (Vec<_>, Vec<_>) = doc
         .select(&IMG)
-        .filter_map(|el| img_source(el.value()).map(|src| (is_site_chrome(&el), src)))
+        .filter_map(|el| img_source(el.value()).map(|src| (el, src)))
+        .take(MAX_IMG_TAGS)
+        .map(|(el, src)| (is_site_chrome(&el), src))
         .partition(|(chrome, _)| *chrome);
     raw.extend(content.into_iter().map(|(_, src)| src));
     raw.extend(chrome.into_iter().map(|(_, src)| src));
@@ -450,6 +458,7 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
         .unwrap_or_else(|| page_url.clone());
 
     let mut out: Vec<Url> = Vec::new();
+    let mut seen: HashSet<Url> = HashSet::new();
     for candidate in raw {
         let candidate = candidate.trim();
         if candidate.is_empty() {
@@ -458,7 +467,7 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
         let Ok(url) = base.join(candidate) else {
             continue;
         };
-        if matches!(url.scheme(), "http" | "https") && !out.contains(&url) {
+        if matches!(url.scheme(), "http" | "https") && seen.insert(url.clone()) {
             out.push(url);
         }
     }
@@ -781,6 +790,44 @@ mod tests {
         let all = extract_cover_candidates(html, &page());
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].as_str(), "https://example.org/a.jpg");
+    }
+
+    #[test]
+    fn a_page_cannot_list_more_than_a_bounded_number_of_img_tags() {
+        // A page built for it could hold tens of thousands of <img> tags
+        // under the page cap: only the first ones are looked at, and the
+        // declared hints keep their place ahead of them.
+        let imgs: String = (0..MAX_IMG_TAGS + 50)
+            .map(|i| format!(r#"<div><img src="/i{i}.jpg">"#))
+            .collect();
+        let html =
+            format!(r#"<meta property="og:image" content="https://example.org/og.jpg">{imgs}"#);
+        let all = extract_cover_candidates(&html, &page());
+        assert_eq!(all.len(), 1 + MAX_IMG_TAGS);
+        assert_eq!(all[0].as_str(), "https://example.org/og.jpg");
+        assert_eq!(
+            all[MAX_IMG_TAGS].as_str(),
+            format!("https://www.editions-exemple.fr/i{}.jpg", MAX_IMG_TAGS - 1)
+        );
+    }
+
+    #[test]
+    fn an_image_declared_twice_is_listed_once() {
+        let html = r#"<meta property="og:image" content="https://example.org/couv.jpg">
+            <img src="https://example.org/couv.jpg">
+            <img src="https://example.org/autre.jpg">
+            <img src="https://example.org/couv.jpg">"#;
+        let all: Vec<String> = extract_cover_candidates(html, &page())
+            .into_iter()
+            .map(|u| u.to_string())
+            .collect();
+        assert_eq!(
+            all,
+            vec![
+                "https://example.org/couv.jpg",
+                "https://example.org/autre.jpg"
+            ]
+        );
     }
 
     #[test]
