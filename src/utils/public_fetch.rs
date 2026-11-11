@@ -316,11 +316,17 @@ pub(crate) async fn fetch_with_policy(
         }
         let client = builder.build().map_err(|_| PublicFetchError::Network)?;
 
-        let mut resp = client
-            .get(url.clone())
-            .send()
-            .await
-            .map_err(|_| PublicFetchError::Network)?;
+        // Some CDNs close a connection before answering now and then. A GET
+        // with no answer yet is safe to send once more; a second failure is
+        // reported.
+        let mut resp = match client.get(url.clone()).send().await {
+            Ok(resp) => resp,
+            Err(_) => client
+                .get(url.clone())
+                .send()
+                .await
+                .map_err(|_| PublicFetchError::Network)?,
+        };
         let status = resp.status();
 
         if status.is_redirection() {
@@ -670,6 +676,46 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(body.bytes.len(), 1000);
+    }
+
+    /// A server that drops the first connection without answering, then
+    /// serves `body` as an image. Returns its base URL.
+    async fn flaky_server(body: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut first = true;
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf).await;
+                if first {
+                    first = false;
+                    continue; // dropped: the client sees an incomplete message
+                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(body).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn retries_once_when_the_server_drops_the_connection() {
+        // Seen live on a publisher's CDN: about one request in four closed
+        // before any answer. A GET is safe to send again.
+        let base = flaky_server(b"cover").await;
+        let body = fetch_test(format!("{base}/couv.jpg"), &no_cap)
+            .await
+            .unwrap();
+        assert_eq!(body.bytes, b"cover");
     }
 
     #[tokio::test]

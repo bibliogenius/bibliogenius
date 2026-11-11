@@ -142,15 +142,29 @@ pub async fn search_all_covers_by_title(
     .map_err(|e| format!("{:?}", e))
 }
 
-/// A cover found on a web page: the raw image bytes and the image's address.
+/// A cover found on a web page: the raw image bytes, the image's address and,
+/// for a page, every usable candidate best first (`image_url` included), for
+/// the app to step through.
 pub struct FrbWebCover {
     pub bytes: Vec<u8>,
     pub image_url: String,
+    pub candidates: Vec<String>,
+}
+
+impl From<crate::modules::integrations::web_cover::WebCover> for FrbWebCover {
+    fn from(c: crate::modules::integrations::web_cover::WebCover) -> Self {
+        FrbWebCover {
+            bytes: c.bytes,
+            image_url: c.image_url,
+            candidates: c.candidates,
+        }
+    }
 }
 
 /// Fetch the cover of the book shown at `url`, a publisher's book page or the
-/// image itself. The bytes are returned unprocessed: the app runs them through
-/// its cover photo pipeline before saving.
+/// image itself. `isbn`, when the book has one, ranks the images named after
+/// it first. The bytes are returned unprocessed: the app runs them through its
+/// cover photo pipeline before saving.
 ///
 /// On failure the error is a stable code (`invalid_url`, `blocked_address`,
 /// `network`, `too_many_redirects`, `http_status`, `too_large`,
@@ -158,13 +172,23 @@ pub struct FrbWebCover {
 ///
 /// FFI only, with no Axum route on purpose: an HTTP endpoint that fetches an
 /// arbitrary URL would let any peer make this device issue requests.
-pub async fn fetch_cover_from_web_page(url: String) -> Result<FrbWebCover, String> {
-    crate::modules::integrations::web_cover::fetch_cover_from_page(&url)
+pub async fn fetch_cover_from_web_page(
+    url: String,
+    isbn: Option<String>,
+) -> Result<FrbWebCover, String> {
+    crate::modules::integrations::web_cover::fetch_cover_from_page(&url, isbn.as_deref())
         .await
-        .map(|c| FrbWebCover {
-            bytes: c.bytes,
-            image_url: c.image_url,
-        })
+        .map(Into::into)
+        .map_err(|e| e.code().to_string())
+}
+
+/// Fetch one of the candidates [`fetch_cover_from_web_page`] listed, when the
+/// user steps to the next image. Same checks and error codes; FFI only for the
+/// same reason.
+pub async fn fetch_web_cover_image(image_url: String) -> Result<FrbWebCover, String> {
+    crate::modules::integrations::web_cover::fetch_cover_image(&image_url)
+        .await
+        .map(Into::into)
         .map_err(|e| e.code().to_string())
 }
 

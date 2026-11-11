@@ -10,7 +10,12 @@
 //!    `Product` carrying an ISBN or GTIN (how bookshops describe a book);
 //! 2. `og:image` (Open Graph), then `twitter:image`;
 //! 3. `<link rel="image_src">`;
-//! 4. the `image` of any other `Product`.
+//! 4. the `image` of any other `Product`;
+//! 5. the page's `<img>` tags, as a last resort the user steps through.
+//!
+//! When the book's ISBN is known, images whose address contains it go first:
+//! bookshops name their cover files after the EAN, which tells the cover from
+//! a site banner even on a page that declares nothing.
 //!
 //! Every request goes through `utils::public_fetch` (public https only, checked
 //! after DNS resolution and on every redirect, bounded size and time). The image
@@ -26,16 +31,22 @@ use serde_json::Value;
 use url::Url;
 
 use crate::utils::cover_image::COVER_MAX_INPUT_BYTES;
+use crate::utils::isbn;
 use crate::utils::public_fetch::{self, BodyCap, FetchPolicy, PublicFetchError, upgrade_to_https};
 
 /// Cap on an HTML page. A publisher's book page is far below this; the cap
 /// only bounds what a hostile or broken server can make us hold in memory.
 pub const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
 
-/// Declared images tried, in order, before giving up: the first one may be
-/// gone (404) or a format we cannot use while the next one is the cover.
+/// Candidates kept, best first: tried in order until one is a usable image
+/// (the first may be gone or a format we cannot use while the next one is
+/// the cover), then handed back for the user to step through ("next image").
 /// Bounded so a page cannot make us fire a request per tag.
-pub const MAX_IMAGE_CANDIDATES: usize = 3;
+pub const MAX_LISTED_CANDIDATES: usize = 12;
+
+/// An `<img>` declaring a smaller side than this is a pixel, an icon or a
+/// logo, not a cover.
+const MIN_IMG_SIDE: u32 = 100;
 
 /// JSON-LD nesting walked before giving up on a block.
 const MAX_JSON_LD_DEPTH: usize = 8;
@@ -47,6 +58,9 @@ pub struct WebCover {
     /// The image URL as the page declared it (or as the user pasted it), not
     /// the post-redirect one: a CDN's redirect target is often short-lived.
     pub image_url: String,
+    /// Every usable candidate of the page, best first, `image_url` included,
+    /// for the user to step through. Empty for a single fetched candidate.
+    pub candidates: Vec<String>,
 }
 
 /// Why no cover came out of a page.
@@ -82,13 +96,50 @@ impl From<PublicFetchError> for WebCoverError {
 }
 
 /// Fetch the cover of the book shown at `raw_url`, which may be the book's
-/// page or the image itself.
-pub async fn fetch_cover_from_page(raw_url: &str) -> Result<WebCover, WebCoverError> {
+/// page or the image itself. `isbn`, when known, ranks the images named after
+/// it first.
+pub async fn fetch_cover_from_page(
+    raw_url: &str,
+    isbn: Option<&str>,
+) -> Result<WebCover, WebCoverError> {
     let url = public_fetch::parse_public_https_url(raw_url)?;
-    fetch_cover_with_policy(url, FetchPolicy::PublicInternet, PICK_DEADLINE).await
+    fetch_cover_with_policy(
+        url,
+        FetchPolicy::PublicInternet,
+        PICK_DEADLINE,
+        isbn.map(str::to_owned),
+    )
+    .await
 }
 
-/// Ceiling on a whole pick (page, redirects, up to [`MAX_IMAGE_CANDIDATES`]
+/// Fetch one candidate the user stepped to. The address comes back from the
+/// app, so it goes through the same checks as any other.
+pub async fn fetch_cover_image(raw_url: &str) -> Result<WebCover, WebCoverError> {
+    let url = public_fetch::parse_public_https_url(raw_url)?;
+    fetch_image_with_policy(url, FetchPolicy::PublicInternet).await
+}
+
+pub(crate) async fn fetch_image_with_policy(
+    url: Url,
+    policy: FetchPolicy,
+) -> Result<WebCover, WebCoverError> {
+    let fetch = public_fetch::fetch_with_policy(
+        url.clone(),
+        &|_| BodyCap::Refuse(COVER_MAX_INPUT_BYTES),
+        policy,
+    );
+    let image = tokio::time::timeout(PICK_DEADLINE, fetch)
+        .await
+        .unwrap_or(Err(PublicFetchError::Network))?;
+    check_usable_image(&image.bytes)?;
+    Ok(WebCover {
+        bytes: image.bytes,
+        image_url: url.to_string(),
+        candidates: Vec::new(),
+    })
+}
+
+/// Ceiling on a whole pick (page, redirects, up to [`MAX_LISTED_CANDIDATES`]
 /// images). The app's dialog cannot be dismissed while it runs, so a slow or
 /// hostile server must not hold it longer than this. Leaves room for a 10 MB
 /// image over a 1 Mbit/s link.
@@ -98,19 +149,25 @@ pub(crate) async fn fetch_cover_with_policy(
     url: Url,
     policy: FetchPolicy,
     deadline: Duration,
+    isbn: Option<String>,
 ) -> Result<WebCover, WebCoverError> {
-    tokio::time::timeout(deadline, pick_cover(url, policy))
+    tokio::time::timeout(deadline, pick_cover(url, policy, isbn))
         .await
         .unwrap_or(Err(PublicFetchError::Network.into()))
 }
 
-async fn pick_cover(url: Url, policy: FetchPolicy) -> Result<WebCover, WebCoverError> {
+async fn pick_cover(
+    url: Url,
+    policy: FetchPolicy,
+    isbn: Option<String>,
+) -> Result<WebCover, WebCoverError> {
     let page = public_fetch::fetch_with_policy(url.clone(), &body_cap, policy).await?;
     if sniff_image(&page.bytes).is_some() {
         check_usable_image(&page.bytes)?;
         return Ok(WebCover {
             bytes: page.bytes,
             image_url: url.to_string(),
+            candidates: vec![url.to_string()],
         });
     }
     if page
@@ -143,8 +200,12 @@ async fn pick_cover(url: Url, policy: FetchPolicy) -> Result<WebCover, WebCoverE
             };
             policy.check(&candidate).ok().map(|()| candidate)
         })
-        .take(MAX_IMAGE_CANDIDATES)
         .collect();
+    let usable: Vec<Url> = rank_by_isbn(usable, isbn.as_deref())
+        .into_iter()
+        .take(MAX_LISTED_CANDIDATES)
+        .collect();
+    let candidates: Vec<String> = usable.iter().map(Url::to_string).collect();
 
     // The last failure is reported when none works.
     let mut error = WebCoverError::NoImageFound;
@@ -160,6 +221,7 @@ async fn pick_cover(url: Url, policy: FetchPolicy) -> Result<WebCover, WebCoverE
                 return Ok(WebCover {
                     bytes: image.bytes,
                     image_url: image_url.to_string(),
+                    candidates,
                 });
             }
             Ok(image) => {
@@ -171,6 +233,26 @@ async fn pick_cover(url: Url, policy: FetchPolicy) -> Result<WebCover, WebCoverE
         }
     }
     Err(error)
+}
+
+/// Move the candidates whose address contains the book's ISBN (either length)
+/// to the front, keeping the page order otherwise. No ISBN, or one that does
+/// not parse, leaves the order as it is.
+fn rank_by_isbn(candidates: Vec<Url>, isbn: Option<&str>) -> Vec<Url> {
+    let Some(isbn) = isbn else {
+        return candidates;
+    };
+    let forms: Vec<String> = [isbn::to_isbn13(isbn), isbn::to_isbn10(isbn)]
+        .into_iter()
+        .flatten()
+        .collect();
+    if forms.is_empty() {
+        return candidates;
+    }
+    let (named, others): (Vec<Url>, Vec<Url>) = candidates
+        .into_iter()
+        .partition(|u| forms.iter().any(|f| u.as_str().contains(f.as_str())));
+    named.into_iter().chain(others).collect()
 }
 
 /// Body cap by content type. An HTML page is cut at the page cap rather than
@@ -307,6 +389,7 @@ static META_IMAGE: LazyLock<Vec<Selector>> = LazyLock::new(|| {
 static BASE: LazyLock<Selector> = LazyLock::new(|| Selector::parse("base[href]").unwrap());
 static IMAGE_SRC: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(r#"link[rel~="image_src"]"#).unwrap());
+static IMG: LazyLock<Selector> = LazyLock::new(|| Selector::parse("img").unwrap());
 
 /// Every cover image a page declares, most specific first, as absolute http(s)
 /// URLs resolved against `page_url`. Duplicates are kept out.
@@ -336,6 +419,7 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
             .map(str::to_owned),
     );
     raw.append(&mut json_ld.other_products);
+    raw.extend(doc.select(&IMG).filter_map(|el| img_source(el.value())));
 
     // Relative links resolve against `<base href>` when the page sets one.
     let base = doc
@@ -359,6 +443,24 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
         }
     }
     out
+}
+
+/// The address an `<img>` really shows: lazy-loading sites put a placeholder
+/// in `src` and the image in a `data-*` attribute. `None` for an image whose
+/// declared size says it is a pixel, an icon or a logo.
+fn img_source(img: &scraper::node::Element) -> Option<String> {
+    let too_small = ["width", "height"].iter().any(|side| {
+        img.attr(side)
+            .and_then(|v| v.trim().trim_end_matches("px").parse::<u32>().ok())
+            .is_some_and(|v| v < MIN_IMG_SIDE)
+    });
+    if too_small {
+        return None;
+    }
+    ["data-src", "data-original", "data-lazy-src", "src"]
+        .iter()
+        .find_map(|attr| img.attr(attr).filter(|v| !v.trim().is_empty()))
+        .map(str::to_owned)
 }
 
 /// The images a page's JSON-LD declares for what it sells or describes,
@@ -628,9 +730,9 @@ mod tests {
     }
 
     #[test]
-    fn a_page_without_hints_has_no_candidate() {
+    fn a_page_without_any_image_has_no_candidate() {
         assert!(
-            extract_cover_candidates("<html><body><img src=x.jpg></body></html>", &page())
+            extract_cover_candidates("<html><body><p>Catalogue</p></body></html>", &page())
                 .is_empty()
         );
         assert!(extract_cover_candidates("", &page()).is_empty());
@@ -756,6 +858,168 @@ mod tests {
     }
 
     #[test]
+    fn img_tags_come_last_lazy_sources_first_tracking_pixels_out() {
+        let html = r#"<meta property="og:image" content="https://example.org/og.jpg">
+            <img src="https://example.org/pixel.gif" width="1" height="1">
+            <img src="/placeholder.gif" data-src="/covers/real.jpg" alt="cover">
+            <img src="https://example.org/plain.jpg">
+            <img src="data:image/gif;base64,R0lGOD">"#;
+        let all: Vec<String> = extract_cover_candidates(html, &page())
+            .into_iter()
+            .map(|u| u.to_string())
+            .collect();
+        assert_eq!(
+            all,
+            vec![
+                "https://example.org/og.jpg",
+                "https://www.editions-exemple.fr/covers/real.jpg",
+                "https://example.org/plain.jpg",
+            ]
+        );
+    }
+
+    #[test]
+    fn images_named_after_the_isbn_come_first() {
+        let urls: Vec<Url> = [
+            "https://shop.example.org/img/og-default.jpg",
+            "https://cdn.example.net/0306406152-cover.jpg",
+            "https://cdn.example.net/9782290003299-475x500-1.jpg",
+            "https://cdn.example.net/other.jpg",
+        ]
+        .iter()
+        .map(|u| Url::parse(u).unwrap())
+        .collect();
+
+        let ranked = rank_by_isbn(urls.clone(), Some("978-2-290-00329-9"));
+        assert_eq!(
+            ranked[0].as_str(),
+            "https://cdn.example.net/9782290003299-475x500-1.jpg"
+        );
+        assert_eq!(
+            &ranked[1..],
+            &[urls[0].clone(), urls[1].clone(), urls[3].clone()]
+        );
+
+        // The ISBN-10 form counts too.
+        let ranked = rank_by_isbn(urls.clone(), Some("9780306406157"));
+        assert_eq!(
+            ranked[0].as_str(),
+            "https://cdn.example.net/0306406152-cover.jpg"
+        );
+
+        // No ISBN, or one that does not parse: the page order stands.
+        assert_eq!(rank_by_isbn(urls.clone(), None), urls);
+        assert_eq!(rank_by_isbn(urls.clone(), Some("not-an-isbn")), urls);
+    }
+
+    #[tokio::test]
+    async fn the_isbn_picks_the_book_image_over_the_page_hints() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/livre"))
+            .respond_with(html(format!(
+                r#"<meta property="og:image" content="{0}/og-default.jpg">
+                   <img src="{0}/9782290003299-475x500-1.jpg">"#,
+                server.uri()
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(JPEG.to_vec(), "image/jpeg"))
+            .mount(&server)
+            .await;
+
+        let url = Url::parse(&format!("{}/livre", server.uri())).unwrap();
+        let cover = fetch_cover_with_policy(
+            url,
+            FetchPolicy::PublicOrLoopbackForTests,
+            PICK_DEADLINE,
+            Some("9782290003299".to_owned()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            cover.image_url,
+            format!("{}/9782290003299-475x500-1.jpg", server.uri())
+        );
+        assert_eq!(
+            cover.candidates,
+            vec![
+                format!("{}/9782290003299-475x500-1.jpg", server.uri()),
+                format!("{}/og-default.jpg", server.uri()),
+            ],
+            "every candidate is handed back for the preview to step through"
+        );
+    }
+
+    #[tokio::test]
+    async fn hands_back_a_bounded_list_of_candidates() {
+        let server = MockServer::start().await;
+        let imgs: String = (0..30)
+            .map(|i| format!(r#"<img src="{}/c{i}.jpg">"#, server.uri()))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/livre"))
+            .respond_with(html(imgs))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(JPEG.to_vec(), "image/jpeg"))
+            .mount(&server)
+            .await;
+
+        let cover = fetch_test(format!("{}/livre", server.uri())).await.unwrap();
+        assert_eq!(cover.candidates.len(), MAX_LISTED_CANDIDATES);
+    }
+
+    #[tokio::test]
+    async fn a_pasted_image_is_its_own_only_candidate() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(JPEG.to_vec(), "image/jpeg"))
+            .mount(&server)
+            .await;
+        let url = format!("{}/couv.jpg", server.uri());
+        let cover = fetch_test(url.clone()).await.unwrap();
+        assert_eq!(cover.candidates, vec![url]);
+    }
+
+    #[tokio::test]
+    async fn fetches_one_chosen_candidate() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/couv.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(JPEG.to_vec(), "image/jpeg"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/page"))
+            .respond_with(html("<html></html>".to_owned()))
+            .mount(&server)
+            .await;
+
+        let image = |p: &str| Url::parse(&format!("{}{p}", server.uri())).unwrap();
+        let cover =
+            fetch_image_with_policy(image("/couv.jpg"), FetchPolicy::PublicOrLoopbackForTests)
+                .await
+                .unwrap();
+        assert_eq!(cover.bytes, JPEG);
+        assert!(cover.candidates.is_empty());
+
+        // A candidate is an image or nothing: never parsed as a page.
+        let err = fetch_image_with_policy(image("/page"), FetchPolicy::PublicOrLoopbackForTests)
+            .await
+            .unwrap_err();
+        assert_eq!(err, WebCoverError::UnsupportedImage);
+
+        // The address comes back from the app: it is checked again.
+        let err = fetch_cover_image("https://192.168.1.10/couv.jpg")
+            .await
+            .unwrap_err();
+        assert_eq!(err, WebCoverError::Fetch(PublicFetchError::BlockedAddress));
+    }
+
+    #[test]
     fn error_codes_are_stable() {
         assert_eq!(WebCoverError::NoImageFound.code(), "no_image_found");
         assert_eq!(
@@ -769,6 +1033,7 @@ mod tests {
             Url::parse(&url).unwrap(),
             FetchPolicy::PublicOrLoopbackForTests,
             PICK_DEADLINE,
+            None,
         )
         .await
     }
@@ -891,9 +1156,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tries_a_bounded_number_of_candidates() {
+    async fn tries_every_listed_candidate_and_no_more() {
+        // The cover may well be the fourth declared image: every candidate
+        // kept is tried, but a page declaring more cannot make us fire a
+        // request per tag.
         let server = MockServer::start().await;
-        let metas: String = (0..6)
+        let metas: String = (0..MAX_LISTED_CANDIDATES + 5)
             .map(|i| {
                 format!(
                     r#"<meta property="og:image" content="{}/c{i}.jpg">"#,
@@ -907,9 +1175,9 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(wiremock::matchers::path_regex(r"^/c\d\.jpg$"))
+            .and(wiremock::matchers::path_regex(r"^/c\d+\.jpg$"))
             .respond_with(ResponseTemplate::new(404))
-            .expect(MAX_IMAGE_CANDIDATES as u64)
+            .expect(MAX_LISTED_CANDIDATES as u64)
             .mount(&server)
             .await;
 
@@ -936,6 +1204,7 @@ mod tests {
             Url::parse(&format!("{}/couv.jpg", server.uri())).unwrap(),
             FetchPolicy::PublicOrLoopbackForTests,
             std::time::Duration::from_millis(200),
+            None,
         )
         .await
         .unwrap_err();
