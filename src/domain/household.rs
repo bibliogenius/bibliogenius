@@ -289,7 +289,11 @@ pub trait HouseholdRepository: Send + Sync {
         self.find_reader(&id).await
     }
 
-    /// Add a reader to the household and make it the reader of this device.
+    /// Add a reader to the household. It becomes the reader of this device
+    /// only when nobody reads here yet: on a device still on the shared view,
+    /// the person creating a reader is creating themselves; on a device that
+    /// already has one, they are adding someone else, and the readings shown
+    /// must not switch to that newcomer's empty record.
     ///
     /// The FIRST reader of a household inherits the reading state already
     /// recorded on the books: it is the owner's history, typed before the
@@ -308,7 +312,9 @@ pub trait HouseholdRepository: Send + Sync {
         if first {
             self.inherit_book_readings(&reader.id).await?;
         }
-        self.store_current_reader_id(&reader.id).await?;
+        if self.current_reader().await?.is_none() {
+            self.store_current_reader_id(&reader.id).await?;
+        }
         Ok(reader)
     }
 

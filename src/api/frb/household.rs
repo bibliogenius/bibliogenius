@@ -41,8 +41,9 @@ pub async fn get_current_household_reader() -> Result<Option<FrbReader>, String>
         .map_err(|e| format!("{e:?}"))
 }
 
-/// Add a reader to the household and make them the reader of this device. The
-/// first reader of a household inherits the reading state already on the books.
+/// Add a reader to the household. They become the reader of this device only
+/// if nobody reads here yet. The first reader of a household inherits the
+/// reading state already on the books.
 pub async fn create_household_reader(name: String) -> Result<FrbReader, String> {
     let db = db().ok_or("Database not initialized")?;
     crate::services::household_service::create_reader(db, &name)

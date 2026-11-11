@@ -340,6 +340,14 @@ mod tests {
         book_service::get_book(db, id).await.unwrap()
     }
 
+    /// A person joining the household on this device: created, then chosen.
+    async fn join(db: &DatabaseConnection, name: &str) {
+        let reader = household_service::create_reader(db, name).await.unwrap();
+        household_service::set_current_reader(db, &reader.id)
+            .await
+            .unwrap();
+    }
+
     const EXPORT: &str = r#"{
         "version": "1",
         "books": [
@@ -368,9 +376,7 @@ mod tests {
         let owner = household_service::create_reader(&db, "Bruno")
             .await
             .unwrap();
-        household_service::create_reader(&db, "Alice")
-            .await
-            .unwrap();
+        join(&db, "Alice").await;
 
         let report = import_readings(&db, EXPORT).await.unwrap();
         assert_eq!(report.matched, 1, "Dune, matched across ISBN-10/13");
@@ -471,9 +477,7 @@ mod tests {
         household_service::create_reader(&db, "Bruno")
             .await
             .unwrap();
-        household_service::create_reader(&db, "Alice")
-            .await
-            .unwrap();
+        join(&db, "Alice").await;
 
         let report = import_readings(&db, EXPORT).await.unwrap();
         assert_eq!(report.matched, 1);
