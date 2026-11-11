@@ -163,8 +163,8 @@ pub struct CoverOrigin {
 }
 
 /// Record (or replace) where the current cover of `book_uuid` came from.
-pub async fn set_cover_origin(
-    db: &DatabaseConnection,
+pub async fn set_cover_origin<C: ConnectionTrait>(
+    db: &C,
     book_uuid: &str,
     origin: &CoverOrigin,
 ) -> Result<(), DbErr> {
@@ -187,8 +187,8 @@ pub async fn set_cover_origin(
 
 /// The recorded cover origin of one book, if any. Whether it still describes
 /// the cover on disk is the caller's check (compare the digest).
-pub async fn cover_origin(
-    db: &DatabaseConnection,
+pub async fn cover_origin<C: ConnectionTrait>(
+    db: &C,
     book_uuid: &str,
 ) -> Result<Option<CoverOrigin>, DbErr> {
     let row = db

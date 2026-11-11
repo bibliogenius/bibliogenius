@@ -26,7 +26,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::utils::cover_image::COVER_MAX_INPUT_BYTES;
-use crate::utils::public_fetch::{self, FetchPolicy, PublicFetchError};
+use crate::utils::public_fetch::{self, BodyCap, FetchPolicy, PublicFetchError, upgrade_to_https};
 
 /// Cap on an HTML page. A publisher's book page is far below this; the cap
 /// only bounds what a hostile or broken server can make us hold in memory.
@@ -107,6 +107,7 @@ pub(crate) async fn fetch_cover_with_policy(
 async fn pick_cover(url: Url, policy: FetchPolicy) -> Result<WebCover, WebCoverError> {
     let page = public_fetch::fetch_with_policy(url.clone(), &body_cap, policy).await?;
     if sniff_image(&page.bytes).is_some() {
+        check_usable_image(&page.bytes)?;
         return Ok(WebCover {
             bytes: page.bytes,
             image_url: url.to_string(),
@@ -120,15 +121,13 @@ async fn pick_cover(url: Url, policy: FetchPolicy) -> Result<WebCover, WebCoverE
         // An image, but not one we can decode (SVG, AVIF...).
         return Err(WebCoverError::UnsupportedImage);
     }
-    // An untyped body was read up to the image cap; as a page it gets the
-    // page cap.
-    if page.bytes.len() > MAX_PAGE_BYTES {
-        return Err(PublicFetchError::TooLarge.into());
-    }
+    // An untyped body was read up to the image cap; as a page, only its first
+    // MAX_PAGE_BYTES are parsed, like a typed one.
+    let head = &page.bytes[..page.bytes.len().min(MAX_PAGE_BYTES)];
 
     // Parsing a page of up to MAX_PAGE_BYTES is CPU work: keep it off the
     // async runtime's worker threads.
-    let html = String::from_utf8_lossy(&page.bytes).into_owned();
+    let html = String::from_utf8_lossy(head).into_owned();
     let page_url = page.final_url;
     let candidates =
         tokio::task::spawn_blocking(move || extract_cover_candidates(&html, &page_url))
@@ -150,48 +149,123 @@ async fn pick_cover(url: Url, policy: FetchPolicy) -> Result<WebCover, WebCoverE
     // The last failure is reported when none works.
     let mut error = WebCoverError::NoImageFound;
     for image_url in usable {
-        match public_fetch::fetch_with_policy(image_url.clone(), &|_| COVER_MAX_INPUT_BYTES, policy)
-            .await
+        match public_fetch::fetch_with_policy(
+            image_url.clone(),
+            &|_| BodyCap::Refuse(COVER_MAX_INPUT_BYTES),
+            policy,
+        )
+        .await
         {
-            Ok(image) if sniff_image(&image.bytes).is_some() => {
+            Ok(image) if check_usable_image(&image.bytes).is_ok() => {
                 return Ok(WebCover {
                     bytes: image.bytes,
                     image_url: image_url.to_string(),
                 });
             }
-            Ok(_) => error = WebCoverError::UnsupportedImage,
+            Ok(image) => {
+                error = check_usable_image(&image.bytes)
+                    .err()
+                    .unwrap_or(WebCoverError::UnsupportedImage)
+            }
             Err(e) => error = e.into(),
         }
     }
     Err(error)
 }
 
-/// Body cap by content type: HTML pages get the page cap, anything else may be
-/// the image itself.
-fn body_cap(content_type: Option<&str>) -> usize {
+/// Body cap by content type. An HTML page is cut at the page cap rather than
+/// refused: its hints sit in its head. Anything else may be the image itself.
+fn body_cap(content_type: Option<&str>) -> BodyCap {
     match content_type {
         Some(ct) if ct.starts_with("text/html") || ct.starts_with("application/xhtml") => {
-            MAX_PAGE_BYTES
+            BodyCap::Truncate(MAX_PAGE_BYTES)
         }
-        _ => COVER_MAX_INPUT_BYTES,
+        _ => BodyCap::Refuse(COVER_MAX_INPUT_BYTES),
     }
 }
 
-/// Many older publisher sites still declare `http://` image links while
-/// serving the same path over https. Try the https form rather than dropping
-/// the candidate; anything else than http(s) is dropped.
-fn upgrade_to_https(mut url: Url) -> Option<Url> {
-    match url.scheme() {
-        "https" => Some(url),
-        "http" => {
-            url.set_scheme("https").ok()?;
-            // An explicit :80 would not survive the scheme change sensibly.
-            if url.port().is_some() {
-                return None;
+/// Largest image, in pixels, the app decodes from the web. Mirrors
+/// `CoverCameraHelper.webMaxSourcePixels` on the app side, which checks the
+/// declared size of every format; this side adds what the app cannot check.
+const WEB_MAX_SOURCE_PIXELS: u64 = 12_000_000;
+
+/// Whether fetched bytes can be handed to the app's cover pipeline: a format
+/// it decodes, and for PNG, data that cannot blow up once inflated.
+fn check_usable_image(bytes: &[u8]) -> Result<(), WebCoverError> {
+    match sniff_image(bytes) {
+        Some("png") => check_png(bytes),
+        Some(_) => Ok(()),
+        None => Err(WebCoverError::UnsupportedImage),
+    }
+}
+
+/// Refuses a PNG whose image data inflates to more than its header allows.
+///
+/// The app's PNG decoder inflates all the IDAT data in one go, whatever size
+/// the header declares: a few kilobytes of compressed zeros can expand to
+/// gigabytes and get the app killed. Here the data is inflated in small
+/// pieces, at constant memory, and counted against the raw size the header
+/// implies. An animated PNG is refused outright, like an animated WebP: a
+/// cover is a still image. Data that is merely corrupt is let through, for
+/// the app's decoder to report as unreadable.
+fn check_png(bytes: &[u8]) -> Result<(), WebCoverError> {
+    use std::io::Read;
+
+    let mut header: Option<(u64, u64, u64, u8)> = None;
+    let mut idat = Vec::new();
+    let mut pos = 8;
+    while pos + 8 <= bytes.len() {
+        let len = u32::from_be_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+        let kind = &bytes[pos + 4..pos + 8];
+        let start = pos + 8;
+        let Some(end) = start.checked_add(len).filter(|end| *end <= bytes.len()) else {
+            break;
+        };
+        let data = &bytes[start..end];
+        match kind {
+            b"IHDR" if data.len() >= 13 => {
+                let width = u32::from_be_bytes(data[0..4].try_into().unwrap()) as u64;
+                let height = u32::from_be_bytes(data[4..8].try_into().unwrap()) as u64;
+                let channels = match data[9] {
+                    0 | 3 => 1,
+                    4 => 2,
+                    2 => 3,
+                    6 => 4,
+                    _ => return Err(WebCoverError::UnsupportedImage),
+                };
+                header = Some((width, height, channels * u64::from(data[8]), data[12]));
             }
-            Some(url)
+            b"acTL" => return Err(WebCoverError::UnsupportedImage),
+            b"IDAT" => idat.extend_from_slice(data),
+            b"IEND" => break,
+            _ => {}
         }
-        _ => None,
+        pos = end + 4; // skip the CRC
+    }
+    let Some((width, height, bits_per_pixel, interlace)) = header else {
+        return Err(WebCoverError::UnsupportedImage);
+    };
+    if width.saturating_mul(height) > WEB_MAX_SOURCE_PIXELS {
+        return Err(PublicFetchError::TooLarge.into());
+    }
+    // One filter byte per row; interlacing splits the image into seven passes
+    // with their own rows, so it gets a generous margin.
+    let raw = height * ((width * bits_per_pixel).div_ceil(8) + 1);
+    let limit = if interlace == 0 { raw } else { raw * 2 } + 1024;
+
+    let mut inflater = flate2::read::ZlibDecoder::new(idat.as_slice());
+    let mut buf = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        match inflater.read(&mut buf) {
+            Ok(0) | Err(_) => return Ok(()),
+            Ok(n) => {
+                total += n as u64;
+                if total > limit {
+                    return Err(PublicFetchError::TooLarge.into());
+                }
+            }
+        }
     }
 }
 
@@ -230,6 +304,7 @@ static META_IMAGE: LazyLock<Vec<Selector>> = LazyLock::new(|| {
     .map(|s| Selector::parse(s).unwrap())
     .collect()
 });
+static BASE: LazyLock<Selector> = LazyLock::new(|| Selector::parse("base[href]").unwrap());
 static IMAGE_SRC: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(r#"link[rel~="image_src"]"#).unwrap());
 
@@ -262,13 +337,21 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
     );
     raw.append(&mut json_ld.other_products);
 
+    // Relative links resolve against `<base href>` when the page sets one.
+    let base = doc
+        .select(&BASE)
+        .next()
+        .and_then(|el| el.value().attr("href"))
+        .and_then(|href| page_url.join(href.trim()).ok())
+        .unwrap_or_else(|| page_url.clone());
+
     let mut out: Vec<Url> = Vec::new();
     for candidate in raw {
         let candidate = candidate.trim();
         if candidate.is_empty() {
             continue;
         }
-        let Ok(url) = page_url.join(candidate) else {
+        let Ok(url) = base.join(candidate) else {
             continue;
         };
         if matches!(url.scheme(), "http" | "https") && !out.contains(&url) {
@@ -402,6 +485,16 @@ mod tests {
         assert_eq!(
             first(html).as_deref(),
             Some("https://img.editions-exemple.fr/42.jpg")
+        );
+    }
+
+    #[test]
+    fn resolves_relative_links_against_the_base_element() {
+        let html = r#"<head><base href="https://static.example.org/site/">
+            <meta property="og:image" content="img/couv.jpg"></head>"#;
+        assert_eq!(
+            first(html).as_deref(),
+            Some("https://static.example.org/site/img/couv.jpg")
         );
     }
 
@@ -544,14 +637,6 @@ mod tests {
     }
 
     #[test]
-    fn upgrades_http_links_to_https() {
-        let up = upgrade_to_https(Url::parse("http://example.org/a.jpg").unwrap()).unwrap();
-        assert_eq!(up.as_str(), "https://example.org/a.jpg");
-        assert!(upgrade_to_https(Url::parse("http://example.org:8080/a.jpg").unwrap()).is_none());
-        assert!(upgrade_to_https(Url::parse("ftp://example.org/a.jpg").unwrap()).is_none());
-    }
-
-    #[test]
     fn sniffs_supported_image_formats() {
         assert_eq!(sniff_image(JPEG), Some("jpeg"));
         assert_eq!(
@@ -615,6 +700,61 @@ mod tests {
         assert_eq!(cover.image_url, format!("{}/couv.jpg", server.uri()));
     }
 
+    /// A PNG with the given header, whose IDAT is `pixels` zero bytes
+    /// compressed (a flat image compresses to almost nothing).
+    fn png(width: u32, height: u32, inflated: usize, animated: bool) -> Vec<u8> {
+        use std::io::Write;
+        fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            out.extend_from_slice(kind);
+            out.extend_from_slice(data);
+            out.extend_from_slice(&[0, 0, 0, 0]); // CRC, not checked here
+        }
+        let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA, not interlaced
+        chunk(&mut out, b"IHDR", &ihdr);
+        if animated {
+            chunk(&mut out, b"acTL", &[0, 0, 0, 2, 0, 0, 0, 0]);
+        }
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        z.write_all(&vec![0u8; inflated]).unwrap();
+        chunk(&mut out, b"IDAT", &z.finish().unwrap());
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    #[test]
+    fn a_png_whose_data_inflates_past_its_size_is_refused() {
+        // 100x100 RGBA holds 100 * (1 + 400) bytes once inflated; this one
+        // expands to 50 MB from a few dozen kilobytes.
+        let bomb = png(100, 100, 50 * 1024 * 1024, false);
+        assert!(bomb.len() < 200 * 1024, "the bomb is small: {}", bomb.len());
+        assert_eq!(
+            check_png(&bomb),
+            Err(WebCoverError::Fetch(PublicFetchError::TooLarge))
+        );
+    }
+
+    #[test]
+    fn an_honest_png_passes() {
+        assert_eq!(check_png(&png(100, 100, 100 * 401, false)), Ok(()));
+    }
+
+    #[test]
+    fn a_png_declaring_too_many_pixels_or_animated_is_refused() {
+        assert_eq!(
+            check_png(&png(6000, 6000, 10, false)),
+            Err(WebCoverError::Fetch(PublicFetchError::TooLarge))
+        );
+        assert_eq!(
+            check_png(&png(100, 100, 100 * 401, true)),
+            Err(WebCoverError::UnsupportedImage)
+        );
+    }
+
     #[test]
     fn error_codes_are_stable() {
         assert_eq!(WebCoverError::NoImageFound.code(), "no_image_found");
@@ -675,9 +815,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn holds_an_untyped_page_to_the_page_cap() {
+    async fn parses_only_the_head_of_a_long_page() {
         // Without a Content-Type the body may be an image, so it is read up to
-        // the image cap; once it turns out not to be one, the page cap applies.
+        // the image cap; once it turns out not to be one, only its first
+        // MAX_PAGE_BYTES are parsed as a page.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; MAX_PAGE_BYTES + 1]))
@@ -686,7 +827,31 @@ mod tests {
         let err = fetch_test(format!("{}/livre", server.uri()))
             .await
             .unwrap_err();
-        assert_eq!(err, WebCoverError::Fetch(PublicFetchError::TooLarge));
+        assert_eq!(err, WebCoverError::NoImageFound);
+    }
+
+    #[tokio::test]
+    async fn reads_the_hints_of_a_page_longer_than_the_cap() {
+        // A product page can exceed the cap in raw HTML; its hints are in the
+        // head, so the page is cut rather than refused.
+        let server = MockServer::start().await;
+        let mut page = format!(
+            r#"<html><head><meta property="og:image" content="{}/couv.jpg"></head><body>"#,
+            server.uri()
+        );
+        page.push_str(&"x".repeat(MAX_PAGE_BYTES + 10));
+        Mock::given(method("GET"))
+            .and(path("/livre"))
+            .respond_with(html(page))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/couv.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(JPEG.to_vec(), "image/jpeg"))
+            .mount(&server)
+            .await;
+        let cover = fetch_test(format!("{}/livre", server.uri())).await.unwrap();
+        assert_eq!(cover.image_url, format!("{}/couv.jpg", server.uri()));
     }
 
     #[tokio::test]

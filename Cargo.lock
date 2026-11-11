@@ -381,6 +381,7 @@ dependencies = [
  "dashmap",
  "dotenvy",
  "ed25519-dalek",
+ "flate2",
  "flutter_rust_bridge",
  "futures",
  "hex",

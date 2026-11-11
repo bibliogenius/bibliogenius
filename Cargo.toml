@@ -172,6 +172,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # flate2 + a couple of others; the compile cost is acceptable and we want
 # a simple, well-tested feature set for archive interop.
 zip = "2"
+# Streaming inflate of a PNG fetched from the web, to bound what its IDAT data
+# expands to before the app decodes it (already in the tree through zip).
+flate2 = "1"
 # HTML parsing for the "cover from a web page" picker: reads the og:image /
 # JSON-LD / image_src hints of a publisher page. No default features: "main"
 # is the CLI binary (getopts) and "errors" keeps parse-error strings we never

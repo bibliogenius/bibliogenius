@@ -499,6 +499,20 @@ async fn merge_one(
     // has to be taken before that happens.
     preserve_collection_membership(&txn, &canonical_id, &duplicate_ids).await?;
 
+    // A rescued cover file keeps its bytes, so the web origin recorded for it
+    // (`book_local`) still describes it: carry it to the survivor before the
+    // duplicate's sidecar row is deleted below.
+    if let Some((from, _)) = &cover_rescue
+        && let Some(source_id) = from.file_stem().and_then(|stem| stem.to_str())
+        && let Some(origin) = crate::infrastructure::book_local::cover_origin(&txn, source_id)
+            .await
+            .map_err(db_err)?
+    {
+        crate::infrastructure::book_local::set_cover_origin(&txn, &canonical_id, &origin)
+            .await
+            .map_err(db_err)?;
+    }
+
     for reference in plan {
         rewire_reference(&txn, reference, &canonical_id, &duplicate_ids).await?;
     }
@@ -1751,6 +1765,40 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(survivor.cover_url.as_deref(), Some("old.jpg"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_rescued_cover_keeps_its_web_origin() {
+        use crate::infrastructure::book_local;
+        use crate::services::web_cover_service::current_cover_origin_url;
+
+        let db = setup_db().await;
+        let dir = std::env::temp_dir().join(format!(
+            "bg-merge-origin-{}",
+            crate::utils::uuid_gen::new_uuid_v7()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (id, at) in [
+            ("old", "2026-01-01T00:00:00Z"),
+            ("young", "2026-02-01T00:00:00Z"),
+        ] {
+            insert_book(&db, id, "Dune", Some("9782264024848"), at).await;
+        }
+        std::fs::write(dir.join("young.jpg"), b"bytes").unwrap();
+        let url = "https://cdn.example.org/dune.jpg";
+        crate::services::web_cover_service::record_cover_origin(&db, &dir, "young", url)
+            .await
+            .unwrap();
+
+        merge_automatic(&db, Some(dir.as_path())).await.unwrap();
+
+        // The bytes moved unchanged, so the origin still describes them.
+        assert_eq!(
+            current_cover_origin_url(&db, &dir, "old").await.unwrap(),
+            Some(url.to_owned())
+        );
+        assert_eq!(book_local::cover_origin(&db, "young").await.unwrap(), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 

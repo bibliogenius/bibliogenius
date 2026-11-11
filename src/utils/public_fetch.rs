@@ -53,6 +53,16 @@ pub enum PublicFetchError {
     TooLarge,
 }
 
+/// How much of a body a caller accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyCap {
+    /// Over this many bytes the fetch fails with [`PublicFetchError::TooLarge`].
+    Refuse(usize),
+    /// Only the first bytes are kept, the rest is not read: an HTML page whose
+    /// hints sit in its head need not be read to the end.
+    Truncate(usize),
+}
+
 /// A fetched body and where it actually came from.
 #[derive(Debug)]
 pub struct FetchedBody {
@@ -195,14 +205,56 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
             s[2] as u8,
         ));
     }
-    let blocked = s[..6] == [0, 0, 0, 0, 0, 0] // ::, ::1, IPv4-compatible
-        || (s[0] & 0xff00) == 0xff00 // multicast
-        || (s[0] & 0xfe00) == 0xfc00 // unique local
-        || (s[0] & 0xffc0) == 0xfe80 // link-local
-        || (s[0] & 0xffc0) == 0xfec0 // site-local (deprecated)
+    // An allowlist: only global unicast (2000::/3) can be public, so a range
+    // nobody listed (local-use NAT64 64:ff9b:1::/48, a future special block)
+    // is refused rather than trusted.
+    if (s[0] & 0xe000) != 0x2000 {
+        return false;
+    }
+    let blocked = (s[0] == 0x2001 && s[1] == 0) // Teredo, tunnels to IPv4
+        || (s[0] == 0x2001 && s[1] == 0x0002 && s[2] == 0) // benchmarking
+        || (s[0] == 0x2001 && (s[1] & 0xfff0) == 0x0020) // ORCHIDv2
         || (s[0] == 0x2001 && s[1] == 0x0db8) // documentation
-        || (s[0] == 0x0100 && s[1..4] == [0, 0, 0]); // discard prefix
+        || (s[0] == 0x3fff && s[1] < 0x1000); // documentation (3fff::/20)
     !blocked
+}
+
+/// Where a redirect leads. A 3xx without a usable target (300, 304) is an
+/// answer, not a hop. An old site bouncing through http is followed over
+/// https, as an http link found in a page is; the next hop is then checked
+/// like any other.
+fn redirect_target(
+    current: &Url,
+    location: Option<&str>,
+    status: u16,
+    policy: FetchPolicy,
+) -> Result<Url, PublicFetchError> {
+    let next = location
+        .and_then(|loc| current.join(loc).ok())
+        .ok_or(PublicFetchError::HttpStatus(status))?;
+    if policy.upgrades_http() {
+        upgrade_to_https(next).ok_or(PublicFetchError::InvalidUrl)
+    } else {
+        Ok(next)
+    }
+}
+
+/// Many older sites still link or redirect to `http://` while serving the same
+/// path over https: the https form is tried rather than the address refused.
+/// Anything else than http(s), or an explicit port that would not survive the
+/// change, gives `None`.
+pub(crate) fn upgrade_to_https(mut url: Url) -> Option<Url> {
+    match url.scheme() {
+        "https" => Some(url),
+        "http" => {
+            if url.port().is_some() {
+                return None;
+            }
+            url.set_scheme("https").ok()?;
+            Some(url)
+        }
+        _ => None,
+    }
 }
 
 /// Resolve the URL's host and return its addresses, all of them public. IP
@@ -237,13 +289,13 @@ async fn resolve_checked(url: &Url) -> Result<Vec<SocketAddr>, PublicFetchError>
 /// Fetch `start` (checked with [`parse_public_https_url`] by the caller) under
 /// `policy`, following redirects by hand.
 ///
-/// `max_bytes` picks the body cap from the response's content type (lowercased,
+/// `body_cap` picks the body cap from the response's content type (lowercased,
 /// `None` when absent), so an HTML page and an image can be held to different
 /// limits by one call. The policy is a parameter so tests can point the loop at
 /// a loopback mock server.
 pub(crate) async fn fetch_with_policy(
     start: Url,
-    max_bytes: &(dyn Fn(Option<&str>) -> usize + Sync),
+    body_cap: &(dyn Fn(Option<&str>) -> BodyCap + Sync),
     policy: FetchPolicy,
 ) -> Result<FetchedBody, PublicFetchError> {
     let mut url = start;
@@ -272,14 +324,11 @@ pub(crate) async fn fetch_with_policy(
         let status = resp.status();
 
         if status.is_redirection() {
-            // A 3xx without a usable target (300, 304) is an answer, not a hop.
-            let next = resp
+            let location = resp
                 .headers()
                 .get(reqwest::header::LOCATION)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|loc| url.join(loc).ok())
-                .ok_or(PublicFetchError::HttpStatus(status.as_u16()))?;
-            url = next;
+                .and_then(|v| v.to_str().ok());
+            url = redirect_target(&url, location, status.as_u16(), policy)?;
             continue;
         }
         if !status.is_success() {
@@ -291,14 +340,21 @@ pub(crate) async fn fetch_with_policy(
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(|v| v.to_ascii_lowercase());
-        let cap = max_bytes(content_type.as_deref());
-        if resp.content_length().is_some_and(|len| len > cap as u64) {
+        let (cap, truncate) = match body_cap(content_type.as_deref()) {
+            BodyCap::Refuse(cap) => (cap, false),
+            BodyCap::Truncate(cap) => (cap, true),
+        };
+        if !truncate && resp.content_length().is_some_and(|len| len > cap as u64) {
             return Err(PublicFetchError::TooLarge);
         }
         let mut bytes = Vec::new();
         while let Some(chunk) = resp.chunk().await.map_err(|_| PublicFetchError::Network)? {
             if bytes.len() + chunk.len() > cap {
-                return Err(PublicFetchError::TooLarge);
+                if !truncate {
+                    return Err(PublicFetchError::TooLarge);
+                }
+                bytes.extend_from_slice(&chunk[..cap - bytes.len()]);
+                break;
             }
             bytes.extend_from_slice(&chunk);
         }
@@ -387,6 +443,33 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_is_public_only_inside_global_unicast() {
+        // An allowlist, not a denylist: anything outside 2000::/3 is refused,
+        // so a range nobody thought of cannot slip through as "public".
+        for ip in [
+            "64:ff9b:1::a00:1", // local-use NAT64, may front a private IPv4
+            "2001::1",          // Teredo, tunnels to an IPv4 host
+            "2001:0:4136:e378::1",
+            "2001:2::1",  // benchmarking
+            "2001:20::1", // ORCHIDv2
+            "3fff::1",    // documentation (2024)
+            "4000::1",    // unallocated, outside 2000::/3
+            "1::1",
+            "::ffff:0:a00:1", // IPv4-translated
+        ] {
+            assert!(!is_public_ip(ip.parse().unwrap()), "{ip} should be blocked");
+        }
+        for ip in [
+            "2606:4700::1111",
+            "2a00:1450:4007::1",
+            "2001:4860:4860::8888",
+            "2400:cb00::1",
+        ] {
+            assert!(is_public_ip(ip.parse().unwrap()), "{ip} should be public");
+        }
+    }
+
+    #[test]
     fn classifies_ip_ranges() {
         let public = [
             "1.1.1.1",
@@ -426,13 +509,13 @@ mod tests {
         assert!(is_public_ip("64:ff9b::808:808".parse().unwrap()));
     }
 
-    fn no_cap(_: Option<&str>) -> usize {
-        usize::MAX
+    fn no_cap(_: Option<&str>) -> BodyCap {
+        BodyCap::Refuse(usize::MAX)
     }
 
     async fn fetch_test(
         url: String,
-        cap: &(dyn Fn(Option<&str>) -> usize + Sync),
+        cap: &(dyn Fn(Option<&str>) -> BodyCap + Sync),
     ) -> Result<FetchedBody, PublicFetchError> {
         fetch_with_policy(
             Url::parse(&url).unwrap(),
@@ -540,6 +623,55 @@ mod tests {
         assert_eq!(err, PublicFetchError::HttpStatus(300));
     }
 
+    #[test]
+    fn a_redirect_through_http_is_followed_over_https() {
+        let here = Url::parse("https://www.example.org/livre/42").unwrap();
+        let next = redirect_target(
+            &here,
+            Some("http://img.example.org/couv.jpg"),
+            301,
+            FetchPolicy::PublicInternet,
+        )
+        .unwrap();
+        assert_eq!(next.as_str(), "https://img.example.org/couv.jpg");
+        assert_eq!(
+            redirect_target(
+                &here,
+                Some("ftp://x.org/a"),
+                301,
+                FetchPolicy::PublicInternet
+            ),
+            Err(PublicFetchError::InvalidUrl)
+        );
+        assert_eq!(
+            redirect_target(&here, None, 304, FetchPolicy::PublicInternet),
+            Err(PublicFetchError::HttpStatus(304))
+        );
+    }
+
+    #[test]
+    fn upgrades_http_links_to_https() {
+        let up = upgrade_to_https(Url::parse("http://example.org/a.jpg").unwrap()).unwrap();
+        assert_eq!(up.as_str(), "https://example.org/a.jpg");
+        assert!(upgrade_to_https(Url::parse("http://example.org:8080/a.jpg").unwrap()).is_none());
+        assert!(upgrade_to_https(Url::parse("ftp://example.org/a.jpg").unwrap()).is_none());
+    }
+
+    #[tokio::test]
+    async fn truncates_a_body_that_may_be_cut() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(vec![b'x'; 5000], "text/html"))
+            .mount(&server)
+            .await;
+        let body = fetch_test(format!("{}/page", server.uri()), &|_| {
+            BodyCap::Truncate(1000)
+        })
+        .await
+        .unwrap();
+        assert_eq!(body.bytes.len(), 1000);
+    }
+
     #[tokio::test]
     async fn reports_http_errors() {
         let server = MockServer::start().await;
@@ -563,9 +695,9 @@ mod tests {
             .await;
         let cap = |ct: Option<&str>| {
             if ct.is_some_and(|c| c.starts_with("text/html")) {
-                1000
+                BodyCap::Refuse(1000)
             } else {
-                usize::MAX
+                BodyCap::Refuse(usize::MAX)
             }
         };
         let err = fetch_test(format!("{}/page", server.uri()), &cap)
