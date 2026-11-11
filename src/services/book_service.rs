@@ -1741,12 +1741,6 @@ pub async fn enrich_missing_covers(
 ) -> Result<i32, ServiceError> {
     use crate::models::installation_profile::Entity as ProfileEntity;
 
-    // Cleanup: re-validate existing OpenLibrary cover URLs that may be
-    // false positives (stored before the ?default=false validation fix).
-    // OpenLibrary returns 200 + redirect for ALL ISBNs unless ?default=false
-    // is used, so previously stored URLs may point to 1x1 transparent pixels.
-    cleanup_stale_openlibrary_covers(db).await;
-
     let books = book_repo
         .find_missing_covers()
         .await
@@ -2574,76 +2568,6 @@ async fn fetch_book_title_author(
         .filter(|t| !t.trim().is_empty());
     let author = fetch_book_author_names(db, book_id).await;
     (title, author)
-}
-
-/// One-time cleanup: re-validate OpenLibrary cover URLs stored before the
-/// `?default=false` fix. Without that parameter, OpenLibrary returns 200 for ALL
-/// ISBNs (redirecting to a 1x1 transparent pixel), so many stored URLs are
-/// false positives. This clears invalid ones so they can be re-enriched from
-/// better sources (Inventaire, BNF, etc.).
-async fn cleanup_stale_openlibrary_covers(db: &DatabaseConnection) {
-    use crate::models::book::Column;
-
-    let stale_models = match BookEntity::find()
-        .filter(Column::CoverUrl.starts_with("https://covers.openlibrary.org/b/isbn/"))
-        .filter(Column::Isbn.is_not_null())
-        .all(db)
-        .await
-    {
-        Ok(models) => models,
-        Err(_) => return,
-    };
-
-    if stale_models.is_empty() {
-        return;
-    }
-
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    let mut cleared = 0;
-    for model in &stale_models {
-        let isbn = model.isbn.as_deref().unwrap_or("").trim();
-        if isbn.is_empty() {
-            continue;
-        }
-
-        let check_url = format!(
-            "https://covers.openlibrary.org/b/isbn/{}-L.jpg?default=false",
-            isbn
-        );
-
-        let is_valid = match client.head(&check_url).send().await {
-            Ok(resp) => resp.status().is_success(),
-            Err(_) => true, // Keep on network error (don't delete data on failure)
-        };
-
-        if !is_valid {
-            let _ = BookEntity::update_many()
-                .col_expr(
-                    Column::CoverUrl,
-                    sea_orm::sea_query::Expr::value(Option::<String>::None),
-                )
-                .filter(Column::Id.eq(model.id.as_str()))
-                .exec(db)
-                .await;
-            cleared += 1;
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-
-    if cleared > 0 {
-        tracing::info!(
-            "Cleared {cleared}/{} stale OpenLibrary cover URLs",
-            stale_models.len()
-        );
-    }
 }
 
 /// Load the Google Books API key from the installation profile.
