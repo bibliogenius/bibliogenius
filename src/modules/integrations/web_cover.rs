@@ -423,7 +423,7 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
     // which a page without hints often lists first.
     let (chrome, content): (Vec<_>, Vec<_>) = doc
         .select(&IMG)
-        .filter_map(|el| img_source(el.value()).map(|src| (is_site_chrome(&el, &src), src)))
+        .filter_map(|el| img_source(el.value()).map(|src| (is_site_chrome(&el), src)))
         .partition(|(chrome, _)| *chrome);
     raw.extend(content.into_iter().map(|(_, src)| src));
     raw.extend(chrome.into_iter().map(|(_, src)| src));
@@ -471,39 +471,37 @@ fn img_source(img: &scraper::node::Element) -> Option<String> {
 }
 
 /// Words that mark an image as part of the site rather than of the page's
-/// content, in its id, class, alt text or file name.
+/// content, in its id or class. Not in its alt text or file name: those
+/// carry the book's title, and a book can be called "No Logo".
 const CHROME_WORDS: [&str; 6] = ["logo", "icon", "avatar", "banner", "sprite", "favicon"];
 
 /// Whether an `<img>` looks like part of the site (logo, menu, footer
-/// badge) rather than the book shown: inside `<header>`, `<nav>` or
-/// `<footer>`, or named so. `src` is the address [`img_source`] kept, whose
-/// file name counts, not the placeholder a lazy-loaded image has in `src`.
-fn is_site_chrome(img: &scraper::ElementRef, src: &str) -> bool {
-    let in_chrome = img.ancestors().any(|node| {
-        node.value()
-            .as_element()
-            .is_some_and(|e| matches!(e.name(), "header" | "nav" | "footer"))
-    });
-    if in_chrome {
+/// badge) rather than the book shown: inside the site's `<header>`, `<nav>`
+/// or `<footer>` (an `<article>` or `<main>` has headers of its own, which
+/// hold content), or with an id or class that says so.
+fn is_site_chrome(img: &scraper::ElementRef) -> bool {
+    let names: Vec<&str> = img
+        .ancestors()
+        .filter_map(|node| node.value().as_element().map(|e| e.name()))
+        .collect();
+    let in_content = names.iter().any(|n| matches!(*n, "article" | "main"));
+    let in_chrome = names
+        .iter()
+        .any(|n| matches!(*n, "header" | "nav" | "footer"));
+    if in_chrome && !in_content {
         return true;
     }
     let element = img.value();
-    let file_name = src.rsplit('/').next().unwrap_or_default();
-    [
-        element.attr("id"),
-        element.attr("class"),
-        element.attr("alt"),
-        Some(file_name),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|text| {
-        text.split(|c: char| !c.is_alphanumeric()).any(|token| {
-            let token = token.to_lowercase();
-            let singular = token.strip_suffix('s').unwrap_or(&token);
-            CHROME_WORDS.contains(&singular)
+    [element.attr("id"), element.attr("class")]
+        .into_iter()
+        .flatten()
+        .any(|text| {
+            text.split(|c: char| !c.is_alphanumeric()).any(|token| {
+                let token = token.to_lowercase();
+                let singular = token.strip_suffix('s').unwrap_or(&token);
+                CHROME_WORDS.contains(&singular)
+            })
         })
-    })
 }
 
 /// The images a page's JSON-LD declares for what it sells or describes,
@@ -951,9 +949,10 @@ mod tests {
     }
 
     #[test]
-    fn a_lazy_loaded_logo_is_recognised_by_its_real_file_name() {
-        // The src is a placeholder pixel; the logo's name is in data-src.
-        let html = r#"<img src="/blank.gif" data-src="https://example.org/brand_logo.png">
+    fn a_lazy_loaded_logo_is_recognised_by_its_class() {
+        // The src is a placeholder pixel and the file name proves nothing;
+        // the class says what the image is for.
+        let html = r#"<img src="/blank.gif" data-src="https://example.org/brand.png" class="site-logo">
             <img src="https://example.org/couv/livre.jpg">"#;
         assert_eq!(
             first(html).as_deref(),
@@ -962,9 +961,25 @@ mod tests {
     }
 
     #[test]
+    fn an_article_header_and_a_title_in_alt_are_content() {
+        // WordPress wraps a post's cover in <article><header>; a book called
+        // "No Logo" says so in its alt text. Neither is the site's chrome.
+        let html = r#"<body>
+            <article><header class="entry-header">
+              <img src="https://example.org/uploads/no-logo-cover.jpg" alt="No Logo, Naomi Klein">
+            </header></article>
+            <img src="https://example.org/uploads/author.jpg">
+            </body>"#;
+        assert_eq!(
+            first(html).as_deref(),
+            Some("https://example.org/uploads/no-logo-cover.jpg")
+        );
+    }
+
+    #[test]
     fn a_chrome_word_must_be_a_whole_word() {
         // "Iconoclaste" is a publisher, not an icon; "logos" still counts.
-        let html = r#"<img src="https://example.org/a/site-logos.png">
+        let html = r#"<img src="https://example.org/a/brands.png" class="partner-logos">
             <img src="https://example.org/couv/ma-reine.jpg" alt="Iconoclaste, Ma reine">"#;
         assert_eq!(
             first(html).as_deref(),
