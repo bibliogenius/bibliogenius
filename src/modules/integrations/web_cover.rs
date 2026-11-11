@@ -419,7 +419,14 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
             .map(str::to_owned),
     );
     raw.append(&mut json_ld.other_products);
-    raw.extend(doc.select(&IMG).filter_map(|el| img_source(el.value())));
+    // Content images before the site's own (logo, menu, footer badges),
+    // which a page without hints often lists first.
+    let (chrome, content): (Vec<_>, Vec<_>) = doc
+        .select(&IMG)
+        .filter_map(|el| img_source(el.value()).map(|src| (is_site_chrome(&el), src)))
+        .partition(|(chrome, _)| *chrome);
+    raw.extend(content.into_iter().map(|(_, src)| src));
+    raw.extend(chrome.into_iter().map(|(_, src)| src));
 
     // Relative links resolve against `<base href>` when the page sets one.
     let base = doc
@@ -461,6 +468,44 @@ fn img_source(img: &scraper::node::Element) -> Option<String> {
         .iter()
         .find_map(|attr| img.attr(attr).filter(|v| !v.trim().is_empty()))
         .map(str::to_owned)
+}
+
+/// Words that mark an image as part of the site rather than of the page's
+/// content, in its id, class, alt text or file name.
+const CHROME_WORDS: [&str; 6] = ["logo", "icon", "avatar", "banner", "sprite", "favicon"];
+
+/// Whether an `<img>` looks like part of the site (logo, menu, footer
+/// badge) rather than the book shown: inside `<header>`, `<nav>` or
+/// `<footer>`, or named so.
+fn is_site_chrome(img: &scraper::ElementRef) -> bool {
+    let in_chrome = img.ancestors().any(|node| {
+        node.value()
+            .as_element()
+            .is_some_and(|e| matches!(e.name(), "header" | "nav" | "footer"))
+    });
+    if in_chrome {
+        return true;
+    }
+    let element = img.value();
+    let file_name = element
+        .attr("src")
+        .and_then(|src| src.rsplit('/').next())
+        .unwrap_or_default();
+    [
+        element.attr("id"),
+        element.attr("class"),
+        element.attr("alt"),
+        Some(file_name),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|text| {
+        text.split(|c: char| !c.is_alphanumeric()).any(|token| {
+            let token = token.to_lowercase();
+            let singular = token.strip_suffix('s').unwrap_or(&token);
+            CHROME_WORDS.contains(&singular)
+        })
+    })
 }
 
 /// The images a page's JSON-LD declares for what it sells or describes,
@@ -875,6 +920,46 @@ mod tests {
                 "https://www.editions-exemple.fr/covers/real.jpg",
                 "https://example.org/plain.jpg",
             ]
+        );
+    }
+
+    #[test]
+    fn site_chrome_images_go_after_the_content_ones() {
+        // Shape of a real publisher page that declares nothing: the site logo
+        // comes first in the markup, the cover second.
+        let html = r#"<html><body>
+            <header><a href="/"><img src="https://example.org/brand.png" alt="Shop"></a></header>
+            <img src="http://example.org/wp-content/uploads/almasta_logo.png" alt="Editions" id="logo">
+            <nav><img src="https://example.org/menu.png"></nav>
+            <main>
+              <img src="https://example.org/icons/cart.svg" class="cart-icon">
+              <img src="https://example.org/uploads/Slow_Sex_femme_web_def.jpg" alt="">
+            </main>
+            <footer><img src="https://example.org/partner.png"></footer>
+            </body></html>"#;
+        let all: Vec<String> = extract_cover_candidates(html, &page())
+            .into_iter()
+            .map(|u| u.to_string())
+            .collect();
+        assert_eq!(
+            all[0],
+            "https://example.org/uploads/Slow_Sex_femme_web_def.jpg"
+        );
+        assert_eq!(
+            all.len(),
+            6,
+            "demoted, never dropped: the user can still step to them"
+        );
+    }
+
+    #[test]
+    fn a_chrome_word_must_be_a_whole_word() {
+        // "Iconoclaste" is a publisher, not an icon; "logos" still counts.
+        let html = r#"<img src="https://example.org/a/site-logos.png">
+            <img src="https://example.org/couv/ma-reine.jpg" alt="Iconoclaste, Ma reine">"#;
+        assert_eq!(
+            first(html).as_deref(),
+            Some("https://example.org/couv/ma-reine.jpg")
         );
     }
 
