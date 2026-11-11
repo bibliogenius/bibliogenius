@@ -423,7 +423,7 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
     // which a page without hints often lists first.
     let (chrome, content): (Vec<_>, Vec<_>) = doc
         .select(&IMG)
-        .filter_map(|el| img_source(el.value()).map(|src| (is_site_chrome(&el), src)))
+        .filter_map(|el| img_source(el.value()).map(|src| (is_site_chrome(&el, &src), src)))
         .partition(|(chrome, _)| *chrome);
     raw.extend(content.into_iter().map(|(_, src)| src));
     raw.extend(chrome.into_iter().map(|(_, src)| src));
@@ -476,8 +476,9 @@ const CHROME_WORDS: [&str; 6] = ["logo", "icon", "avatar", "banner", "sprite", "
 
 /// Whether an `<img>` looks like part of the site (logo, menu, footer
 /// badge) rather than the book shown: inside `<header>`, `<nav>` or
-/// `<footer>`, or named so.
-fn is_site_chrome(img: &scraper::ElementRef) -> bool {
+/// `<footer>`, or named so. `src` is the address [`img_source`] kept, whose
+/// file name counts, not the placeholder a lazy-loaded image has in `src`.
+fn is_site_chrome(img: &scraper::ElementRef, src: &str) -> bool {
     let in_chrome = img.ancestors().any(|node| {
         node.value()
             .as_element()
@@ -487,10 +488,7 @@ fn is_site_chrome(img: &scraper::ElementRef) -> bool {
         return true;
     }
     let element = img.value();
-    let file_name = element
-        .attr("src")
-        .and_then(|src| src.rsplit('/').next())
-        .unwrap_or_default();
+    let file_name = src.rsplit('/').next().unwrap_or_default();
     [
         element.attr("id"),
         element.attr("class"),
@@ -949,6 +947,17 @@ mod tests {
             all.len(),
             6,
             "demoted, never dropped: the user can still step to them"
+        );
+    }
+
+    #[test]
+    fn a_lazy_loaded_logo_is_recognised_by_its_real_file_name() {
+        // The src is a placeholder pixel; the logo's name is in data-src.
+        let html = r#"<img src="/blank.gif" data-src="https://example.org/brand_logo.png">
+            <img src="https://example.org/couv/livre.jpg">"#;
+        assert_eq!(
+            first(html).as_deref(),
+            Some("https://example.org/couv/livre.jpg")
         );
     }
 
