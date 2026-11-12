@@ -597,17 +597,12 @@ pub async fn delete_book(
     _claims: crate::auth::Claims,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    use crate::domain::DomainError;
+    use crate::services::book_service;
 
-    // Idempotent DELETE: return 200 OK even if book doesn't exist
-    match state.book_repo.delete(&id).await {
-        Ok(()) | Err(DomainError::NotFound) => {
-            let _ = crate::sync::log_operation(state.db(), "book", &id, "DELETE", None).await;
-            // Best-effort hub cover cleanup — same rationale as the FFI
-            // delete path. Non-fatal: the book is already gone locally.
-            if let Err(e) = state.hub_directory.delete_cover(state.db(), &id).await {
-                tracing::debug!("hub cover cleanup skipped for book {id}: {e}");
-            }
+    // Same path as the FFI delete: cascade in one transaction, operation log,
+    // best-effort hub cover cleanup. Idempotent: an unknown id answers 200.
+    match book_service::delete_book(state.db(), &id).await {
+        Ok(()) => {
             // Notify accepted peers that our catalog changed (debounced).
             crate::services::catalog_notification::schedule_catalog_changed_notification(
                 state.clone(),
@@ -618,11 +613,17 @@ pub async fn delete_book(
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            let msg = match e {
+                book_service::ServiceError::Database(msg) => msg,
+                other => format!("{other:?}"),
+            };
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": msg})),
+            )
+                .into_response()
+        }
     }
 }
 

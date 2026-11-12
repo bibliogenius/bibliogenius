@@ -41,6 +41,10 @@ pub struct PaginatedBooks {
 }
 
 /// Repository trait for Book entity
+///
+/// There is deliberately no `delete`: a book is deleted through
+/// `book_service::delete_book`, which also removes its dependent rows
+/// (nothing cascades in the database since ADR-044).
 #[async_trait]
 pub trait BookRepository: Send + Sync {
     /// Find all books matching the filter criteria with pagination support
@@ -63,9 +67,6 @@ pub trait BookRepository: Send + Sync {
 
     /// Update an existing book
     async fn update(&self, id: &str, book: Book) -> Result<Book, DomainError>;
-
-    /// Delete a book by ID
-    async fn delete(&self, id: &str) -> Result<(), DomainError>;
 
     /// Find books that have an ISBN but no persisted cover URL.
     /// Returns (book_id, isbn) pairs.

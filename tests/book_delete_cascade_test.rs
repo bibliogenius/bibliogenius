@@ -1,12 +1,14 @@
-//! `POST /books/batch/edit` with the `Delete` action must remove each book the
-//! way a single delete does: copies, their loans and sales, author/tag/
-//! collection links and notes go with the book, and one operation-log row
-//! records every deletion. The replicated tables carry no foreign keys since
-//! ADR-044, so nothing cascades in the database itself.
+//! Both HTTP routes that delete books, `DELETE /books/:id` and
+//! `POST /books/batch/edit` with the `Delete` action, must remove a book the
+//! way the FFI path does: copies, their loans and sales, author/tag/collection
+//! links and notes go with the book, and one operation-log row records every
+//! deletion. The replicated tables carry no foreign keys since ADR-044, so
+//! nothing cascades in the database itself.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use rust_lib_app::api;
+use rust_lib_app::auth::create_jwt;
 use rust_lib_app::db;
 use rust_lib_app::infrastructure::AppState;
 use rust_lib_app::models::{
@@ -44,6 +46,12 @@ fn batch_router(db: &DatabaseConnection) -> axum::Router {
             "/books/batch/edit",
             axum::routing::post(api::batch::batch_edit),
         )
+        .with_state(AppState::new(db.clone()))
+}
+
+fn single_delete_router(db: &DatabaseConnection) -> axum::Router {
+    axum::Router::new()
+        .route("/books/:id", axum::routing::delete(api::books::delete_book))
         .with_state(AppState::new(db.clone()))
 }
 
@@ -268,4 +276,92 @@ async fn batch_delete_logs_one_delete_per_book() {
     assert_eq!(logged.len(), 2, "one DELETE row per book: {logged:?}");
     assert!(logged.contains(&first));
     assert!(logged.contains(&second));
+}
+
+async fn single_delete(app: axum::Router, id: &str) -> StatusCode {
+    let token = create_jwt("owner", "admin").expect("jwt");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/books/{id}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    response.status()
+}
+
+async fn logged_book_deletes(db: &DatabaseConnection) -> Vec<String> {
+    operation_log::Entity::find()
+        .filter(operation_log::Column::EntityType.eq("book"))
+        .filter(operation_log::Column::Operation.eq("DELETE"))
+        .all(db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.entity_id)
+        .collect()
+}
+
+#[tokio::test]
+async fn single_delete_removes_the_book_and_every_dependent_row() {
+    let db = setup_db().await;
+    let doomed = seed_full_book(&db, "doomed").await;
+    let survivor = seed_full_book(&db, "survivor").await;
+
+    let status = single_delete(single_delete_router(&db), &doomed).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        book::Entity::find_by_id(doomed.clone())
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none(),
+        "deleted book"
+    );
+    assert!(
+        book::Entity::find_by_id(survivor)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some(),
+        "survivor"
+    );
+    // Only the survivor's single row is left in every dependent table.
+    assert_eq!(count::<copy::Entity>(&db).await, 1, "copies");
+    assert_eq!(count::<loan::Entity>(&db).await, 1, "loans");
+    assert_eq!(count::<sale::Entity>(&db).await, 1, "sales");
+    assert_eq!(count::<book_authors::Entity>(&db).await, 1, "book_authors");
+    assert_eq!(count::<book_tags::Entity>(&db).await, 1, "book_tags");
+    assert_eq!(
+        count::<collection_book::Entity>(&db).await,
+        1,
+        "collection_books"
+    );
+    assert_eq!(count::<book_note::Entity>(&db).await, 1, "book_notes");
+    assert_eq!(logged_book_deletes(&db).await, vec![doomed]);
+}
+
+#[tokio::test]
+async fn single_delete_of_an_unknown_id_answers_ok_and_touches_nothing() {
+    let db = setup_db().await;
+    let survivor = seed_full_book(&db, "survivor").await;
+
+    let status = single_delete(single_delete_router(&db), "does-not-exist").await;
+
+    // DELETE stays idempotent: a book already gone is not an error.
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        book::Entity::find_by_id(survivor)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some(),
+        "an unknown id must not touch the other books"
+    );
+    assert_eq!(count::<copy::Entity>(&db).await, 1, "copies");
 }

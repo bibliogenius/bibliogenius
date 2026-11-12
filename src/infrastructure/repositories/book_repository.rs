@@ -365,18 +365,6 @@ impl BookRepository for SeaOrmBookRepository {
         Ok(updated)
     }
 
-    async fn delete(&self, id: &str) -> Result<(), DomainError> {
-        let result = BookEntity::delete_by_id(id.to_owned())
-            .exec(&self.db)
-            .await?;
-
-        if result.rows_affected == 0 {
-            return Err(DomainError::NotFound);
-        }
-
-        Ok(())
-    }
-
     async fn find_missing_covers(&self) -> Result<Vec<(String, String)>, DomainError> {
         let models = BookEntity::find()
             .filter(Column::CoverUrl.is_null())
