@@ -22,6 +22,7 @@ body { margin: 0; background: var(--bg); color: var(--text);
   font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 main { max-width: 1100px; margin: 0 auto; padding: 16px; }
 h1 { font-size: 1.5rem; margin: 8px 0 4px; }
+.top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 h2 { font-size: 1.1rem; margin: 24px 0 8px; }
 a { color: var(--accent); }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -70,64 +71,170 @@ summary { cursor: pointer; color: var(--accent); }
 </head>
 <body>
 <main>
-  <h1>Publisher sites</h1>
+  <div class="top">
+    <h1 data-i18n="title">Publisher sites</h1>
+    <button class="plain" id="lang" type="button"></button>
+  </div>
   <p class="muted" id="meta"></p>
-  <p class="muted">Corrections are kept in this browser only. Export them as <code>overrides.json</code>,
-    replace <code>data/publisher_sites/overrides.json</code> with it, then run
-    <code>publisher_sites build</code> (it checks new or changed recipes itself: a hand-written recipe
-    enters the table only once it works), and open a PR.</p>
+  <p class="muted" data-i18n-html="intro"></p>
 
-  <ul class="stats" id="stats" aria-label="Filter by status"></ul>
+  <ul class="stats" id="stats" data-i18n-aria="filter_status"></ul>
 
   <div class="toolbar" role="search">
-    <input type="search" id="q" placeholder="Publisher, site, prefix, ISBN…" aria-label="Search publishers, sites, prefixes">
-    <select id="table-filter" aria-label="Filter by table membership">
-      <option value="">All sites</option>
-      <option value="in">In the shipped table</option>
-      <option value="out">Not in the table</option>
-      <option value="edited">With pending corrections</option>
-      <option value="check">Last check not passed</option>
+    <input type="search" id="q" data-i18n-placeholder="search_placeholder" data-i18n-aria="search_label">
+    <select id="table-filter" data-i18n-aria="filter_table">
+      <option value="" data-i18n="opt_all"></option>
+      <option value="in" data-i18n="opt_in"></option>
+      <option value="out" data-i18n="opt_out"></option>
+      <option value="edited" data-i18n="opt_edited"></option>
+      <option value="check" data-i18n="opt_check"></option>
     </select>
     <span id="pending" class="muted" aria-live="polite"></span>
-    <button class="action" id="export" type="button">Export overrides.json</button>
-    <button class="plain" id="discard" type="button">Discard corrections</button>
+    <button class="action" id="export" type="button" data-i18n="export"></button>
+    <button class="plain" id="discard" type="button" data-i18n="discard"></button>
   </div>
 
   <p id="count" class="muted" aria-live="polite"></p>
   <div id="list"></div>
-  <button class="plain more" id="more" type="button" hidden>Show more</button>
+  <button class="plain more" id="more" type="button" hidden data-i18n="more"></button>
 
-  <h2>Prefix corrections</h2>
-  <p class="muted">An ISBN prefix (digits only) sent to another publisher than the one Wikidata names.</p>
-  <div class="scroll"><table id="prefix-table"><thead><tr><th scope="col">Prefix</th><th scope="col">Publisher</th><th scope="col">Home page</th><th scope="col"><span hidden>Actions</span></th></tr></thead><tbody></tbody></table></div>
+  <h2 data-i18n="prefix_title"></h2>
+  <p class="muted" data-i18n="prefix_intro"></p>
+  <div class="scroll"><table id="prefix-table"><thead><tr><th scope="col" data-i18n="col_prefix"></th><th scope="col" data-i18n="col_publisher"></th><th scope="col" data-i18n="col_home"></th><th scope="col"><span hidden data-i18n="col_actions"></span></th></tr></thead><tbody></tbody></table></div>
   <form class="form" id="prefix-form">
     <div class="row">
-      <label>Prefix <input type="text" name="prefix" inputmode="numeric" pattern="97[89][0-9]{1,9}" required placeholder="9782253"></label>
-      <label>Publisher <input type="text" name="name" required placeholder="Le Livre de Poche"></label>
-      <label>Home page <input type="url" name="home" required placeholder="https://www.livredepoche.com/"></label>
+      <label><span data-i18n="col_prefix"></span> <input type="text" name="prefix" inputmode="numeric" pattern="97[89][0-9]{1,9}" required placeholder="9782253"></label>
+      <label><span data-i18n="col_publisher"></span> <input type="text" name="name" required placeholder="Le Livre de Poche"></label>
+      <label><span data-i18n="col_home"></span> <input type="url" name="home" required placeholder="https://www.livredepoche.com/"></label>
     </div>
-    <div><button class="plain" type="submit">Add prefix correction</button></div>
+    <div><button class="plain" type="submit" data-i18n="prefix_add"></button></div>
   </form>
 </main>
 
 <script>
 const DATA = /*DATA*/null;
 const STORE = "publisher_sites_edits_v1";
+const LANG_STORE = "publisher_sites_lang";
 const PAGE = 100;
 
-const STATUS = {
-  ok: ["Recipe found", "s-ok"], no_witness: ["No witness", "s-warn"], no_recipe: ["No recipe", "s-warn"],
-  js_results: ["Results in JavaScript", "s-warn"], search_down: ["Search down", "s-warn"],
-  blocked: ["Blocked", "s-bad"], robots_forbid: ["robots.txt forbids", "s-bad"],
-  offline: ["Offline", "s-bad"], excluded: ["Excluded", "s-bad"], unprobed: ["Not probed yet", "s-warn"],
+// Interface strings. `{name}` is replaced by a value; strings used as HTML
+// (`*_html`, `intro`) hold only markup written here, never data.
+const I18N = {
+  en: {
+    title: "Publisher sites", switch_to: "Français", switch_label: "Afficher la page en français",
+    intro: "Corrections are kept in this browser only. Export them as <code>overrides.json</code>, replace <code>data/publisher_sites/overrides.json</code> with it, then run <code>publisher_sites build</code> (it checks new or changed recipes itself: a hand-written recipe enters the table only once it works), and open a PR.",
+    meta: "Report of {generated} · table built {table} · {sites} sites from {publishers} Wikidata publishers",
+    filter_status: "Filter by status", search_placeholder: "Publisher, site, prefix, ISBN…", search_label: "Search publishers, sites, prefixes",
+    filter_table: "Filter by table membership", opt_all: "All sites", opt_in: "In the shipped table", opt_out: "Not in the table",
+    opt_edited: "With pending corrections", opt_check: "Last check not passed",
+    export: "Export overrides.json", discard: "Discard corrections", more: "Show more", all: "All",
+    count: "{n} site(s)", pending: "{n} pending correction(s)",
+    set_aside: "overrides.json changed since your last {n} correction(s) here (as expected once they were exported): they were set aside, under the localStorage key {key} in case they are still wanted.",
+    confirm_discard: "Discard every pending correction kept in this browser?",
+    prefix_title: "Prefix corrections", prefix_intro: "An ISBN prefix (digits only) sent to another publisher than the one Wikidata names.",
+    col_prefix: "Prefix", col_publisher: "Publisher", col_home: "Home page", col_actions: "Actions", prefix_add: "Add prefix correction",
+    remove: "Remove", none: "None",
+    st_ok: "Recipe found", st_no_witness: "No witness", st_no_recipe: "No recipe", st_js_results: "Results in JavaScript",
+    st_search_down: "Search down", st_blocked: "Blocked", st_robots_forbid: "robots.txt forbids", st_offline: "Offline",
+    st_excluded: "Excluded", st_unprobed: "Not probed yet",
+    ck_works: "works", ck_reprobed: "probed again", ck_broken: "broken", ck_no_witness: "no witness", ck_blocked: "blocked", ck_offline: "offline",
+    kind_product: "product page", kind_search: "search",
+    in_table: "in table", pending_badge: "pending correction", prefixes_label: "ISBN prefixes",
+    product: "Product page", search: "Search", corrected: " (corrected)", note: "Note", correction_note: "Correction note",
+    probed: "Probed", last_check: "Last check",
+    rebuilt: "rebuilt {n} witness(es), {m} mismatch(es)", slug_ignored: "slug ignored by the server", apostrophe: "apostrophe {rule}",
+    found: "found {isbn} by ISBN, {title} by title", unreachable: "unreachable {n} day(s) in a row", failed: "failed: {kinds}",
+    witnesses: "Witnesses ({n})", col_title: "Title", col_author: "Author", col_try: "Try",
+    link_page: "page", link_product: "product recipe", link_search: "search recipe",
+    tried: "Searches tried ({n})", col_address: "Address", col_by_isbn: "By ISBN", col_by_title: "By title", col_why: "Why not",
+    js_results: "JavaScript results", broken: "broken",
+    correct: "Correct this site", f_note: "Note (why, source)", f_excluded: "Exclude this site (publisher's request, wrong site)",
+    f_home: "Home page to probe instead", f_product_html: "Product page template (<code>{isbn}</code>, <code>{slug}</code>, <code>{author}</code>)",
+    f_apostrophe: "Apostrophe", f_drop: "drop (j'ai → jai)", f_dash: "dash (j'ai → j-ai)", f_slug_ignored: "Server ignores the slug",
+    f_search_html: "Search address (GET, with <code>{q}</code>)", f_post_kept: "POST search kept as is: edit overrides.json to change it",
+    f_by_isbn: "Search finds books by ISBN", f_witnesses_html: "Extra witnesses, one per line: <code>ISBN | title | author | page URL</code>",
+    f_keep: "Keep correction", f_remove: "Remove my correction",
+  },
+  fr: {
+    title: "Sites d'éditeurs", switch_to: "English", switch_label: "Show this page in English",
+    intro: "Les corrections ne sont gardées que dans ce navigateur. Exportez-les en <code>overrides.json</code>, remplacez <code>data/publisher_sites/overrides.json</code> par ce fichier, lancez <code>publisher_sites build</code> (il vérifie lui-même les recettes nouvelles ou modifiées : une recette saisie à la main n'entre dans la table qu'une fois qu'elle marche), puis ouvrez une PR.",
+    meta: "Rapport du {generated} · table construite le {table} · {sites} sites pour {publishers} éditeurs Wikidata",
+    filter_status: "Filtrer par état", search_placeholder: "Éditeur, site, préfixe, ISBN…", search_label: "Chercher un éditeur, un site, un préfixe",
+    filter_table: "Filtrer selon la présence dans la table", opt_all: "Tous les sites", opt_in: "Dans la table livrée", opt_out: "Hors de la table",
+    opt_edited: "Avec des corrections en attente", opt_check: "Dernière vérification non réussie",
+    export: "Exporter overrides.json", discard: "Abandonner les corrections", more: "Afficher plus", all: "Tous",
+    count: "{n} site(s)", pending: "{n} correction(s) en attente",
+    set_aside: "overrides.json a changé depuis vos {n} dernière(s) correction(s) ici (c'est normal après un export) : elles ont été mises de côté, sous la clé localStorage {key}, au cas où.",
+    confirm_discard: "Abandonner toutes les corrections en attente gardées dans ce navigateur ?",
+    prefix_title: "Corrections de préfixes", prefix_intro: "Un préfixe ISBN (chiffres seuls) attribué à un autre éditeur que celui de Wikidata.",
+    col_prefix: "Préfixe", col_publisher: "Éditeur", col_home: "Page d'accueil", col_actions: "Actions", prefix_add: "Ajouter la correction de préfixe",
+    remove: "Retirer", none: "Aucune",
+    st_ok: "Recette trouvée", st_no_witness: "Aucun témoin", st_no_recipe: "Aucune recette", st_js_results: "Résultats en JavaScript",
+    st_search_down: "Recherche en panne", st_blocked: "Bloqué", st_robots_forbid: "Interdit par robots.txt", st_offline: "Hors ligne",
+    st_excluded: "Exclu", st_unprobed: "Pas encore sondé",
+    ck_works: "marche", ck_reprobed: "sondé de nouveau", ck_broken: "cassée", ck_no_witness: "aucun témoin", ck_blocked: "bloqué", ck_offline: "hors ligne",
+    kind_product: "fiche", kind_search: "recherche",
+    in_table: "dans la table", pending_badge: "correction en attente", prefixes_label: "Préfixes ISBN",
+    product: "Fiche du livre", search: "Recherche", corrected: " (corrigée)", note: "Note", correction_note: "Note de correction",
+    probed: "Sondé le", last_check: "Dernière vérification",
+    rebuilt: "{n} témoin(s) reconstruit(s), {m} écart(s)", slug_ignored: "slug ignoré par le serveur", apostrophe: "apostrophe : {rule}",
+    found: "trouvé {isbn} par ISBN, {title} par titre", unreachable: "injoignable {n} jour(s) d'affilée", failed: "en échec : {kinds}",
+    witnesses: "Témoins ({n})", col_title: "Titre", col_author: "Auteur", col_try: "Essayer",
+    link_page: "page", link_product: "recette de fiche", link_search: "recette de recherche",
+    tried: "Recherches essayées ({n})", col_address: "Adresse", col_by_isbn: "Par ISBN", col_by_title: "Par titre", col_why: "Pourquoi non",
+    js_results: "résultats en JavaScript", broken: "en panne",
+    correct: "Corriger ce site", f_note: "Note (raison, source)", f_excluded: "Exclure ce site (demande de l'éditeur, mauvais site)",
+    f_home: "Page d'accueil à sonder à la place", f_product_html: "Modèle d'adresse de fiche (<code>{isbn}</code>, <code>{slug}</code>, <code>{author}</code>)",
+    f_apostrophe: "Apostrophe", f_drop: "supprimée (j'ai → jai)", f_dash: "tiret (j'ai → j-ai)", f_slug_ignored: "Le serveur ignore le slug",
+    f_search_html: "Adresse de recherche (GET, avec <code>{q}</code>)", f_post_kept: "Recherche POST gardée telle quelle : modifiez overrides.json pour la changer",
+    f_by_isbn: "La recherche trouve les livres par ISBN", f_witnesses_html: "Témoins supplémentaires, un par ligne : <code>ISBN | titre | auteur | adresse de la page</code>",
+    f_keep: "Garder la correction", f_remove: "Retirer ma correction",
+  },
 };
+
+// The language: the one chosen on this page before, else the browser's.
+function initialLang() {
+  try { const saved = localStorage.getItem(LANG_STORE); if (saved in I18N) return saved; } catch (e) { /* ignore */ }
+  const wanted = (navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || "en"]);
+  return wanted.some(l => String(l).toLowerCase().startsWith("fr")) &&
+    !wanted.slice(0, wanted.findIndex(l => String(l).toLowerCase().startsWith("fr"))).some(l => String(l).toLowerCase().startsWith("en"))
+    ? "fr" : "en";
+}
+let lang = initialLang();
+// Placeholders the dictionary keeps as they are: recipe syntax, not values.
+const LITERAL = new Set(["isbn", "slug", "author", "q"]);
+function t(key, vars) {
+  const text = (I18N[lang][key] ?? I18N.en[key] ?? key);
+  return text.replace(/\{(\w+)\}/g, (m, name) => LITERAL.has(name) && !(vars && name in vars) ? m : (vars && name in vars ? vars[name] : m));
+}
+
+function applyStatic() {
+  document.documentElement.lang = lang;
+  document.title = t("title");
+  document.querySelectorAll("[data-i18n]").forEach(e => { e.textContent = t(e.dataset.i18n); });
+  document.querySelectorAll("[data-i18n-html]").forEach(e => { e.innerHTML = t(e.dataset.i18nHtml); });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach(e => { e.placeholder = t(e.dataset.i18nPlaceholder); });
+  document.querySelectorAll("[data-i18n-aria]").forEach(e => { e.setAttribute("aria-label", t(e.dataset.i18nAria)); });
+  const b = document.getElementById("lang");
+  b.textContent = t("switch_to");
+  b.setAttribute("aria-label", t("switch_label"));
+  b.lang = lang === "fr" ? "en" : "fr";
+  document.getElementById("meta").textContent = t("meta", {
+    generated: DATA.generated, table: DATA.table_generated, sites: DATA.sites.length, publishers: DATA.wikidata_publishers });
+}
+
+const STATUS_CLASS = {
+  ok: "s-ok", no_witness: "s-warn", no_recipe: "s-warn", js_results: "s-warn", search_down: "s-warn",
+  blocked: "s-bad", robots_forbid: "s-bad", offline: "s-bad", excluded: "s-bad", unprobed: "s-warn",
+};
+const KIND = { product: "kind_product", search: "kind_search" };
 
 // Pending corrections are tied to the overrides.json they were made on. Once
 // that file changes (they were exported and committed, or someone else's
 // corrections landed), exporting them again would overwrite it: they are set
 // aside instead, and kept under another key in case they are still wanted.
 const BASE = JSON.stringify(DATA.overrides || {});
-let notice = "";
+let notice = null;
 function emptyEdits() { return { base: BASE, sites: {}, prefixes: {} }; }
 function loadEdits() {
   let saved = null;
@@ -137,8 +244,7 @@ function loadEdits() {
   if (saved.base !== BASE) {
     if (count) {
       try { localStorage.setItem(STORE + "_set_aside", JSON.stringify(saved)); } catch (e) { /* ignore */ }
-      notice = `overrides.json changed since your last ${count} correction(s) here (as expected once they were exported): ` +
-        `they were set aside, under the localStorage key ${STORE}_set_aside in case they are still wanted.`;
+      notice = { n: count, key: STORE + "_set_aside" };
     }
     return emptyEdits();
   }
@@ -184,14 +290,14 @@ function matches(site) {
   if (!state.text) return true;
   const hay = [site.key, site.home, ...site.publishers, ...site.prefixes, ...site.prefixes.map(prettyPrefix),
     ...((site.probe && site.probe.witnesses) || []).flatMap(w => [w.isbn, w.title])].join(" ").toLowerCase();
-  return state.text.toLowerCase().split(/\s+/).every(t => hay.includes(t));
+  return state.text.toLowerCase().split(/\s+/).every(term => hay.includes(term));
 }
 
 function renderStats() {
   const counts = {};
   for (const s of DATA.sites) counts[statusOf(s)] = (counts[statusOf(s)] || 0) + 1;
-  const items = [["", "All", DATA.sites.length]].concat(
-    Object.keys(STATUS).filter(k => counts[k]).map(k => [k, STATUS[k][0], counts[k]]));
+  const items = [["", t("all"), DATA.sites.length]].concat(
+    Object.keys(STATUS_CLASS).filter(k => counts[k]).map(k => [k, t("st_" + k), counts[k]]));
   document.getElementById("stats").innerHTML = items.map(([k, label, n]) =>
     `<li><button type="button" data-status="${k}" aria-pressed="${state.status === k}">${esc(label)} <strong>${n}</strong></button></li>`).join("");
 }
@@ -202,23 +308,24 @@ function recipeBlock(site) {
   const product = c.product || (p && p.product && p.product.recipe);
   const search = c.search || (p && p.search && p.search.recipe);
   if (product) {
-    const check = p && p.product ? ` <span class="muted">· rebuilt ${p.product.checked_on} witness(es), ${p.product.mismatches} mismatch(es)</span>` : "";
-    rows.push(`<dt>Product page${c.product ? " (corrected)" : ""}</dt><dd><code>${esc(product.template)}</code>
-      <span class="muted">· apostrophe ${esc(product.apostrophe)}${product.slug_ignored ? " · slug ignored by the server" : ""}</span>${check}</dd>`);
+    const check = p && p.product ? ` <span class="muted">· ${esc(t("rebuilt", { n: p.product.checked_on, m: p.product.mismatches }))}</span>` : "";
+    const rule = t(product.apostrophe === "dash" ? "f_dash" : "f_drop");
+    rows.push(`<dt>${esc(t("product"))}${c.product ? esc(t("corrected")) : ""}</dt><dd><code>${esc(product.template)}</code>
+      <span class="muted">· ${esc(t("apostrophe", { rule }))}${product.slug_ignored ? " · " + esc(t("slug_ignored")) : ""}</span>${check}</dd>`);
   }
   if (search) {
-    const check = p && p.search ? ` <span class="muted">· found ${p.search.found_by_isbn} by ISBN, ${p.search.found_by_title} by title</span>` : "";
+    const check = p && p.search ? ` <span class="muted">· ${esc(t("found", { isbn: p.search.found_by_isbn, title: p.search.found_by_title }))}</span>` : "";
     const post = search.post_fields ? ` <span class="muted">· POST ${esc(search.post_fields.map(f => f[0] + "=" + f[1]).join("&"))}</span>` : "";
-    rows.push(`<dt>Search${c.search ? " (corrected)" : ""}</dt><dd><code>${esc(search.url)}</code>${post}${check}</dd>`);
+    rows.push(`<dt>${esc(t("search"))}${c.search ? esc(t("corrected")) : ""}</dt><dd><code>${esc(search.url)}</code>${post}${check}</dd>`);
   }
-  if (p && p.note) rows.push(`<dt>Note</dt><dd>${esc(p.note)}</dd>`);
-  if (c.note) rows.push(`<dt>Correction note</dt><dd>${esc(c.note)}</dd>`);
-  if (p) rows.push(`<dt>Probed</dt><dd>${esc(p.probed_at)}</dd>`);
+  if (p && p.note) rows.push(`<dt>${esc(t("note"))}</dt><dd>${esc(p.note)}</dd>`);
+  if (c.note) rows.push(`<dt>${esc(t("correction_note"))}</dt><dd>${esc(c.note)}</dd>`);
+  if (p) rows.push(`<dt>${esc(t("probed"))}</dt><dd>${esc(p.probed_at)}</dd>`);
   if (site.check) {
     const ch = site.check, cls = ch.status === "works" ? "s-ok" : ch.status === "reprobed" ? "s-warn" : "s-bad";
-    const streak = ch.unreachable_in_a_row ? ` · unreachable ${ch.unreachable_in_a_row} check(s) in a row` : "";
-    const failed = (ch.failed || []).length ? ` · failed: ${esc(ch.failed.join(", "))}` : "";
-    rows.push(`<dt>Last check</dt><dd>${esc(ch.checked_at)} <span class="badge ${cls}">${esc(ch.status.replace("_", " "))}</span>${esc(streak)}${failed}${ch.note ? " · " + esc(ch.note) : ""}</dd>`);
+    const streak = ch.unreachable_in_a_row ? " · " + t("unreachable", { n: ch.unreachable_in_a_row }) : "";
+    const failed = (ch.failed || []).length ? " · " + t("failed", { kinds: ch.failed.map(k => t(KIND[k] || k)).join(", ") }) : "";
+    rows.push(`<dt>${esc(t("last_check"))}</dt><dd>${esc(ch.checked_at)} <span class="badge ${cls}">${esc(t("ck_" + ch.status))}</span>${esc(streak)}${esc(failed)}${ch.note ? " · " + esc(ch.note) : ""}</dd>`);
   }
   return rows.length ? `<dl>${rows.join("")}</dl>` : "";
 }
@@ -232,25 +339,25 @@ function witnessBlock(site) {
   const search = c.search || (p && p.search && p.search.recipe);
   const rows = list.map(w => {
     const links = [];
-    if (w.url) links.push(`<a href="${safeHref(w.url)}" target="_blank" rel="noopener noreferrer">page</a>`);
-    if (product) links.push(`<a href="${safeHref(productUrl(product, w))}" target="_blank" rel="noopener noreferrer">product recipe</a>`);
+    if (w.url) links.push(`<a href="${safeHref(w.url)}" target="_blank" rel="noopener noreferrer">${esc(t("link_page"))}</a>`);
+    if (product) links.push(`<a href="${safeHref(productUrl(product, w))}" target="_blank" rel="noopener noreferrer">${esc(t("link_product"))}</a>`);
     const su = search && searchUrl(search, search.by_isbn ? w.isbn : w.title);
-    if (su) links.push(`<a href="${safeHref(su)}" target="_blank" rel="noopener noreferrer">search recipe</a>`);
+    if (su) links.push(`<a href="${safeHref(su)}" target="_blank" rel="noopener noreferrer">${esc(t("link_search"))}</a>`);
     return `<tr><td>${esc(w.title)}</td><td class="muted">${esc(w.authors)}</td><td><code>${esc(w.isbn)}</code></td><td>${links.join(" · ")}</td></tr>`;
   }).join("");
-  return `<details><summary>Witnesses (${list.length})</summary><div class="scroll"><table>
-    <thead><tr><th scope="col">Title</th><th scope="col">Author</th><th scope="col">ISBN</th><th scope="col">Try</th></tr></thead>
+  return `<details><summary>${esc(t("witnesses", { n: list.length }))}</summary><div class="scroll"><table>
+    <thead><tr><th scope="col">${esc(t("col_title"))}</th><th scope="col">${esc(t("col_author"))}</th><th scope="col">ISBN</th><th scope="col">${esc(t("col_try"))}</th></tr></thead>
     <tbody>${rows}</tbody></table></div></details>`;
 }
 
 function triedBlock(site) {
   const tried = (site.probe && site.probe.tried) || [];
   if (!tried.length) return "";
-  const rows = tried.map(t => `<tr><td><code>${esc(t.recipe.url)}</code>${t.recipe.post_fields ? " (POST)" : ""}</td>
-    <td>${t.found_by_isbn}</td><td>${t.found_by_title}</td>
-    <td class="muted">${esc([t.js_results && "JavaScript results", t.broken && "broken", t.note].filter(Boolean).join(" · "))}</td></tr>`).join("");
-  return `<details><summary>Searches tried (${tried.length})</summary><div class="scroll"><table>
-    <thead><tr><th scope="col">Address</th><th scope="col">By ISBN</th><th scope="col">By title</th><th scope="col">Why not</th></tr></thead>
+  const rows = tried.map(r => `<tr><td><code>${esc(r.recipe.url)}</code>${r.recipe.post_fields ? " (POST)" : ""}</td>
+    <td>${r.found_by_isbn}</td><td>${r.found_by_title}</td>
+    <td class="muted">${esc([r.js_results && t("js_results"), r.broken && t("broken"), r.note].filter(Boolean).join(" · "))}</td></tr>`).join("");
+  return `<details><summary>${esc(t("tried", { n: tried.length }))}</summary><div class="scroll"><table>
+    <thead><tr><th scope="col">${esc(t("col_address"))}</th><th scope="col">${esc(t("col_by_isbn"))}</th><th scope="col">${esc(t("col_by_title"))}</th><th scope="col">${esc(t("col_why"))}</th></tr></thead>
     <tbody>${rows}</tbody></table></div></details>`;
 }
 
@@ -259,50 +366,51 @@ function formBlock(site) {
   const pr = c.product || {}, se = c.search || {};
   const wit = (c.witnesses || []).map(w => [w.isbn, w.title, w.authors || "", w.url || ""].join(" | ")).join("\n");
   const id = "f-" + site.key.replace(/[^a-z0-9]/gi, "_");
-  return `<details><summary>Correct this site</summary>
+  return `<details><summary>${esc(t("correct"))}</summary>
   <form class="form" data-key="${esc(site.key)}">
-    <label>Note (why, source) <input type="text" name="note" value="${esc(c.note)}"></label>
-    <div class="row"><label class="check"><input type="checkbox" name="excluded" ${c.excluded ? "checked" : ""}> Exclude this site (publisher's request, wrong site)</label></div>
-    <label>Home page to probe instead <input type="url" name="home" value="${esc(c.home)}" placeholder="${esc(site.home)}"></label>
-    <label>Product page template (<code>{isbn}</code>, <code>{slug}</code>, <code>{author}</code>) <input type="text" name="product" value="${esc(pr.template)}"></label>
+    <label>${esc(t("f_note"))} <input type="text" name="note" value="${esc(c.note)}"></label>
+    <div class="row"><label class="check"><input type="checkbox" name="excluded" ${c.excluded ? "checked" : ""}> ${esc(t("f_excluded"))}</label></div>
+    <label>${esc(t("f_home"))} <input type="url" name="home" value="${esc(c.home)}" placeholder="${esc(site.home)}"></label>
+    <label>${t("f_product_html")} <input type="text" name="product" value="${esc(pr.template)}"></label>
     <div class="row">
-      <label>Apostrophe <select name="apostrophe"><option value="drop" ${pr.apostrophe !== "dash" ? "selected" : ""}>drop (j'ai → jai)</option><option value="dash" ${pr.apostrophe === "dash" ? "selected" : ""}>dash (j'ai → j-ai)</option></select></label>
-      <label class="check"><input type="checkbox" name="slug_ignored" ${pr.slug_ignored ? "checked" : ""}> Server ignores the slug</label>
+      <label>${esc(t("f_apostrophe"))} <select name="apostrophe"><option value="drop" ${pr.apostrophe !== "dash" ? "selected" : ""}>${esc(t("f_drop"))}</option><option value="dash" ${pr.apostrophe === "dash" ? "selected" : ""}>${esc(t("f_dash"))}</option></select></label>
+      <label class="check"><input type="checkbox" name="slug_ignored" ${pr.slug_ignored ? "checked" : ""}> ${esc(t("f_slug_ignored"))}</label>
     </div>
-    <label>Search address (GET, with <code>{q}</code>) <input type="text" name="search" value="${esc(se.post_fields ? "" : se.url)}"
-      placeholder="${se.post_fields ? "POST search kept as is: edit overrides.json to change it" : ""}"></label>
-    <div class="row"><label class="check"><input type="checkbox" name="by_isbn" ${se.by_isbn ? "checked" : ""}> Search finds books by ISBN</label></div>
-    <label for="${id}-w">Extra witnesses, one per line: <code>ISBN | title | author | page URL</code></label>
+    <label>${t("f_search_html")} <input type="text" name="search" value="${esc(se.post_fields ? "" : se.url)}"
+      placeholder="${se.post_fields ? esc(t("f_post_kept")) : ""}"></label>
+    <div class="row"><label class="check"><input type="checkbox" name="by_isbn" ${se.by_isbn ? "checked" : ""}> ${esc(t("f_by_isbn"))}</label></div>
+    <label for="${id}-w">${t("f_witnesses_html")}</label>
     <textarea id="${id}-w" name="witnesses" rows="3">${esc(wit)}</textarea>
-    <div class="row"><button class="action" type="submit">Keep correction</button>
-      <button class="plain" type="button" data-reset="${esc(site.key)}">Remove my correction</button></div>
+    <div class="row"><button class="action" type="submit">${esc(t("f_keep"))}</button>
+      <button class="plain" type="button" data-reset="${esc(site.key)}">${esc(t("f_remove"))}</button></div>
   </form></details>`;
 }
 
 function siteCard(site) {
-  const st = statusOf(site), [label, cls] = STATUS[st] || [st, ""];
+  const st = statusOf(site);
   const edited = site.key in edits.sites;
   return `<article class="site${edited ? " edited" : ""}" aria-labelledby="h-${esc(site.key)}">
     <header><h3 id="h-${esc(site.key)}">${esc(site.publishers.join(", ") || site.key)}</h3>
-      <span class="badge ${cls}">${esc(label)}</span>
-      ${site.in_table ? '<span class="badge s-ok">in table</span>' : ""}
-      ${edited ? '<span class="badge s-warn">pending correction</span>' : ""}</header>
+      <span class="badge ${STATUS_CLASS[st] || ""}">${esc(t("st_" + st))}</span>
+      ${site.in_table ? `<span class="badge s-ok">${esc(t("in_table"))}</span>` : ""}
+      ${edited ? `<span class="badge s-warn">${esc(t("pending_badge"))}</span>` : ""}</header>
     <div><a href="${safeHref(site.home)}" target="_blank" rel="noopener noreferrer">${esc(site.home)}</a> <span class="muted">· ${esc(site.key)}</span></div>
-    <ul class="chips" aria-label="ISBN prefixes">${site.prefixes.map(p => `<li>${esc(prettyPrefix(p))}</li>`).join("")}</ul>
+    <ul class="chips" aria-label="${esc(t("prefixes_label"))}">${site.prefixes.map(p => `<li>${esc(prettyPrefix(p))}</li>`).join("")}</ul>
     ${recipeBlock(site)}${witnessBlock(site)}${triedBlock(site)}${formBlock(site)}
   </article>`;
 }
 
 function renderList() {
   const found = DATA.sites.filter(matches);
-  document.getElementById("count").textContent = `${found.length} site(s)`;
+  document.getElementById("count").textContent = t("count", { n: found.length });
   document.getElementById("list").innerHTML = found.slice(0, state.shown).map(siteCard).join("");
   document.getElementById("more").hidden = found.length <= state.shown;
 }
 
 function renderPending() {
   const n = Object.keys(edits.sites).length + Object.keys(edits.prefixes).length;
-  document.getElementById("pending").textContent = [notice, n ? `${n} pending correction(s)` : ""].filter(Boolean).join(" ");
+  document.getElementById("pending").textContent =
+    [notice && t("set_aside", notice), n ? t("pending", { n }) : ""].filter(Boolean).join(" ");
   document.getElementById("discard").disabled = !n;
 }
 
@@ -310,8 +418,8 @@ function renderPrefixes() {
   const merged = mergedOverrides().prefixes;
   const rows = Object.keys(merged).sort().map(p => `<tr><td><code>${esc(p)}</code></td><td>${esc(merged[p].name)}</td>
     <td><a href="${safeHref(merged[p].home)}" target="_blank" rel="noopener noreferrer">${esc(merged[p].home)}</a></td>
-    <td><button class="plain" type="button" data-unprefix="${esc(p)}">Remove</button></td></tr>`).join("");
-  document.querySelector("#prefix-table tbody").innerHTML = rows || '<tr><td colspan="4" class="muted">None</td></tr>';
+    <td><button class="plain" type="button" data-unprefix="${esc(p)}">${esc(t("remove"))}</button></td></tr>`).join("");
+  document.querySelector("#prefix-table tbody").innerHTML = rows || `<tr><td colspan="4" class="muted">${esc(t("none"))}</td></tr>`;
 }
 
 function mergedOverrides() {
@@ -346,10 +454,13 @@ function readForm(form, previous) {
   return o;
 }
 
-function refresh() { renderStats(); renderList(); renderPending(); renderPrefixes(); }
+function refresh() { applyStatic(); renderStats(); renderList(); renderPending(); renderPrefixes(); }
 
-document.getElementById("meta").textContent =
-  `Report of ${DATA.generated} · table built ${DATA.table_generated} · ${DATA.sites.length} sites from ${DATA.wikidata_publishers} Wikidata publishers`;
+document.getElementById("lang").addEventListener("click", () => {
+  lang = lang === "fr" ? "en" : "fr";
+  try { localStorage.setItem(LANG_STORE, lang); } catch (e) { /* kept for this visit only */ }
+  refresh();
+});
 document.getElementById("stats").addEventListener("click", e => {
   const b = e.target.closest("button[data-status]"); if (!b) return;
   state.status = b.dataset.status; state.shown = PAGE; refresh();
@@ -385,8 +496,8 @@ document.getElementById("export").addEventListener("click", () => {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 });
 document.getElementById("discard").addEventListener("click", () => {
-  if (!confirm("Discard every pending correction kept in this browser?")) return;
-  edits = emptyEdits(); notice = ""; saveEdits(); refresh();
+  if (!confirm(t("confirm_discard"))) return;
+  edits = emptyEdits(); notice = null; saveEdits(); refresh();
 });
 refresh();
 </script>

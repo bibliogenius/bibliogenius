@@ -87,8 +87,10 @@ The outcome of each check is kept in `probe.json` (`checks`). `probe
 
 ## Improving the table
 
-Open the report page (`publisher_sites report`, then open the file, or serve
-the folder with `python3 -m http.server`). Filter by status, try the recipes
+Open the report page (`publisher_sites report`, then serve the folder with
+`python3 -m http.server`: Chrome refuses some features on `file://`). It
+speaks English or French, following the browser's language, with a switch in
+its header. Filter by status, try the recipes
 on the witnesses, and correct a site: home page, product template, search
 address, extra witnesses, exclusion; or send an ISBN prefix to another
 publisher. Corrections stay in the browser until exported: replace
