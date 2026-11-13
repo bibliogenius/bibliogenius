@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Publisher sites</title>
+<style>
+:root {
+  --bg: #f6f6f4; --panel: #ffffff; --text: #1d1d1b; --muted: #5f5f5a; --line: #d9d9d4;
+  --accent: #1f5fa8; --ok: #1b6e3a; --warn: #8a5300; --bad: #a32020; --chip: #ececE8;
+  --focus: #1f5fa8; --edited: #fff4d6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #151514; --panel: #1f1f1d; --text: #ececea; --muted: #a5a59f; --line: #3a3a37;
+    --accent: #7fb2ee; --ok: #6fcf8f; --warn: #e5b05c; --bad: #f08a8a; --chip: #2c2c29;
+    --focus: #7fb2ee; --edited: #3b3320;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 1.5rem; margin: 8px 0 4px; }
+h2 { font-size: 1.1rem; margin: 24px 0 8px; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.muted { color: var(--muted); }
+.stats { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; padding: 0; list-style: none; }
+.stats button { border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit; }
+.stats button[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.toolbar { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 8px 0;
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border-bottom: 1px solid var(--line); }
+input[type="search"], input[type="text"], input[type="url"], select, textarea {
+  font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 8px; }
+input[type="search"] { flex: 1 1 240px; min-width: 0; }
+button.action { font: inherit; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+  border: 1px solid var(--accent); background: var(--accent); color: var(--panel); }
+button.plain { font: inherit; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+button:disabled { opacity: .5; cursor: default; }
+.site { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 12px 14px; margin: 10px 0; }
+.site.edited { background: var(--edited); }
+.site header { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.site h3 { font-size: 1rem; margin: 0; overflow-wrap: anywhere; }
+.badge { font-size: .8rem; border-radius: 999px; padding: 1px 8px; border: 1px solid currentColor; }
+.s-ok { color: var(--ok); } .s-warn { color: var(--warn); } .s-bad { color: var(--bad); }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; padding: 0; list-style: none; }
+.chips li { background: var(--chip); border-radius: 4px; padding: 0 6px; font-size: .85rem; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; overflow-wrap: anywhere; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 8px 0; }
+dt { color: var(--muted); } dd { margin: 0; min-width: 0; }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+th, td { text-align: left; padding: 4px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+.scroll { overflow-x: auto; }
+details { margin-top: 8px; }
+summary { cursor: pointer; color: var(--accent); }
+.form { display: grid; gap: 8px; margin-top: 8px; }
+.form label { display: block; font-size: .9rem; }
+.form label > input:not([type="checkbox"]), .form label > select { display: block; margin-top: 2px; }
+.form label.check { display: inline-flex; gap: 6px; align-items: center; }
+.form .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.form input[type="text"], .form input[type="url"], .form textarea { width: 100%; }
+.more { display: block; margin: 16px auto; }
+@media (max-width: 600px) { dl { grid-template-columns: 1fr; } dt { margin-top: 4px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Publisher sites</h1>
+  <p class="muted" id="meta"></p>
+  <p class="muted">Corrections are kept in this browser only. Export them as <code>overrides.json</code>,
+    replace <code>data/publisher_sites/overrides.json</code> with it, then run
+    <code>publisher_sites build</code> (it checks new or changed recipes itself: a hand-written recipe
+    enters the table only once it works), and open a PR.</p>
+
+  <ul class="stats" id="stats" aria-label="Filter by status"></ul>
+
+  <div class="toolbar" role="search">
+    <input type="search" id="q" placeholder="Publisher, site, prefix, ISBN…" aria-label="Search publishers, sites, prefixes">
+    <select id="table-filter" aria-label="Filter by table membership">
+      <option value="">All sites</option>
+      <option value="in">In the shipped table</option>
+      <option value="out">Not in the table</option>
+      <option value="edited">With pending corrections</option>
+      <option value="check">Last check not passed</option>
+    </select>
+    <span id="pending" class="muted" aria-live="polite"></span>
+    <button class="action" id="export" type="button">Export overrides.json</button>
+    <button class="plain" id="discard" type="button">Discard corrections</button>
+  </div>
+
+  <p id="count" class="muted" aria-live="polite"></p>
+  <div id="list"></div>
+  <button class="plain more" id="more" type="button" hidden>Show more</button>
+
+  <h2>Prefix corrections</h2>
+  <p class="muted">An ISBN prefix (digits only) sent to another publisher than the one Wikidata names.</p>
+  <div class="scroll"><table id="prefix-table"><thead><tr><th scope="col">Prefix</th><th scope="col">Publisher</th><th scope="col">Home page</th><th scope="col"><span hidden>Actions</span></th></tr></thead><tbody></tbody></table></div>
+  <form class="form" id="prefix-form">
+    <div class="row">
+      <label>Prefix <input type="text" name="prefix" inputmode="numeric" pattern="97[89][0-9]{1,9}" required placeholder="9782253"></label>
+      <label>Publisher <input type="text" name="name" required placeholder="Le Livre de Poche"></label>
+      <label>Home page <input type="url" name="home" required placeholder="https://www.livredepoche.com/"></label>
+    </div>
+    <div><button class="plain" type="submit">Add prefix correction</button></div>
+  </form>
+</main>
+
+<script>
+const DATA = /*DATA*/null;
+const STORE = "publisher_sites_edits_v1";
+const PAGE = 100;
+
+const STATUS = {
+  ok: ["Recipe found", "s-ok"], no_witness: ["No witness", "s-warn"], no_recipe: ["No recipe", "s-warn"],
+  js_results: ["Results in JavaScript", "s-warn"], search_down: ["Search down", "s-warn"],
+  blocked: ["Blocked", "s-bad"], robots_forbid: ["robots.txt forbids", "s-bad"],
+  offline: ["Offline", "s-bad"], excluded: ["Excluded", "s-bad"], unprobed: ["Not probed yet", "s-warn"],
+};
+
+// Pending corrections are tied to the overrides.json they were made on. Once
+// that file changes (they were exported and committed, or someone else's
+// corrections landed), exporting them again would overwrite it: they are set
+// aside instead, and kept under another key in case they are still wanted.
+const BASE = JSON.stringify(DATA.overrides || {});
+let notice = "";
+function emptyEdits() { return { base: BASE, sites: {}, prefixes: {} }; }
+function loadEdits() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(STORE)); } catch (e) { saved = null; }
+  if (!saved) return emptyEdits();
+  const count = Object.keys(saved.sites || {}).length + Object.keys(saved.prefixes || {}).length;
+  if (saved.base !== BASE) {
+    if (count) {
+      try { localStorage.setItem(STORE + "_set_aside", JSON.stringify(saved)); } catch (e) { /* ignore */ }
+      notice = `overrides.json changed since your last ${count} correction(s) here (as expected once they were exported): ` +
+        `they were set aside, under the localStorage key ${STORE}_set_aside in case they are still wanted.`;
+    }
+    return emptyEdits();
+  }
+  return { base: BASE, sites: saved.sites || {}, prefixes: saved.prefixes || {} };
+}
+function saveEdits() {
+  try { localStorage.setItem(STORE, JSON.stringify(edits)); } catch (e) { /* private window: kept in memory */ }
+  renderPending();
+}
+let edits = loadEdits();
+let state = { status: "", text: "", table: "", shown: PAGE };
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const statusOf = s => s.excluded ? "excluded" : (s.probe ? s.probe.status : "unprobed");
+const prettyPrefix = p => p.startsWith("97910") ? "979-10-" + p.slice(5) : p.startsWith("9782") ? "978-2-" + p.slice(4) : p;
+
+// Same rules as text.rs `slugify`, enough to build test links.
+function slugify(s, apostrophe) {
+  s = (s || "").replace(/’/g, "'").replace(/œ/g, "oe").replace(/Œ/g, "Oe")
+    .replace(/'/g, apostrophe === "dash" ? "-" : "");
+  return s.normalize("NFKD").replace(/[^\x00-\x7f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+function productUrl(recipe, w) {
+  const author = (w.authors || "").split(",")[0].trim();
+  return recipe.template.replace("{isbn}", w.isbn).replace("{slug}", slugify(w.title, recipe.apostrophe))
+    .replace("{author}", slugify(author, recipe.apostrophe));
+}
+function searchUrl(recipe, q) {
+  return recipe.post_fields ? null : recipe.url.replace("{q}", encodeURIComponent(q));
+}
+function safeHref(u) { return /^https?:\/\//i.test(u || "") ? esc(u) : "#"; }
+
+function correctionOf(site) {
+  return Object.prototype.hasOwnProperty.call(edits.sites, site.key) ? edits.sites[site.key] : site.correction;
+}
+
+function matches(site) {
+  if (state.status && statusOf(site) !== state.status) return false;
+  if (state.table === "in" && !site.in_table) return false;
+  if (state.table === "out" && site.in_table) return false;
+  if (state.table === "edited" && !(site.key in edits.sites)) return false;
+  if (state.table === "check" && !(site.check && site.check.status !== "works")) return false;
+  if (!state.text) return true;
+  const hay = [site.key, site.home, ...site.publishers, ...site.prefixes, ...site.prefixes.map(prettyPrefix),
+    ...((site.probe && site.probe.witnesses) || []).flatMap(w => [w.isbn, w.title])].join(" ").toLowerCase();
+  return state.text.toLowerCase().split(/\s+/).every(t => hay.includes(t));
+}
+
+function renderStats() {
+  const counts = {};
+  for (const s of DATA.sites) counts[statusOf(s)] = (counts[statusOf(s)] || 0) + 1;
+  const items = [["", "All", DATA.sites.length]].concat(
+    Object.keys(STATUS).filter(k => counts[k]).map(k => [k, STATUS[k][0], counts[k]]));
+  document.getElementById("stats").innerHTML = items.map(([k, label, n]) =>
+    `<li><button type="button" data-status="${k}" aria-pressed="${state.status === k}">${esc(label)} <strong>${n}</strong></button></li>`).join("");
+}
+
+function recipeBlock(site) {
+  const p = site.probe, rows = [];
+  const c = correctionOf(site) || {};
+  const product = c.product || (p && p.product && p.product.recipe);
+  const search = c.search || (p && p.search && p.search.recipe);
+  if (product) {
+    const check = p && p.product ? ` <span class="muted">· rebuilt ${p.product.checked_on} witness(es), ${p.product.mismatches} mismatch(es)</span>` : "";
+    rows.push(`<dt>Product page${c.product ? " (corrected)" : ""}</dt><dd><code>${esc(product.template)}</code>
+      <span class="muted">· apostrophe ${esc(product.apostrophe)}${product.slug_ignored ? " · slug ignored by the server" : ""}</span>${check}</dd>`);
+  }
+  if (search) {
+    const check = p && p.search ? ` <span class="muted">· found ${p.search.found_by_isbn} by ISBN, ${p.search.found_by_title} by title</span>` : "";
+    const post = search.post_fields ? ` <span class="muted">· POST ${esc(search.post_fields.map(f => f[0] + "=" + f[1]).join("&"))}</span>` : "";
+    rows.push(`<dt>Search${c.search ? " (corrected)" : ""}</dt><dd><code>${esc(search.url)}</code>${post}${check}</dd>`);
+  }
+  if (p && p.note) rows.push(`<dt>Note</dt><dd>${esc(p.note)}</dd>`);
+  if (c.note) rows.push(`<dt>Correction note</dt><dd>${esc(c.note)}</dd>`);
+  if (p) rows.push(`<dt>Probed</dt><dd>${esc(p.probed_at)}</dd>`);
+  if (site.check) {
+    const ch = site.check, cls = ch.status === "works" ? "s-ok" : ch.status === "reprobed" ? "s-warn" : "s-bad";
+    const streak = ch.unreachable_in_a_row ? ` · unreachable ${ch.unreachable_in_a_row} check(s) in a row` : "";
+    const failed = (ch.failed || []).length ? ` · failed: ${esc(ch.failed.join(", "))}` : "";
+    rows.push(`<dt>Last check</dt><dd>${esc(ch.checked_at)} <span class="badge ${cls}">${esc(ch.status.replace("_", " "))}</span>${esc(streak)}${failed}${ch.note ? " · " + esc(ch.note) : ""}</dd>`);
+  }
+  return rows.length ? `<dl>${rows.join("")}</dl>` : "";
+}
+
+function witnessBlock(site) {
+  const p = site.probe, c = correctionOf(site) || {};
+  const list = ((p && p.witnesses) || []).slice();
+  for (const w of c.witnesses || []) if (!list.some(x => x.isbn === w.isbn)) list.push(w);
+  if (!list.length) return "";
+  const product = c.product || (p && p.product && p.product.recipe);
+  const search = c.search || (p && p.search && p.search.recipe);
+  const rows = list.map(w => {
+    const links = [];
+    if (w.url) links.push(`<a href="${safeHref(w.url)}" target="_blank" rel="noopener noreferrer">page</a>`);
+    if (product) links.push(`<a href="${safeHref(productUrl(product, w))}" target="_blank" rel="noopener noreferrer">product recipe</a>`);
+    const su = search && searchUrl(search, search.by_isbn ? w.isbn : w.title);
+    if (su) links.push(`<a href="${safeHref(su)}" target="_blank" rel="noopener noreferrer">search recipe</a>`);
+    return `<tr><td>${esc(w.title)}</td><td class="muted">${esc(w.authors)}</td><td><code>${esc(w.isbn)}</code></td><td>${links.join(" · ")}</td></tr>`;
+  }).join("");
+  return `<details><summary>Witnesses (${list.length})</summary><div class="scroll"><table>
+    <thead><tr><th scope="col">Title</th><th scope="col">Author</th><th scope="col">ISBN</th><th scope="col">Try</th></tr></thead>
+    <tbody>${rows}</tbody></table></div></details>`;
+}
+
+function triedBlock(site) {
+  const tried = (site.probe && site.probe.tried) || [];
+  if (!tried.length) return "";
+  const rows = tried.map(t => `<tr><td><code>${esc(t.recipe.url)}</code>${t.recipe.post_fields ? " (POST)" : ""}</td>
+    <td>${t.found_by_isbn}</td><td>${t.found_by_title}</td>
+    <td class="muted">${esc([t.js_results && "JavaScript results", t.broken && "broken", t.note].filter(Boolean).join(" · "))}</td></tr>`).join("");
+  return `<details><summary>Searches tried (${tried.length})</summary><div class="scroll"><table>
+    <thead><tr><th scope="col">Address</th><th scope="col">By ISBN</th><th scope="col">By title</th><th scope="col">Why not</th></tr></thead>
+    <tbody>${rows}</tbody></table></div></details>`;
+}
+
+function formBlock(site) {
+  const c = correctionOf(site) || {};
+  const pr = c.product || {}, se = c.search || {};
+  const wit = (c.witnesses || []).map(w => [w.isbn, w.title, w.authors || "", w.url || ""].join(" | ")).join("\n");
+  const id = "f-" + site.key.replace(/[^a-z0-9]/gi, "_");
+  return `<details><summary>Correct this site</summary>
+  <form class="form" data-key="${esc(site.key)}">
+    <label>Note (why, source) <input type="text" name="note" value="${esc(c.note)}"></label>
+    <div class="row"><label class="check"><input type="checkbox" name="excluded" ${c.excluded ? "checked" : ""}> Exclude this site (publisher's request, wrong site)</label></div>
+    <label>Home page to probe instead <input type="url" name="home" value="${esc(c.home)}" placeholder="${esc(site.home)}"></label>
+    <label>Product page template (<code>{isbn}</code>, <code>{slug}</code>, <code>{author}</code>) <input type="text" name="product" value="${esc(pr.template)}"></label>
+    <div class="row">
+      <label>Apostrophe <select name="apostrophe"><option value="drop" ${pr.apostrophe !== "dash" ? "selected" : ""}>drop (j'ai → jai)</option><option value="dash" ${pr.apostrophe === "dash" ? "selected" : ""}>dash (j'ai → j-ai)</option></select></label>
+      <label class="check"><input type="checkbox" name="slug_ignored" ${pr.slug_ignored ? "checked" : ""}> Server ignores the slug</label>
+    </div>
+    <label>Search address (GET, with <code>{q}</code>) <input type="text" name="search" value="${esc(se.post_fields ? "" : se.url)}"
+      placeholder="${se.post_fields ? "POST search kept as is: edit overrides.json to change it" : ""}"></label>
+    <div class="row"><label class="check"><input type="checkbox" name="by_isbn" ${se.by_isbn ? "checked" : ""}> Search finds books by ISBN</label></div>
+    <label for="${id}-w">Extra witnesses, one per line: <code>ISBN | title | author | page URL</code></label>
+    <textarea id="${id}-w" name="witnesses" rows="3">${esc(wit)}</textarea>
+    <div class="row"><button class="action" type="submit">Keep correction</button>
+      <button class="plain" type="button" data-reset="${esc(site.key)}">Remove my correction</button></div>
+  </form></details>`;
+}
+
+function siteCard(site) {
+  const st = statusOf(site), [label, cls] = STATUS[st] || [st, ""];
+  const edited = site.key in edits.sites;
+  return `<article class="site${edited ? " edited" : ""}" aria-labelledby="h-${esc(site.key)}">
+    <header><h3 id="h-${esc(site.key)}">${esc(site.publishers.join(", ") || site.key)}</h3>
+      <span class="badge ${cls}">${esc(label)}</span>
+      ${site.in_table ? '<span class="badge s-ok">in table</span>' : ""}
+      ${edited ? '<span class="badge s-warn">pending correction</span>' : ""}</header>
+    <div><a href="${safeHref(site.home)}" target="_blank" rel="noopener noreferrer">${esc(site.home)}</a> <span class="muted">· ${esc(site.key)}</span></div>
+    <ul class="chips" aria-label="ISBN prefixes">${site.prefixes.map(p => `<li>${esc(prettyPrefix(p))}</li>`).join("")}</ul>
+    ${recipeBlock(site)}${witnessBlock(site)}${triedBlock(site)}${formBlock(site)}
+  </article>`;
+}
+
+function renderList() {
+  const found = DATA.sites.filter(matches);
+  document.getElementById("count").textContent = `${found.length} site(s)`;
+  document.getElementById("list").innerHTML = found.slice(0, state.shown).map(siteCard).join("");
+  document.getElementById("more").hidden = found.length <= state.shown;
+}
+
+function renderPending() {
+  const n = Object.keys(edits.sites).length + Object.keys(edits.prefixes).length;
+  document.getElementById("pending").textContent = [notice, n ? `${n} pending correction(s)` : ""].filter(Boolean).join(" ");
+  document.getElementById("discard").disabled = !n;
+}
+
+function renderPrefixes() {
+  const merged = mergedOverrides().prefixes;
+  const rows = Object.keys(merged).sort().map(p => `<tr><td><code>${esc(p)}</code></td><td>${esc(merged[p].name)}</td>
+    <td><a href="${safeHref(merged[p].home)}" target="_blank" rel="noopener noreferrer">${esc(merged[p].home)}</a></td>
+    <td><button class="plain" type="button" data-unprefix="${esc(p)}">Remove</button></td></tr>`).join("");
+  document.querySelector("#prefix-table tbody").innerHTML = rows || '<tr><td colspan="4" class="muted">None</td></tr>';
+}
+
+function mergedOverrides() {
+  const out = JSON.parse(JSON.stringify(DATA.overrides || {}));
+  out.prefixes = out.prefixes || {}; out.sites = out.sites || {};
+  for (const [k, v] of Object.entries(edits.sites)) { if (v === null) delete out.sites[k]; else out.sites[k] = v; }
+  for (const [k, v] of Object.entries(edits.prefixes)) { if (v === null) delete out.prefixes[k]; else out.prefixes[k] = v; }
+  const sortKeys = o => Object.fromEntries(Object.keys(o).sort().map(k => [k, o[k]]));
+  return { prefixes: sortKeys(out.prefixes), sites: sortKeys(out.sites) };
+}
+
+function readForm(form, previous) {
+  const f = new FormData(form), o = {};
+  const text = n => (f.get(n) || "").trim();
+  if (text("note")) o.note = text("note");
+  if (f.get("excluded")) o.excluded = true;
+  if (text("home")) o.home = text("home");
+  if (text("product")) {
+    o.product = { template: text("product"), apostrophe: f.get("apostrophe") || "drop" };
+    if (f.get("slug_ignored")) o.product.slug_ignored = true;
+  }
+  if (text("search")) {
+    o.search = { url: text("search") };
+    if (f.get("by_isbn")) o.search.by_isbn = true;
+  } else if (previous && previous.search && previous.search.post_fields) {
+    // A POST search cannot be edited in this form: keep it as it is.
+    o.search = previous.search;
+  }
+  const witnesses = text("witnesses").split("\n").map(l => l.split("|").map(x => x.trim())).filter(p => /^97[89]\d{10}$/.test(p[0]))
+    .map(([isbn, title, authors, url]) => Object.assign({ isbn, title: title || "", authors: authors || "" }, url ? { url } : {}));
+  if (witnesses.length) o.witnesses = witnesses;
+  return o;
+}
+
+function refresh() { renderStats(); renderList(); renderPending(); renderPrefixes(); }
+
+document.getElementById("meta").textContent =
+  `Report of ${DATA.generated} · table built ${DATA.table_generated} · ${DATA.sites.length} sites from ${DATA.wikidata_publishers} Wikidata publishers`;
+document.getElementById("stats").addEventListener("click", e => {
+  const b = e.target.closest("button[data-status]"); if (!b) return;
+  state.status = b.dataset.status; state.shown = PAGE; refresh();
+});
+document.getElementById("q").addEventListener("input", e => { state.text = e.target.value.trim(); state.shown = PAGE; renderList(); });
+document.getElementById("table-filter").addEventListener("change", e => { state.table = e.target.value; state.shown = PAGE; renderList(); });
+document.getElementById("more").addEventListener("click", () => { state.shown += PAGE; renderList(); });
+document.getElementById("list").addEventListener("submit", e => {
+  e.preventDefault();
+  const form = e.target, site = DATA.sites.find(x => x.key === form.dataset.key);
+  const o = readForm(form, site && correctionOf(site));
+  edits.sites[form.dataset.key] = Object.keys(o).length ? o : null;
+  saveEdits(); renderList();
+});
+document.getElementById("list").addEventListener("click", e => {
+  const b = e.target.closest("button[data-reset]"); if (!b) return;
+  delete edits.sites[b.dataset.reset]; saveEdits(); renderList();
+});
+document.getElementById("prefix-form").addEventListener("submit", e => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  edits.prefixes[f.get("prefix").trim()] = { name: f.get("name").trim(), home: f.get("home").trim() };
+  e.target.reset(); saveEdits(); renderPrefixes();
+});
+document.getElementById("prefix-table").addEventListener("click", e => {
+  const b = e.target.closest("button[data-unprefix]"); if (!b) return;
+  edits.prefixes[b.dataset.unprefix] = null; saveEdits(); renderPrefixes();
+});
+document.getElementById("export").addEventListener("click", () => {
+  const blob = new Blob([JSON.stringify(mergedOverrides(), null, 2) + "\n"], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "overrides.json"; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+document.getElementById("discard").addEventListener("click", () => {
+  if (!confirm("Discard every pending correction kept in this browser?")) return;
+  edits = emptyEdits(); notice = ""; saveEdits(); refresh();
+});
+refresh();
+</script>
+</body>
+</html>

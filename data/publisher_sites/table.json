@@ -1,0 +1,151 @@
+{
+  "format": 1,
+  "generated": "2026-11-13",
+  "prefixes": [
+    {
+      "prefix": "978202",
+      "publishers": [
+        {
+          "name": "Seuil",
+          "site": "seuil.com"
+        }
+      ]
+    },
+    {
+      "prefix": "978207",
+      "publishers": [
+        {
+          "name": "Gallimard",
+          "site": "gallimard.fr"
+        }
+      ]
+    },
+    {
+      "prefix": "9782253",
+      "publishers": [
+        {
+          "name": "Le Livre de Poche",
+          "site": "livredepoche.com"
+        }
+      ]
+    },
+    {
+      "prefix": "9782330",
+      "publishers": [
+        {
+          "name": "Actes Sud",
+          "site": "actes-sud.fr"
+        }
+      ]
+    },
+    {
+      "prefix": "978235178",
+      "publishers": [
+        {
+          "name": "Gallmeister",
+          "site": "gallmeister.fr"
+        }
+      ]
+    },
+    {
+      "prefix": "9782404",
+      "publishers": [
+        {
+          "name": "Gallmeister",
+          "site": "gallmeister.fr"
+        }
+      ]
+    },
+    {
+      "prefix": "97827424",
+      "publishers": [
+        {
+          "name": "Éditions Gallimard",
+          "site": "gallimard.fr"
+        }
+      ]
+    },
+    {
+      "prefix": "97827427",
+      "publishers": [
+        {
+          "name": "Actes Sud",
+          "site": "actes-sud.fr"
+        }
+      ]
+    },
+    {
+      "prefix": "97827578",
+      "publishers": [
+        {
+          "name": "Seuil",
+          "site": "seuil.com"
+        }
+      ]
+    },
+    {
+      "prefix": "978286869",
+      "publishers": [
+        {
+          "name": "Actes Sud",
+          "site": "actes-sud.fr"
+        }
+      ]
+    },
+    {
+      "prefix": "978286943",
+      "publishers": [
+        {
+          "name": "Actes Sud",
+          "site": "actes-sud.fr"
+        }
+      ]
+    },
+    {
+      "prefix": "9782903098",
+      "publishers": [
+        {
+          "name": "Actes Sud",
+          "site": "actes-sud.fr"
+        }
+      ]
+    }
+  ],
+  "sites": {
+    "actes-sud.fr": {
+      "home": "http://www.actes-sud.fr",
+      "search": {
+        "url": "https://actes-sud.fr/catalogue?s%5Bq%5D={q}",
+        "by_isbn": true
+      }
+    },
+    "gallimard.fr": {
+      "home": "https://www.gallimard.fr/",
+      "product": {
+        "template": "https://www.gallimard.fr/catalogue/{slug}/{isbn}",
+        "apostrophe": "dash"
+      }
+    },
+    "gallmeister.fr": {
+      "home": "http://www.gallmeister.fr/",
+      "search": {
+        "url": "https://gallmeister.fr/recherche?q={q}"
+      }
+    },
+    "livredepoche.com": {
+      "home": "https://www.livredepoche.com/",
+      "product": {
+        "template": "https://www.livredepoche.com/livre/{slug}-{isbn}/",
+        "apostrophe": "drop"
+      }
+    },
+    "seuil.com": {
+      "home": "https://www.seuil.com/",
+      "product": {
+        "template": "https://www.seuil.com/ouvrage/{slug}/{isbn}",
+        "apostrophe": "drop",
+        "slug_ignored": true
+      }
+    }
+  }
+}

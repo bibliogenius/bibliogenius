@@ -2,6 +2,7 @@ pub mod bnf;
 pub mod google_books;
 pub mod inventaire;
 pub mod openlibrary;
+pub mod publisher_sites;
 pub mod sudoc;
 pub mod unimarc;
 pub mod web_cover;

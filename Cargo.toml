@@ -18,6 +18,12 @@ name = "bibliogenius"
 path = "src/main.rs"
 required-features = ["desktop"]
 
+# Maintenance tool for the publisher site table (data/publisher_sites/README.md).
+[[bin]]
+name = "publisher_sites"
+path = "tools/publisher_sites/main.rs"
+required-features = ["desktop"]
+
 [features]
 default = ["desktop", "mcp"]
 desktop = []

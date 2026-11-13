@@ -301,25 +301,12 @@ pub(crate) async fn fetch_with_policy(
     let mut url = start;
     for _hop in 0..=MAX_REDIRECTS {
         policy.check(&url)?;
-        let addrs = resolve_checked(&url).await?;
-
-        let mut builder = reqwest::Client::builder()
-            .user_agent(API_USER_AGENT)
-            .timeout(REQUEST_TIMEOUT)
-            .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(READ_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy();
-        if let Some(Host::Domain(domain)) = url.host() {
-            // Pin the connection to the addresses checked above.
-            builder = builder.resolve_to_addrs(domain, &addrs);
-        }
-        let client = builder.build().map_err(|_| PublicFetchError::Network)?;
+        let client = pinned_client(&url).await?;
 
         // Some CDNs close a connection before answering now and then. A GET
         // with no answer yet is safe to send once more; a second failure is
         // reported.
-        let mut resp = match client.get(url.clone()).send().await {
+        let resp = match client.get(url.clone()).send().await {
             Ok(resp) => resp,
             Err(_) => client
                 .get(url.clone())
@@ -330,47 +317,147 @@ pub(crate) async fn fetch_with_policy(
         let status = resp.status();
 
         if status.is_redirection() {
-            let location = resp
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|v| v.to_str().ok());
-            url = redirect_target(&url, location, status.as_u16(), policy)?;
+            url = redirect_target(&url, location_of(&resp), status.as_u16(), policy)?;
             continue;
         }
         if !status.is_success() {
             return Err(PublicFetchError::HttpStatus(status.as_u16()));
         }
-
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.to_ascii_lowercase());
-        let (cap, truncate) = match body_cap(content_type.as_deref()) {
-            BodyCap::Refuse(cap) => (cap, false),
-            BodyCap::Truncate(cap) => (cap, true),
-        };
-        if !truncate && resp.content_length().is_some_and(|len| len > cap as u64) {
-            return Err(PublicFetchError::TooLarge);
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = resp.chunk().await.map_err(|_| PublicFetchError::Network)? {
-            if bytes.len() + chunk.len() > cap {
-                if !truncate {
-                    return Err(PublicFetchError::TooLarge);
-                }
-                bytes.extend_from_slice(&chunk[..cap - bytes.len()]);
-                break;
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        return Ok(FetchedBody {
-            final_url: url,
-            content_type,
-            bytes,
-        });
+        return read_body(resp, url, body_cap).await;
     }
     Err(PublicFetchError::TooManyRedirects)
+}
+
+/// What one request answered, its redirects not followed.
+#[derive(Debug)]
+pub enum HopOutcome {
+    /// The server sends the client elsewhere (a search form posting then
+    /// redirecting to a GET result page, a moved page). The target, checked
+    /// against the policy, is not fetched.
+    Redirect(Url),
+    /// The server answered with the page itself.
+    Body(FetchedBody),
+}
+
+/// GET `url` under `policy` without following a redirect: the caller
+/// decides, hop by hop, whether and when to go on (robots.txt and pacing
+/// apply to every address, not only the first).
+pub(crate) async fn get_one_hop_with_policy(
+    url: Url,
+    body_cap: &(dyn Fn(Option<&str>) -> BodyCap + Sync),
+    policy: FetchPolicy,
+) -> Result<HopOutcome, PublicFetchError> {
+    policy.check(&url)?;
+    let client = pinned_client(&url).await?;
+    let resp = match client.get(url.clone()).send().await {
+        Ok(resp) => resp,
+        Err(_) => client
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|_| PublicFetchError::Network)?,
+    };
+    let status = resp.status();
+    if status.is_redirection() {
+        let target = redirect_target(&url, location_of(&resp), status.as_u16(), policy)?;
+        policy.check(&target)?;
+        return Ok(HopOutcome::Redirect(target));
+    }
+    if !status.is_success() {
+        return Err(PublicFetchError::HttpStatus(status.as_u16()));
+    }
+    read_body(resp, url, body_cap).await.map(HopOutcome::Body)
+}
+
+/// Submit an HTML form (`application/x-www-form-urlencoded`) to `url` under
+/// `policy`. Redirects are not followed but returned, so the caller can keep
+/// the GET address a search form leads to. A POST is not repeated on a
+/// dropped connection: it is not idempotent.
+pub(crate) async fn post_form_with_policy(
+    url: Url,
+    fields: &[(String, String)],
+    body_cap: &(dyn Fn(Option<&str>) -> BodyCap + Sync),
+    policy: FetchPolicy,
+) -> Result<HopOutcome, PublicFetchError> {
+    policy.check(&url)?;
+    let client = pinned_client(&url).await?;
+    let resp = client
+        .post(url.clone())
+        .form(fields)
+        .send()
+        .await
+        .map_err(|_| PublicFetchError::Network)?;
+    let status = resp.status();
+    if status.is_redirection() {
+        let target = redirect_target(&url, location_of(&resp), status.as_u16(), policy)?;
+        policy.check(&target)?;
+        return Ok(HopOutcome::Redirect(target));
+    }
+    if !status.is_success() {
+        return Err(PublicFetchError::HttpStatus(status.as_u16()));
+    }
+    read_body(resp, url, body_cap).await.map(HopOutcome::Body)
+}
+
+/// A client for one request to `url`, whose host is resolved and checked
+/// here, the connection pinned to the checked addresses.
+async fn pinned_client(url: &Url) -> Result<reqwest::Client, PublicFetchError> {
+    let addrs = resolve_checked(url).await?;
+    let mut builder = reqwest::Client::builder()
+        .user_agent(API_USER_AGENT)
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if let Some(Host::Domain(domain)) = url.host() {
+        // Pin the connection to the addresses checked above.
+        builder = builder.resolve_to_addrs(domain, &addrs);
+    }
+    builder.build().map_err(|_| PublicFetchError::Network)
+}
+
+fn location_of(resp: &reqwest::Response) -> Option<&str> {
+    resp.headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+}
+
+/// Read a success response's body under the cap `body_cap` picks for its
+/// content type, streaming rather than trusting `Content-Length`.
+async fn read_body(
+    mut resp: reqwest::Response,
+    url: Url,
+    body_cap: &(dyn Fn(Option<&str>) -> BodyCap + Sync),
+) -> Result<FetchedBody, PublicFetchError> {
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_ascii_lowercase());
+    let (cap, truncate) = match body_cap(content_type.as_deref()) {
+        BodyCap::Refuse(cap) => (cap, false),
+        BodyCap::Truncate(cap) => (cap, true),
+    };
+    if !truncate && resp.content_length().is_some_and(|len| len > cap as u64) {
+        return Err(PublicFetchError::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|_| PublicFetchError::Network)? {
+        if bytes.len() + chunk.len() > cap {
+            if !truncate {
+                return Err(PublicFetchError::TooLarge);
+            }
+            bytes.extend_from_slice(&chunk[..cap - bytes.len()]);
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(FetchedBody {
+        final_url: url,
+        content_type,
+        bytes,
+    })
 }
 
 #[cfg(test)]
@@ -716,6 +803,107 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body.bytes, b"cover");
+    }
+
+    async fn post_test(url: String) -> Result<HopOutcome, PublicFetchError> {
+        let fields = vec![("q".to_string(), "9782070000000".to_string())];
+        post_form_with_policy(
+            Url::parse(&url).unwrap(),
+            &fields,
+            &no_cap,
+            FetchPolicy::PublicOrLoopbackForTests,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn one_hop_get_returns_its_redirect_unfollowed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/recherche"))
+            .respond_with(ResponseTemplate::new(301).insert_header("Location", "/catalogue?q=x"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let outcome = get_one_hop_with_policy(
+            Url::parse(&format!("{}/recherche", server.uri())).unwrap(),
+            &no_cap,
+            FetchPolicy::PublicOrLoopbackForTests,
+        )
+        .await
+        .unwrap();
+        match outcome {
+            HopOutcome::Redirect(target) => assert_eq!(target.path(), "/catalogue"),
+            other => panic!("expected a redirect, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_posted_form_returns_its_redirect_unfollowed() {
+        use wiremock::matchers::body_string;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .and(body_string("q=9782070000000"))
+            .respond_with(
+                ResponseTemplate::new(303).insert_header("Location", "/results?q=9782070000000"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        match post_test(format!("{}/search", server.uri())).await.unwrap() {
+            HopOutcome::Redirect(target) => {
+                assert_eq!(target.path(), "/results");
+                assert_eq!(target.query(), Some("q=9782070000000"));
+            }
+            other => panic!("expected a redirect, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_posted_form_returns_the_page_it_answers_with() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>results</html>"))
+            .mount(&server)
+            .await;
+        match post_test(format!("{}/index.php?page=search", server.uri()))
+            .await
+            .unwrap()
+        {
+            HopOutcome::Body(body) => assert_eq!(body.bytes, b"<html>results</html>"),
+            other => panic!("expected a body, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_posted_form_redirecting_to_a_private_address_is_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("Location", "https://192.168.1.1/admin"),
+            )
+            .mount(&server)
+            .await;
+        let err = post_test(format!("{}/search", server.uri()))
+            .await
+            .unwrap_err();
+        assert_eq!(err, PublicFetchError::BlockedAddress);
+    }
+
+    #[tokio::test]
+    async fn production_policy_refuses_to_post_to_the_loopback_mock() {
+        let server = MockServer::start().await;
+        let fields: Vec<(String, String)> = Vec::new();
+        let err = post_form_with_policy(
+            Url::parse(&format!("{}/search", server.uri())).unwrap(),
+            &fields,
+            &no_cap,
+            FetchPolicy::PublicInternet,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, PublicFetchError::InvalidUrl);
     }
 
     #[tokio::test]

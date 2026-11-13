@@ -1,0 +1,10174 @@
+[
+  {
+    "qid": "Q100587692",
+    "name": "Ludopathes",
+    "prefixes": [
+      "978235112"
+    ],
+    "sites": [
+      "http://www.ludopathes.com/"
+    ]
+  },
+  {
+    "qid": "Q100744835",
+    "name": "D'Orbestier",
+    "prefixes": [
+      "978284238"
+    ],
+    "sites": [
+      "https://www.dorbestier.com"
+    ]
+  },
+  {
+    "qid": "Q101046628",
+    "name": "la ville brûle",
+    "prefixes": [
+      "978236012"
+    ],
+    "sites": [
+      "https://www.lavillebrule.com"
+    ]
+  },
+  {
+    "qid": "Q101084469",
+    "name": "Éditions Seuil jeunesse",
+    "prefixes": [
+      "97827256"
+    ],
+    "sites": [
+      "http://seuiljeunesse.com/"
+    ]
+  },
+  {
+    "qid": "Q101759503",
+    "name": "Austral éditions",
+    "prefixes": [
+      "9791091894"
+    ],
+    "sites": [
+      "https://austral-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q102335367",
+    "name": "Les fourmis rouges",
+    "prefixes": [
+      "978236902"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q1027462",
+    "name": "Éditions Racine",
+    "prefixes": [
+      "978239025",
+      "978284108",
+      "978287386"
+    ],
+    "sites": [
+      "https://www.racine.be/fr"
+    ]
+  },
+  {
+    "qid": "Q103846819",
+    "name": "Tertium éditions",
+    "prefixes": [
+      "978236848",
+      "9782916132"
+    ],
+    "sites": [
+      "https://www.tertium-editions.fr/"
+    ]
+  },
+  {
+    "qid": "Q104059755",
+    "name": "C&F éditions",
+    "prefixes": [
+      "978237662",
+      "9782915825"
+    ],
+    "sites": [
+      "https://cfeditions.com"
+    ]
+  },
+  {
+    "qid": "Q104162437",
+    "name": "Éditions HumenSciences",
+    "prefixes": [
+      "978237931"
+    ],
+    "sites": [
+      "https://www.humensciences.com/"
+    ]
+  },
+  {
+    "qid": "Q104708971",
+    "name": "Soulières éditeur",
+    "prefixes": [
+      "978289607",
+      "9782922225"
+    ],
+    "sites": [
+      "https://soulieresediteur.com"
+    ]
+  },
+  {
+    "qid": "Q104777307",
+    "name": "éditions Varia",
+    "prefixes": [
+      "978289606",
+      "9782922245"
+    ],
+    "sites": [
+      "https://www.leslibraires.ca/editeur/varia/"
+    ]
+  },
+  {
+    "qid": "Q104783577",
+    "name": "Éditions du Fleuve",
+    "prefixes": [
+      "978285116"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q104791338",
+    "name": "Éditions Stéphane Bachès",
+    "prefixes": [
+      "978235752",
+      "978236842",
+      "9782915266",
+      "97829511985",
+      "97829516680"
+    ],
+    "sites": [
+      "http://www.lescuisinieres.fr/"
+    ]
+  },
+  {
+    "qid": "Q104843486",
+    "name": "Editions de la \"Vraie France\"",
+    "prefixes": [
+      "978237538"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q104851588",
+    "name": "Éditions du Chemin des Crêtes",
+    "prefixes": [
+      "97829539191",
+      "9791095743"
+    ],
+    "sites": [
+      "https://www.chemindescretes.fr"
+    ]
+  },
+  {
+    "qid": "Q105162135",
+    "name": "Éditions du Fournel",
+    "prefixes": [
+      "978236142",
+      "9782915493",
+      "97829511851",
+      "97829517025"
+    ],
+    "sites": [
+      "https://editions-fournel.fr/"
+    ]
+  },
+  {
+    "qid": "Q105178329",
+    "name": "Éditions Princesse",
+    "prefixes": [
+      "978285961"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q105636184",
+    "name": "Presses universitaires de Bordeaux",
+    "prefixes": [
+      "978286781",
+      "97910300"
+    ],
+    "sites": [
+      "http://www.pub.u-bordeaux3.fr/"
+    ]
+  },
+  {
+    "qid": "Q105659373",
+    "name": "Gérard Louis éditeur",
+    "prefixes": [
+      "978235763",
+      "9782914554"
+    ],
+    "sites": [
+      "http://www.gerard-louis.com",
+      "https://gerard-louis.fr/"
+    ]
+  },
+  {
+    "qid": "Q105754138",
+    "name": "Annika Parance Éditeur",
+    "prefixes": [
+      "9782923830",
+      "9782925085"
+    ],
+    "sites": [
+      "http://apediteur.com"
+    ]
+  },
+  {
+    "qid": "Q105946020",
+    "name": "au pont 9",
+    "prefixes": [
+      "978286680"
+    ],
+    "sites": [
+      "https://aupont9.com/"
+    ]
+  },
+  {
+    "qid": "Q105946751",
+    "name": "Rue des Écoles",
+    "prefixes": [
+      "97828208",
+      "978284431",
+      "978284927"
+    ],
+    "sites": [
+      "https://www.ruedesecoles.com/"
+    ]
+  },
+  {
+    "qid": "Q106442208",
+    "name": "Beauchemin international",
+    "prefixes": [
+      "978289584"
+    ],
+    "sites": [
+      "http://beaucheminint.com/"
+    ]
+  },
+  {
+    "qid": "Q106464148",
+    "name": "Zones",
+    "prefixes": [
+      "978235522"
+    ],
+    "sites": [
+      "https://www.editions-zones.fr"
+    ]
+  },
+  {
+    "qid": "Q1065097",
+    "name": "O'Reilly Media",
+    "prefixes": [
+      "978235402",
+      "978284177"
+    ],
+    "sites": [
+      "https://www.oreilly.com/"
+    ]
+  },
+  {
+    "qid": "Q106610331",
+    "name": "Graines de Pensées",
+    "prefixes": [
+      "9782916101",
+      "97910361"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q1066188",
+    "name": "Université Charles-Sturt",
+    "prefixes": [
+      "978285719"
+    ],
+    "sites": [
+      "http://csu.edu.au/"
+    ]
+  },
+  {
+    "qid": "Q106624345",
+    "name": "Lamiroy",
+    "prefixes": [
+      "978287595"
+    ],
+    "sites": [
+      "https://lamiroy.be",
+      "https://lamiroy.net"
+    ]
+  },
+  {
+    "qid": "Q106864042",
+    "name": "Divergences",
+    "prefixes": [
+      "9791097088"
+    ],
+    "sites": [
+      "https://www.editionsdivergences.com"
+    ]
+  },
+  {
+    "qid": "Q107065033",
+    "name": "Les Éditions Alaska",
+    "prefixes": [
+      "97829816217",
+      "97829817496",
+      "97829819203"
+    ],
+    "sites": [
+      "https://www.editionsalaska.com/"
+    ]
+  },
+  {
+    "qid": "Q107410923",
+    "name": "Éditions Leha",
+    "prefixes": [
+      "9782493405",
+      "9791097270"
+    ],
+    "sites": [
+      "https://editions-leha.com"
+    ]
+  },
+  {
+    "qid": "Q108014622",
+    "name": "Éditions Lemaitre",
+    "prefixes": [
+      "97828062",
+      "97828080"
+    ],
+    "sites": [
+      "http://www.lemaitre-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q108312197",
+    "name": "GM Éditions",
+    "prefixes": [
+      "978237797",
+      "9791092730"
+    ],
+    "sites": [
+      "https://gm-editions.com"
+    ]
+  },
+  {
+    "qid": "Q108680087",
+    "name": "La Déferlante",
+    "prefixes": [
+      "9782487162"
+    ],
+    "sites": [
+      "https://revueladeferlante.fr/"
+    ]
+  },
+  {
+    "qid": "Q109021511",
+    "name": "Éditions Lumen",
+    "prefixes": [
+      "978237102"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q109037994",
+    "name": "Front Froid",
+    "prefixes": [
+      "9782924455",
+      "97829810422",
+      "97829819128"
+    ],
+    "sites": [
+      "http://frontfroid.com/"
+    ]
+  },
+  {
+    "qid": "Q109044795",
+    "name": "Même Pas Mal",
+    "prefixes": [
+      "9782918645"
+    ],
+    "sites": [
+      "https://meme-pas-mal.fr/"
+    ]
+  },
+  {
+    "qid": "Q109282945",
+    "name": "AIGLON",
+    "prefixes": [
+      "978285935",
+      "9782906675"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q109497827",
+    "name": "Atelier 10",
+    "prefixes": [
+      "978289759",
+      "9782924153",
+      "9782924275",
+      "9782924429"
+    ],
+    "sites": [
+      "http://www.atelier10.ca"
+    ]
+  },
+  {
+    "qid": "Q109500890",
+    "name": "Éditions du quartz",
+    "prefixes": [
+      "9782924031"
+    ],
+    "sites": [
+      "https://www.editionsduquartz.com/"
+    ]
+  },
+  {
+    "qid": "Q109662245",
+    "name": "Éditions Goater",
+    "prefixes": [
+      "978238367",
+      "9782918647",
+      "9791097465"
+    ],
+    "sites": [
+      "http://www.editions-goater.org/"
+    ]
+  },
+  {
+    "qid": "Q110588250",
+    "name": "Anamosa",
+    "prefixes": [
+      "9791095772"
+    ],
+    "sites": [
+      "https://anamosa.fr/"
+    ]
+  },
+  {
+    "qid": "Q110994338",
+    "name": "Pluriel",
+    "prefixes": [
+      "978201",
+      "97828185"
+    ],
+    "sites": [
+      "https://www.fayard.fr/pluriel"
+    ]
+  },
+  {
+    "qid": "Q111208608",
+    "name": "Éditions Hibou",
+    "prefixes": [
+      "978287453"
+    ],
+    "sites": [
+      "https://www.editionshibou.com/"
+    ]
+  },
+  {
+    "qid": "Q111598831",
+    "name": "Les éditions de la maison en feu",
+    "prefixes": [
+      "9782924888"
+    ],
+    "sites": [
+      "https://maisonenfeu.com/"
+    ]
+  },
+  {
+    "qid": "Q111901551",
+    "name": "Éditions du Crabe",
+    "prefixes": [
+      "97829547234",
+      "97829583022"
+    ],
+    "sites": [
+      "https://www.editionsducrabe.fr/"
+    ]
+  },
+  {
+    "qid": "Q111907735",
+    "name": "Éditions IQRA",
+    "prefixes": [
+      "9782916316"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q111968623",
+    "name": "L'instant même",
+    "prefixes": [
+      "978289502",
+      "9782921197",
+      "97829800635"
+    ],
+    "sites": [
+      "https://instantmeme.com/"
+    ]
+  },
+  {
+    "qid": "Q112232628",
+    "name": "LaNovel-Édition",
+    "prefixes": [
+      "978238606",
+      "9782492139",
+      "97829572095"
+    ],
+    "sites": [
+      "https://www.lanovel-edition.fr/"
+    ]
+  },
+  {
+    "qid": "Q11281463",
+    "name": "Ribon Mascot Comics",
+    "prefixes": [
+      "978286855"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q112960470",
+    "name": "Page centrale",
+    "prefixes": [
+      "9791090367"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q113303584",
+    "name": "Rue des Scribes",
+    "prefixes": [
+      "9782906064"
+    ],
+    "sites": [
+      "http://www.rue-des-scribes.com"
+    ]
+  },
+  {
+    "qid": "Q113366783",
+    "name": "Label LN",
+    "prefixes": [
+      "9782915915"
+    ],
+    "sites": [
+      "http://www.editions-label-ln.com"
+    ]
+  },
+  {
+    "qid": "Q113460070",
+    "name": "Noeve",
+    "prefixes": [
+      "978238316"
+    ],
+    "sites": [
+      "https://noeve.com/"
+    ]
+  },
+  {
+    "qid": "Q113551664",
+    "name": "éditions Revoir",
+    "prefixes": [
+      "978235265"
+    ],
+    "sites": [
+      "https://editionsrevoir.fr/"
+    ]
+  },
+  {
+    "qid": "Q113644008",
+    "name": "Editions Blanco",
+    "prefixes": [
+      "9782872"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q114033358",
+    "name": "Locus Solus",
+    "prefixes": [
+      "978236833"
+    ],
+    "sites": [
+      "https://www.locus-solus.fr/"
+    ]
+  },
+  {
+    "qid": "Q114404",
+    "name": "EDP Sciences",
+    "prefixes": [
+      "97827598",
+      "978286883",
+      "9782902731"
+    ],
+    "sites": [
+      "http://www.edpsciences.org"
+    ]
+  },
+  {
+    "qid": "Q115258430",
+    "name": "Lirabelle",
+    "prefixes": [
+      "978235496",
+      "978235878",
+      "9782914216"
+    ],
+    "sites": [
+      "http://www.lirabelle.fr"
+    ]
+  },
+  {
+    "qid": "Q115351789",
+    "name": "Ulysse éditions",
+    "prefixes": [
+      "97827658",
+      "978289464",
+      "978289665",
+      "9782921444",
+      "97829801872"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q115351973",
+    "name": "À l'étage",
+    "prefixes": [
+      "9782924568"
+    ],
+    "sites": [
+      "https://www.groupecourteechelle.com/a-l-etage/"
+    ]
+  },
+  {
+    "qid": "Q115352229",
+    "name": "Alias",
+    "prefixes": [
+      "9782924787"
+    ],
+    "sites": [
+      "http://groupenotabene.com/"
+    ]
+  },
+  {
+    "qid": "Q115354735",
+    "name": "Andara éditeur inc.",
+    "prefixes": [
+      "978289746",
+      "9782924146"
+    ],
+    "sites": [
+      "http://www.andara.ca/"
+    ]
+  },
+  {
+    "qid": "Q115355207",
+    "name": "Archimède",
+    "prefixes": [
+      "9782922132",
+      "9782923686",
+      "9782924328",
+      "97829801956",
+      "97829803585"
+    ],
+    "sites": [
+      "http://editionsarchimede.com/"
+    ]
+  },
+  {
+    "qid": "Q115355421",
+    "name": "Publications chrétiennes",
+    "prefixes": [
+      "978289082",
+      "9782911499"
+    ],
+    "sites": [
+      "https://publicationschretiennes.com"
+    ]
+  },
+  {
+    "qid": "Q115355480",
+    "name": "Ariane éditions",
+    "prefixes": [
+      "978289626",
+      "9782920987"
+    ],
+    "sites": [
+      "https://editions-ariane.com/"
+    ]
+  },
+  {
+    "qid": "Q115355598",
+    "name": "Éditions MD",
+    "prefixes": [
+      "978289144"
+    ],
+    "sites": [
+      "http://editionsmichelquintin.ca/"
+    ]
+  },
+  {
+    "qid": "Q115356679",
+    "name": "Boomerang éditeur jeunesse",
+    "prefixes": [
+      "978289595",
+      "978289709"
+    ],
+    "sites": [
+      "http://boomerangjeunesse.com/"
+    ]
+  },
+  {
+    "qid": "Q115356703",
+    "name": "Éditions Marie-France",
+    "prefixes": [
+      "978289168",
+      "978289661",
+      "97829806777"
+    ],
+    "sites": [
+      "http://marie-france.qc.ca/"
+    ]
+  },
+  {
+    "qid": "Q115357133",
+    "name": "Centre d'élaboration des moyens d'enseignement du Québec (CEMEQ)",
+    "prefixes": [
+      "978289446",
+      "978289620",
+      "978289790"
+    ],
+    "sites": [
+      "https://www.cemeq.qc.ca/"
+    ]
+  },
+  {
+    "qid": "Q115357353",
+    "name": "Éditions Les heures bleues",
+    "prefixes": [
+      "9782922265",
+      "9782924063",
+      "9782924277",
+      "9782924537",
+      "9782924914"
+    ],
+    "sites": [
+      "http://heuresbleues.com/"
+    ]
+  },
+  {
+    "qid": "Q115357399",
+    "name": "Crackboom! Livres",
+    "prefixes": [
+      "978289802",
+      "9782924786",
+      "97829815807"
+    ],
+    "sites": [
+      "http://livrescrackboom.com/"
+    ]
+  },
+  {
+    "qid": "Q115357652",
+    "name": "Dramaturges",
+    "prefixes": [
+      "978289637",
+      "9782922182"
+    ],
+    "sites": [
+      "http://dramaturges.qc.ca/"
+    ]
+  },
+  {
+    "qid": "Q115357985",
+    "name": "Editions Symbolicone",
+    "prefixes": [
+      "9782924410"
+    ],
+    "sites": [
+      "https://www.symbolicone.com/"
+    ]
+  },
+  {
+    "qid": "Q115358456",
+    "name": "Éditions Au carré",
+    "prefixes": [
+      "9782923335",
+      "9782924966"
+    ],
+    "sites": [
+      "http://editionsaucarre.com/"
+    ]
+  },
+  {
+    "qid": "Q115358791",
+    "name": "Éditions Chouette",
+    "prefixes": [
+      "978289450",
+      "978289718",
+      "9782921198",
+      "97829800909"
+    ],
+    "sites": [
+      "http://editions-chouette.com/"
+    ]
+  },
+  {
+    "qid": "Q115358874",
+    "name": "Éditions L'hybride",
+    "prefixes": [
+      "9782924962",
+      "97829815059"
+    ],
+    "sites": [
+      "http://editionslhybride.com/"
+    ]
+  },
+  {
+    "qid": "Q115359248",
+    "name": "Éditions de l'Isatis",
+    "prefixes": [
+      "9782923234",
+      "9782923818",
+      "9782924309",
+      "9782924769",
+      "9782925088"
+    ],
+    "sites": [
+      "http://editionsdelisatis.com/"
+    ]
+  },
+  {
+    "qid": "Q115359653",
+    "name": "Éditions Dent-de-lion",
+    "prefixes": [
+      "9782924926"
+    ],
+    "sites": [
+      "http://editionsdentdelion.com/"
+    ]
+  },
+  {
+    "qid": "Q115359710",
+    "name": "Éditions Histoire Québec",
+    "prefixes": [
+      "978289586"
+    ],
+    "sites": [
+      "http://histoirequebec.qc.ca/"
+    ]
+  },
+  {
+    "qid": "Q115381278",
+    "name": "Pleine lune éditions",
+    "prefixes": [
+      "978289024"
+    ],
+    "sites": [
+      "https://www.pleinelune.qc.ca"
+    ]
+  },
+  {
+    "qid": "Q115382027",
+    "name": "Parfum d'encre éditions",
+    "prefixes": [
+      "9782923708",
+      "9782924251",
+      "9782925101"
+    ],
+    "sites": [
+      "https://www.groupecourteechelle.com/parfum-d-encre/"
+    ]
+  },
+  {
+    "qid": "Q115403435",
+    "name": "Talaia",
+    "prefixes": [
+      "9782917859",
+      "97829522036"
+    ],
+    "sites": [
+      "http://www.editions-talaia.com"
+    ]
+  },
+  {
+    "qid": "Q115407643",
+    "name": "Éditions Hashtag",
+    "prefixes": [
+      "9782924936"
+    ],
+    "sites": [
+      "https://editionshashtag.com/"
+    ]
+  },
+  {
+    "qid": "Q115407884",
+    "name": "Monsieur ED",
+    "prefixes": [
+      "9782924663"
+    ],
+    "sites": [
+      "https://monsieured.com"
+    ]
+  },
+  {
+    "qid": "Q115407958",
+    "name": "Éditions Hannenorak",
+    "prefixes": [
+      "9782923926",
+      "9782925118"
+    ],
+    "sites": [
+      "https://editions.hannenorak.com/"
+    ]
+  },
+  {
+    "qid": "Q115408135",
+    "name": "Éditions Ganesha",
+    "prefixes": [
+      "978289145"
+    ],
+    "sites": [
+      "http://www.editions-ganesha.qc.ca/"
+    ]
+  },
+  {
+    "qid": "Q115408842",
+    "name": "Éditions des Plaines",
+    "prefixes": [
+      "978289611",
+      "9782921353"
+    ],
+    "sites": [
+      "http://plaines.ca/"
+    ]
+  },
+  {
+    "qid": "Q115408885",
+    "name": "Maison des éditions TNT",
+    "prefixes": [
+      "9782923375",
+      "9782925002",
+      "97829803768"
+    ],
+    "sites": [
+      "https://editionstnt.com"
+    ]
+  },
+  {
+    "qid": "Q115409003",
+    "name": "Éditions du CHU Sainte-Justine",
+    "prefixes": [
+      "978289619",
+      "978289828",
+      "9782921215",
+      "9782921858",
+      "9782922770"
+    ],
+    "sites": [
+      "https://www.editions-chu-sainte-justine.org/"
+    ]
+  },
+  {
+    "qid": "Q115409331",
+    "name": "Éditions du Tullinois",
+    "prefixes": [
+      "978289809",
+      "9782924169",
+      "97829811387"
+    ],
+    "sites": [
+      "http://www.editionsdutullinois.ca/"
+    ]
+  },
+  {
+    "qid": "Q115409641",
+    "name": "Éditions Édiligne",
+    "prefixes": [
+      "978289832",
+      "9782924016",
+      "9782925009"
+    ],
+    "sites": [
+      "http://ediligne.ca/"
+    ]
+  },
+  {
+    "qid": "Q115409726",
+    "name": "Lévesque éditeur",
+    "prefixes": [
+      "978289763",
+      "9782923844",
+      "9782924186"
+    ],
+    "sites": [
+      "https://levesqueediteur.com"
+    ]
+  },
+  {
+    "qid": "Q115409778",
+    "name": "Le lézard amoureux",
+    "prefixes": [
+      "9782923398"
+    ],
+    "sites": [
+      "http://groupenotabene.com/"
+    ]
+  },
+  {
+    "qid": "Q115409869",
+    "name": "Éditions Pow Pow",
+    "prefixes": [
+      "9782924049",
+      "9782925114",
+      "9782981112"
+    ],
+    "sites": [
+      "http://editionspowpow.com/"
+    ]
+  },
+  {
+    "qid": "Q115410438",
+    "name": "Les éditeurs réunis",
+    "prefixes": [
+      "978289585",
+      "978289783"
+    ],
+    "sites": [
+      "http://lesediteursreunis.com/"
+    ]
+  },
+  {
+    "qid": "Q115410702",
+    "name": "Les éditions Sémaphore",
+    "prefixes": [
+      "9782923107",
+      "9782924461"
+    ],
+    "sites": [
+      "https://www.editionssemaphore.qc.ca"
+    ]
+  },
+  {
+    "qid": "Q115410837",
+    "name": "Les éditions André Fontaine",
+    "prefixes": [
+      "97829808098",
+      "97829819317"
+    ],
+    "sites": [
+      "https://editionsandrefontaine.ca/"
+    ]
+  },
+  {
+    "qid": "Q115410921",
+    "name": "Les éditions de La Grenouillère",
+    "prefixes": [
+      "9782923949",
+      "9782924758"
+    ],
+    "sites": [
+      "http://delagrenouillere.com/"
+    ]
+  },
+  {
+    "qid": "Q115410932",
+    "name": "Les éditions La Plume d'or",
+    "prefixes": [
+      "9782924224",
+      "9782924594",
+      "9782924849",
+      "9782925049",
+      "9782925178",
+      "97829800496",
+      "97829803694",
+      "97829813259"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q115410934",
+    "name": "La Mèche",
+    "prefixes": [
+      "978289707"
+    ],
+    "sites": [
+      "http://lameche.ca/"
+    ]
+  },
+  {
+    "qid": "Q115410998",
+    "name": "Les éditions La Pensée",
+    "prefixes": [
+      "978289458",
+      "9782921187",
+      "97829804767"
+    ],
+    "sites": [
+      "https://www.lidec.qc.ca"
+    ]
+  },
+  {
+    "qid": "Q115411006",
+    "name": "Les éditions du Blé",
+    "prefixes": [
+      "9782921347",
+      "9782923673",
+      "9782924378",
+      "9782924915"
+    ],
+    "sites": [
+      "http://ble.refc.ca/"
+    ]
+  },
+  {
+    "qid": "Q115411015",
+    "name": "Guérin éditeur (canada)",
+    "prefixes": [
+      "97827601"
+    ],
+    "sites": [
+      "https://www.guerin-editeur.qc.ca/Message.aspx?msg=msg_accueil"
+    ]
+  },
+  {
+    "qid": "Q115411024",
+    "name": "Éditions Sylvain Harvey",
+    "prefixes": [
+      "9782921703",
+      "9782923794",
+      "9782924782"
+    ],
+    "sites": [
+      "http://editionssylvainharvey.com/"
+    ]
+  },
+  {
+    "qid": "Q115411034",
+    "name": "La Boîte à Livres Éditions",
+    "prefixes": [
+      "9782923817",
+      "9782924543",
+      "9782925008"
+    ],
+    "sites": [
+      "http://laboitealivres.com/"
+    ]
+  },
+  {
+    "qid": "Q115411052",
+    "name": "Les éditions du CRAM",
+    "prefixes": [
+      "978289721",
+      "9782922050",
+      "9782923705",
+      "97829801489"
+    ],
+    "sites": [
+      "https://www.editionscram.com/editions"
+    ]
+  },
+  {
+    "qid": "Q115411108",
+    "name": "Éditions L'Esprit libre",
+    "prefixes": [
+      "9782925070",
+      "97829815618"
+    ],
+    "sites": [
+      "https://revuelespritlibre.org/maison-edition"
+    ]
+  },
+  {
+    "qid": "Q115411129",
+    "name": "Éditions Tête première",
+    "prefixes": [
+      "9782924207",
+      "9782925035"
+    ],
+    "sites": [
+      "http://tetepremiere.com/"
+    ]
+  },
+  {
+    "qid": "Q115411135",
+    "name": "Les éditions du soleil de minuit",
+    "prefixes": [
+      "9782922691",
+      "9782924279",
+      "97829805802"
+    ],
+    "sites": [
+      "https://www.editions-soleildeminuit.com/"
+    ]
+  },
+  {
+    "qid": "Q115411155",
+    "name": "Kata éditeur",
+    "prefixes": [
+      "9782925077"
+    ],
+    "sites": [
+      "https://editionskata.com/"
+    ]
+  },
+  {
+    "qid": "Q115411173",
+    "name": "Les éditions Foulire",
+    "prefixes": [
+      "978289591"
+    ],
+    "sites": [
+      "https://www.foulire.com"
+    ]
+  },
+  {
+    "qid": "Q115411216",
+    "name": "Les éditions Glénat Québec",
+    "prefixes": [
+      "9782923621",
+      "9782924997"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q115411384",
+    "name": "Fonfon",
+    "prefixes": [
+      "9782923813",
+      "9782924984"
+    ],
+    "sites": [
+      "http://editionsfonfon.com/"
+    ]
+  },
+  {
+    "qid": "Q115754548",
+    "name": "",
+    "prefixes": [
+      "97829561294"
+    ],
+    "sites": [
+      "http://argranenn.net"
+    ]
+  },
+  {
+    "qid": "Q115756237",
+    "name": "",
+    "prefixes": [
+      "97829502619",
+      "97829574257"
+    ],
+    "sites": [
+      "https://www.pressespopulaires.bzh/",
+      "https://www.pressespopulaires.bzh/br/embannaduriou-poblek-breizh/"
+    ]
+  },
+  {
+    "qid": "Q116312977",
+    "name": "éditions du Thabor",
+    "prefixes": [
+      "978286478"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q116441551",
+    "name": "Éditions la nouvelle plume",
+    "prefixes": [
+      "9782921385",
+      "9782924237"
+    ],
+    "sites": [
+      "https://plume.refc.ca/"
+    ]
+  },
+  {
+    "qid": "Q116441676",
+    "name": "Les éditions Pacifique Nord-Ouest",
+    "prefixes": [
+      "9782925064"
+    ],
+    "sites": [
+      "https://editionspno.com/"
+    ]
+  },
+  {
+    "qid": "Q116441848",
+    "name": "Éditions Terre d'Accueil",
+    "prefixes": [
+      "9782925133"
+    ],
+    "sites": [
+      "https://terre-daccueil.ca/"
+    ]
+  },
+  {
+    "qid": "Q116441959",
+    "name": "Éditions Vidacom",
+    "prefixes": [
+      "9782923653"
+    ],
+    "sites": [
+      "https://fr.vidacom.ca/"
+    ]
+  },
+  {
+    "qid": "Q116503579",
+    "name": "HarperCollins France",
+    "prefixes": [
+      "9782280",
+      "97910339"
+    ],
+    "sites": [
+      "https://www.harpercollins.fr/"
+    ]
+  },
+  {
+    "qid": "Q1165843",
+    "name": "Dargaud",
+    "prefixes": [
+      "9782205",
+      "9782505",
+      "978287129"
+    ],
+    "sites": [
+      "http://www.dargaud.com"
+    ]
+  },
+  {
+    "qid": "Q116790789",
+    "name": "Les Éditions du Vermillon",
+    "prefixes": [
+      "9782921417"
+    ],
+    "sites": [
+      "https://www.leseditionsduvermillon.ca/"
+    ]
+  },
+  {
+    "qid": "Q116793644",
+    "name": "Éditions du Chardon Bleu",
+    "prefixes": [
+      "9782923953",
+      "97829803478"
+    ],
+    "sites": [
+      "http://www.chardonbleu.ca/"
+    ]
+  },
+  {
+    "qid": "Q116794973",
+    "name": "Éditions Pierre de lune",
+    "prefixes": [
+      "97829807757"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q116795220",
+    "name": "Éditions du Nordir",
+    "prefixes": [
+      "978289531",
+      "9782921365"
+    ],
+    "sites": [
+      "https://crccf.uottawa.ca/passeport/II/A2a/IIA2a02-3-3.html"
+    ]
+  },
+  {
+    "qid": "Q116795588",
+    "name": "Éditions Karo",
+    "prefixes": [
+      "9782923881",
+      "97829810468"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q11713098",
+    "name": "Institut littéraire",
+    "prefixes": [
+      "97827168"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q117223168",
+    "name": "Éditions de l'Étrave",
+    "prefixes": [
+      "978235992"
+    ],
+    "sites": [
+      "http://www.editions-etrave.fr/"
+    ]
+  },
+  {
+    "qid": "Q117423115",
+    "name": "Éditions libertaires",
+    "prefixes": [
+      "9782900886",
+      "9782914980",
+      "9782919568"
+    ],
+    "sites": [
+      "https://editions-libertaires.org/"
+    ]
+  },
+  {
+    "qid": "Q117844334",
+    "name": "OPUS",
+    "prefixes": [
+      "97827442"
+    ],
+    "sites": [
+      "http://opus.u-paris.fr/"
+    ]
+  },
+  {
+    "qid": "Q118630335",
+    "name": "Bénart éditions",
+    "prefixes": [
+      "978237253"
+    ],
+    "sites": [
+      "http://benarteditions.com/"
+    ]
+  },
+  {
+    "qid": "Q118762745",
+    "name": "La Lenteur",
+    "prefixes": [
+      "9791095432"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q118810217",
+    "name": "éditions José Corti",
+    "prefixes": [
+      "97827143"
+    ],
+    "sites": [
+      "https://editions-corti.fr/"
+    ]
+  },
+  {
+    "qid": "Q11942678",
+    "name": "Presses universitaires de Perpignan",
+    "prefixes": [
+      "978235412",
+      "9782908912",
+      "9782914518"
+    ],
+    "sites": [
+      "https://www.univ-perp.fr/"
+    ]
+  },
+  {
+    "qid": "Q119666126",
+    "name": "Éditions Magnus",
+    "prefixes": [
+      "978238422"
+    ],
+    "sites": [
+      "https://editionsmagnus.fr/"
+    ]
+  },
+  {
+    "qid": "Q1209105",
+    "name": "Diaphanes",
+    "prefixes": [
+      "978288928"
+    ],
+    "sites": [
+      "https://www.diaphanes.net/"
+    ]
+  },
+  {
+    "qid": "Q12211270",
+    "name": "Dār al-Mashriq",
+    "prefixes": [
+      "97827214"
+    ],
+    "sites": [
+      "https://www.darelmachreq.com/"
+    ]
+  },
+  {
+    "qid": "Q122505272",
+    "name": "Éditions Aber",
+    "prefixes": [
+      "9782916845"
+    ],
+    "sites": [
+      "https://aber.bzh/fr"
+    ]
+  },
+  {
+    "qid": "Q1225116",
+    "name": "Les Belles Lettres",
+    "prefixes": [
+      "9782251"
+    ],
+    "sites": [
+      "https://www.lesbelleslettres.com/"
+    ]
+  },
+  {
+    "qid": "Q12303112",
+    "name": "Benjamin Media",
+    "prefixes": [
+      "978237515",
+      "9782912754"
+    ],
+    "sites": [
+      "https://benjamin.dk/"
+    ]
+  },
+  {
+    "qid": "Q123176929",
+    "name": "Éditions du commun",
+    "prefixes": [
+      "9791095630",
+      "97910978731",
+      "97910979377"
+    ],
+    "sites": [
+      "https://www.editionsducommun.org"
+    ]
+  },
+  {
+    "qid": "Q123224060",
+    "name": "Franciscopolis (éditeur)",
+    "prefixes": [
+      "97829544208",
+      "9791097348"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q124646323",
+    "name": "Corsica Comix Édition",
+    "prefixes": [
+      "97829536251",
+      "9791092481"
+    ],
+    "sites": [
+      "https://corsicacomixedition.com/"
+    ]
+  },
+  {
+    "qid": "Q124726167",
+    "name": "Vega-Dupuis",
+    "prefixes": [
+      "978237950"
+    ],
+    "sites": [
+      "https://www.vega-dupuis.com"
+    ]
+  },
+  {
+    "qid": "Q125297908",
+    "name": "Argyll",
+    "prefixes": [
+      "9782492403"
+    ],
+    "sites": [
+      "https://argyll.fr"
+    ]
+  },
+  {
+    "qid": "Q125490865",
+    "name": "",
+    "prefixes": [
+      "9782492926"
+    ],
+    "sites": [
+      "https://www.exemplaire-editions.fr/"
+    ]
+  },
+  {
+    "qid": "Q125526280",
+    "name": "Le Doyenné",
+    "prefixes": [
+      "97829565687"
+    ],
+    "sites": [
+      "https://ledoyenne-brioude.fr/"
+    ]
+  },
+  {
+    "qid": "Q125560245",
+    "name": "Les Éditions Fond'tonne",
+    "prefixes": [
+      "9782925073",
+      "97829814392",
+      "97829815448"
+    ],
+    "sites": [
+      "https://www.fondtonne.ca/"
+    ]
+  },
+  {
+    "qid": "Q125739075",
+    "name": "Éditions de l'Université de Bruxelles",
+    "prefixes": [
+      "97828004"
+    ],
+    "sites": [
+      "https://www.editions-ulb.be/"
+    ]
+  },
+  {
+    "qid": "Q125745167",
+    "name": "éditions Théâtrales",
+    "prefixes": [
+      "978284260",
+      "9782907810"
+    ],
+    "sites": [
+      "https://www.editionstheatrales.fr/"
+    ]
+  },
+  {
+    "qid": "Q125961613",
+    "name": "Mangetsu",
+    "prefixes": [
+      "978238281"
+    ],
+    "sites": [
+      "https://mangetsu-manga.fr/"
+    ]
+  },
+  {
+    "qid": "Q1266653",
+    "name": "Dupuis",
+    "prefixes": [
+      "97828001",
+      "97910347"
+    ],
+    "sites": [
+      "http://www.dupuis.com"
+    ]
+  },
+  {
+    "qid": "Q127148460",
+    "name": "Éditions Anthropos",
+    "prefixes": [
+      "97827157"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q12757924",
+    "name": "Prosveta",
+    "prefixes": [
+      "97828184",
+      "978285566"
+    ],
+    "sites": [
+      "http://www.prosveta.rs/"
+    ]
+  },
+  {
+    "qid": "Q1276574",
+    "name": "EXpress-Edition",
+    "prefixes": [
+      "97828244",
+      "978284343"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q128042935",
+    "name": "Ad Astra",
+    "prefixes": [
+      "9782919241"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q128061333",
+    "name": "De Saxus",
+    "prefixes": [
+      "978237876"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q128519660",
+    "name": "Le Sabot",
+    "prefixes": [
+      "9782492352"
+    ],
+    "sites": [
+      "https://le-sabot.fr/"
+    ]
+  },
+  {
+    "qid": "Q130262312",
+    "name": "Bougainvillier Éditions",
+    "prefixes": [
+      "9782494778"
+    ],
+    "sites": [
+      "https://www.bougainvilliereditions.com/"
+    ]
+  },
+  {
+    "qid": "Q130391972",
+    "name": "éditions localement transcendantes",
+    "prefixes": [
+      "978238366"
+    ],
+    "sites": [
+      "https://localement-transcendantes.fr/"
+    ]
+  },
+  {
+    "qid": "Q130588382",
+    "name": "Illustria",
+    "prefixes": [
+      "978235404"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q13216797",
+    "name": "Lès Rèlîs Namurwès",
+    "prefixes": [
+      "97829603340"
+    ],
+    "sites": [
+      "https://relis-namurwes.be"
+    ]
+  },
+  {
+    "qid": "Q13217132",
+    "name": "Yoran Embanner",
+    "prefixes": [
+      "978236785",
+      "9782916579",
+      "97829521446"
+    ],
+    "sites": [
+      "http://www.yoran-embanner.com/"
+    ]
+  },
+  {
+    "qid": "Q132744873",
+    "name": "ARTEHIS Éditions",
+    "prefixes": [
+      "97829580726"
+    ],
+    "sites": [
+      "https://books.openedition.org/artehis/",
+      "https://i6doc.com/fr/publisher/?publisher_ID=462"
+    ]
+  },
+  {
+    "qid": "Q132745010",
+    "name": "",
+    "prefixes": [
+      "9791096982"
+    ],
+    "sites": [
+      "https://books.openedition.org/eurorbem/",
+      "https://eurorbem.sorbonne-universite.fr/eurorbem-editions"
+    ]
+  },
+  {
+    "qid": "Q133187780",
+    "name": "Éditions Oxymore",
+    "prefixes": [
+      "97823856"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q133253947",
+    "name": "édition Charles Moreau",
+    "prefixes": [
+      "9782909458"
+    ],
+    "sites": [
+      "https://www.snrbaudouin.com/editions-charles-moreau-c102x3977660"
+    ]
+  },
+  {
+    "qid": "Q133272236",
+    "name": "Hommes et Techniques",
+    "prefixes": [
+      "97827057"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q1334582",
+    "name": "Université de Liège",
+    "prefixes": [
+      "978287456",
+      "9782930322"
+    ],
+    "sites": [
+      "https://www.uliege.be/"
+    ]
+  },
+  {
+    "qid": "Q133545352",
+    "name": "",
+    "prefixes": [
+      "9782488115"
+    ],
+    "sites": [
+      "https://leseditionslameute.com/"
+    ]
+  },
+  {
+    "qid": "Q133567277",
+    "name": "Éditions Grandir",
+    "prefixes": [
+      "978284166",
+      "9782904292"
+    ],
+    "sites": [
+      "https://www.editionsgrandir.eu"
+    ]
+  },
+  {
+    "qid": "Q133812572",
+    "name": "Art × Science International",
+    "prefixes": [
+      "978238719"
+    ],
+    "sites": [
+      "https://artxsc.org",
+      "https://artxsc.org/en/"
+    ]
+  },
+  {
+    "qid": "Q133994060",
+    "name": "Slalom",
+    "prefixes": [
+      "978237554"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q134292252",
+    "name": "Librio",
+    "prefixes": [
+      "9782290",
+      "9782292"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q134675120",
+    "name": "ErosOnyx",
+    "prefixes": [
+      "9782918444",
+      "97829529499"
+    ],
+    "sites": [
+      "https://www.erosonyx.com/"
+    ]
+  },
+  {
+    "qid": "Q135216782",
+    "name": "Éditions 2031",
+    "prefixes": [
+      "9782491328",
+      "97829163336"
+    ],
+    "sites": [
+      "https://www.editions2031.fr/"
+    ]
+  },
+  {
+    "qid": "Q135234516",
+    "name": "Éditions Hurlevent",
+    "prefixes": [
+      "9782494109"
+    ],
+    "sites": [
+      "https://editionshurlevent.wixsite.com/editions-hurlevent"
+    ]
+  },
+  {
+    "qid": "Q135617928",
+    "name": "Gulf Stream Éditeur",
+    "prefixes": [
+      "978235488",
+      "978238349",
+      "9782909421"
+    ],
+    "sites": [
+      "https://gulfstream.fr/"
+    ]
+  },
+  {
+    "qid": "Q135671292",
+    "name": "Éditions Plume Blanche",
+    "prefixes": [
+      "978238199",
+      "9791094786"
+    ],
+    "sites": [
+      "https://plumeblanche-editions.fr/"
+    ]
+  },
+  {
+    "qid": "Q136475693",
+    "name": "GERESO Édition",
+    "prefixes": [
+      "978235953"
+    ],
+    "sites": [
+      "https://www.gereso.com/edition"
+    ]
+  },
+  {
+    "qid": "Q136606095",
+    "name": "Éditions BPM",
+    "prefixes": [
+      "9782487656",
+      "9782493530"
+    ],
+    "sites": [
+      "https://www.editionsbattementsparminute.com/"
+    ]
+  },
+  {
+    "qid": "Q136724013",
+    "name": "Hi Comics",
+    "prefixes": [
+      "978237887"
+    ],
+    "sites": [
+      "https://hicomics.fr"
+    ]
+  },
+  {
+    "qid": "Q136935087",
+    "name": "SHED",
+    "prefixes": [
+      "97829577498"
+    ],
+    "sites": [
+      "https://shed-publishing.com"
+    ]
+  },
+  {
+    "qid": "Q137151022",
+    "name": "City Éditions",
+    "prefixes": [
+      "97828246"
+    ],
+    "sites": [
+      "http://www.city-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q137545833",
+    "name": "La Compagnie littéraire",
+    "prefixes": [
+      "978287683"
+    ],
+    "sites": [
+      "https://www.compagnie-litteraire.com/"
+    ]
+  },
+  {
+    "qid": "Q138391905",
+    "name": "C'est-à-dire",
+    "prefixes": [
+      "9782918235",
+      "97829527564"
+    ],
+    "sites": [
+      "http://cestadire.editions.free.fr/"
+    ]
+  },
+  {
+    "qid": "Q139399658",
+    "name": "Éditions HAPAX",
+    "prefixes": [
+      "9782487855"
+    ],
+    "sites": [
+      "https://editions-hapax.org/"
+    ]
+  },
+  {
+    "qid": "Q139987029",
+    "name": "Éditions Critiques",
+    "prefixes": [
+      "9782487232",
+      "9791097331"
+    ],
+    "sites": [
+      "https://editionscritiques.fr/"
+    ]
+  },
+  {
+    "qid": "Q139987259",
+    "name": "Éditions Maison des Langues",
+    "prefixes": [
+      "978235685"
+    ],
+    "sites": [
+      "https://www.emdl.fr/"
+    ]
+  },
+  {
+    "qid": "Q139987406",
+    "name": "Éditions Terrasses",
+    "prefixes": [
+      "9782490887"
+    ],
+    "sites": [
+      "https://terrasses.net/"
+    ]
+  },
+  {
+    "qid": "Q140264043",
+    "name": "Créatures éditions",
+    "prefixes": [
+      "9782489105"
+    ],
+    "sites": [
+      "https://www.creatureseditions.com/"
+    ]
+  },
+  {
+    "qid": "Q140361398",
+    "name": "Éditions Onlit",
+    "prefixes": [
+      "978287560"
+    ],
+    "sites": [
+      "https://www.onlit.net/"
+    ]
+  },
+  {
+    "qid": "Q140375934",
+    "name": "Éditions Tétras Lyre",
+    "prefixes": [
+      "9782930685"
+    ],
+    "sites": [
+      "https://www.editionstetraslyre.be/"
+    ]
+  },
+  {
+    "qid": "Q140562390",
+    "name": "Trakt éditions",
+    "prefixes": [
+      "9782919589"
+    ],
+    "sites": [
+      "https://www.trakt-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q140703787",
+    "name": "",
+    "prefixes": [
+      "978235767"
+    ],
+    "sites": [
+      "https://www.editions-beaurepaire.fr/"
+    ]
+  },
+  {
+    "qid": "Q1408498",
+    "name": "Ocean Software",
+    "prefixes": [
+      "978236247",
+      "9782907064",
+      "9782916533"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q141016224",
+    "name": "Le Livre de poche",
+    "prefixes": [
+      "9782253"
+    ],
+    "sites": [
+      "http://www.livredepoche.com"
+    ]
+  },
+  {
+    "qid": "Q141069081",
+    "name": "Mera Éditions",
+    "prefixes": [
+      "9782487149",
+      "9782489058"
+    ],
+    "sites": [
+      "https://mera-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q141203499",
+    "name": "Ideereka",
+    "prefixes": [
+      "9782492577"
+    ],
+    "sites": [
+      "https://www.ideereka.com"
+    ]
+  },
+  {
+    "qid": "Q141366818",
+    "name": "Héraclès Éditions",
+    "prefixes": [
+      "978238661"
+    ],
+    "sites": [
+      "https://heracleseditions.com/"
+    ]
+  },
+  {
+    "qid": "Q141366822",
+    "name": "Amanuensis Éditions",
+    "prefixes": [
+      "978238716"
+    ],
+    "sites": [
+      "https://amanuensis.fr/"
+    ]
+  },
+  {
+    "qid": "Q141366830",
+    "name": "L'Étoile Flamboyante",
+    "prefixes": [
+      "9782487792",
+      "97829594646"
+    ],
+    "sites": [
+      "https://letoileflamboyante.org/"
+    ]
+  },
+  {
+    "qid": "Q141366831",
+    "name": "Le Merveilleux",
+    "prefixes": [
+      "9782488712"
+    ],
+    "sites": [
+      "https://lemerveilleux.com/"
+    ]
+  },
+  {
+    "qid": "Q141527118",
+    "name": "PhB éditions",
+    "prefixes": [
+      "9791093732"
+    ],
+    "sites": [
+      "https://www.phbeditions.fr/"
+    ]
+  },
+  {
+    "qid": "Q141593475",
+    "name": "Arianne G Voyance Publications",
+    "prefixes": [
+      "97910988128"
+    ],
+    "sites": [
+      "https://www.arianne-g-voyance.fr/"
+    ]
+  },
+  {
+    "qid": "Q1446975",
+    "name": "Bibliopolis",
+    "prefixes": [
+      "978286976"
+    ],
+    "sites": [
+      "http://www.bibliopolis.it"
+    ]
+  },
+  {
+    "qid": "Q1454296",
+    "name": "Glénat Éditions",
+    "prefixes": [
+      "9782344",
+      "978235626",
+      "97827234",
+      "97827493",
+      "978287176"
+    ],
+    "sites": [
+      "https://glenat.com"
+    ]
+  },
+  {
+    "qid": "Q15459036",
+    "name": "Éditions Kontre Kulture",
+    "prefixes": [
+      "978236725",
+      "97829539880"
+    ],
+    "sites": [
+      "http://www.kontrekulture.com/"
+    ]
+  },
+  {
+    "qid": "Q15507437",
+    "name": "Académie des sciences, belles-lettres et arts de Clermont-Ferrand",
+    "prefixes": [
+      "97829523803"
+    ],
+    "sites": [
+      "https://www.acad-sbla-clermont.fr/"
+    ]
+  },
+  {
+    "qid": "Q15745260",
+    "name": "Communications in Information Literacy",
+    "prefixes": [
+      "978287469"
+    ],
+    "sites": [
+      "http://bibpurl.oclc.org/web/50809",
+      "http://rzblx1.uni-regensburg.de/ezeit/warpto.phtml?colors=7&jour_id=91286",
+      "http://www.comminfolit.org",
+      "https://pdxscholar.library.pdx.edu/comminfolit/"
+    ]
+  },
+  {
+    "qid": "Q1582074",
+    "name": "Kazé",
+    "prefixes": [
+      "97828203",
+      "978284965"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q16525636",
+    "name": "Akata",
+    "prefixes": [
+      "978238212"
+    ],
+    "sites": [
+      "http://www.akata.fr/"
+    ]
+  },
+  {
+    "qid": "Q16535235",
+    "name": "Cambourakis",
+    "prefixes": [
+      "978236624",
+      "9782916589"
+    ],
+    "sites": [
+      "http://www.cambourakis.com/"
+    ]
+  },
+  {
+    "qid": "Q1664787",
+    "name": "Institut d'études occitanes",
+    "prefixes": [
+      "978285910"
+    ],
+    "sites": [
+      "http://www.ieo-oc.org"
+    ]
+  },
+  {
+    "qid": "Q16651850",
+    "name": "La Contre Allée",
+    "prefixes": [
+      "978237665",
+      "9782917817"
+    ],
+    "sites": [
+      "http://www.lacontreallee.com"
+    ]
+  },
+  {
+    "qid": "Q16655436",
+    "name": "Les XII Singes",
+    "prefixes": [
+      "978237441",
+      "9782918045",
+      "97829528135"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q16662516",
+    "name": "Makaka éditions",
+    "prefixes": [
+      "978236796",
+      "9782917371"
+    ],
+    "sites": [
+      "http://www.makaka-editions.com"
+    ]
+  },
+  {
+    "qid": "Q16662945",
+    "name": "Mardaga",
+    "prefixes": [
+      "97828047",
+      "978287009"
+    ],
+    "sites": [
+      "http://www.editionsmardaga.com/"
+    ]
+  },
+  {
+    "qid": "Q16664500",
+    "name": "Mijade",
+    "prefixes": [
+      "978287142"
+    ],
+    "sites": [
+      "http://mijade.be/",
+      "https://www.mijade.be"
+    ]
+  },
+  {
+    "qid": "Q16665807",
+    "name": "Mémoire d'encrier",
+    "prefixes": [
+      "978289712",
+      "9782923153",
+      "9782923713"
+    ],
+    "sites": [
+      "http://memoiredencrier.com/"
+    ]
+  },
+  {
+    "qid": "Q16670499",
+    "name": "Pocket Jeunesse",
+    "prefixes": [
+      "9782266"
+    ],
+    "sites": [
+      "http://www.pocketjeunesse.fr"
+    ]
+  },
+  {
+    "qid": "Q16670980",
+    "name": "Presses universitaires de Rouen et du Havre",
+    "prefixes": [
+      "978287775",
+      "97910240"
+    ],
+    "sites": [
+      "https://purh.univ-rouen.fr"
+    ]
+  },
+  {
+    "qid": "Q16677456",
+    "name": "Éditions d'art Somogy",
+    "prefixes": [
+      "97827572",
+      "978284598",
+      "978285056"
+    ],
+    "sites": [
+      "http://www.somogy.fr/"
+    ]
+  },
+  {
+    "qid": "Q16684355",
+    "name": "Édilarge",
+    "prefixes": [
+      "97827373",
+      "978285882"
+    ],
+    "sites": [
+      "https://editions.ouest-france.fr/"
+    ]
+  },
+  {
+    "qid": "Q16684371",
+    "name": "Éditions Alto",
+    "prefixes": [
+      "978289694",
+      "9782923550"
+    ],
+    "sites": [
+      "http://www.editionsalto.com"
+    ]
+  },
+  {
+    "qid": "Q16684383",
+    "name": "Éditions Ex Aequo",
+    "prefixes": [
+      "978235962",
+      "978237873",
+      "97910388"
+    ],
+    "sites": [
+      "http://www.editions-exaequo.fr"
+    ]
+  },
+  {
+    "qid": "Q16684392",
+    "name": "Éditions L'Interligne",
+    "prefixes": [
+      "978289699",
+      "9782921463",
+      "9782923274"
+    ],
+    "sites": [
+      "https://interligne.ca/"
+    ]
+  },
+  {
+    "qid": "Q16684398",
+    "name": "Éditions Libretto",
+    "prefixes": [
+      "978285940"
+    ],
+    "sites": [
+      "https://www.editionslibretto.fr/"
+    ]
+  },
+  {
+    "qid": "Q16684409",
+    "name": "Éditions Odile Jacob",
+    "prefixes": [
+      "9782415",
+      "97827381"
+    ],
+    "sites": [
+      "http://www.odilejacob.fr"
+    ]
+  },
+  {
+    "qid": "Q16684420",
+    "name": "Éditions Solar",
+    "prefixes": [
+      "9782263"
+    ],
+    "sites": [
+      "http://www.solar.fr"
+    ]
+  },
+  {
+    "qid": "Q16781931",
+    "name": "CDU SEDES",
+    "prefixes": [
+      "9782301",
+      "97827181"
+    ],
+    "sites": [
+      "http://www.editions-sedes.com/"
+    ]
+  },
+  {
+    "qid": "Q16855974",
+    "name": "Presses du Midi",
+    "prefixes": [
+      "97828127",
+      "978287867"
+    ],
+    "sites": [
+      "http://www.lespressesdumidi.fr"
+    ]
+  },
+  {
+    "qid": "Q1687719",
+    "name": "université de Provence Aix-Marseille-I",
+    "prefixes": [
+      "978285399"
+    ],
+    "sites": [
+      "http://www.univ-provence.fr/"
+    ]
+  },
+  {
+    "qid": "Q16909207",
+    "name": "Fabert",
+    "prefixes": [
+      "978284922",
+      "9782907164"
+    ],
+    "sites": [
+      "http://www.fabert.com/"
+    ]
+  },
+  {
+    "qid": "Q17174351",
+    "name": "Atelier Perrousseaux",
+    "prefixes": [
+      "978236765",
+      "9782911220"
+    ],
+    "sites": [
+      "https://www.adverbum.fr/"
+    ]
+  },
+  {
+    "qid": "Q17353371",
+    "name": "Vents d'Ouest",
+    "prefixes": [
+      "9782344",
+      "978235648",
+      "97827234",
+      "97827493",
+      "978286967",
+      "9782923621"
+    ],
+    "sites": [
+      "https://www.glenat.com/bd/collections/vents-douest"
+    ]
+  },
+  {
+    "qid": "Q17355423",
+    "name": "Éditions Olivétan",
+    "prefixes": [
+      "978235479",
+      "9782902916",
+      "9782915245"
+    ],
+    "sites": [
+      "https://www.editions-olivetan.com/"
+    ]
+  },
+  {
+    "qid": "Q17488000",
+    "name": "Mare Nostrum",
+    "prefixes": [
+      "978236391",
+      "9782908476"
+    ],
+    "sites": [
+      "http://www.marenostrumedition.com/"
+    ]
+  },
+  {
+    "qid": "Q17633849",
+    "name": "Liv'Éditions",
+    "prefixes": [
+      "978284497",
+      "9782910781",
+      "97829507834"
+    ],
+    "sites": [
+      "http://www.liv-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q17640238",
+    "name": "Ultima Necat",
+    "prefixes": [
+      "978236771"
+    ],
+    "sites": [
+      "http://ultimanecat.fr/"
+    ]
+  },
+  {
+    "qid": "Q17957",
+    "name": "Lonely Planet",
+    "prefixes": [
+      "97828161",
+      "978284070"
+    ],
+    "sites": [
+      "https://www.lonelyplanet.com/"
+    ]
+  },
+  {
+    "qid": "Q1799264",
+    "name": "La Fabrique",
+    "prefixes": [
+      "978235872",
+      "9782913372"
+    ],
+    "sites": [
+      "https://lafabrique.fr"
+    ]
+  },
+  {
+    "qid": "Q18005337",
+    "name": "Association pour le développement de l'enseignement et de la recherche",
+    "prefixes": [
+      "978284882"
+    ],
+    "sites": [
+      "http://www.adera.fr"
+    ]
+  },
+  {
+    "qid": "Q1823146",
+    "name": "Librairie éditrice vaticane",
+    "prefixes": [
+      "978284051"
+    ],
+    "sites": [
+      "http://www.libreriaeditricevaticana.va/"
+    ]
+  },
+  {
+    "qid": "Q18289345",
+    "name": "Éditions de Ta Mère",
+    "prefixes": [
+      "9782923553",
+      "9782924670",
+      "9782925110"
+    ],
+    "sites": [
+      "http://www.tamere.org"
+    ]
+  },
+  {
+    "qid": "Q18332075",
+    "name": "Keit Vimp Bev",
+    "prefixes": [
+      "978286824"
+    ],
+    "sites": [
+      "https://www.keitvimpbev.bzh/"
+    ]
+  },
+  {
+    "qid": "Q18388504",
+    "name": "Telleri",
+    "prefixes": [
+      "97827450"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q186225",
+    "name": "Mercure de France",
+    "prefixes": [
+      "97827152"
+    ],
+    "sites": [
+      "https://gallica.bnf.fr/ark:/12148/cb32814317r/date",
+      "https://www.retronews.fr/ark:/12148/cb32814317r/notice"
+    ]
+  },
+  {
+    "qid": "Q18745111",
+    "name": "Champ Vallon",
+    "prefixes": [
+      "978287673",
+      "9782903528",
+      "97910267"
+    ],
+    "sites": [
+      "http://www.champ-vallon.com/"
+    ]
+  },
+  {
+    "qid": "Q18745443",
+    "name": "Rue de Sèvres",
+    "prefixes": [
+      "978236981",
+      "97828102"
+    ],
+    "sites": [
+      "http://www.editions-ruedesevres.fr"
+    ]
+  },
+  {
+    "qid": "Q18844154",
+    "name": "Mirobole éditions",
+    "prefixes": [
+      "978237561",
+      "9791092145"
+    ],
+    "sites": [
+      "http://mirobole-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q1892146",
+    "name": "Presses universitaires de France",
+    "prefixes": [
+      "978213"
+    ],
+    "sites": [
+      "http://www.puf.com"
+    ]
+  },
+  {
+    "qid": "Q1916402",
+    "name": "Pearson",
+    "prefixes": [
+      "9782326",
+      "97827440"
+    ],
+    "sites": [
+      "https://www.pearson.com/"
+    ]
+  },
+  {
+    "qid": "Q1933558",
+    "name": "université Toulouse-Jean-Jaurès",
+    "prefixes": [
+      "978285716"
+    ],
+    "sites": [
+      "http://www.univ-tlse2.fr/"
+    ]
+  },
+  {
+    "qid": "Q193563",
+    "name": "Bibliothèque nationale de France",
+    "prefixes": [
+      "97827177"
+    ],
+    "sites": [
+      "https://www.bnf.fr/",
+      "https://www.bnf.fr/en"
+    ]
+  },
+  {
+    "qid": "Q19544335",
+    "name": "Éditions Classiques Garnier",
+    "prefixes": [
+      "9782406",
+      "97828124"
+    ],
+    "sites": [
+      "https://www.classiques-garnier.com"
+    ]
+  },
+  {
+    "qid": "Q19838644",
+    "name": "Espaces et signes",
+    "prefixes": [
+      "978238206",
+      "97829535965",
+      "9791094176"
+    ],
+    "sites": [
+      "http://www.espacesetsignes.com/"
+    ]
+  },
+  {
+    "qid": "Q19845187",
+    "name": "Michel de Maule",
+    "prefixes": [
+      "978287623"
+    ],
+    "sites": [
+      "http://www.micheldemaule.com/"
+    ]
+  },
+  {
+    "qid": "Q19947531",
+    "name": "Les éditions du passage",
+    "prefixes": [
+      "9782922892",
+      "9782924397",
+      "9782925091"
+    ],
+    "sites": [
+      "http://www.editionsdupassage.com/"
+    ]
+  },
+  {
+    "qid": "Q19947798",
+    "name": "Éditions XYZ",
+    "prefixes": [
+      "978289261",
+      "978289772"
+    ],
+    "sites": [
+      "http://www.editionsxyz.com/"
+    ]
+  },
+  {
+    "qid": "Q1997457",
+    "name": "NordSüd Verlag",
+    "prefixes": [
+      "97828311"
+    ],
+    "sites": [
+      "http://www.nord-sued.com/",
+      "https://northsouth.com/"
+    ]
+  },
+  {
+    "qid": "Q2002708",
+    "name": "Nouvelles Éditions latines",
+    "prefixes": [
+      "97827233",
+      "978285147"
+    ],
+    "sites": [
+      "http://nouvelles-editionslatines.com",
+      "http://www.editions-nel.com/site/qui.shtml"
+    ]
+  },
+  {
+    "qid": "Q2012415",
+    "name": "Éditions EPO",
+    "prefixes": [
+      "978287262"
+    ],
+    "sites": [
+      "http://www.epo.be"
+    ]
+  },
+  {
+    "qid": "Q20639929",
+    "name": "Éditions lyonnaises d'art et d'histoire",
+    "prefixes": [
+      "978284147"
+    ],
+    "sites": [
+      "http://www.editions-lyonnaises.fr"
+    ]
+  },
+  {
+    "qid": "Q20644390",
+    "name": "Éditions Chariot d'Or",
+    "prefixes": [
+      "978236047",
+      "9782911806"
+    ],
+    "sites": [
+      "http://editions-chariot-dor.fr"
+    ]
+  },
+  {
+    "qid": "Q20724495",
+    "name": "Éditions Delagrave",
+    "prefixes": [
+      "9782206",
+      "97827135"
+    ],
+    "sites": [
+      "http://www.editions-delagrave.fr/"
+    ]
+  },
+  {
+    "qid": "Q20724496",
+    "name": "Les Éditions sociales",
+    "prefixes": [
+      "978235367",
+      "9782911833"
+    ],
+    "sites": [
+      "http://www.editionssociales.fr/"
+    ]
+  },
+  {
+    "qid": "Q20744305",
+    "name": "Éditions du Hénnin",
+    "prefixes": [
+      "97827243"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q20800109",
+    "name": "DésIris",
+    "prefixes": [
+      "978236403",
+      "9782907653",
+      "9782915418"
+    ],
+    "sites": [
+      "https://www.adverbum.fr/"
+    ]
+  },
+  {
+    "qid": "Q20828340",
+    "name": "Librairie générale française",
+    "prefixes": [
+      "9782253"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q20829329",
+    "name": "Quorum",
+    "prefixes": [
+      "978287399",
+      "9782930014"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q20829783",
+    "name": "Éditions Lune-Écarlate",
+    "prefixes": [
+      "978236976"
+    ],
+    "sites": [
+      "http://lune-ecarlate.com"
+    ]
+  },
+  {
+    "qid": "Q20970810",
+    "name": "Éditions du Poutan",
+    "prefixes": [
+      "978237553",
+      "9782918607"
+    ],
+    "sites": [
+      "https://www.poutan.fr/"
+    ]
+  },
+  {
+    "qid": "Q21001293",
+    "name": "Éditions Charpentier",
+    "prefixes": [
+      "978285073"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q21008366",
+    "name": "Éditions Wildproject",
+    "prefixes": [
+      "978238114",
+      "9782918490"
+    ],
+    "sites": [
+      "http://www.wildproject.org"
+    ]
+  },
+  {
+    "qid": "Q21012414",
+    "name": "Pyramyd éditions",
+    "prefixes": [
+      "978235017",
+      "9782910565"
+    ],
+    "sites": [
+      "https://pyramyd-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q21015527",
+    "name": "Warum",
+    "prefixes": [
+      "978236535",
+      "9782915920"
+    ],
+    "sites": [
+      "https://lapin.lapin.org/"
+    ]
+  },
+  {
+    "qid": "Q21016383",
+    "name": "Society for Experimental Mechanics",
+    "prefixes": [
+      "978235764"
+    ],
+    "sites": [
+      "https://sem.org/"
+    ]
+  },
+  {
+    "qid": "Q2107343",
+    "name": "Microsoft Press",
+    "prefixes": [
+      "978210",
+      "978284082"
+    ],
+    "sites": [
+      "https://microsoftpressstore.com/"
+    ]
+  },
+  {
+    "qid": "Q21406262",
+    "name": "Peeters",
+    "prefixes": [
+      "97828017",
+      "978287723"
+    ],
+    "sites": [
+      "https://www.peeters-leuven.be/"
+    ]
+  },
+  {
+    "qid": "Q21428306",
+    "name": "Presses de l'Université de Montréal",
+    "prefixes": [
+      "97827606"
+    ],
+    "sites": [
+      "https://www.pum.umontreal.ca/"
+    ]
+  },
+  {
+    "qid": "Q21837019",
+    "name": "Mégara",
+    "prefixes": [
+      "97829539441",
+      "9791093943"
+    ],
+    "sites": [
+      "http://www.megara-entertainment.com/"
+    ]
+  },
+  {
+    "qid": "Q2190366",
+    "name": "éditions Albin Michel",
+    "prefixes": [
+      "9782226",
+      "9782253"
+    ],
+    "sites": [
+      "https://www.albin-michel.fr/"
+    ]
+  },
+  {
+    "qid": "Q22047689",
+    "name": "Éditions du sous-sol",
+    "prefixes": [
+      "978236468"
+    ],
+    "sites": [
+      "http://www.editions-du-sous-sol.com/"
+    ]
+  },
+  {
+    "qid": "Q22248701",
+    "name": "La Manufacture de livres",
+    "prefixes": [
+      "978235887",
+      "978238553"
+    ],
+    "sites": [
+      "https://www.lamanufacturedelivres.com/"
+    ]
+  },
+  {
+    "qid": "Q22248796",
+    "name": "Loubatières",
+    "prefixes": [
+      "978286266"
+    ],
+    "sites": [
+      "http://www.loubatieres.fr"
+    ]
+  },
+  {
+    "qid": "Q22249445",
+    "name": "Vide Cocagne",
+    "prefixes": [
+      "978237936",
+      "97829537105",
+      "9791090425"
+    ],
+    "sites": [
+      "https://videcocagne.fr/"
+    ]
+  },
+  {
+    "qid": "Q22342873",
+    "name": "Éditions À l'Orient",
+    "prefixes": [
+      "9782912591"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q22680018",
+    "name": "éditions France Agricole",
+    "prefixes": [
+      "978285557",
+      "9791090213"
+    ],
+    "sites": [
+      "https://www.editions-france-agricole.fr/"
+    ]
+  },
+  {
+    "qid": "Q22683416",
+    "name": "Allary éditions",
+    "prefixes": [
+      "978237073"
+    ],
+    "sites": [
+      "http://www.allary-editions.fr/"
+    ]
+  },
+  {
+    "qid": "Q2296378",
+    "name": "Yvert et Tellier",
+    "prefixes": [
+      "978286814"
+    ],
+    "sites": [
+      "http://www.yvert.com/"
+    ]
+  },
+  {
+    "qid": "Q2302586",
+    "name": "université d'Aix-Marseille",
+    "prefixes": [
+      "978235797",
+      "9782903449"
+    ],
+    "sites": [
+      "https://www.univ-amu.fr/",
+      "https://www.univ-amu.fr/en"
+    ]
+  },
+  {
+    "qid": "Q23045550",
+    "name": "Delta",
+    "prefixes": [
+      "97828029"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q2310291",
+    "name": "Éditions du Relié",
+    "prefixes": [
+      "978235490",
+      "9782909698",
+      "9782914916"
+    ],
+    "sites": [
+      "https://www.editions-du-relie.com/"
+    ]
+  },
+  {
+    "qid": "Q2338135",
+    "name": "Musée national des beaux-arts du Québec",
+    "prefixes": [
+      "978255"
+    ],
+    "sites": [
+      "https://www.mnbaq.org/"
+    ]
+  },
+  {
+    "qid": "Q2339806",
+    "name": "Delcourt",
+    "prefixes": [
+      "9782413",
+      "97827560",
+      "978284055",
+      "978284789",
+      "9782906187"
+    ],
+    "sites": [
+      "http://www.editions-delcourt.fr/"
+    ]
+  },
+  {
+    "qid": "Q2339813",
+    "name": "Kana",
+    "prefixes": [
+      "9782505",
+      "97827234",
+      "97828036",
+      "978287129"
+    ],
+    "sites": [
+      "http://www.kana.fr/"
+    ]
+  },
+  {
+    "qid": "Q2350714",
+    "name": "Centre national d'enseignement à distance",
+    "prefixes": [
+      "97827463"
+    ],
+    "sites": [
+      "https://www.cned.fr/"
+    ]
+  },
+  {
+    "qid": "Q23679680",
+    "name": "Éditions First",
+    "prefixes": [
+      "9782412"
+    ],
+    "sites": [
+      "https://www.editionsfirst.fr/"
+    ]
+  },
+  {
+    "qid": "Q23686551",
+    "name": "Zones sensibles",
+    "prefixes": [
+      "9782930601"
+    ],
+    "sites": [
+      "http://www.zones-sensibles.org/"
+    ]
+  },
+  {
+    "qid": "Q2378651",
+    "name": "Bouton d'or Acadie",
+    "prefixes": [
+      "978289682",
+      "978289750",
+      "9782922203",
+      "9782923518"
+    ],
+    "sites": [
+      "http://boutondoracadie.com/"
+    ]
+  },
+  {
+    "qid": "Q2379416",
+    "name": "Le Lombard",
+    "prefixes": [
+      "97828036",
+      "97828082",
+      "978287389"
+    ],
+    "sites": [
+      "https://www.lelombard.com/"
+    ]
+  },
+  {
+    "qid": "Q23913497",
+    "name": "VEGA",
+    "prefixes": [
+      "978238135",
+      "978285829"
+    ],
+    "sites": [
+      "https://www.editions-tredaniel.com/vega-editeur-2.html"
+    ]
+  },
+  {
+    "qid": "Q23936703",
+    "name": "Éditions d'histoire sociale",
+    "prefixes": [
+      "97827156"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q23946115",
+    "name": "Éditeurs français réunis",
+    "prefixes": [
+      "9782201",
+      "9782209"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q2399636",
+    "name": "Éditions du Chêne",
+    "prefixes": [
+      "97828123",
+      "978284277",
+      "978285108"
+    ],
+    "sites": [
+      "http://www.editionsduchene.fr/"
+    ]
+  },
+  {
+    "qid": "Q24023140",
+    "name": "Société française d'histoire d'outre-mer",
+    "prefixes": [
+      "978285970"
+    ],
+    "sites": [
+      "http://sfhom.free.fr"
+    ]
+  },
+  {
+    "qid": "Q24072533",
+    "name": "Edicef",
+    "prefixes": [
+      "97827531",
+      "978284129",
+      "978285069"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q2410691",
+    "name": "Mondadori France",
+    "prefixes": [
+      "978235590"
+    ],
+    "sites": [
+      "http://www.mondadori.fr/"
+    ]
+  },
+  {
+    "qid": "Q24192775",
+    "name": "Galerie Lelong",
+    "prefixes": [
+      "978286882"
+    ],
+    "sites": [
+      "http://www.galerielelong.com/",
+      "https://www.galerie-lelong.com/fr/"
+    ]
+  },
+  {
+    "qid": "Q2421005",
+    "name": "Pocket",
+    "prefixes": [
+      "9782266",
+      "978286917"
+    ],
+    "sites": [
+      "http://www.pocket.fr/"
+    ]
+  },
+  {
+    "qid": "Q2422405",
+    "name": "Taifu Comics",
+    "prefixes": [
+      "978235180",
+      "978237506"
+    ],
+    "sites": [
+      "http://www.taifu-comics.com/"
+    ]
+  },
+  {
+    "qid": "Q2425164",
+    "name": "Éditions du Rouergue",
+    "prefixes": [
+      "97828126",
+      "978284156",
+      "9782905209"
+    ],
+    "sites": [
+      "http://www.lerouergue.com/"
+    ]
+  },
+  {
+    "qid": "Q2470271",
+    "name": "Casa de Velázquez",
+    "prefixes": [
+      "978287634"
+    ],
+    "sites": [
+      "https://www.casadevelazquez.org/"
+    ]
+  },
+  {
+    "qid": "Q2485022",
+    "name": "Éditions Denoël",
+    "prefixes": [
+      "9782207"
+    ],
+    "sites": [
+      "http://www.denoel.fr/"
+    ]
+  },
+  {
+    "qid": "Q24933517",
+    "name": "Éditions Critic",
+    "prefixes": [
+      "978237579",
+      "97829534998",
+      "9791090648"
+    ],
+    "sites": [
+      "http://editions.librairie-critic.fr/"
+    ]
+  },
+  {
+    "qid": "Q2522678",
+    "name": "Gallimard Jeunesse",
+    "prefixes": [
+      "978207"
+    ],
+    "sites": [
+      "http://www.gallimard-jeunesse.fr/"
+    ]
+  },
+  {
+    "qid": "Q25377386",
+    "name": "Presses universitaires de la Méditerranée",
+    "prefixes": [
+      "978236781",
+      "978284269"
+    ],
+    "sites": [
+      "https://www.pulm.fr/"
+    ]
+  },
+  {
+    "qid": "Q25378017",
+    "name": "Ofelbe",
+    "prefixes": [
+      "978237302"
+    ],
+    "sites": [
+      "http://www.ofelbe.com/"
+    ]
+  },
+  {
+    "qid": "Q25383770",
+    "name": "Presses internationales Polytechnique",
+    "prefixes": [
+      "9782553"
+    ],
+    "sites": [
+      "http://www.presses-polytechnique.ca/fr/accueil"
+    ]
+  },
+  {
+    "qid": "Q255319",
+    "name": "Per Noste",
+    "prefixes": [
+      "978286866"
+    ],
+    "sites": [
+      "https://www.pernoste.com/"
+    ]
+  },
+  {
+    "qid": "Q25565011",
+    "name": "Le Temps éditeur",
+    "prefixes": [
+      "978236312"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q2619680",
+    "name": "Éditions Desclée de Brouwer",
+    "prefixes": [
+      "9782220",
+      "9782249",
+      "97827189"
+    ],
+    "sites": [
+      "http://www.ddbeditions.com"
+    ]
+  },
+  {
+    "qid": "Q26299720",
+    "name": "Arbre bleu éditions",
+    "prefixes": [
+      "9791090129"
+    ],
+    "sites": [
+      "http://www.arbre-bleu-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q2635075",
+    "name": "Seuil",
+    "prefixes": [
+      "978202",
+      "97827578"
+    ],
+    "sites": [
+      "https://www.seuil.com/"
+    ]
+  },
+  {
+    "qid": "Q2637007",
+    "name": "Marsu Productions",
+    "prefixes": [
+      "978235426",
+      "9782908462",
+      "9782912536",
+      "97829502211"
+    ],
+    "sites": [
+      "http://www.marsupro.com/"
+    ]
+  },
+  {
+    "qid": "Q26883682",
+    "name": "Éditions universitaires de Dijon",
+    "prefixes": [
+      "978236441",
+      "9782905965",
+      "9782915552",
+      "9782915611"
+    ],
+    "sites": [
+      "https://eud.u-bourgogne.fr/"
+    ]
+  },
+  {
+    "qid": "Q26904149",
+    "name": "Les presses du Languedoc",
+    "prefixes": [
+      "978285998"
+    ],
+    "sites": [
+      "http://pressesdulanguedoc.free.fr/BK/presentation.htm"
+    ]
+  },
+  {
+    "qid": "Q26907177",
+    "name": "Éditions Maloine",
+    "prefixes": [
+      "9782224"
+    ],
+    "sites": [
+      "http://www.maloine.fr/"
+    ]
+  },
+  {
+    "qid": "Q26933334",
+    "name": "Éditions Messene",
+    "prefixes": [
+      "978284549",
+      "9782911043"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q26951521",
+    "name": "Fischbacher",
+    "prefixes": [
+      "97827179"
+    ],
+    "sites": [
+      "http://www.editionsfischbacher.com/"
+    ]
+  },
+  {
+    "qid": "Q2696397",
+    "name": "Éditions Robert Laffont",
+    "prefixes": [
+      "9782221"
+    ],
+    "sites": [
+      "http://www.laffont.fr"
+    ]
+  },
+  {
+    "qid": "Q2723468",
+    "name": "Plantyn",
+    "prefixes": [
+      "97827136",
+      "97828010"
+    ],
+    "sites": [
+      "https://www.plantyn.com/"
+    ]
+  },
+  {
+    "qid": "Q27310221",
+    "name": "Éditions littéraires et linguistiques de l’université de Grenoble",
+    "prefixes": [
+      "978284310",
+      "9782902709"
+    ],
+    "sites": [
+      "https://www.uga-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q273548",
+    "name": "École française d'Athènes",
+    "prefixes": [
+      "978286958"
+    ],
+    "sites": [
+      "https://www.efa.gr/"
+    ]
+  },
+  {
+    "qid": "Q273819",
+    "name": "Éditions Gallimard",
+    "prefixes": [
+      "978207",
+      "97827424"
+    ],
+    "sites": [
+      "https://www.gallimard.fr/"
+    ]
+  },
+  {
+    "qid": "Q273821",
+    "name": "Éditions Jeanne Laffitte",
+    "prefixes": [
+      "978286276",
+      "978286604"
+    ],
+    "sites": [
+      "http://www.jeanne-laffitte.com/"
+    ]
+  },
+  {
+    "qid": "Q273829",
+    "name": "Les Éditions de Minuit",
+    "prefixes": [
+      "97827073"
+    ],
+    "sites": [
+      "http://www.leseditionsdeminuit.fr/"
+    ]
+  },
+  {
+    "qid": "Q273835",
+    "name": "Éditions Larousse",
+    "prefixes": [
+      "978203"
+    ],
+    "sites": [
+      "https://www.editions-larousse.fr/"
+    ]
+  },
+  {
+    "qid": "Q273837",
+    "name": "Éditions du Cerf",
+    "prefixes": [
+      "9782204"
+    ],
+    "sites": [
+      "https://www.editionsducerf.fr/"
+    ]
+  },
+  {
+    "qid": "Q2777746",
+    "name": "Fayard",
+    "prefixes": [
+      "9782213"
+    ],
+    "sites": [
+      "https://www.fayard.fr"
+    ]
+  },
+  {
+    "qid": "Q27882859",
+    "name": "Editions Ivréa",
+    "prefixes": [
+      "978285184"
+    ],
+    "sites": [
+      "https://www.editions-ivrea.fr/"
+    ]
+  },
+  {
+    "qid": "Q27882915",
+    "name": "ENS Éditions",
+    "prefixes": [
+      "978284788",
+      "9782900869",
+      "9782902126",
+      "97910362"
+    ],
+    "sites": [
+      "http://catalogue-editions.ens-lyon.fr/"
+    ]
+  },
+  {
+    "qid": "Q27962451",
+    "name": "Les Éditions de l'Écrou",
+    "prefixes": [
+      "9782924682",
+      "97829811485",
+      "97829813911"
+    ],
+    "sites": [
+      "http://lecrou.com/"
+    ]
+  },
+  {
+    "qid": "Q27962584",
+    "name": "Éditions Les Escales",
+    "prefixes": [
+      "978236569"
+    ],
+    "sites": [
+      "http://www.lesescales.fr/"
+    ]
+  },
+  {
+    "qid": "Q27964951",
+    "name": "Presses universitaires de Franche-Comté",
+    "prefixes": [
+      "978284627",
+      "978284867",
+      "9782913322"
+    ],
+    "sites": [
+      "https://pufc.univ-fcomte.fr/"
+    ]
+  },
+  {
+    "qid": "Q280413",
+    "name": "Centre national de la recherche scientifique",
+    "prefixes": [
+      "9782222"
+    ],
+    "sites": [
+      "https://www.cnrs.fr/"
+    ]
+  },
+  {
+    "qid": "Q2806609",
+    "name": "10/18",
+    "prefixes": [
+      "9782264"
+    ],
+    "sites": [
+      "http://www.10-18.fr"
+    ]
+  },
+  {
+    "qid": "Q2807409",
+    "name": "12 bis",
+    "prefixes": [
+      "978235648"
+    ],
+    "sites": [
+      "http://12bis.com"
+    ]
+  },
+  {
+    "qid": "Q28172342",
+    "name": "Presses de l’École normale supérieure",
+    "prefixes": [
+      "97827288"
+    ],
+    "sites": [
+      "http://presses.ens.fr/"
+    ]
+  },
+  {
+    "qid": "Q2823584",
+    "name": "Actes Sud",
+    "prefixes": [
+      "9782330",
+      "97827427",
+      "978286869",
+      "978286943",
+      "9782903098"
+    ],
+    "sites": [
+      "http://www.actes-sud.fr"
+    ]
+  },
+  {
+    "qid": "Q2823694",
+    "name": "Action poétique",
+    "prefixes": [
+      "978285463"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q2823766",
+    "name": "",
+    "prefixes": [
+      "978236629",
+      "978237686",
+      "9782917689",
+      "97829522502"
+    ],
+    "sites": [
+      "http://www.actusf.com",
+      "http://www.editions-actusf.fr/"
+    ]
+  },
+  {
+    "qid": "Q2829040",
+    "name": "Akileos",
+    "prefixes": [
+      "978235574",
+      "9782915168"
+    ],
+    "sites": [
+      "http://www.akileos.com/"
+    ]
+  },
+  {
+    "qid": "Q2829538",
+    "name": "Alain Beaulet",
+    "prefixes": [
+      "978236206",
+      "9782905231"
+    ],
+    "sites": [
+      "http://www.alainbeaulet.com/"
+    ]
+  },
+  {
+    "qid": "Q28309884",
+    "name": "Framabook",
+    "prefixes": [
+      "97829539187",
+      "9791092674"
+    ],
+    "sites": [
+      "https://framabook.org"
+    ]
+  },
+  {
+    "qid": "Q2837120",
+    "name": "Alire",
+    "prefixes": [
+      "978289615",
+      "978289787",
+      "978289835",
+      "9782922145",
+      "97829801068"
+    ],
+    "sites": [
+      "http://www.alire.com/"
+    ]
+  },
+  {
+    "qid": "Q2838429",
+    "name": "Champ libre",
+    "prefixes": [
+      "978285184"
+    ],
+    "sites": [
+      "http://editions-ivrea.fr/"
+    ]
+  },
+  {
+    "qid": "Q2844894",
+    "name": "An Here",
+    "prefixes": [
+      "978286843"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q2845047",
+    "name": "Anacharsis",
+    "prefixes": [
+      "9782914777",
+      "97910279",
+      "9791092011"
+    ],
+    "sites": [
+      "http://www.editions-anacharsis.com"
+    ]
+  },
+  {
+    "qid": "Q28493261",
+    "name": "Ankama Éditions",
+    "prefixes": [
+      "978235910",
+      "9782916739",
+      "97829524509",
+      "97910335"
+    ],
+    "sites": [
+      "https://www.ankama.com/fr/editions"
+    ]
+  },
+  {
+    "qid": "Q28495521",
+    "name": "Éditions Hugo & Cie",
+    "prefixes": [
+      "97827556",
+      "97910386"
+    ],
+    "sites": [
+      "https://www.hugopublishing.fr/"
+    ]
+  },
+  {
+    "qid": "Q28575706",
+    "name": "Lienart Éditions",
+    "prefixes": [
+      "978235906"
+    ],
+    "sites": [
+      "https://lienart2.wixsite.com/lienarteditions"
+    ]
+  },
+  {
+    "qid": "Q2858512",
+    "name": "Apopsix",
+    "prefixes": [
+      "978235979"
+    ],
+    "sites": [
+      "http://www.apopsix.fr"
+    ]
+  },
+  {
+    "qid": "Q2860093",
+    "name": "Archibooks",
+    "prefixes": [
+      "978235733",
+      "9782915639"
+    ],
+    "sites": [
+      "http://www.bookstorming.com/"
+    ]
+  },
+  {
+    "qid": "Q2860416",
+    "name": "Archives d'Architecture Moderne",
+    "prefixes": [
+      "978287143"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q2861671",
+    "name": "Arléa",
+    "prefixes": [
+      "978236308",
+      "978286959"
+    ],
+    "sites": [
+      "https://www.arlea.fr/"
+    ]
+  },
+  {
+    "qid": "Q2861815",
+    "name": "Armand Colin",
+    "prefixes": [
+      "9782200",
+      "9782247"
+    ],
+    "sites": [
+      "https://www.dunod.com/marque/armand-colin"
+    ]
+  },
+  {
+    "qid": "Q2864352",
+    "name": "Ars vivens",
+    "prefixes": [
+      "978236264",
+      "9782916613"
+    ],
+    "sites": [
+      "http://www.arsvivens.net/"
+    ]
+  },
+  {
+    "qid": "Q2864644",
+    "name": "Art et Comédie",
+    "prefixes": [
+      "978237393",
+      "978284422",
+      "9782901756"
+    ],
+    "sites": [
+      "https://www.artcomedie.com/"
+    ]
+  },
+  {
+    "qid": "Q28647125",
+    "name": "Presses de l'ENSSIB",
+    "prefixes": [
+      "978237546",
+      "9782910227",
+      "9791091281"
+    ],
+    "sites": [
+      "https://www.enssib.fr/"
+    ]
+  },
+  {
+    "qid": "Q2864902",
+    "name": "Arthaud",
+    "prefixes": [
+      "978208",
+      "97827003"
+    ],
+    "sites": [
+      "http://www.arthaud.fr/"
+    ]
+  },
+  {
+    "qid": "Q2865788",
+    "name": "Artima",
+    "prefixes": [
+      "97827311"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q2866722",
+    "name": "Asmodee Éditions",
+    "prefixes": [
+      "978237099",
+      "9782911103",
+      "9782914849"
+    ],
+    "sites": [
+      "http://corporate.asmodee.com"
+    ]
+  },
+  {
+    "qid": "Q2868660",
+    "name": "Asuka",
+    "prefixes": [
+      "97828203",
+      "978284965"
+    ],
+    "sites": [
+      "http://manga.kaze.fr/"
+    ]
+  },
+  {
+    "qid": "Q2868848",
+    "name": "Atelier de création libertaire",
+    "prefixes": [
+      "978235104",
+      "9782905691"
+    ],
+    "sites": [
+      "https://www.atelierdecreationlibertaire.com/"
+    ]
+  },
+  {
+    "qid": "Q2868851",
+    "name": "atelier de l'agneau",
+    "prefixes": [
+      "978237428",
+      "9782930188",
+      "9782930440"
+    ],
+    "sites": [
+      "https://atelierdelagneau.com"
+    ]
+  },
+  {
+    "qid": "Q2868904",
+    "name": "ateliers du Fresne",
+    "prefixes": [
+      "978236499",
+      "9782910257"
+    ],
+    "sites": [
+      "http://www.adfmusique.net/"
+    ]
+  },
+  {
+    "qid": "Q2870243",
+    "name": "Au Bord des Continents",
+    "prefixes": [
+      "978237051",
+      "9782911684",
+      "9782919089"
+    ],
+    "sites": [
+      "https://www.au-bord-des-continents.com/"
+    ]
+  },
+  {
+    "qid": "Q2870250",
+    "name": "Au diable vauvert",
+    "prefixes": [
+      "978284626",
+      "97910307"
+    ],
+    "sites": [
+      "http://www.audiable.com/"
+    ]
+  },
+  {
+    "qid": "Q2870652",
+    "name": "Aubéron",
+    "prefixes": [
+      "978284498",
+      "9782908650"
+    ],
+    "sites": [
+      "http://www.auberon.fr/f/index.php"
+    ]
+  },
+  {
+    "qid": "Q2870766",
+    "name": "Audiolib",
+    "prefixes": [
+      "978235641",
+      "978236762",
+      "97910354"
+    ],
+    "sites": [
+      "https://www.audiolib.fr/"
+    ]
+  },
+  {
+    "qid": "Q2873070",
+    "name": "Autrement",
+    "prefixes": [
+      "97827467",
+      "978286260"
+    ],
+    "sites": [
+      "http://www.autrement.com"
+    ]
+  },
+  {
+    "qid": "Q2876971",
+    "name": "",
+    "prefixes": [
+      "978287535"
+    ],
+    "sites": [
+      "http://www.bdmust.be/"
+    ]
+  },
+  {
+    "qid": "Q28777883",
+    "name": "French Pulp",
+    "prefixes": [
+      "97910251"
+    ],
+    "sites": [
+      "http://frenchpulpeditions.fr/"
+    ]
+  },
+  {
+    "qid": "Q28777944",
+    "name": "Éditions Goélette",
+    "prefixes": [
+      "978289638",
+      "978289690",
+      "978289800",
+      "9782922983",
+      "97829804941",
+      "97829806291"
+    ],
+    "sites": [
+      "https://www.goelette.ca/"
+    ]
+  },
+  {
+    "qid": "Q28802044",
+    "name": "Artlys",
+    "prefixes": [
+      "978285495"
+    ],
+    "sites": [
+      "http://artlys.fr/"
+    ]
+  },
+  {
+    "qid": "Q28816985",
+    "name": "Renessans",
+    "prefixes": [
+      "97827175",
+      "978284223"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q2881792",
+    "name": "Bamboo Édition",
+    "prefixes": [
+      "978235078",
+      "97828189",
+      "9782912715",
+      "9782915309"
+    ],
+    "sites": [
+      "https://www.bamboo.fr/"
+    ]
+  },
+  {
+    "qid": "Q28872985",
+    "name": "Éditions les Malins",
+    "prefixes": [
+      "978289657",
+      "978289810"
+    ],
+    "sites": [
+      "http://www.lesmalins.ca/"
+    ]
+  },
+  {
+    "qid": "Q28912497",
+    "name": "Association des anciens élèves et amis des langues orientales",
+    "prefixes": [
+      "97829557325"
+    ],
+    "sites": [
+      "http://alumni.inalco.fr"
+    ]
+  },
+  {
+    "qid": "Q2892212",
+    "name": "Bayard Canada",
+    "prefixes": [
+      "978289579",
+      "978289770",
+      "9782920660"
+    ],
+    "sites": [
+      "http://bayardlivres.ca/"
+    ]
+  },
+  {
+    "qid": "Q2892216",
+    "name": "Bayard Édition",
+    "prefixes": [
+      "978237414",
+      "9782915216"
+    ],
+    "sites": [
+      "https://www.bayard-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q29002111",
+    "name": "Lemieux Éditeur",
+    "prefixes": [
+      "978237344"
+    ],
+    "sites": [
+      "http://www.lemieux-editeur.fr/"
+    ]
+  },
+  {
+    "qid": "Q2902991",
+    "name": "Bilboquet",
+    "prefixes": [
+      "978284181"
+    ],
+    "sites": [
+      "http://www.editions-bilboquet.com/"
+    ]
+  },
+  {
+    "qid": "Q2905324",
+    "name": "Black Book Éditions",
+    "prefixes": [
+      "978236328",
+      "978238227",
+      "9782915847"
+    ],
+    "sites": [
+      "https://www.black-book-editions.fr/"
+    ]
+  },
+  {
+    "qid": "Q2906286",
+    "name": "Blay-Foldex",
+    "prefixes": [
+      "9782309",
+      "9782914514"
+    ],
+    "sites": [
+      "https://blayfoldex.com/"
+    ]
+  },
+  {
+    "qid": "Q2906462",
+    "name": "Bleu autour",
+    "prefixes": [
+      "978235848",
+      "9782912019"
+    ],
+    "sites": [
+      "http://www.bleu-autour.com"
+    ]
+  },
+  {
+    "qid": "Q2906475",
+    "name": "Bleu de Chine",
+    "prefixes": [
+      "978284931",
+      "9782910884"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q2912244",
+    "name": "université Paul-Valéry",
+    "prefixes": [
+      "978284269",
+      "9782905397"
+    ],
+    "sites": [
+      "https://www.univ-montp3.fr/"
+    ]
+  },
+  {
+    "qid": "Q2923533",
+    "name": "Bragelonne",
+    "prefixes": [
+      "978235294",
+      "97828112",
+      "97828205",
+      "9782914370",
+      "9782915549",
+      "97910281",
+      "9791093835"
+    ],
+    "sites": [
+      "http://www.bragelonne.fr"
+    ]
+  },
+  {
+    "qid": "Q2924461",
+    "name": "DC Comics",
+    "prefixes": [
+      "978236577",
+      "97828094",
+      "97910268"
+    ],
+    "sites": [
+      "https://www.dc.com/"
+    ]
+  },
+  {
+    "qid": "Q2927437",
+    "name": "Buchet/Chastel",
+    "prefixes": [
+      "9782283",
+      "97827020"
+    ],
+    "sites": [
+      "https://www.buchetchastel.fr"
+    ]
+  },
+  {
+    "qid": "Q2927575",
+    "name": "Budo Éditions",
+    "prefixes": [
+      "978284617",
+      "9782908580"
+    ],
+    "sites": [
+      "http://www.budo.fr/"
+    ]
+  },
+  {
+    "qid": "Q2931696",
+    "name": "CLE International",
+    "prefixes": [
+      "978209",
+      "978219"
+    ],
+    "sites": [
+      "https://www.cle-international.com/"
+    ]
+  },
+  {
+    "qid": "Q2931793",
+    "name": "CNRS Éditions",
+    "prefixes": [
+      "9782271"
+    ],
+    "sites": [
+      "https://www.cnrseditions.fr/"
+    ]
+  },
+  {
+    "qid": "Q2934320",
+    "name": "Calmann-Lévy",
+    "prefixes": [
+      "97827021"
+    ],
+    "sites": [
+      "https://calmann-levy.fr"
+    ]
+  },
+  {
+    "qid": "Q2937764",
+    "name": "Carabas",
+    "prefixes": [
+      "978235100",
+      "978237889",
+      "9782914203"
+    ],
+    "sites": [
+      "https://carabas4news.wordpress.com/"
+    ]
+  },
+  {
+    "qid": "Q2939778",
+    "name": "Carnets nord",
+    "prefixes": [
+      "978235536"
+    ],
+    "sites": [
+      "http://www.carnetsnord.fr/"
+    ]
+  },
+  {
+    "qid": "Q2940638",
+    "name": "Cartoon Creation",
+    "prefixes": [
+      "978287345"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q2941396",
+    "name": "Castelmore",
+    "prefixes": [
+      "978236231",
+      "97828112",
+      "97828205"
+    ],
+    "sites": [
+      "http://www.castelmore.fr/"
+    ]
+  },
+  {
+    "qid": "Q294317",
+    "name": "AK Press",
+    "prefixes": [
+      "97829805763"
+    ],
+    "sites": [
+      "https://akuk.com/",
+      "https://www.akpress.org/"
+    ]
+  },
+  {
+    "qid": "Q2955987",
+    "name": "Chandeigne & Lima",
+    "prefixes": [
+      "978236732",
+      "9782906462",
+      "9782915540"
+    ],
+    "sites": [
+      "http://www.editions-chandeigne.com/"
+    ]
+  },
+  {
+    "qid": "Q2963150",
+    "name": "Cheyne éditeur",
+    "prefixes": [
+      "978284116",
+      "9782903705"
+    ],
+    "sites": [
+      "http://www.cheyne-editeur.com"
+    ]
+  },
+  {
+    "qid": "Q2965077",
+    "name": "Éditions Christian Bourgois",
+    "prefixes": [
+      "9782267"
+    ],
+    "sites": [
+      "https://bourgoisediteur.fr/"
+    ]
+  },
+  {
+    "qid": "Q2966778",
+    "name": "Chronique sociale",
+    "prefixes": [
+      "978236717",
+      "978285008"
+    ],
+    "sites": [
+      "https://www.chroniquesociale.com/"
+    ]
+  },
+  {
+    "qid": "Q2974804",
+    "name": "Cité du Design",
+    "prefixes": [
+      "9782492621",
+      "9782912808"
+    ],
+    "sites": [
+      "https://www.citedudesign.com/"
+    ]
+  },
+  {
+    "qid": "Q2974962",
+    "name": "Clair de Lune",
+    "prefixes": [
+      "978235325",
+      "9782913714"
+    ],
+    "sites": [
+      "http://www.editionsclairdelune.fr/"
+    ]
+  },
+  {
+    "qid": "Q2981629",
+    "name": "Codes Rousseau",
+    "prefixes": [
+      "97827095"
+    ],
+    "sites": [
+      "http://www.codesrousseau.fr"
+    ]
+  },
+  {
+    "qid": "Q2982875",
+    "name": "Collection Toujours un chemin",
+    "prefixes": [
+      "978236072"
+    ],
+    "sites": [
+      "http://www.toujoursunchemin.com/"
+    ]
+  },
+  {
+    "qid": "Q2989743",
+    "name": "Comp'Act",
+    "prefixes": [
+      "978287661"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q2996566",
+    "name": "Coop Breizh",
+    "prefixes": [
+      "978238106",
+      "978284346",
+      "9782909924"
+    ],
+    "sites": [
+      "http://www.coop-breizh.fr/"
+    ]
+  },
+  {
+    "qid": "Q2997613",
+    "name": "Cornélius",
+    "prefixes": [
+      "978236081",
+      "9782909990",
+      "9782915492"
+    ],
+    "sites": [
+      "http://www.cornelius.fr"
+    ]
+  },
+  {
+    "qid": "Q3012482",
+    "name": "Dalloz",
+    "prefixes": [
+      "9782247",
+      "9782248"
+    ],
+    "sites": [
+      "http://www.editions-dalloz.fr/"
+    ]
+  },
+  {
+    "qid": "Q3014385",
+    "name": "Daniel Maghen",
+    "prefixes": [
+      "978235674",
+      "97829511355",
+      "97829523826"
+    ],
+    "sites": [
+      "https://www.danielmaghen.com"
+    ]
+  },
+  {
+    "qid": "Q3016617",
+    "name": "Darwin Project",
+    "prefixes": [
+      "978235139",
+      "97829521728"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3020074",
+    "name": "De Boeck",
+    "prefixes": [
+      "97827445",
+      "97828041"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3020076",
+    "name": "De Boeck Supérieur",
+    "prefixes": [
+      "978235327",
+      "97828011",
+      "97828073"
+    ],
+    "sites": [
+      "https://www.deboecksuperieur.com/"
+    ]
+  },
+  {
+    "qid": "Q3020081",
+    "name": "De Borée",
+    "prefixes": [
+      "97828129",
+      "978284494",
+      "9782908592"
+    ],
+    "sites": [
+      "https://www.deboree.com/"
+    ]
+  },
+  {
+    "qid": "Q3021415",
+    "name": "Delachaux et Niestlé",
+    "prefixes": [
+      "9782603"
+    ],
+    "sites": [
+      "http://www.delachauxetniestle.com"
+    ]
+  },
+  {
+    "qid": "Q3024199",
+    "name": "Des ronds dans l'O",
+    "prefixes": [
+      "978237418",
+      "9782917237",
+      "97829523173"
+    ],
+    "sites": [
+      "http://www.desrondsdanslo.com/"
+    ]
+  },
+  {
+    "qid": "Q3024920",
+    "name": "Éditions des deux coqs d'or",
+    "prefixes": [
+      "978201",
+      "97827192"
+    ],
+    "sites": [
+      "https://www.hachette.com/fr/accueil/"
+    ]
+  },
+  {
+    "qid": "Q3026786",
+    "name": "Éditions Le Robert",
+    "prefixes": [
+      "9782321",
+      "978284902",
+      "978285036"
+    ],
+    "sites": [
+      "https://www.lerobert.com/"
+    ]
+  },
+  {
+    "qid": "Q3026891",
+    "name": "Didier",
+    "prefixes": [
+      "9782278"
+    ],
+    "sites": [
+      "http://www.editionsdidier.com/"
+    ]
+  },
+  {
+    "qid": "Q3027053",
+    "name": "Didier Jeunesse",
+    "prefixes": [
+      "9782278"
+    ],
+    "sites": [
+      "http://www.didierjeunesse.com/"
+    ]
+  },
+  {
+    "qid": "Q3027999",
+    "name": "Ruedo Ibérico",
+    "prefixes": [
+      "97827153"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3039563",
+    "name": "Droit-Afrique.com",
+    "prefixes": [
+      "978235308"
+    ],
+    "sites": [
+      "http://www.droit-afrique.com/"
+    ]
+  },
+  {
+    "qid": "Q3046105",
+    "name": "ESF éditeur",
+    "prefixes": [
+      "97827101",
+      "97828104",
+      "978285086"
+    ],
+    "sites": [
+      "http://www.esf-editeur.fr/"
+    ]
+  },
+  {
+    "qid": "Q3047043",
+    "name": "Eclipse",
+    "prefixes": [
+      "978236270"
+    ],
+    "sites": [
+      "http://eclipse.fr/"
+    ]
+  },
+  {
+    "qid": "Q3047089",
+    "name": "Economica",
+    "prefixes": [
+      "97827158"
+    ],
+    "sites": [
+      "https://www.economica.fr/"
+    ]
+  },
+  {
+    "qid": "Q3051322",
+    "name": "Elkar",
+    "prefixes": [
+      "9782903421",
+      "9782913156"
+    ],
+    "sites": [
+      "https://www.elkar.eus"
+    ]
+  },
+  {
+    "qid": "Q3053849",
+    "name": "Encrage",
+    "prefixes": [
+      "9782251",
+      "978236058",
+      "9782906389",
+      "9782911576"
+    ],
+    "sites": [
+      "http://www.encrage.fr/"
+    ]
+  },
+  {
+    "qid": "Q3053861",
+    "name": "Encres vives",
+    "prefixes": [
+      "978285550"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3055978",
+    "name": "Erasme",
+    "prefixes": [
+      "97828081",
+      "978287127",
+      "978287438"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3061810",
+    "name": "Excelsis",
+    "prefixes": [
+      "97827550",
+      "9782911260",
+      "9782914144"
+    ],
+    "sites": [
+      "https://www.xl6.com/"
+    ]
+  },
+  {
+    "qid": "Q3062796",
+    "name": "Eyrolles",
+    "prefixes": [
+      "9782212",
+      "9782416"
+    ],
+    "sites": [
+      "https://www.editions-eyrolles.com/"
+    ]
+  },
+  {
+    "qid": "Q3063572",
+    "name": "Jakin",
+    "prefixes": [
+      "978284806",
+      "9782911731"
+    ],
+    "sites": [
+      "https://www.jakin.eus/"
+    ]
+  },
+  {
+    "qid": "Q30731100",
+    "name": "Quai Voltaire",
+    "prefixes": [
+      "97827103",
+      "978287653",
+      "9782912517"
+    ],
+    "sites": [
+      "https://www.editionslatableronde.fr/"
+    ]
+  },
+  {
+    "qid": "Q30737505",
+    "name": "Asphalte éditions",
+    "prefixes": [
+      "978236533",
+      "9782918767"
+    ],
+    "sites": [
+      "http://asphalte-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q3074102",
+    "name": "Florent Massot",
+    "prefixes": [
+      "978236436",
+      "978284442",
+      "9782908382",
+      "9782916546"
+    ],
+    "sites": [
+      "https://boutique.massot.com/"
+    ]
+  },
+  {
+    "qid": "Q30742162",
+    "name": "Rue de l'échiquier",
+    "prefixes": [
+      "978237425",
+      "9782917770"
+    ],
+    "sites": [
+      "https://www.ruedelechiquier.net/"
+    ]
+  },
+  {
+    "qid": "Q30742290",
+    "name": "Kaléidoscope",
+    "prefixes": [
+      "978287767"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3075059",
+    "name": "Folle Avoine",
+    "prefixes": [
+      "978286810"
+    ],
+    "sites": [
+      "http://www.editionsfolleavoine.com/"
+    ]
+  },
+  {
+    "qid": "Q30751169",
+    "name": "Alice Jeunesse",
+    "prefixes": [
+      "978287426",
+      "9782930182"
+    ],
+    "sites": [
+      "https://www.alice-editions.be/"
+    ]
+  },
+  {
+    "qid": "Q3080726",
+    "name": "France Loisirs",
+    "prefixes": [
+      "9782298",
+      "97827242",
+      "97827441"
+    ],
+    "sites": [
+      "https://www.franceloisirs.com"
+    ]
+  },
+  {
+    "qid": "Q3090419",
+    "name": "Frémok",
+    "prefixes": [
+      "978235065",
+      "978239022",
+      "9782911842",
+      "9782930204"
+    ],
+    "sites": [
+      "http://www.fremok.org/"
+    ]
+  },
+  {
+    "qid": "Q3091303",
+    "name": "Futuropolis",
+    "prefixes": [
+      "97827548"
+    ],
+    "sites": [
+      "http://www.futuropolis.fr/"
+    ]
+  },
+  {
+    "qid": "Q3094459",
+    "name": "Galaade éditions",
+    "prefixes": [
+      "978235176"
+    ],
+    "sites": [
+      "http://www.galaade.com/"
+    ]
+  },
+  {
+    "qid": "Q3094638",
+    "name": "Galerie de France",
+    "prefixes": [
+      "978285563",
+      "9782902406"
+    ],
+    "sites": [
+      "http://www.galeriedefrance.com/"
+    ]
+  },
+  {
+    "qid": "Q3094837",
+    "name": "Gallmeister",
+    "prefixes": [
+      "978235178",
+      "9782404"
+    ],
+    "sites": [
+      "http://www.gallmeister.fr/"
+    ]
+  },
+  {
+    "qid": "Q3099466",
+    "name": "Gauthier-Villars",
+    "prefixes": [
+      "978204",
+      "978284299"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3099508",
+    "name": "Gautier-Languereau",
+    "prefixes": [
+      "978201",
+      "9782217"
+    ],
+    "sites": [
+      "https://www.meslivresjeunesse.fr/gautier-languereau/"
+    ]
+  },
+  {
+    "qid": "Q3101600",
+    "name": "Harrap's",
+    "prefixes": [
+      "97828187"
+    ],
+    "sites": [
+      "https://www.editions-larousse.fr/harraps"
+    ]
+  },
+  {
+    "qid": "Q3106778",
+    "name": "Ginkgo éditeur",
+    "prefixes": [
+      "978284679"
+    ],
+    "sites": [
+      "http://www.ginkgo-editeur.fr"
+    ]
+  },
+  {
+    "qid": "Q31073342",
+    "name": "",
+    "prefixes": [
+      "978285041"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3110273",
+    "name": "Éditions Golias",
+    "prefixes": [
+      "978235472",
+      "9782911453",
+      "9782914475"
+    ],
+    "sites": [
+      "https://www.golias-editions.fr"
+    ]
+  },
+  {
+    "qid": "Q3117373",
+    "name": "Groupe Dargaud",
+    "prefixes": [
+      "9782205"
+    ],
+    "sites": [
+      "http://www.groupe-dargaud.com/"
+    ]
+  },
+  {
+    "qid": "Q3117374",
+    "name": "Groupe De Boeck",
+    "prefixes": [
+      "97828011",
+      "978284371",
+      "9782909455"
+    ],
+    "sites": [
+      "http://www.deboeck.com"
+    ]
+  },
+  {
+    "qid": "Q3117417",
+    "name": "Flammarion",
+    "prefixes": [
+      "978208",
+      "97827007"
+    ],
+    "sites": [
+      "https://editions.flammarion.com/"
+    ]
+  },
+  {
+    "qid": "Q3118641",
+    "name": "Gründ",
+    "prefixes": [
+      "9782324",
+      "97827000"
+    ],
+    "sites": [
+      "https://www.editis.com/maison/grund/"
+    ]
+  },
+  {
+    "qid": "Q3118708",
+    "name": "Gualino",
+    "prefixes": [
+      "9782297",
+      "978284200"
+    ],
+    "sites": [
+      "https://www.gualino.fr/"
+    ]
+  },
+  {
+    "qid": "Q3122128",
+    "name": "Guy Saint-Jean éditeur",
+    "prefixes": [
+      "978289455",
+      "978289758",
+      "978289827",
+      "9782920340"
+    ],
+    "sites": [
+      "https://saint-jeanediteur.com/"
+    ]
+  },
+  {
+    "qid": "Q3125445",
+    "name": "Hachette Jeunesse",
+    "prefixes": [
+      "978201"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3128309",
+    "name": "Hatier",
+    "prefixes": [
+      "9782218",
+      "9782401"
+    ],
+    "sites": [
+      "http://www.editions-hatier.fr"
+    ]
+  },
+  {
+    "qid": "Q3134124",
+    "name": "Hermann",
+    "prefixes": [
+      "97827056",
+      "97910370"
+    ],
+    "sites": [
+      "http://www.editions-hermann.fr/"
+    ]
+  },
+  {
+    "qid": "Q3135022",
+    "name": "Hexagonal",
+    "prefixes": [
+      "978284188"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3141672",
+    "name": "Hoëbeke",
+    "prefixes": [
+      "978207",
+      "978284230",
+      "9782905292"
+    ],
+    "sites": [
+      "http://www.hoebeke.fr/"
+    ]
+  },
+  {
+    "qid": "Q3144677",
+    "name": "Hélium",
+    "prefixes": [
+      "9782330",
+      "978235851"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3147424",
+    "name": "Ibis Rouge Éditions",
+    "prefixes": [
+      "978237520",
+      "978284450",
+      "9782911390"
+    ],
+    "sites": [
+      "https://www.editions-orphie.com/shop/"
+    ]
+  },
+  {
+    "qid": "Q3149986",
+    "name": "Éditions Inculte",
+    "prefixes": [
+      "9782915453",
+      "9782916940",
+      "9791091887"
+    ],
+    "sites": [
+      "http://www.inculte.fr"
+    ]
+  },
+  {
+    "qid": "Q3150076",
+    "name": "Indian Country Today",
+    "prefixes": [
+      "978284753"
+    ],
+    "sites": [
+      "https://ictnews.org/"
+    ]
+  },
+  {
+    "qid": "Q3150476",
+    "name": "Indigène éditions",
+    "prefixes": [
+      "978237595",
+      "9782911939",
+      "9791090354"
+    ],
+    "sites": [
+      "http://www.indigene-editions.fr"
+    ]
+  },
+  {
+    "qid": "Q3151963",
+    "name": "Institut d'études slaves",
+    "prefixes": [
+      "97827204"
+    ],
+    "sites": [
+      "http://institut-etudes-slaves.fr/"
+    ]
+  },
+  {
+    "qid": "Q31525125",
+    "name": "Éditions Érick Bonnier",
+    "prefixes": [
+      "978236243",
+      "978236760"
+    ],
+    "sites": [
+      "https://www.erickbonnier-editions.com"
+    ]
+  },
+  {
+    "qid": "Q3156592",
+    "name": "J'ai lu",
+    "prefixes": [
+      "9782277",
+      "9782290"
+    ],
+    "sites": [
+      "http://www.jailu.com"
+    ]
+  },
+  {
+    "qid": "Q3156921",
+    "name": "JMG éditions",
+    "prefixes": [
+      "978235784",
+      "9782912507",
+      "9782915164"
+    ],
+    "sites": [
+      "https://jmgeditions.fr/"
+    ]
+  },
+  {
+    "qid": "Q3164993",
+    "name": "Jean-Claude Gawsewitch Éditeur",
+    "prefixes": [
+      "978235013"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3165282",
+    "name": "Jean-Cyrille Godefroy",
+    "prefixes": [
+      "978286553"
+    ],
+    "sites": [
+      "http://www.editionsjcgodefroy.fr"
+    ]
+  },
+  {
+    "qid": "Q3168112",
+    "name": "Jean-Michel Place",
+    "prefixes": [
+      "978285893"
+    ],
+    "sites": [
+      "https://jeanmichelplace.fr/"
+    ]
+  },
+  {
+    "qid": "Q3173972",
+    "name": "Jean Picollec Éditeur",
+    "prefixes": [
+      "978286477"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3178213",
+    "name": "Jeux Descartes",
+    "prefixes": [
+      "97827408"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3181937",
+    "name": "John Libbey Eurotext",
+    "prefixes": [
+      "97827420"
+    ],
+    "sites": [
+      "http://www.jle.com"
+    ]
+  },
+  {
+    "qid": "Q3183162",
+    "name": "Joly éditions",
+    "prefixes": [
+      "9782306",
+      "9782907512"
+    ],
+    "sites": [
+      "http://www.editions-joly.com/"
+    ]
+  },
+  {
+    "qid": "Q31838812",
+    "name": "Dar Al-Kotob Al-Ilmiyah",
+    "prefixes": [
+      "97827451"
+    ],
+    "sites": [
+      "http://www.al-ilmiyah.com/"
+    ]
+  },
+  {
+    "qid": "Q3192418",
+    "name": "Kami",
+    "prefixes": [
+      "978235100"
+    ],
+    "sites": [
+      "https://www.groupetournon.com/#_=_"
+    ]
+  },
+  {
+    "qid": "Q3194288",
+    "name": "Kaugummi",
+    "prefixes": [
+      "978235862"
+    ],
+    "sites": [
+      "http://www.kaugummi.fr/"
+    ]
+  },
+  {
+    "qid": "Q3196283",
+    "name": "Ki-oon",
+    "prefixes": [
+      "978235592",
+      "9782915513",
+      "97910327"
+    ],
+    "sites": [
+      "http://www.ki-oon.com"
+    ]
+  },
+  {
+    "qid": "Q3197874",
+    "name": "Klincksieck",
+    "prefixes": [
+      "9782252",
+      "978286563"
+    ],
+    "sites": [
+      "https://www.klincksieck.com/"
+    ]
+  },
+  {
+    "qid": "Q3200558",
+    "name": "Kurokawa",
+    "prefixes": [
+      "978236852",
+      "978238071",
+      "97910420"
+    ],
+    "sites": [
+      "http://www.kurokawa.fr/"
+    ]
+  },
+  {
+    "qid": "Q3202266",
+    "name": "L'Arche",
+    "prefixes": [
+      "978285181"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3202496",
+    "name": "L'Atalante",
+    "prefixes": [
+      "978236793",
+      "978284172",
+      "9782903699",
+      "9782905158",
+      "97910360"
+    ],
+    "sites": [
+      "http://www.l-atalante.com/"
+    ]
+  },
+  {
+    "qid": "Q3202517",
+    "name": "L'Atelier du poisson soluble",
+    "prefixes": [
+      "978235871",
+      "9782913741",
+      "97829504568"
+    ],
+    "sites": [
+      "https://www.poissonsoluble.com/"
+    ]
+  },
+  {
+    "qid": "Q3203291",
+    "name": "L'Esprit frappeur",
+    "prefixes": [
+      "978284405",
+      "978285103",
+      "9791093279"
+    ],
+    "sites": [
+      "https://www.ladylongsolo.com/",
+      "https://www.livrelibre.fr"
+    ]
+  },
+  {
+    "qid": "Q3205210",
+    "name": "L'École des loisirs",
+    "prefixes": [
+      "9782211"
+    ],
+    "sites": [
+      "http://www.ecoledesloisirs.fr"
+    ]
+  },
+  {
+    "qid": "Q3205791",
+    "name": "L'Œil d'or",
+    "prefixes": [
+      "9782490437",
+      "9782913661"
+    ],
+    "sites": [
+      "https://www.loeildorenligne.com/"
+    ]
+  },
+  {
+    "qid": "Q3206144",
+    "name": "LR Presse",
+    "prefixes": [
+      "978237536",
+      "9782903651"
+    ],
+    "sites": [
+      "http://www.lrpresse.com"
+    ]
+  },
+  {
+    "qid": "Q3206843",
+    "name": "La Boîte à bulles",
+    "prefixes": [
+      "978284953"
+    ],
+    "sites": [
+      "http://www.la-boite-a-bulles.com"
+    ]
+  },
+  {
+    "qid": "Q3207425",
+    "name": "La Cinquième Couche",
+    "prefixes": [
+      "978239008"
+    ],
+    "sites": [
+      "https://5c.be/"
+    ]
+  },
+  {
+    "qid": "Q3207920",
+    "name": "La Courte Échelle",
+    "prefixes": [
+      "978289021",
+      "978289651",
+      "978289695",
+      "978289774"
+    ],
+    "sites": [
+      "http://courteechelle.groupecourteechelle.com/"
+    ]
+  },
+  {
+    "qid": "Q3208324",
+    "name": "La Documentation française",
+    "prefixes": [
+      "978211"
+    ],
+    "sites": [
+      "http://www.ladocumentationfrancaise.fr"
+    ]
+  },
+  {
+    "qid": "Q3208426",
+    "name": "La Découverte",
+    "prefixes": [
+      "9782348",
+      "978235522",
+      "97827071"
+    ],
+    "sites": [
+      "http://www.editionsladecouverte.fr/"
+    ]
+  },
+  {
+    "qid": "Q3209880",
+    "name": "La Joie de lire",
+    "prefixes": [
+      "978288258",
+      "978288908"
+    ],
+    "sites": [
+      "http://www.lajoiedelire.ch"
+    ]
+  },
+  {
+    "qid": "Q3210604",
+    "name": "La Martinière jeunesse",
+    "prefixes": [
+      "97827324",
+      "97910401"
+    ],
+    "sites": [
+      "http://www.lamartinierejeunesse.fr/"
+    ]
+  },
+  {
+    "qid": "Q3210606",
+    "name": "La Martinière Groupe",
+    "prefixes": [
+      "97827324"
+    ],
+    "sites": [
+      "http://www.lamartinieregroupe.com/"
+    ]
+  },
+  {
+    "qid": "Q3210793",
+    "name": "La Montagne secrète",
+    "prefixes": [
+      "9782923163",
+      "9782924217",
+      "9782924774",
+      "9782925108"
+    ],
+    "sites": [
+      "https://lamontagnesecrete.com/"
+    ]
+  },
+  {
+    "qid": "Q3210916",
+    "name": "La Musardine",
+    "prefixes": [
+      "978236490",
+      "978284271"
+    ],
+    "sites": [
+      "http://www.lamusardine.com/"
+    ]
+  },
+  {
+    "qid": "Q3211277",
+    "name": "La Nuée bleue",
+    "prefixes": [
+      "97827165"
+    ],
+    "sites": [
+      "https://www.nueebleue.com/"
+    ]
+  },
+  {
+    "qid": "Q3211399",
+    "name": "La Pastèque",
+    "prefixes": [
+      "978289777",
+      "9782922585",
+      "9782923841",
+      "9782924342"
+    ],
+    "sites": [
+      "http://www.lapasteque.com"
+    ]
+  },
+  {
+    "qid": "Q3213929",
+    "name": "La Volte",
+    "prefixes": [
+      "978237049",
+      "9782917157",
+      "97829522217"
+    ],
+    "sites": [
+      "https://lavolte.net/"
+    ]
+  },
+  {
+    "qid": "Q3216622",
+    "name": "Lambert-Lucas",
+    "prefixes": [
+      "978235935",
+      "9782915806"
+    ],
+    "sites": [
+      "http://www.lambertlucas.com/"
+    ]
+  },
+  {
+    "qid": "Q3217744",
+    "name": "Lapin Éditions",
+    "prefixes": [
+      "978237754",
+      "9782918653",
+      "97829524703"
+    ],
+    "sites": [
+      "https://www.lapin.org/"
+    ]
+  },
+  {
+    "qid": "Q3220690",
+    "name": "Le Bélial'",
+    "prefixes": [
+      "978238163",
+      "978284344",
+      "9782913039"
+    ],
+    "sites": [
+      "https://www.belial.fr/"
+    ]
+  },
+  {
+    "qid": "Q3220877",
+    "name": "Le Castor astral",
+    "prefixes": [
+      "978285920",
+      "97910278"
+    ],
+    "sites": [
+      "http://www.castorastral.com/"
+    ]
+  },
+  {
+    "qid": "Q3221167",
+    "name": "Le Cherche-Midi",
+    "prefixes": [
+      "97827491",
+      "978286274"
+    ],
+    "sites": [
+      "https://www.lisez.com/editeurs/cherche-midi"
+    ]
+  },
+  {
+    "qid": "Q3221549",
+    "name": "Le Coffre à BD",
+    "prefixes": [
+      "978235007"
+    ],
+    "sites": [
+      "https://coffre-a-bd.com/"
+    ]
+  },
+  {
+    "qid": "Q3222321",
+    "name": "Le Dilettante",
+    "prefixes": [
+      "978284263",
+      "9782905344",
+      "97910308"
+    ],
+    "sites": [
+      "https://www.ledilettante.com/"
+    ]
+  },
+  {
+    "qid": "Q3223258",
+    "name": "Le Grand Livre du mois",
+    "prefixes": [
+      "9782286",
+      "97827028"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3224011",
+    "name": "Le Livre de poche jeunesse",
+    "prefixes": [
+      "978201"
+    ],
+    "sites": [
+      "https://www.hachetteromans.fr/livre-de-poche-jeunesse/"
+    ]
+  },
+  {
+    "qid": "Q3225285",
+    "name": "Le Passager clandestin",
+    "prefixes": [
+      "978236935",
+      "9782916952"
+    ],
+    "sites": [
+      "https://www.lepassagerclandestin.fr/"
+    ]
+  },
+  {
+    "qid": "Q3225767",
+    "name": "Le Pommier",
+    "prefixes": [
+      "97827465"
+    ],
+    "sites": [
+      "http://www.editions-lepommier.fr/"
+    ]
+  },
+  {
+    "qid": "Q3226185",
+    "name": "Le Quartanier",
+    "prefixes": [
+      "978289698",
+      "9782923400",
+      "97829808122"
+    ],
+    "sites": [
+      "https://www.lequartanier.com/"
+    ]
+  },
+  {
+    "qid": "Q3226831",
+    "name": "Le Sablier Éditions",
+    "prefixes": [
+      "978284390"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3227099",
+    "name": "Le Septième Cercle",
+    "prefixes": [
+      "978237070",
+      "9782914892"
+    ],
+    "sites": [
+      "https://www.7emecercle.com/7C_site/"
+    ]
+  },
+  {
+    "qid": "Q3227334",
+    "name": "Le Souffle d'or",
+    "prefixes": [
+      "978284058",
+      "9782904670"
+    ],
+    "sites": [
+      "https://www.souffledor.fr/"
+    ]
+  },
+  {
+    "qid": "Q3227610",
+    "name": "Le Temps qu'il fait",
+    "prefixes": [
+      "978286853"
+    ],
+    "sites": [
+      "http://www.letempsquilfait.com/"
+    ]
+  },
+  {
+    "qid": "Q3227991",
+    "name": "Le Vaisseau d'argent",
+    "prefixes": [
+      "978287757"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3229015",
+    "name": "Lefrancq",
+    "prefixes": [
+      "978287153"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3230340",
+    "name": "Les 400 coups",
+    "prefixes": [
+      "978289540",
+      "978289815",
+      "9782921620"
+    ],
+    "sites": [
+      "http://www.editions400coups.ca"
+    ]
+  },
+  {
+    "qid": "Q3230701",
+    "name": "Les Arènes",
+    "prefixes": [
+      "978235204",
+      "97827112",
+      "9782912485",
+      "97910375"
+    ],
+    "sites": [
+      "http://www.arenes.fr/"
+    ]
+  },
+  {
+    "qid": "Q3232288",
+    "name": "Les Empêcheurs de penser en rond",
+    "prefixes": [
+      "978235925",
+      "978284324",
+      "978284671",
+      "9782908602"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3233175",
+    "name": "Éditions Les Herbes rouges",
+    "prefixes": [
+      "978289419",
+      "9782920051"
+    ],
+    "sites": [
+      "http://lesherbesrouges.com/"
+    ]
+  },
+  {
+    "qid": "Q3233302",
+    "name": "Les Impressions nouvelles",
+    "prefixes": [
+      "978287449",
+      "9782906131"
+    ],
+    "sites": [
+      "http://www.lesimpressionsnouvelles.com",
+      "https://lesimpressionsnouvelles.com/"
+    ]
+  },
+  {
+    "qid": "Q3234011",
+    "name": "Les Moutons électriques",
+    "prefixes": [
+      "978236183",
+      "9782915793"
+    ],
+    "sites": [
+      "http://www.moutons-electriques.fr/"
+    ]
+  },
+  {
+    "qid": "Q3234650",
+    "name": "Les Petits Matins",
+    "prefixes": [
+      "978236383",
+      "9782915879"
+    ],
+    "sites": [
+      "http://www.lespetitsmatins.fr/"
+    ]
+  },
+  {
+    "qid": "Q3234892",
+    "name": "Les Presses du réel",
+    "prefixes": [
+      "978237896",
+      "978284066"
+    ],
+    "sites": [
+      "http://www.lespressesdureel.com/"
+    ]
+  },
+  {
+    "qid": "Q32361125",
+    "name": "Éditions Choudens",
+    "prefixes": [
+      "978285886"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3236382",
+    "name": "Les liens qui libèrent",
+    "prefixes": [
+      "9782918597",
+      "97910209"
+    ],
+    "sites": [
+      "http://www.editionslesliensquiliberent.fr/"
+    ]
+  },
+  {
+    "qid": "Q3236498",
+    "name": "Les Échappés",
+    "prefixes": [
+      "978235766"
+    ],
+    "sites": [
+      "https://lesechappes.com/"
+    ]
+  },
+  {
+    "qid": "Q3236518",
+    "name": "Les Éditions Albert René",
+    "prefixes": [
+      "978286497"
+    ],
+    "sites": [
+      "https://www.asterix.com/"
+    ]
+  },
+  {
+    "qid": "Q3236519",
+    "name": "Éditions Cercle d'art",
+    "prefixes": [
+      "97827022"
+    ],
+    "sites": [
+      "http://www.cercledart.com/"
+    ]
+  },
+  {
+    "qid": "Q3236522",
+    "name": "Les Éditions Héritage",
+    "prefixes": [
+      "97827625",
+      "978289812"
+    ],
+    "sites": [
+      "http://www.dominiqueetcompagnie.com/index.asp"
+    ]
+  },
+  {
+    "qid": "Q3237418",
+    "name": "Lextenso éditions",
+    "prefixes": [
+      "9782275",
+      "978235971"
+    ],
+    "sites": [
+      "http://www.lextenso-editions.fr/"
+    ]
+  },
+  {
+    "qid": "Q3237715",
+    "name": "Raisons d'agir",
+    "prefixes": [
+      "9782912107"
+    ],
+    "sites": [
+      "http://www.raisonsdagir-editions.org"
+    ]
+  },
+  {
+    "qid": "Q3237769",
+    "name": "Libertalia",
+    "prefixes": [
+      "978237729",
+      "9782918059",
+      "97829528292"
+    ],
+    "sites": [
+      "https://editionslibertalia.com/"
+    ]
+  },
+  {
+    "qid": "Q3237900",
+    "name": "Éditions Tallandier",
+    "prefixes": [
+      "9782235",
+      "978284734",
+      "97910210"
+    ],
+    "sites": [
+      "https://www.tallandier.com/"
+    ]
+  },
+  {
+    "qid": "Q3237911",
+    "name": "Librairie générale de droit et de jurisprudence",
+    "prefixes": [
+      "9782275"
+    ],
+    "sites": [
+      "https://www.lgdj.fr"
+    ]
+  },
+  {
+    "qid": "Q326282",
+    "name": "Université du Québec",
+    "prefixes": [
+      "978237745"
+    ],
+    "sites": [
+      "https://www.uquebec.ca"
+    ]
+  },
+  {
+    "qid": "Q3268031",
+    "name": "Lux Éditeur",
+    "prefixes": [
+      "978289596",
+      "978289833",
+      "9782922494",
+      "97829804963"
+    ],
+    "sites": [
+      "https://luxediteur.com"
+    ]
+  },
+  {
+    "qid": "Q3277077",
+    "name": "Magnard",
+    "prefixes": [
+      "9782210"
+    ],
+    "sites": [
+      "https://www.magnard.fr/"
+    ]
+  },
+  {
+    "qid": "Q3278187",
+    "name": "Tonkam",
+    "prefixes": [
+      "97827595",
+      "978284580",
+      "9782910645",
+      "9782912628"
+    ],
+    "sites": [
+      "http://www.editions-tonkam.com/"
+    ]
+  },
+  {
+    "qid": "Q3287340",
+    "name": "Marabout",
+    "prefixes": [
+      "9782501"
+    ],
+    "sites": [
+      "http://www.marabout.com/",
+      "https://www.marabout.com/"
+    ]
+  },
+  {
+    "qid": "Q3290405",
+    "name": "Maren Sell Éditeurs",
+    "prefixes": [
+      "978235004"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3296035",
+    "name": "Marval",
+    "prefixes": [
+      "978286234"
+    ],
+    "sites": [
+      "http://www.marval.fr/"
+    ]
+  },
+  {
+    "qid": "Q3302236",
+    "name": "Max Milo",
+    "prefixes": [
+      "9782315",
+      "978235341",
+      "9782914388"
+    ],
+    "sites": [
+      "http://www.maxmilo.com"
+    ]
+  },
+  {
+    "qid": "Q3309921",
+    "name": "Michel Houdiard Éditeur",
+    "prefixes": [
+      "978235692",
+      "9782912673"
+    ],
+    "sites": [
+      "http://www.michelhoudiardediteur.com/"
+    ]
+  },
+  {
+    "qid": "Q33112853",
+    "name": "Éditions Mame",
+    "prefixes": [
+      "9782250",
+      "97827189",
+      "97827289"
+    ],
+    "sites": [
+      "http://www.mameeditions.com/"
+    ]
+  },
+  {
+    "qid": "Q3312008",
+    "name": "Micro Application",
+    "prefixes": [
+      "9782300",
+      "97827429",
+      "97828224"
+    ],
+    "sites": [
+      "https://www.microapp.com"
+    ]
+  },
+  {
+    "qid": "Q3313823",
+    "name": "Mila Éditions",
+    "prefixes": [
+      "978237853",
+      "978237879",
+      "978284006"
+    ],
+    "sites": [
+      "http://www.mila-editions.fr/"
+    ]
+  },
+  {
+    "qid": "Q3313834",
+    "name": "Milady",
+    "prefixes": [
+      "97828112",
+      "97828205",
+      "97910281"
+    ],
+    "sites": [
+      "http://www.milady.fr/"
+    ]
+  },
+  {
+    "qid": "Q3314003",
+    "name": "Milan Presse",
+    "prefixes": [
+      "978237039",
+      "9782408",
+      "97827100",
+      "97827459",
+      "978284113",
+      "978286726",
+      "97829543027"
+    ],
+    "sites": [
+      "http://milanpresse.com"
+    ]
+  },
+  {
+    "qid": "Q3321472",
+    "name": "Monsieur Toussaint Louverture",
+    "prefixes": [
+      "978238196",
+      "97829522081",
+      "97829533664",
+      "9791090724"
+    ],
+    "sites": [
+      "https://www.monsieurtoussaintlouverture.com/"
+    ]
+  },
+  {
+    "qid": "Q3325508",
+    "name": "Mouladurioù Hor Yezh",
+    "prefixes": [
+      "978286863"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3327646",
+    "name": "MultiMondes",
+    "prefixes": [
+      "978289544",
+      "978289773",
+      "9782921146"
+    ],
+    "sites": [
+      "https://editionsmultimondes.com/"
+    ]
+  },
+  {
+    "qid": "Q3327723",
+    "name": "Multisim",
+    "prefixes": [
+      "978284476",
+      "9782909934"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3329701",
+    "name": "musée de Bretagne",
+    "prefixes": [
+      "9782901429"
+    ],
+    "sites": [
+      "http://www.musee-bretagne.fr/"
+    ]
+  },
+  {
+    "qid": "Q3332141",
+    "name": "Mécanique générale",
+    "prefixes": [
+      "9782922827",
+      "9782925125"
+    ],
+    "sites": [
+      "http://www.mecaniquegenerale.org/",
+      "https://editionsmecaniquegenerale.com"
+    ]
+  },
+  {
+    "qid": "Q3332501",
+    "name": "Média Système Édition",
+    "prefixes": [
+      "978284518",
+      "9782910104"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3332563",
+    "name": "Médiaspaul",
+    "prefixes": [
+      "97827122",
+      "978289039",
+      "978289129",
+      "978289420",
+      "978289760"
+    ],
+    "sites": [
+      "http://www.mediaspaul.fr",
+      "https://mediaspaul.ca"
+    ]
+  },
+  {
+    "qid": "Q3336695",
+    "name": "Nathan",
+    "prefixes": [
+      "978209"
+    ],
+    "sites": [
+      "http://www.nathan.fr"
+    ]
+  },
+  {
+    "qid": "Q3341331",
+    "name": "Niffle",
+    "prefixes": [
+      "978287393"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3342521",
+    "name": "Nobi nobi !",
+    "prefixes": [
+      "978237349",
+      "9782918857"
+    ],
+    "sites": [
+      "http://www.nobi-nobi.fr"
+    ]
+  },
+  {
+    "qid": "Q3345036",
+    "name": "Nouveau Monde",
+    "prefixes": [
+      "978236583",
+      "978236942",
+      "978238094",
+      "978284736"
+    ],
+    "sites": [
+      "https://www.nouveau-monde.net/"
+    ]
+  },
+  {
+    "qid": "Q3345384",
+    "name": "Novedi",
+    "prefixes": [
+      "97828039"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3349862",
+    "name": "Oh ! Éditions",
+    "prefixes": [
+      "978236107",
+      "9782915056"
+    ],
+    "sites": [
+      "http://www.oheditions.com/"
+    ]
+  },
+  {
+    "qid": "Q3355196",
+    "name": "Orbit",
+    "prefixes": [
+      "978236051"
+    ],
+    "sites": [
+      "http://www.orbitbooks.net/"
+    ]
+  },
+  {
+    "qid": "Q3357700",
+    "name": "Ototo",
+    "prefixes": [
+      "978235180",
+      "978237506",
+      "978237717"
+    ],
+    "sites": [
+      "http://www.ototo.fr/"
+    ]
+  },
+  {
+    "qid": "Q3365970",
+    "name": "Parole et Silence",
+    "prefixes": [
+      "978284573",
+      "978288918",
+      "978288959",
+      "9782911940",
+      "9782940632"
+    ],
+    "sites": [
+      "http://www.paroleetsilence.com/"
+    ]
+  },
+  {
+    "qid": "Q3373257",
+    "name": "Payot Editeur",
+    "prefixes": [
+      "9782228"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3373262",
+    "name": "Payot & Rivages",
+    "prefixes": [
+      "97827436",
+      "978286930",
+      "9782903059"
+    ],
+    "sites": [
+      "https://www.payot-rivages.fr"
+    ]
+  },
+  {
+    "qid": "Q3377299",
+    "name": "Petit à Petit",
+    "prefixes": [
+      "978238046",
+      "978284949",
+      "9782914401",
+      "97829511733",
+      "9791095670"
+    ],
+    "sites": [
+      "https://www.petitapetit.fr/"
+    ]
+  },
+  {
+    "qid": "Q3388349",
+    "name": "Pika Édition",
+    "prefixes": [
+      "97828116",
+      "978284599"
+    ],
+    "sites": [
+      "http://www.pika.fr/"
+    ]
+  },
+  {
+    "qid": "Q3391621",
+    "name": "Planète rebelle",
+    "prefixes": [
+      "9782922528",
+      "9782923735",
+      "9782924174",
+      "9782924797",
+      "9782925139",
+      "9782925142",
+      "97829805796"
+    ],
+    "sites": [
+      "https://planeterebelle.qc.ca"
+    ]
+  },
+  {
+    "qid": "Q3392087",
+    "name": "Play Bac",
+    "prefixes": [
+      "97828096",
+      "978284203"
+    ],
+    "sites": [
+      "http://www.playbac.fr"
+    ]
+  },
+  {
+    "qid": "Q3392522",
+    "name": "Plon",
+    "prefixes": [
+      "9782259"
+    ],
+    "sites": [
+      "https://www.lisez.com/plon/21"
+    ]
+  },
+  {
+    "qid": "Q3393550",
+    "name": "Pointe Noire",
+    "prefixes": [
+      "978284553"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3402566",
+    "name": "Presses Sorbonne Nouvelle",
+    "prefixes": [
+      "978237906",
+      "978287854",
+      "9782903019"
+    ],
+    "sites": [
+      "https://psn.sorbonne-nouvelle.fr/"
+    ]
+  },
+  {
+    "qid": "Q3402568",
+    "name": "Presses de Sciences Po",
+    "prefixes": [
+      "97827246"
+    ],
+    "sites": [
+      "https://www.pressesdesciencespo.fr/"
+    ]
+  },
+  {
+    "qid": "Q3402572",
+    "name": "Presses de l'Université Laval",
+    "prefixes": [
+      "97827637"
+    ],
+    "sites": [
+      "https://www.pulaval.com",
+      "https://www.pulaval.com/"
+    ]
+  },
+  {
+    "qid": "Q3402573",
+    "name": "Presses de l'Université du Québec",
+    "prefixes": [
+      "97827605"
+    ],
+    "sites": [
+      "https://www.puq.ca/"
+    ]
+  },
+  {
+    "qid": "Q3402575",
+    "name": "Sorbonne Université Presses",
+    "prefixes": [
+      "978284050",
+      "97910231"
+    ],
+    "sites": [
+      "http://sup.sorbonne-universite.fr/"
+    ]
+  },
+  {
+    "qid": "Q3402576",
+    "name": "Presses de la Renaissance",
+    "prefixes": [
+      "97827509",
+      "978285616"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3402577",
+    "name": "Presses du Châtelet",
+    "prefixes": [
+      "978238195",
+      "978284592",
+      "9782911217"
+    ],
+    "sites": [
+      "http://www.editionsarchipel.com/"
+    ]
+  },
+  {
+    "qid": "Q3402583",
+    "name": "Presses universitaires de Caen",
+    "prefixes": [
+      "978238185",
+      "978284133",
+      "9782904461",
+      "9782905461"
+    ],
+    "sites": [
+      "https://www.unicaen.fr/recherche/communication-scientifique/presses-universitaires-de-caen/"
+    ]
+  },
+  {
+    "qid": "Q3402584",
+    "name": "Presses universitaires de Grenoble",
+    "prefixes": [
+      "97827061"
+    ],
+    "sites": [
+      "http://www.pug.fr"
+    ]
+  },
+  {
+    "qid": "Q3402585",
+    "name": "Presses universitaires de Louvain",
+    "prefixes": [
+      "978239061",
+      "978287463",
+      "978287558",
+      "9782930344"
+    ],
+    "sites": [
+      "https://pul.uclouvain.be/"
+    ]
+  },
+  {
+    "qid": "Q3402586",
+    "name": "Presses de la Cité",
+    "prefixes": [
+      "9782258"
+    ],
+    "sites": [
+      "http://www.pressesdelacite.com/"
+    ]
+  },
+  {
+    "qid": "Q3402591",
+    "name": "Presses universitaires du Septentrion",
+    "prefixes": [
+      "97827574",
+      "978285939",
+      "978286531",
+      "9782907170"
+    ],
+    "sites": [
+      "http://www.septentrion.com/"
+    ]
+  },
+  {
+    "qid": "Q3402592",
+    "name": "Presses universitaires de Strasbourg",
+    "prefixes": [
+      "978286820",
+      "97910344"
+    ],
+    "sites": [
+      "http://pus.unistra.fr/"
+    ]
+  },
+  {
+    "qid": "Q3402593",
+    "name": "Presses universitaires de Vincennes",
+    "prefixes": [
+      "978284292",
+      "9782903981",
+      "9782910381"
+    ],
+    "sites": [
+      "https://www.puv-editions.fr/"
+    ]
+  },
+  {
+    "qid": "Q3402596",
+    "name": "Presses universitaires de Rennes",
+    "prefixes": [
+      "97827535",
+      "978286847"
+    ],
+    "sites": [
+      "http://www.pur-editions.fr/"
+    ]
+  },
+  {
+    "qid": "Q3409088",
+    "name": "Présence africaine",
+    "prefixes": [
+      "97827087"
+    ],
+    "sites": [
+      "http://www.cairn.info/revue-presence-africaine.htm",
+      "https://www.presenceafricaine.com/"
+    ]
+  },
+  {
+    "qid": "Q3410471",
+    "name": "Publie.net",
+    "prefixes": [
+      "97828145"
+    ],
+    "sites": [
+      "https://www.publie.net/"
+    ]
+  },
+  {
+    "qid": "Q3410482",
+    "name": "Publisud",
+    "prefixes": [
+      "978236291",
+      "978286600"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3411208",
+    "name": "Pygmalion",
+    "prefixes": [
+      "978208151",
+      "97827564",
+      "978285704"
+    ],
+    "sites": [
+      "https://www.editions-pygmalion.fr/"
+    ]
+  },
+  {
+    "qid": "Q3412577",
+    "name": "Quadrants",
+    "prefixes": [
+      "9782302",
+      "978284565",
+      "978284946",
+      "978287764"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3416317",
+    "name": "Rackham",
+    "prefixes": [
+      "978287827"
+    ],
+    "sites": [
+      "https://www.editions-rackham.com/"
+    ]
+  },
+  {
+    "qid": "Q3417474",
+    "name": "Rageot",
+    "prefixes": [
+      "97827002"
+    ],
+    "sites": [
+      "https://www.rageot.fr/"
+    ]
+  },
+  {
+    "qid": "Q3418619",
+    "name": "Ramsay",
+    "prefixes": [
+      "97828122",
+      "978284114",
+      "978285956"
+    ],
+    "sites": [
+      "https://ramsay.fr/"
+    ]
+  },
+  {
+    "qid": "Q3420286",
+    "name": "Ravet-Anceau",
+    "prefixes": [
+      "978235973",
+      "9782914657"
+    ],
+    "sites": [
+      "http://www.ravet-anceau.fr"
+    ]
+  },
+  {
+    "qid": "Q3440730",
+    "name": "Romain Pages Éditions",
+    "prefixes": [
+      "978284350",
+      "9782908878"
+    ],
+    "sites": [
+      "http://www.romain-pages.com"
+    ]
+  },
+  {
+    "qid": "Q3443221",
+    "name": "Rouge et Or",
+    "prefixes": [
+      "978209",
+      "9782261"
+    ],
+    "sites": [
+      "https://www.lisez.com/"
+    ]
+  },
+  {
+    "qid": "Q3452642",
+    "name": "Rue du monde",
+    "prefixes": [
+      "978235504",
+      "9782912084",
+      "9782915569"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3461469",
+    "name": "Sagédition",
+    "prefixes": [
+      "978285670"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3470363",
+    "name": "Salvator",
+    "prefixes": [
+      "97827067"
+    ],
+    "sites": [
+      "http://www.editions-salvator.com/"
+    ]
+  },
+  {
+    "qid": "Q3470868",
+    "name": "Samji",
+    "prefixes": [
+      "97828128"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3472152",
+    "name": "Sang de la Terre",
+    "prefixes": [
+      "978286985"
+    ],
+    "sites": [
+      "http://www.sangdelaterre.fr/"
+    ]
+  },
+  {
+    "qid": "Q3474431",
+    "name": "Sav-Heol",
+    "prefixes": [
+      "9782918703",
+      "97829534848",
+      "9791090456"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3478421",
+    "name": "Semic",
+    "prefixes": [
+      "978235100",
+      "978284857",
+      "9782914082"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3479007",
+    "name": "Septembre éditeur",
+    "prefixes": [
+      "978289471",
+      "9782920433",
+      "9782921481",
+      "9782923683"
+    ],
+    "sites": [
+      "https://www.septembre.com"
+    ]
+  },
+  {
+    "qid": "Q3486319",
+    "name": "Skira",
+    "prefixes": [
+      "978237074"
+    ],
+    "sites": [
+      "https://www.skira.net/"
+    ]
+  },
+  {
+    "qid": "Q3487702",
+    "name": "Société bourbonnaise des études locales",
+    "prefixes": [
+      "97829517544"
+    ],
+    "sites": [
+      "https://sbel.hypotheses.org/"
+    ]
+  },
+  {
+    "qid": "Q3488576",
+    "name": "Société parisienne d'édition",
+    "prefixes": [
+      "978285110",
+      "978286315"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3489306",
+    "name": "Soleil Productions",
+    "prefixes": [
+      "9782302",
+      "978284565",
+      "978284946",
+      "978287764"
+    ],
+    "sites": [
+      "https://www.editions-soleil.fr/"
+    ]
+  },
+  {
+    "qid": "Q3490284",
+    "name": "Sonatine Éditions",
+    "prefixes": [
+      "978235584"
+    ],
+    "sites": [
+      "http://www.sonatine-editions.fr/"
+    ]
+  },
+  {
+    "qid": "Q3491506",
+    "name": "Souffles",
+    "prefixes": [
+      "978287658"
+    ],
+    "sites": [
+      "https://www.fabert.com/"
+    ]
+  },
+  {
+    "qid": "Q349566",
+    "name": "Hachette",
+    "prefixes": [
+      "978201"
+    ],
+    "sites": [
+      "http://www.hachette.com",
+      "https://www.hachette.fr/"
+    ]
+  },
+  {
+    "qid": "Q3509035",
+    "name": "Syros",
+    "prefixes": [
+      "97827485",
+      "978284146",
+      "978286738"
+    ],
+    "sites": [
+      "https://www.syros.fr/"
+    ]
+  },
+  {
+    "qid": "Q3516157",
+    "name": "Taupinambour",
+    "prefixes": [
+      "978235011",
+      "97829520160"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3518681",
+    "name": "Terre vivante",
+    "prefixes": [
+      "978236098",
+      "9782904082",
+      "9782914717"
+    ],
+    "sites": [
+      "https://www.terrevivante.org/"
+    ]
+  },
+  {
+    "qid": "Q3519467",
+    "name": "Thalia Édition",
+    "prefixes": [
+      "978235278"
+    ],
+    "sites": [
+      "http://www.thaliaedition.com/"
+    ]
+  },
+  {
+    "qid": "Q3523542",
+    "name": "Theloma",
+    "prefixes": [
+      "978284998"
+    ],
+    "sites": [
+      "http://theloma.free.fr/"
+    ]
+  },
+  {
+    "qid": "Q3527992",
+    "name": "Ti embann ar skolioù",
+    "prefixes": [
+      "9782240"
+    ],
+    "sites": [
+      "http://crdp.ac-rennes.fr/tes/site/"
+    ]
+  },
+  {
+    "qid": "Q3537395",
+    "name": "Transboréal",
+    "prefixes": [
+      "978236157",
+      "9782913955",
+      "97829507992"
+    ],
+    "sites": [
+      "https://www.transboreal.fr/"
+    ]
+  },
+  {
+    "qid": "Q3538371",
+    "name": "Treize étrange",
+    "prefixes": [
+      "97827234",
+      "97827459",
+      "9782911058"
+    ],
+    "sites": [
+      "http://www.glenatbd.com/bd/collections/treize-etrange.htm"
+    ]
+  },
+  {
+    "qid": "Q3539566",
+    "name": "Triptyque",
+    "prefixes": [
+      "978289031",
+      "978289741",
+      "978289801"
+    ],
+    "sites": [
+      "http://www.groupenotabene.com/editions-triptyque"
+    ]
+  },
+  {
+    "qid": "Q3550694",
+    "name": "United Dead Artists",
+    "prefixes": [
+      "978237543"
+    ],
+    "sites": [
+      "http://www.uniteddeadartists.com"
+    ]
+  },
+  {
+    "qid": "Q3552182",
+    "name": "Urban Comics",
+    "prefixes": [
+      "978236577",
+      "97910268"
+    ],
+    "sites": [
+      "http://www.urban-comics.com/"
+    ]
+  },
+  {
+    "qid": "Q3556251",
+    "name": "Vertige Graphic",
+    "prefixes": [
+      "978284999",
+      "9782908981"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3556497",
+    "name": "Via Romana",
+    "prefixes": [
+      "978237271",
+      "9782916727",
+      "9791090029"
+    ],
+    "sites": [
+      "https://boutique.via-romana.fr/"
+    ]
+  },
+  {
+    "qid": "Q3562486",
+    "name": "Voix d'encre",
+    "prefixes": [
+      "978235128",
+      "9782910957"
+    ],
+    "sites": [
+      "https://www.voix-dencre.net/"
+    ]
+  },
+  {
+    "qid": "Q3563761",
+    "name": "Vuibert",
+    "prefixes": [
+      "9782311",
+      "97827117"
+    ],
+    "sites": [
+      "https://www.vuibert.fr/"
+    ]
+  },
+  {
+    "qid": "Q3570425",
+    "name": "XO éditions",
+    "prefixes": [
+      "978237448",
+      "978284563"
+    ],
+    "sites": [
+      "http://www.xoeditions.com"
+    ]
+  },
+  {
+    "qid": "Q3573399",
+    "name": "Yvelinédition",
+    "prefixes": [
+      "978284668"
+    ],
+    "sites": [
+      "http://www.editionsbaudez.fr",
+      "http://www.yvelinedition.fr"
+    ]
+  },
+  {
+    "qid": "Q3576279",
+    "name": "Zulma",
+    "prefixes": [
+      "978284304",
+      "9782909031",
+      "97910387"
+    ],
+    "sites": [
+      "http://www.zulma.fr"
+    ]
+  },
+  {
+    "qid": "Q3576945",
+    "name": "À vue d'œil",
+    "prefixes": [
+      "978284666",
+      "9782912632",
+      "97910269"
+    ],
+    "sites": [
+      "http://www.avuedoeil.fr"
+    ]
+  },
+  {
+    "qid": "Q3577268",
+    "name": "Çà et là",
+    "prefixes": [
+      "978236990",
+      "9782916207"
+    ],
+    "sites": [
+      "https://www.caetla.fr/"
+    ]
+  },
+  {
+    "qid": "Q3578803",
+    "name": "Écosociété",
+    "prefixes": [
+      "978289719",
+      "9782921561",
+      "9782923165",
+      "97829808099"
+    ],
+    "sites": [
+      "http://ecosociete.org/"
+    ]
+  },
+  {
+    "qid": "Q3579156",
+    "name": "Édite",
+    "prefixes": [
+      "978284608"
+    ],
+    "sites": [
+      "https://www.oeildusphinx.com/"
+    ]
+  },
+  {
+    "qid": "Q3579191",
+    "name": "Éditions Michel Quintin",
+    "prefixes": [
+      "978289435",
+      "978289762",
+      "9782920438"
+    ],
+    "sites": [
+      "https://www.editionsmichelquintin.ca"
+    ]
+  },
+  {
+    "qid": "Q3579193",
+    "name": "Édition des Archers",
+    "prefixes": [
+      "978287144"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579197",
+    "name": "Éditions A. Pedone",
+    "prefixes": [
+      "9782233"
+    ],
+    "sites": [
+      "https://pedone.info/"
+    ]
+  },
+  {
+    "qid": "Q3579202",
+    "name": "Éditions Aden",
+    "prefixes": [
+      "97828059",
+      "978284840",
+      "9782930402",
+      "97829600273"
+    ],
+    "sites": [
+      "https://adeneditions.com/"
+    ]
+  },
+  {
+    "qid": "Q3579203",
+    "name": "Agone",
+    "prefixes": [
+      "97827489",
+      "9782910846"
+    ],
+    "sites": [
+      "https://agone.org"
+    ]
+  },
+  {
+    "qid": "Q3579206",
+    "name": "Éditions Alain Moreau",
+    "prefixes": [
+      "978285209"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579212",
+    "name": "Allia",
+    "prefixes": [
+      "978284485",
+      "9782904235",
+      "9782911188",
+      "97910304"
+    ],
+    "sites": [
+      "http://www.editions-allia.com"
+    ]
+  },
+  {
+    "qid": "Q3579215",
+    "name": "Éditions Alternatives",
+    "prefixes": [
+      "978207",
+      "978286227",
+      "978286738"
+    ],
+    "sites": [
+      "http://www.editionsalternatives.com/"
+    ]
+  },
+  {
+    "qid": "Q3579221",
+    "name": "Éditions Anne Carrière",
+    "prefixes": [
+      "978238082",
+      "978284337"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579224",
+    "name": "éditions Apogée",
+    "prefixes": [
+      "978284398",
+      "9782909275"
+    ],
+    "sites": [
+      "http://www.editions-apogee.com"
+    ]
+  },
+  {
+    "qid": "Q3579227",
+    "name": "Éditions Arkhê",
+    "prefixes": [
+      "978238341",
+      "9782918682"
+    ],
+    "sites": [
+      "https://www.arkhe-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q3579229",
+    "name": "Éditions Artémis",
+    "prefixes": [
+      "978284416"
+    ],
+    "sites": [
+      "https://www.editions-artemis.com/"
+    ]
+  },
+  {
+    "qid": "Q3579230",
+    "name": "Éditions Artège",
+    "prefixes": [
+      "978236040",
+      "9782916053",
+      "97910336"
+    ],
+    "sites": [
+      "http://www.editionsartege.fr"
+    ]
+  },
+  {
+    "qid": "Q3579239",
+    "name": "Éditions Balland",
+    "prefixes": [
+      "978235315"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579241",
+    "name": "Éditions Bartillat",
+    "prefixes": [
+      "978284100"
+    ],
+    "sites": [
+      "https://www.editions-bartillat.com"
+    ]
+  },
+  {
+    "qid": "Q3579243",
+    "name": "Éditions Belfond",
+    "prefixes": [
+      "97827144"
+    ],
+    "sites": [
+      "http://www.belfond.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579244",
+    "name": "Éditions Beauchesne",
+    "prefixes": [
+      "97827010"
+    ],
+    "sites": [
+      "https://www.editions-beauchesne.com/"
+    ]
+  },
+  {
+    "qid": "Q3579246",
+    "name": "Éditions Belin",
+    "prefixes": [
+      "9782410",
+      "97827011"
+    ],
+    "sites": [
+      "https://www.belin-editeur.com/accueil"
+    ]
+  },
+  {
+    "qid": "Q3579248",
+    "name": "Éditions Berger-Levrault",
+    "prefixes": [
+      "97827013",
+      "978285130"
+    ],
+    "sites": [
+      "https://www.berger-levrault.com"
+    ]
+  },
+  {
+    "qid": "Q3579253",
+    "name": "Éditions Bordas",
+    "prefixes": [
+      "978204"
+    ],
+    "sites": [
+      "http://www.editions-bordas.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579257",
+    "name": "Éditions Bréal",
+    "prefixes": [
+      "978235009"
+    ],
+    "sites": [
+      "http://www.editions-breal.fr"
+    ]
+  },
+  {
+    "qid": "Q3579263",
+    "name": "Éditions Cadex",
+    "prefixes": [
+      "978237299",
+      "9782905910",
+      "9782913388"
+    ],
+    "sites": [
+      "https://www.cadex-editions.net/"
+    ]
+  },
+  {
+    "qid": "Q3579273",
+    "name": "Éditions Charles Léopold Mayer",
+    "prefixes": [
+      "978284377"
+    ],
+    "sites": [
+      "http://www.eclm.fr"
+    ]
+  },
+  {
+    "qid": "Q3579277",
+    "name": "Éditions Chronique",
+    "prefixes": [
+      "978287220"
+    ],
+    "sites": [
+      "http://www.editions-chronique.com"
+    ]
+  },
+  {
+    "qid": "Q3579282",
+    "name": "Éditions Complexe",
+    "prefixes": [
+      "978287027"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579287",
+    "name": "Éditions Couleur livres",
+    "prefixes": [
+      "978287003"
+    ],
+    "sites": [
+      "https://www.couleurlivres.org/"
+    ]
+  },
+  {
+    "qid": "Q3579289",
+    "name": "éditions Cujas",
+    "prefixes": [
+      "9782254"
+    ],
+    "sites": [
+      "https://www.cujas.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579291",
+    "name": "Éditions Cépaduès",
+    "prefixes": [
+      "978236493",
+      "978238395",
+      "978285428",
+      "9791090138"
+    ],
+    "sites": [
+      "http://www.cepadues.com"
+    ]
+  },
+  {
+    "qid": "Q3579294",
+    "name": "Éditions Dangles",
+    "prefixes": [
+      "97827033"
+    ],
+    "sites": [
+      "http://www.editions-dangles.com"
+    ]
+  },
+  {
+    "qid": "Q3579295",
+    "name": "Éditions David",
+    "prefixes": [
+      "978289597",
+      "9782922109",
+      "97829803982"
+    ],
+    "sites": [
+      "http://www.editionsdavid.com"
+    ]
+  },
+  {
+    "qid": "Q3579305",
+    "name": "Éditions Dervy",
+    "prefixes": [
+      "978284454",
+      "978285076",
+      "97910242"
+    ],
+    "sites": [
+      "https://www.dervy-medicis.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579306",
+    "name": "Éditions Diane de Selliers",
+    "prefixes": [
+      "978236437",
+      "9782903656"
+    ],
+    "sites": [
+      "http://www.editionsdianedeselliers.com/"
+    ]
+  },
+  {
+    "qid": "Q3579307",
+    "name": "Éditions Didier Carpentier",
+    "prefixes": [
+      "978284167",
+      "9782906962",
+      "97910305"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579308",
+    "name": "Éditions Dominique Leroy",
+    "prefixes": [
+      "978237433",
+      "978286688"
+    ],
+    "sites": [
+      "https://www.dominiqueleroy.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579310",
+    "name": "Éditions Druide",
+    "prefixes": [
+      "978289711"
+    ],
+    "sites": [
+      "https://www.editionsdruide.com/"
+    ]
+  },
+  {
+    "qid": "Q3579311",
+    "name": "Éditions Dunod",
+    "prefixes": [
+      "978210"
+    ],
+    "sites": [
+      "https://www.dunod.com/"
+    ]
+  },
+  {
+    "qid": "Q3579312",
+    "name": "Éditions Ellipses",
+    "prefixes": [
+      "9782340",
+      "97827298"
+    ],
+    "sites": [
+      "http://www.editions-ellipses.fr"
+    ]
+  },
+  {
+    "qid": "Q3579320",
+    "name": "Éditions FLBLB",
+    "prefixes": [
+      "978235761",
+      "9782914553"
+    ],
+    "sites": [
+      "https://www.flblb.com/"
+    ]
+  },
+  {
+    "qid": "Q3579328",
+    "name": "Éditions Fides",
+    "prefixes": [
+      "97827621"
+    ],
+    "sites": [
+      "https://editionsfides.com/"
+    ]
+  },
+  {
+    "qid": "Q3579332",
+    "name": "Éditions France-Empire",
+    "prefixes": [
+      "97827048"
+    ],
+    "sites": [
+      "https://www.france-catholique.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579335",
+    "name": "Éditions François-Xavier de Guibert",
+    "prefixes": [
+      "97827554",
+      "978286839"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579336",
+    "name": "Éditions Galilée",
+    "prefixes": [
+      "978238174",
+      "9782491006",
+      "97827186"
+    ],
+    "sites": [
+      "http://www.editions-galilee.fr"
+    ]
+  },
+  {
+    "qid": "Q3579346",
+    "name": "Éditions Hazan",
+    "prefixes": [
+      "97827198",
+      "97827541",
+      "978285025"
+    ],
+    "sites": [
+      "http://www.editions-hazan.fr"
+    ]
+  },
+  {
+    "qid": "Q3579355",
+    "name": "Éditions Hurtubise",
+    "prefixes": [
+      "978289045",
+      "978289428",
+      "978289647",
+      "978289723",
+      "978289781"
+    ],
+    "sites": [
+      "http://www.editionshurtubise.com/"
+    ]
+  },
+  {
+    "qid": "Q3579357",
+    "name": "Éditions Héliotrope",
+    "prefixes": [
+      "978289822",
+      "9782923511",
+      "9782923975",
+      "9782924666"
+    ],
+    "sites": [
+      "https://www.editionsheliotrope.com/"
+    ]
+  },
+  {
+    "qid": "Q3579361",
+    "name": "Éditions JCL",
+    "prefixes": [
+      "978289431",
+      "978289804",
+      "9782920176"
+    ],
+    "sites": [
+      "https://www.editionsjcl.com"
+    ]
+  },
+  {
+    "qid": "Q3579365",
+    "name": "Éditions Jean-Claude Lattès",
+    "prefixes": [
+      "97827096"
+    ],
+    "sites": [
+      "https://www.editions-jclattes.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579367",
+    "name": "Éditions Jigal",
+    "prefixes": [
+      "978237722",
+      "9782914704",
+      "97829502272",
+      "97829511058",
+      "97829515228",
+      "9791092016"
+    ],
+    "sites": [
+      "http://www.polar.jigal.com/"
+    ]
+  },
+  {
+    "qid": "Q3579368",
+    "name": "Éditions Joca Seria",
+    "prefixes": [
+      "978284809",
+      "9782908929"
+    ],
+    "sites": [
+      "http://www.jocaseria.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579369",
+    "name": "Éditions Joker",
+    "prefixes": [
+      "978287265"
+    ],
+    "sites": [
+      "http://www.editions-joker.com/"
+    ]
+  },
+  {
+    "qid": "Q3579376",
+    "name": "Karthala",
+    "prefixes": [
+      "97828111",
+      "978284586",
+      "978286537"
+    ],
+    "sites": [
+      "http://www.karthala.com"
+    ]
+  },
+  {
+    "qid": "Q3579378",
+    "name": "Éditions Kimé",
+    "prefixes": [
+      "978238072",
+      "978284174",
+      "9782908212"
+    ],
+    "sites": [
+      "https://www.editionskime.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579383",
+    "name": "Éditions L'Harmattan",
+    "prefixes": [
+      "978214",
+      "9782296",
+      "9782336",
+      "9782343",
+      "97827384",
+      "97827475",
+      "978285802"
+    ],
+    "sites": [
+      "https://www.editions-harmattan.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579385",
+    "name": "Éditions La Grande Marée",
+    "prefixes": [
+      "9782921722",
+      "9782925262",
+      "97829803838"
+    ],
+    "sites": [
+      "https://grandemaree.refc.ca/"
+    ]
+  },
+  {
+    "qid": "Q3579388",
+    "name": "Éditions Labor",
+    "prefixes": [
+      "97828040"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579390",
+    "name": "Éditions Larivière",
+    "prefixes": [
+      "978284890",
+      "9782907051",
+      "9782914205"
+    ],
+    "sites": [
+      "http://www.editions-lariviere.fr/site/accueil.php"
+    ]
+  },
+  {
+    "qid": "Q3579392",
+    "name": "Éditions Le Bord de l'eau",
+    "prefixes": [
+      "978235687",
+      "9782911803",
+      "9782915651",
+      "97829508946"
+    ],
+    "sites": [
+      "http://www.editionsbdl.com/"
+    ]
+  },
+  {
+    "qid": "Q3579393",
+    "name": "Éditions Le Cri",
+    "prefixes": [
+      "978239001",
+      "978287106"
+    ],
+    "sites": [
+      "http://www.editions-mols.eu/",
+      "http://www.lecri.be"
+    ]
+  },
+  {
+    "qid": "Q3579402",
+    "name": "Éditions Le Pré aux clercs",
+    "prefixes": [
+      "97827144",
+      "978284228"
+    ],
+    "sites": [
+      "http://www.lepreauxclercs.com/"
+    ]
+  },
+  {
+    "qid": "Q3579411",
+    "name": "Éditions Liana Levi",
+    "prefixes": [
+      "978286746",
+      "97910349"
+    ],
+    "sites": [
+      "https://www.lianalevi.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579413",
+    "name": "Lignes",
+    "prefixes": [
+      "978235526"
+    ],
+    "sites": [
+      "https://www.editions-lignes.com/"
+    ]
+  },
+  {
+    "qid": "Q3579419",
+    "name": "Éditions Mango",
+    "prefixes": [
+      "978284752",
+      "9782914353"
+    ],
+    "sites": [
+      "https://www.mangoeditions.com/"
+    ]
+  },
+  {
+    "qid": "Q3579420",
+    "name": "Éditions Massin",
+    "prefixes": [
+      "97827072"
+    ],
+    "sites": [
+      "http://www.massin.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579422",
+    "name": "Éditions Matériologiques",
+    "prefixes": [
+      "978237361",
+      "9782919694"
+    ],
+    "sites": [
+      "http://www.materiologiques.com"
+    ]
+  },
+  {
+    "qid": "Q3579425",
+    "name": "Éditions Maurice Nadeau",
+    "prefixes": [
+      "978286231"
+    ],
+    "sites": [
+      "http://www.maurice-nadeau.net/"
+    ]
+  },
+  {
+    "qid": "Q3579427",
+    "name": "Éditions MeMo",
+    "prefixes": [
+      "978237175"
+    ],
+    "sites": [
+      "http://www.editions-memo.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579431",
+    "name": "Éditions Michel Lafon",
+    "prefixes": [
+      "97827499",
+      "978284098",
+      "9782908652"
+    ],
+    "sites": [
+      "http://www.michel-lafon.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579432",
+    "name": "Éditions Mille et une nuits",
+    "prefixes": [
+      "978284205"
+    ],
+    "sites": [
+      "https://www.fayard.fr/1001-nuits"
+    ]
+  },
+  {
+    "qid": "Q3579435",
+    "name": "Éditions Montchrestien",
+    "prefixes": [
+      "97827076"
+    ],
+    "sites": [
+      "http://www.lextenso-editions.fr/marque/montchrestien"
+    ]
+  },
+  {
+    "qid": "Q3579436",
+    "name": "Éditions Mnémos",
+    "prefixes": [
+      "978235408",
+      "978238267",
+      "9782911618",
+      "9782915159"
+    ],
+    "sites": [
+      "http://www.mnemos.com"
+    ]
+  },
+  {
+    "qid": "Q3579437",
+    "name": "Éditions Millefeuille",
+    "prefixes": [
+      "978237602",
+      "978287410",
+      "9782916742"
+    ],
+    "sites": [
+      "https://www.editionsmillefeuille.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579441",
+    "name": "Éditions Métailié",
+    "prefixes": [
+      "978286424",
+      "97910226"
+    ],
+    "sites": [
+      "http://www.metailie.fr"
+    ]
+  },
+  {
+    "qid": "Q3579445",
+    "name": "éditions Nicolas-Chaudun",
+    "prefixes": [
+      "978235039"
+    ],
+    "sites": [
+      "http://www.editions-nicolaschaudun.com"
+    ]
+  },
+  {
+    "qid": "Q3579449",
+    "name": "Éditions Nota bene",
+    "prefixes": [
+      "978286204",
+      "978289518",
+      "9782921053"
+    ],
+    "sites": [
+      "http://www.groupenotabene.com/"
+    ]
+  },
+  {
+    "qid": "Q3579450",
+    "name": "Éditions Nouvelle Cité",
+    "prefixes": [
+      "978237582",
+      "978285313"
+    ],
+    "sites": [
+      "https://www.nouvellecite.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579451",
+    "name": "Éditions Novalis",
+    "prefixes": [
+      "978289088",
+      "978289507",
+      "978289646",
+      "978289688",
+      "978289830"
+    ],
+    "sites": [
+      "https://fr.novalis.ca"
+    ]
+  },
+  {
+    "qid": "Q3579464",
+    "name": "Éditions P.O.L",
+    "prefixes": [
+      "97828180",
+      "978284682",
+      "978286744"
+    ],
+    "sites": [
+      "http://www.pol-editeur.fr"
+    ]
+  },
+  {
+    "qid": "Q3579467",
+    "name": "éditions Pardès",
+    "prefixes": [
+      "978286714"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579469",
+    "name": "Éditions Pauvert",
+    "prefixes": [
+      "97827202",
+      "978286940"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579472",
+    "name": "Éditions Perce-Neige",
+    "prefixes": [
+      "978289691",
+      "9782920221",
+      "9782922992"
+    ],
+    "sites": [
+      "https://editionsperceneige.ca/"
+    ]
+  },
+  {
+    "qid": "Q3579473",
+    "name": "Éditions Perrin",
+    "prefixes": [
+      "9782262"
+    ],
+    "sites": [
+      "https://www.lisez.com/editeurs/perrin"
+    ]
+  },
+  {
+    "qid": "Q3579476",
+    "name": "Éditions Picard",
+    "prefixes": [
+      "97827084"
+    ],
+    "sites": [
+      "http://www.editions-picard.com/"
+    ]
+  },
+  {
+    "qid": "Q3579477",
+    "name": "Éditions Philippe Rey",
+    "prefixes": [
+      "978284876"
+    ],
+    "sites": [
+      "http://www.philippe-rey.fr"
+    ]
+  },
+  {
+    "qid": "Q3579478",
+    "name": "Éditions Philippe Picquier",
+    "prefixes": [
+      "97828097",
+      "978287730"
+    ],
+    "sites": [
+      "http://www.editions-picquier.com/"
+    ]
+  },
+  {
+    "qid": "Q3579479",
+    "name": "Éditions Pierre Tisseyre",
+    "prefixes": [
+      "978289051",
+      "978289633"
+    ],
+    "sites": [
+      "http://tisseyre.ca/"
+    ]
+  },
+  {
+    "qid": "Q3579486",
+    "name": "Éditions Points",
+    "prefixes": [
+      "97827578",
+      "97910414"
+    ],
+    "sites": [
+      "https://www.editionspoints.com/"
+    ]
+  },
+  {
+    "qid": "Q3579487",
+    "name": "Pratico Édition",
+    "prefixes": [
+      "978289658",
+      "9782923261"
+    ],
+    "sites": [
+      "https://praticoedition.com"
+    ]
+  },
+  {
+    "qid": "Q3579489",
+    "name": "Éditions Privat",
+    "prefixes": [
+      "97827089"
+    ],
+    "sites": [
+      "http://www.editions-privat.com"
+    ]
+  },
+  {
+    "qid": "Q3579491",
+    "name": "Éditions Prise de parole",
+    "prefixes": [
+      "978289423",
+      "978289744"
+    ],
+    "sites": [
+      "http://prisedeparole.ca"
+    ]
+  },
+  {
+    "qid": "Q3579494",
+    "name": "Éditions Quæ",
+    "prefixes": [
+      "97827592"
+    ],
+    "sites": [
+      "http://www.quae.com"
+    ]
+  },
+  {
+    "qid": "Q3579500",
+    "name": "Éditions Rouff",
+    "prefixes": [
+      "978285045"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579502",
+    "name": "Éditions Sabine Wespieser",
+    "prefixes": [
+      "978284805"
+    ],
+    "sites": [
+      "https://www.swediteur.com/"
+    ]
+  },
+  {
+    "qid": "Q3579506",
+    "name": "Éditions Sarbacane",
+    "prefixes": [
+      "978237731",
+      "978284865"
+    ],
+    "sites": [
+      "http://www.editions-sarbacane.com/"
+    ]
+  },
+  {
+    "qid": "Q3579510",
+    "name": "Éditions Siloë",
+    "prefixes": [
+      "978285054"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579515",
+    "name": "Éditions Sud Ouest",
+    "prefixes": [
+      "9782344",
+      "978284182",
+      "9782905521"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579516",
+    "name": "Éditions Sulliver",
+    "prefixes": [
+      "978235122",
+      "9782911199"
+    ],
+    "sites": [
+      "https://www.sulliver.com/"
+    ]
+  },
+  {
+    "qid": "Q3579517",
+    "name": "Éditions Stock",
+    "prefixes": [
+      "9782234",
+      "97827423"
+    ],
+    "sites": [
+      "https://www.editions-stock.fr"
+    ]
+  },
+  {
+    "qid": "Q3579519",
+    "name": "Syllepse",
+    "prefixes": [
+      "978284797",
+      "978284950",
+      "9782907993",
+      "9782913165",
+      "97910399"
+    ],
+    "sites": [
+      "https://www.syllepse.net/"
+    ]
+  },
+  {
+    "qid": "Q3579521",
+    "name": "Éditions Séguier",
+    "prefixes": [
+      "978284049",
+      "978287736",
+      "9782906284"
+    ],
+    "sites": [
+      "http://www.editions-seguier.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579523",
+    "name": "Éditions Tabou",
+    "prefixes": [
+      "978236326",
+      "9782915635"
+    ],
+    "sites": [
+      "https://www.tabou-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q3579525",
+    "name": "Éditions Textes Gais",
+    "prefixes": [
+      "978236307",
+      "9782914679",
+      "97910294"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579527",
+    "name": "Éditions Textuel",
+    "prefixes": [
+      "978284597",
+      "9782909317"
+    ],
+    "sites": [
+      "https://www.editionstextuel.com/"
+    ]
+  },
+  {
+    "qid": "Q3579528",
+    "name": "Terre de brume",
+    "prefixes": [
+      "978284362",
+      "9782908021"
+    ],
+    "sites": [
+      "http://www.terredebrume.com"
+    ]
+  },
+  {
+    "qid": "Q3579530",
+    "name": "Éditions Thierry Magnier",
+    "prefixes": [
+      "978236474",
+      "978284420",
+      "97910352"
+    ],
+    "sites": [
+      "http://www.editions-thierry-magnier.com/"
+    ]
+  },
+  {
+    "qid": "Q3579540",
+    "name": "Éditions Trabucaire",
+    "prefixes": [
+      "978284974",
+      "9782905828",
+      "9782912966"
+    ],
+    "sites": [
+      "https://www.trabucaire.com/"
+    ]
+  },
+  {
+    "qid": "Q3579553",
+    "name": "Éditions Vigdor",
+    "prefixes": [
+      "978284771",
+      "9782910243"
+    ],
+    "sites": [
+      "http://www.vigdor.com/"
+    ]
+  },
+  {
+    "qid": "Q3579555",
+    "name": "Éditions Viviane Hamy",
+    "prefixes": [
+      "978238140",
+      "978287858",
+      "9791097417"
+    ],
+    "sites": [
+      "http://www.viviane-hamy.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579556",
+    "name": "Éditions Voy'el",
+    "prefixes": [
+      "978236475",
+      "9782916307"
+    ],
+    "sites": [
+      "http://www.editions-voyel.fr"
+    ]
+  },
+  {
+    "qid": "Q3579558",
+    "name": "Éditions Xavier Barral",
+    "prefixes": [
+      "978236511",
+      "9782915173"
+    ],
+    "sites": [
+      "http://exb.fr/en",
+      "https://exb.fr/fr/"
+    ]
+  },
+  {
+    "qid": "Q3579562",
+    "name": "Éditions Z'ailées",
+    "prefixes": [
+      "9782923574",
+      "9782923910",
+      "9782924563",
+      "9782924991"
+    ],
+    "sites": [
+      "http://www.zailees.com"
+    ]
+  },
+  {
+    "qid": "Q3579565",
+    "name": "Éditions Zoé",
+    "prefixes": [
+      "978288927"
+    ],
+    "sites": [
+      "http://www.editionszoe.ch"
+    ]
+  },
+  {
+    "qid": "Q3579569",
+    "name": "Éditions d'En Bas",
+    "prefixes": [
+      "97828290"
+    ],
+    "sites": [
+      "https://enbas.net/"
+    ]
+  },
+  {
+    "qid": "Q3579572",
+    "name": "Éditions d'Écarts",
+    "prefixes": [
+      "978236225",
+      "9782912824",
+      "9782919121"
+    ],
+    "sites": [
+      "http://ecartsmbh.wordpress.com/"
+    ]
+  },
+  {
+    "qid": "Q3579575",
+    "name": "Éditions de Chiré",
+    "prefixes": [
+      "978285190"
+    ],
+    "sites": [
+      "http://www.chire.fr"
+    ]
+  },
+  {
+    "qid": "Q3579582",
+    "name": "Éditions de Mortagne",
+    "prefixes": [
+      "978289074",
+      "978289662",
+      "978289792"
+    ],
+    "sites": [
+      "http://www.editionsdemortagne.com"
+    ]
+  },
+  {
+    "qid": "Q3579583",
+    "name": "Éditions de Paris",
+    "prefixes": [
+      "978285162"
+    ],
+    "sites": [
+      "http://www.leseditionsdeparis.com/index.php"
+    ]
+  },
+  {
+    "qid": "Q3579586",
+    "name": "Éditions de l'An 2",
+    "prefixes": [
+      "97827427",
+      "978284856"
+    ],
+    "sites": [
+      "http://www.editionsdelan2.com/"
+    ]
+  },
+  {
+    "qid": "Q3579589",
+    "name": "Éditions de l'Atelier",
+    "prefixes": [
+      "97827082"
+    ],
+    "sites": [
+      "http://www.editionsatelier.com/"
+    ]
+  },
+  {
+    "qid": "Q3579592",
+    "name": "Éditions de l'Aube",
+    "prefixes": [
+      "97828159"
+    ],
+    "sites": [
+      "https://editionsdelaube.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579598",
+    "name": "Éditions de l'Insomniaque",
+    "prefixes": [
+      "978237623",
+      "9782908744",
+      "9782915694"
+    ],
+    "sites": [
+      "http://www.insomniaqueediteur.org/"
+    ]
+  },
+  {
+    "qid": "Q3579600",
+    "name": "Éditions de l'Olivier",
+    "prefixes": [
+      "97828236",
+      "978287929"
+    ],
+    "sites": [
+      "http://www.editionsdelolivier.fr"
+    ]
+  },
+  {
+    "qid": "Q3579603",
+    "name": "Éditions de l'Éclat",
+    "prefixes": [
+      "978284162",
+      "9782905372"
+    ],
+    "sites": [
+      "http://www.lyber-eclat.net/"
+    ]
+  },
+  {
+    "qid": "Q3579610",
+    "name": "Éditions de la Différence",
+    "prefixes": [
+      "97827291"
+    ],
+    "sites": [
+      "http://www.ladifference.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579616",
+    "name": "La Table ronde",
+    "prefixes": [
+      "97827103",
+      "97910371"
+    ],
+    "sites": [
+      "http://www.editionslatableronde.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579622",
+    "name": "Éditions des Intouchables",
+    "prefixes": [
+      "9782921775"
+    ],
+    "sites": [
+      "http://www.lesintouchables.com/"
+    ]
+  },
+  {
+    "qid": "Q3579627",
+    "name": "Éditions des Équateurs",
+    "prefixes": [
+      "978238284",
+      "978284990"
+    ],
+    "sites": [
+      "https://editionsdesequateurs.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579629",
+    "name": "Éditions du Boréal",
+    "prefixes": [
+      "97827646",
+      "978289052"
+    ],
+    "sites": [
+      "https://www.editionsboreal.qc.ca/"
+    ]
+  },
+  {
+    "qid": "Q3579630",
+    "name": "Éditions du Camion blanc",
+    "prefixes": [
+      "978235779",
+      "978237848",
+      "9782910196"
+    ],
+    "sites": [
+      "http://www.camionblanc.com/"
+    ]
+  },
+  {
+    "qid": "Q3579635",
+    "name": "Éditions du Croquant",
+    "prefixes": [
+      "978236512",
+      "9782914968"
+    ],
+    "sites": [
+      "https://editions-croquant.org/"
+    ]
+  },
+  {
+    "qid": "Q3579636",
+    "name": "Éditions du Cygne",
+    "prefixes": [
+      "978236454",
+      "978284924"
+    ],
+    "sites": [
+      "http://www.editionsducygne.com/"
+    ]
+  },
+  {
+    "qid": "Q3579642",
+    "name": "Éditions du Masque",
+    "prefixes": [
+      "97827024"
+    ],
+    "sites": [
+      "http://www.lemasque.com"
+    ]
+  },
+  {
+    "qid": "Q3579644",
+    "name": "Éditions du Monde libertaire",
+    "prefixes": [
+      "978237981",
+      "9782903013",
+      "9782915514"
+    ],
+    "sites": [
+      "http://www.editionsmondelibertaire.org/"
+    ]
+  },
+  {
+    "qid": "Q3579645",
+    "name": "Éditions du Noroît",
+    "prefixes": [
+      "978289"
+    ],
+    "sites": [
+      "https://lenoroit.com"
+    ]
+  },
+  {
+    "qid": "Q3579650",
+    "name": "Panama",
+    "prefixes": [
+      "97827557"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579651",
+    "name": "Éditions du Panthéon",
+    "prefixes": [
+      "97827547",
+      "978284094"
+    ],
+    "sites": [
+      "http://www.editions-pantheon.fr"
+    ]
+  },
+  {
+    "qid": "Q3579655",
+    "name": "Éditions du Pouvoir",
+    "prefixes": [
+      "978235840",
+      "9782906545"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579656",
+    "name": "Éditions du Renouveau pédagogique",
+    "prefixes": [
+      "97827613",
+      "97827661"
+    ],
+    "sites": [
+      "https://www.pearsonerpi.com/fr/"
+    ]
+  },
+  {
+    "qid": "Q3579664",
+    "name": "Éditions du Septentrion",
+    "prefixes": [
+      "978289448",
+      "978289664",
+      "978289791",
+      "9782921114"
+    ],
+    "sites": [
+      "https://www.septentrion.qc.ca/"
+    ]
+  },
+  {
+    "qid": "Q3579667",
+    "name": "Éditions du Square",
+    "prefixes": [
+      "97827341",
+      "978285631"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3579671",
+    "name": "Éditions du remue-ménage",
+    "prefixes": [
+      "978289091"
+    ],
+    "sites": [
+      "http://editions-rm.ca/"
+    ]
+  },
+  {
+    "qid": "Q3579673",
+    "name": "Éditions gaies et lesbiennes",
+    "prefixes": [
+      "978235680",
+      "9782912706"
+    ],
+    "sites": [
+      "http://www.livresgaisetlesbiens.fr/"
+    ]
+  },
+  {
+    "qid": "Q3579680",
+    "name": "Éditions régionales de l'Ouest",
+    "prefixes": [
+      "978285554"
+    ],
+    "sites": [
+      "https://www.editionsregionalesdelouest.com/"
+    ]
+  },
+  {
+    "qid": "Q3579681",
+    "name": "Éditions techniques de l'ingénieur",
+    "prefixes": [
+      "978237620",
+      "978285059"
+    ],
+    "sites": [
+      "https://www.techniques-ingenieur.fr"
+    ]
+  },
+  {
+    "qid": "Q3579685",
+    "name": "Éditions Édilivre",
+    "prefixes": [
+      "9782323",
+      "9782332",
+      "9782334",
+      "9782337",
+      "978235335",
+      "978235607",
+      "9782414",
+      "97828121",
+      "9782917135",
+      "97829528929"
+    ],
+    "sites": [
+      "http://www.edilivre.com/"
+    ]
+  },
+  {
+    "qid": "Q3592751",
+    "name": "Éveil éditeur",
+    "prefixes": [
+      "978284000"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q3628248",
+    "name": "Atlas",
+    "prefixes": [
+      "9782344",
+      "97827234",
+      "97827312"
+    ],
+    "sites": [
+      "https://www.edatlas.it/"
+    ]
+  },
+  {
+    "qid": "Q3639697",
+    "name": "Bibliothèque québécoise",
+    "prefixes": [
+      "978289406"
+    ],
+    "sites": [
+      "http://www.livres-bq.com"
+    ]
+  },
+  {
+    "qid": "Q3719325",
+    "name": "Edizioni Dehoniane Bologna",
+    "prefixes": [
+      "978235998",
+      "978284024",
+      "9782905480",
+      "97910306"
+    ],
+    "sites": [
+      "https://www.dehoniane.it/"
+    ]
+  },
+  {
+    "qid": "Q3776591",
+    "name": "Gremese",
+    "prefixes": [
+      "978236677"
+    ],
+    "sites": [
+      "http://www.gremese.com"
+    ]
+  },
+  {
+    "qid": "Q38038188",
+    "name": "Fage Editions",
+    "prefixes": [
+      "978284975"
+    ],
+    "sites": [
+      "http://www.fage-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q384602",
+    "name": "ministère de la Culture",
+    "prefixes": [
+      "978211"
+    ],
+    "sites": [
+      "https://www.culture.gouv.fr/"
+    ]
+  },
+  {
+    "qid": "Q40015082",
+    "name": "EMCC",
+    "prefixes": [
+      "978235740",
+      "9782908291"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q4025357",
+    "name": "Leméac",
+    "prefixes": [
+      "97827609"
+    ],
+    "sites": [
+      "http://www.lemeac.com/"
+    ]
+  },
+  {
+    "qid": "Q4043752",
+    "name": "Marshall Cavendish",
+    "prefixes": [
+      "97827365"
+    ],
+    "sites": [
+      "https://www.marshallcavendish.com/"
+    ]
+  },
+  {
+    "qid": "Q4064645",
+    "name": "Amphora",
+    "prefixes": [
+      "97827576",
+      "978285180"
+    ],
+    "sites": [
+      "http://www.amphora.ru/",
+      "https://ed-amphora.fr/"
+    ]
+  },
+  {
+    "qid": "Q4195152",
+    "name": "YMCA Press",
+    "prefixes": [
+      "978285065"
+    ],
+    "sites": [
+      "https://www.editeurs-reunis.fr/"
+    ]
+  },
+  {
+    "qid": "Q43182365",
+    "name": "Keltia Graphic",
+    "prefixes": [
+      "978235313",
+      "9782906992",
+      "9782912242",
+      "9782913953"
+    ],
+    "sites": [
+      "http://www.keltiagraphiceditions.com/"
+    ]
+  },
+  {
+    "qid": "Q43462346",
+    "name": "Editions Romillat",
+    "prefixes": [
+      "978287894"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q4355026",
+    "name": "Editorial Ivrea",
+    "prefixes": [
+      "978285184"
+    ],
+    "sites": [
+      "http://www.editorialivrea.com"
+    ]
+  },
+  {
+    "qid": "Q43964634",
+    "name": "Éditions Héloïse d'Ormesson",
+    "prefixes": [
+      "978235087"
+    ],
+    "sites": [
+      "http://www.editions-heloisedormesson.com/"
+    ]
+  },
+  {
+    "qid": "Q44700418",
+    "name": "Éditions Joëlle Losfeld",
+    "prefixes": [
+      "978207",
+      "978284412",
+      "9782909906"
+    ],
+    "sites": [
+      "http://www.joellelosfeld.fr/"
+    ]
+  },
+  {
+    "qid": "Q45317824",
+    "name": "An Alarc'h embannadurioù",
+    "prefixes": [
+      "978238190",
+      "9782916835",
+      "97829520238"
+    ],
+    "sites": [
+      "http://www.brezhoneg.org/fr"
+    ]
+  },
+  {
+    "qid": "Q45748998",
+    "name": "Het Volk",
+    "prefixes": [
+      "978287371"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q47519058",
+    "name": "Aux amateurs de livres",
+    "prefixes": [
+      "978287841",
+      "9782905053"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q47520278",
+    "name": "Éditions Somme toute",
+    "prefixes": [
+      "978289794",
+      "9782924283",
+      "9782924606"
+    ],
+    "sites": [
+      "https://editionssommetoute.com/"
+    ]
+  },
+  {
+    "qid": "Q48703067",
+    "name": "Alma Éditeur",
+    "prefixes": [
+      "978236279"
+    ],
+    "sites": [
+      "http://www.alma-editeur.fr/"
+    ]
+  },
+  {
+    "qid": "Q48750784",
+    "name": "Éditions Parole",
+    "prefixes": [
+      "978237586",
+      "9782917141"
+    ],
+    "sites": [
+      "http://www.editions-parole.net"
+    ]
+  },
+  {
+    "qid": "Q48756519",
+    "name": "Publibook",
+    "prefixes": [
+      "9782342",
+      "97827483"
+    ],
+    "sites": [
+      "http://www.publibook.com/"
+    ]
+  },
+  {
+    "qid": "Q48758151",
+    "name": "Éditions Flohic",
+    "prefixes": [
+      "978284234",
+      "9782908958"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q50328987",
+    "name": "Société Pierre-Joseph Proudhon",
+    "prefixes": [
+      "9782906096"
+    ],
+    "sites": [
+      "http://www.proudhon.net/"
+    ]
+  },
+  {
+    "qid": "Q50358335",
+    "name": "Éveil et Découvertes",
+    "prefixes": [
+      "978235366"
+    ],
+    "sites": [
+      "http://www.eveiletdecouvertes.fr/"
+    ]
+  },
+  {
+    "qid": "Q50376996",
+    "name": "Éditions Lajouanie",
+    "prefixes": [
+      "978237047"
+    ],
+    "sites": [
+      "https://www.editionslajouanie.com/"
+    ]
+  },
+  {
+    "qid": "Q50898739",
+    "name": "Éditions Mélibée",
+    "prefixes": [
+      "978236252",
+      "978237631"
+    ],
+    "sites": [
+      "http://www.editions-melibee.com/"
+    ]
+  },
+  {
+    "qid": "Q51160769",
+    "name": "éditions de l'Observatoire",
+    "prefixes": [
+      "97910329"
+    ],
+    "sites": [
+      "https://www.editions-observatoire.com/"
+    ]
+  },
+  {
+    "qid": "Q52058789",
+    "name": "Third Éditions",
+    "prefixes": [
+      "978237784",
+      "9791094723"
+    ],
+    "sites": [
+      "https://www.thirdeditions.com//en/"
+    ]
+  },
+  {
+    "qid": "Q52150641",
+    "name": "Parigramme",
+    "prefixes": [
+      "978237395",
+      "978284096"
+    ],
+    "sites": [
+      "https://www.parigramme.com/"
+    ]
+  },
+  {
+    "qid": "Q52150831",
+    "name": "Don Quichotte",
+    "prefixes": [
+      "978235949"
+    ],
+    "sites": [
+      "http://www.donquichotte-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q52158983",
+    "name": "Éditions Tatamis",
+    "prefixes": [
+      "978237153",
+      "9782917617",
+      "97829523647"
+    ],
+    "sites": [
+      "https://www.editionstatamis.com/"
+    ]
+  },
+  {
+    "qid": "Q52162390",
+    "name": "Fyp",
+    "prefixes": [
+      "978236405",
+      "9782916571"
+    ],
+    "sites": [
+      "https://www.fypeditions.com/"
+    ]
+  },
+  {
+    "qid": "Q52182880",
+    "name": "D-BookeR",
+    "prefixes": [
+      "97828227"
+    ],
+    "sites": [
+      "https://www.d-booker.fr/"
+    ]
+  },
+  {
+    "qid": "Q52186184",
+    "name": "Éditions du Mercredi",
+    "prefixes": [
+      "9791093433"
+    ],
+    "sites": [
+      "http://www.editionsdumercredi.com/"
+    ]
+  },
+  {
+    "qid": "Q52197999",
+    "name": "Plume de carotte",
+    "prefixes": [
+      "978236672",
+      "9782915810",
+      "97829516629"
+    ],
+    "sites": [
+      "https://www.plumedecarotte.com/"
+    ]
+  },
+  {
+    "qid": "Q52237737",
+    "name": "Thélès",
+    "prefixes": [
+      "9782303",
+      "978284776"
+    ],
+    "sites": [
+      "http://www.theles.fr/"
+    ]
+  },
+  {
+    "qid": "Q52259299",
+    "name": "Acoria",
+    "prefixes": [
+      "978235572",
+      "9782912525"
+    ],
+    "sites": [
+      "http://www.acoria.site-fr.fr/"
+    ]
+  },
+  {
+    "qid": "Q52261436",
+    "name": "Lignes de repère",
+    "prefixes": [
+      "978236609",
+      "9782915752"
+    ],
+    "sites": [
+      "http://www.lignes-de-reperes.com/"
+    ]
+  },
+  {
+    "qid": "Q52517983",
+    "name": "Scrineo",
+    "prefixes": [
+      "978236740",
+      "978238167",
+      "9782919755",
+      "97829534954"
+    ],
+    "sites": [
+      "http://www.scrineo.fr/"
+    ]
+  },
+  {
+    "qid": "Q52607643",
+    "name": "Les Presses agronomiques de Gembloux",
+    "prefixes": [
+      "978287016"
+    ],
+    "sites": [
+      "http://www.pressesagro.be/"
+    ]
+  },
+  {
+    "qid": "Q52611162",
+    "name": "Publications scientifiques du Muséum",
+    "prefixes": [
+      "978238327",
+      "978285653"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q52636942",
+    "name": "Presses Universitaires de Paris Nanterre",
+    "prefixes": [
+      "978284016"
+    ],
+    "sites": [
+      "https://presses-universitaires.parisnanterre.fr/"
+    ]
+  },
+  {
+    "qid": "Q52660188",
+    "name": "Presses Universitaires du Midi",
+    "prefixes": [
+      "97828107",
+      "978285816"
+    ],
+    "sites": [
+      "http://pum.univ-tlse2.fr/"
+    ]
+  },
+  {
+    "qid": "Q52929298",
+    "name": "Foolstrip",
+    "prefixes": [
+      "978235987",
+      "9782917713"
+    ],
+    "sites": [
+      "http://www.foolstrip.com/"
+    ]
+  },
+  {
+    "qid": "Q53343983",
+    "name": "Éditions ENI",
+    "prefixes": [
+      "9782409",
+      "97827460",
+      "978284072",
+      "9782907635"
+    ],
+    "sites": [
+      "https://www.editions-eni.fr/"
+    ]
+  },
+  {
+    "qid": "Q54515600",
+    "name": "Ar Gripi",
+    "prefixes": [
+      "9791094291"
+    ],
+    "sites": [
+      "http://argripi.com"
+    ]
+  },
+  {
+    "qid": "Q54670290",
+    "name": "Éditions Møtus",
+    "prefixes": [
+      "978236011",
+      "9782907354"
+    ],
+    "sites": [
+      "http://www.editions-motus.com/"
+    ]
+  },
+  {
+    "qid": "Q549564",
+    "name": "Ligue pour la Lecture de la Bible",
+    "prefixes": [
+      "978287001"
+    ],
+    "sites": [
+      "http://www.su-international.org/index.php?Doo=ContentView&id=100"
+    ]
+  },
+  {
+    "qid": "Q55316991",
+    "name": "Presses de l'Université Toulouse 1 Capitole",
+    "prefixes": [
+      "978236170",
+      "978237928",
+      "9782909628",
+      "9782915699"
+    ],
+    "sites": [
+      "http://www.ut-capitole.fr/recherche/publications-de-l-universite/presses-de-l-universite/"
+    ]
+  },
+  {
+    "qid": "Q55317356",
+    "name": "",
+    "prefixes": [
+      "978287795"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q55418540",
+    "name": "Ricochet",
+    "prefixes": [
+      "978235263",
+      "9782911013"
+    ],
+    "sites": [
+      "http://ricochet-livres-jeunesse.fr/"
+    ]
+  },
+  {
+    "qid": "Q55597641",
+    "name": "La Peuplade",
+    "prefixes": [
+      "9782923530",
+      "9782924519",
+      "9782924898",
+      "9782925141"
+    ],
+    "sites": [
+      "http://lapeuplade.com/"
+    ]
+  },
+  {
+    "qid": "Q56231116",
+    "name": "Éditions Desjonquères",
+    "prefixes": [
+      "978284321",
+      "9782904227"
+    ],
+    "sites": [
+      "http://www.editions-desjonqueres.com"
+    ]
+  },
+  {
+    "qid": "Q56249336",
+    "name": "Éditions 404",
+    "prefixes": [
+      "97910324"
+    ],
+    "sites": [
+      "http://404-editions.fr/"
+    ]
+  },
+  {
+    "qid": "Q56512738",
+    "name": "Premier Parallèle",
+    "prefixes": [
+      "978285061",
+      "9791094841"
+    ],
+    "sites": [
+      "http://www.premierparallele.fr"
+    ]
+  },
+  {
+    "qid": "Q56795282",
+    "name": "éditions Jacques Brémond",
+    "prefixes": [
+      "978237963",
+      "9782903108",
+      "9782910063",
+      "9782915519"
+    ],
+    "sites": [
+      "http://jabremedit.free.fr"
+    ]
+  },
+  {
+    "qid": "Q568077",
+    "name": "Casterman",
+    "prefixes": [
+      "9782203",
+      "9782542"
+    ],
+    "sites": [
+      "https://www.casterman.com"
+    ]
+  },
+  {
+    "qid": "Q57758949",
+    "name": "Presses universitaires de Liège",
+    "prefixes": [
+      "978287544",
+      "978287562"
+    ],
+    "sites": [
+      "http://www.presses.uliege.be"
+    ]
+  },
+  {
+    "qid": "Q5800201",
+    "name": "Euredit",
+    "prefixes": [
+      "978284564",
+      "978284830"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q58293629",
+    "name": "Posidonia Editions",
+    "prefixes": [
+      "978237636"
+    ],
+    "sites": [
+      "https://posidoniaeditions.fr/"
+    ]
+  },
+  {
+    "qid": "Q59188251",
+    "name": "Presses universitaires d'Aix-Marseille",
+    "prefixes": [
+      "97827314"
+    ],
+    "sites": [
+      "https://presses-universitaires.univ-amu.fr/"
+    ]
+  },
+  {
+    "qid": "Q59419393",
+    "name": "Firmin-Didot",
+    "prefixes": [
+      "97827196"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q5947227",
+    "name": "Naakojaa",
+    "prefixes": [
+      "978236612"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q597775",
+    "name": "Nautilus",
+    "prefixes": [
+      "978284603"
+    ],
+    "sites": [
+      "http://nautilus-autoproduzioni.org"
+    ]
+  },
+  {
+    "qid": "Q60323346",
+    "name": "Édition Jasor",
+    "prefixes": [
+      "978238219",
+      "9782912594",
+      "9791090675"
+    ],
+    "sites": [
+      "http://www.editionsjasor.com/"
+    ]
+  },
+  {
+    "qid": "Q60537634",
+    "name": "Alinéa",
+    "prefixes": [
+      "97827401",
+      "9782904631"
+    ],
+    "sites": [
+      "https://www.alinea.dk/"
+    ]
+  },
+  {
+    "qid": "Q60848908",
+    "name": "Éditions Le Tripode",
+    "prefixes": [
+      "978237055"
+    ],
+    "sites": [
+      "https://le-tripode.net/"
+    ]
+  },
+  {
+    "qid": "Q60849128",
+    "name": "Éditions de l'Iconoclaste",
+    "prefixes": [
+      "978237880",
+      "9782913366",
+      "9791095438"
+    ],
+    "sites": [
+      "https://www.editions-iconoclaste.fr/"
+    ]
+  },
+  {
+    "qid": "Q612938",
+    "name": "Harlequin Enterprises Ltd",
+    "prefixes": [
+      "9782280"
+    ],
+    "sites": [
+      "https://www.harlequin.com",
+      "https://www.harlequin.fr"
+    ]
+  },
+  {
+    "qid": "Q61746483",
+    "name": "Pierre Housieaux",
+    "prefixes": [
+      "97829503547"
+    ],
+    "sites": [
+      "http://www.housieaux.eu/"
+    ]
+  },
+  {
+    "qid": "Q621534",
+    "name": "Éditions Grasset",
+    "prefixes": [
+      "9782246"
+    ],
+    "sites": [
+      "http://www.grasset.fr/"
+    ]
+  },
+  {
+    "qid": "Q62571760",
+    "name": "Phénix d'Azur éditions",
+    "prefixes": [
+      "978237988",
+      "9791094243"
+    ],
+    "sites": [
+      "http://www.glycines-editions.fr/"
+    ]
+  },
+  {
+    "qid": "Q62572074",
+    "name": "Bibliocratie",
+    "prefixes": [
+      "978236673"
+    ],
+    "sites": [
+      "http://www.bibliocratie.com/"
+    ]
+  },
+  {
+    "qid": "Q63881045",
+    "name": "Arkhane Asylum Publishing",
+    "prefixes": [
+      "978237255"
+    ],
+    "sites": [
+      "https://www.arkhane-asylum.fr/"
+    ]
+  },
+  {
+    "qid": "Q64019334",
+    "name": "Cercle de la Librairie",
+    "prefixes": [
+      "9782903181"
+    ],
+    "sites": [
+      "https://cercledelalibrairie.org/"
+    ]
+  },
+  {
+    "qid": "Q6420723",
+    "name": "Pearson Education",
+    "prefixes": [
+      "9782326",
+      "97827440",
+      "978284211"
+    ],
+    "sites": [
+      "https://it.pearson.com"
+    ]
+  },
+  {
+    "qid": "Q64606164",
+    "name": "Éditions La Presse",
+    "prefixes": [
+      "978289043",
+      "978289705",
+      "978289825",
+      "9782923194",
+      "9782923681"
+    ],
+    "sites": [
+      "https://editionslapresse.ca/"
+    ]
+  },
+  {
+    "qid": "Q64949318",
+    "name": "Alcide",
+    "prefixes": [
+      "978237591",
+      "9782917743",
+      "97829521548"
+    ],
+    "sites": [
+      "http://www.editions-alcide.com/"
+    ]
+  },
+  {
+    "qid": "Q65133791",
+    "name": "500 nuances de geek",
+    "prefixes": [
+      "978238177",
+      "9791090692"
+    ],
+    "sites": [
+      "http://www.500nuancesdegeek.fr/"
+    ]
+  },
+  {
+    "qid": "Q65133846",
+    "name": "Le Cheval d'août",
+    "prefixes": [
+      "9782924491"
+    ],
+    "sites": [
+      "https://lechevaldaout.com/"
+    ]
+  },
+  {
+    "qid": "Q65152074",
+    "name": "Binge Audio",
+    "prefixes": [
+      "9782491260"
+    ],
+    "sites": [
+      "https://www.binge.audio/"
+    ]
+  },
+  {
+    "qid": "Q66086693",
+    "name": "FIRST",
+    "prefixes": [
+      "9782412",
+      "97827540",
+      "978287691"
+    ],
+    "sites": [
+      "http://firstforum.org/"
+    ]
+  },
+  {
+    "qid": "Q66088124",
+    "name": "Albiana",
+    "prefixes": [
+      "97828241",
+      "978284698",
+      "9782905124"
+    ],
+    "sites": [
+      "https://www.albiana.fr/"
+    ]
+  },
+  {
+    "qid": "Q6629012",
+    "name": "Carmel Publishing House",
+    "prefixes": [
+      "978284713",
+      "9782900424"
+    ],
+    "sites": [
+      "http://www.carmelph.co.il"
+    ]
+  },
+  {
+    "qid": "Q66424341",
+    "name": "Éditions du Phare-Ouest",
+    "prefixes": [
+      "9782921668"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q670903",
+    "name": "Fleuve noir",
+    "prefixes": [
+      "9782265"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q683146",
+    "name": "LexisNexis",
+    "prefixes": [
+      "97827110",
+      "9782910179"
+    ],
+    "sites": [
+      "https://www.lexisnexis.com/en-us/home.page"
+    ]
+  },
+  {
+    "qid": "Q69053735",
+    "name": "éditions Lucie",
+    "prefixes": [
+      "978235371",
+      "9782913376"
+    ],
+    "sites": [
+      "http://www.lucie-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q69392164",
+    "name": "Jacques-Marie Laffont Éditeur",
+    "prefixes": [
+      "978236124",
+      "9782488325"
+    ],
+    "sites": [
+      "https://jmlaffont-editions.com/",
+      "https://www.jacques-marie-laffont.fr/"
+    ]
+  },
+  {
+    "qid": "Q69564935",
+    "name": "Éditions de la Sorbonne",
+    "prefixes": [
+      "978285944",
+      "97910351"
+    ],
+    "sites": [
+      "http://editionsdelasorbonne.fr/",
+      "http://www.editions-sorbonne.fr/"
+    ]
+  },
+  {
+    "qid": "Q69677251",
+    "name": "Presses universitaires de Provence",
+    "prefixes": [
+      "978285399",
+      "97910320"
+    ],
+    "sites": [
+      "https://presses-universitaires.univ-amu.fr/"
+    ]
+  },
+  {
+    "qid": "Q703322",
+    "name": "Panini",
+    "prefixes": [
+      "97828094",
+      "978284538",
+      "97910268",
+      "97910391"
+    ],
+    "sites": [
+      "https://panini.com.br/panini-comics",
+      "https://panini.it/"
+    ]
+  },
+  {
+    "qid": "Q7181615",
+    "name": "Phidal",
+    "prefixes": [
+      "97827643",
+      "978289393",
+      "9782920129"
+    ],
+    "sites": [
+      "http://phidal.com/"
+    ]
+  },
+  {
+    "qid": "Q7205413",
+    "name": "Plume",
+    "prefixes": [
+      "978235224",
+      "978284110",
+      "9782908034"
+    ],
+    "sites": [
+      "https://www.penguin.com/plume-books-overview/"
+    ]
+  },
+  {
+    "qid": "Q72415202",
+    "name": "Librairie protestante",
+    "prefixes": [
+      "978285373"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q733801",
+    "name": "Garnier Frères",
+    "prefixes": [
+      "978235184",
+      "97827370"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q741694",
+    "name": "Assimil",
+    "prefixes": [
+      "97827005"
+    ],
+    "sites": [
+      "http://www.assimil.com/",
+      "https://www.assimil.com/fr/"
+    ]
+  },
+  {
+    "qid": "Q7430850",
+    "name": "Sceptre",
+    "prefixes": [
+      "978285332"
+    ],
+    "sites": [
+      "http://www.hodder.co.uk/sceptre/index.page"
+    ]
+  },
+  {
+    "qid": "Q74351328",
+    "name": "Les Nouvelles Presses du Languedoc",
+    "prefixes": [
+      "978235414"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q74434952",
+    "name": "Centre Littéraire d'Impression Provençal",
+    "prefixes": [
+      "978235897",
+      "978238235",
+      "9782916557"
+    ],
+    "sites": [
+      "https://www.imprimerieclip.fr/"
+    ]
+  },
+  {
+    "qid": "Q746413",
+    "name": "Elsevier",
+    "prefixes": [
+      "97828101",
+      "978284299",
+      "9782906077"
+    ],
+    "sites": [
+      "https://www.elsevier.com/"
+    ]
+  },
+  {
+    "qid": "Q74738461",
+    "name": "Presses universitaires de Limoges",
+    "prefixes": [
+      "978284287",
+      "9782910016"
+    ],
+    "sites": [
+      "https://www.pulim.unilim.fr/"
+    ]
+  },
+  {
+    "qid": "Q7896044",
+    "name": "Presses de l'Université d'Ottawa",
+    "prefixes": [
+      "97827603"
+    ],
+    "sites": [
+      "http://www.press.uottawa.ca"
+    ]
+  },
+  {
+    "qid": "Q80265",
+    "name": "Éditions Julliard",
+    "prefixes": [
+      "9782260"
+    ],
+    "sites": [
+      "http://www.julliard.fr"
+    ]
+  },
+  {
+    "qid": "Q80355432",
+    "name": "Éditions Guénégaud",
+    "prefixes": [
+      "978285023"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q81411358",
+    "name": "Michel Bakni",
+    "prefixes": [
+      "97829576887"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q81818941",
+    "name": "Tana Éditions",
+    "prefixes": [
+      "978284567",
+      "97910301"
+    ],
+    "sites": [
+      "https://www.editis.com/maisons/tana/"
+    ]
+  },
+  {
+    "qid": "Q831576",
+    "name": "Books on Demand",
+    "prefixes": [
+      "9782322",
+      "97828106"
+    ],
+    "sites": [
+      "http://www.bod.fr",
+      "https://www.bod.de",
+      "https://www.bod.de/"
+    ]
+  },
+  {
+    "qid": "Q839900",
+    "name": "Université pontificale catholique de Campinas",
+    "prefixes": [
+      "978238053"
+    ],
+    "sites": [
+      "http://www.puc-campinas.edu.br"
+    ]
+  },
+  {
+    "qid": "Q84322917",
+    "name": "Ici Même",
+    "prefixes": [
+      "978236912"
+    ],
+    "sites": [
+      "http://www.icimeme-editions.fr/"
+    ]
+  },
+  {
+    "qid": "Q85721214",
+    "name": "Presses de l'Inalco",
+    "prefixes": [
+      "978285831"
+    ],
+    "sites": [
+      "http://www.inalco.fr/presses-inalco"
+    ]
+  },
+  {
+    "qid": "Q861799",
+    "name": "Orion Publishing Group",
+    "prefixes": [
+      "978236149"
+    ],
+    "sites": [
+      "http://www.orionbooks.co.uk"
+    ]
+  },
+  {
+    "qid": "Q86698497",
+    "name": "Presses universitaires Blaise-Pascal",
+    "prefixes": [
+      "978238377",
+      "978284516",
+      "978287741"
+    ],
+    "sites": [
+      "http://pubp.univ-bpclermont.fr/"
+    ]
+  },
+  {
+    "qid": "Q86832489",
+    "name": "A.N.C.R.E.",
+    "prefixes": [
+      "978238282",
+      "9782903179",
+      "9791096873"
+    ],
+    "sites": [
+      "https://ancre.fr/en/"
+    ]
+  },
+  {
+    "qid": "Q87008393",
+    "name": "Bloud et Gay",
+    "prefixes": [
+      "97827017"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q882160",
+    "name": "Schmidt Spiele",
+    "prefixes": [
+      "978286989"
+    ],
+    "sites": [
+      "http://www.schmidtspiele.de/"
+    ]
+  },
+  {
+    "qid": "Q88947621",
+    "name": "Ipomée",
+    "prefixes": [
+      "978286485"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q88997933",
+    "name": "Éditions La Fontaine",
+    "prefixes": [
+      "978235361",
+      "9782907846"
+    ],
+    "sites": [
+      "http://editionslafontaine.fr/"
+    ]
+  },
+  {
+    "qid": "Q91397187",
+    "name": "Librairie Maritime Outremer",
+    "prefixes": [
+      "97827070"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q9144221",
+    "name": "Wydawnictwo Albatros",
+    "prefixes": [
+      "97827273"
+    ],
+    "sites": [
+      "https://www.wydawnictwoalbatros.com/"
+    ]
+  },
+  {
+    "qid": "Q929887",
+    "name": "Bayard Presse",
+    "prefixes": [
+      "9782227",
+      "97827009",
+      "97827470",
+      "9782909820",
+      "97910296"
+    ],
+    "sites": [
+      "https://www.bayard-editions.com/"
+    ]
+  },
+  {
+    "qid": "Q9307455",
+    "name": "Res Publica",
+    "prefixes": [
+      "978235810"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q93426578",
+    "name": "Nauwelaerts",
+    "prefixes": [
+      "97828038"
+    ],
+    "sites": [
+      "https://www.beauvechain.be/economie/commerces/annuaire-commercants/edition/nauwelaerts-editions-sa"
+    ]
+  },
+  {
+    "qid": "Q935891",
+    "name": "Éditions Honoré Champion",
+    "prefixes": [
+      "978238096",
+      "97827453",
+      "978285203"
+    ],
+    "sites": [
+      "https://www.honorechampion.com/"
+    ]
+  },
+  {
+    "qid": "Q9393619",
+    "name": "Éditions du Dialogue",
+    "prefixes": [
+      "978285316"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q94392812",
+    "name": "Yvon",
+    "prefixes": [
+      "9782904226",
+      "97910247"
+    ],
+    "sites": [
+      "http://www.yvon.net/"
+    ]
+  },
+  {
+    "qid": "Q95626537",
+    "name": "Maeght Editeur (Paris)",
+    "prefixes": [
+      "978286941"
+    ],
+    "sites": [
+      "http://www.maeght.com/editions/"
+    ]
+  },
+  {
+    "qid": "Q96095242",
+    "name": "Ateliers Henri Peladan",
+    "prefixes": [
+      "978285610"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q96149801",
+    "name": "Iggybook",
+    "prefixes": [
+      "978236315",
+      "978237979"
+    ],
+    "sites": [
+      "http://www.storylab.fr/"
+    ]
+  },
+  {
+    "qid": "Q96277262",
+    "name": "éditions Marcus",
+    "prefixes": [
+      "97827131"
+    ],
+    "sites": [
+      "http://www.guidesmarcus.com/"
+    ]
+  },
+  {
+    "qid": "Q965400",
+    "name": "Les Humanoïdes associés",
+    "prefixes": [
+      "97827316"
+    ],
+    "sites": [
+      "https://www.humanoids.com/"
+    ]
+  },
+  {
+    "qid": "Q96745352",
+    "name": "Dujarric",
+    "prefixes": [
+      "978285947"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q96779774",
+    "name": "Gallimard Loisirs",
+    "prefixes": [
+      "97827424"
+    ],
+    "sites": [
+      "http://guides-gallimard.fr/"
+    ]
+  },
+  {
+    "qid": "Q97797514",
+    "name": "Omaké Books",
+    "prefixes": [
+      "978237989",
+      "9782919603"
+    ],
+    "sites": [
+      "https://omakebooks.com/"
+    ]
+  },
+  {
+    "qid": "Q98108770",
+    "name": "L'Edition d'Art Henri Piazza",
+    "prefixes": [
+      "978285225",
+      "97829561601",
+      "97829571107"
+    ],
+    "sites": [
+      "https://editionhenripiazza.fr/"
+    ]
+  },
+  {
+    "qid": "Q981917",
+    "name": "Brepols",
+    "prefixes": [
+      "9782503",
+      "978285006"
+    ],
+    "sites": [
+      "https://www.brepols.com/"
+    ]
+  },
+  {
+    "qid": "Q99372764",
+    "name": "Lela Presse",
+    "prefixes": [
+      "978237468",
+      "9782914017",
+      "97829509485"
+    ],
+    "sites": [
+      "https://www.avions-bateaux.com/"
+    ]
+  },
+  {
+    "qid": "Q99372823",
+    "name": "Éditions La Plage",
+    "prefixes": [
+      "978238338",
+      "978284221"
+    ],
+    "sites": [
+      "https://www.laplage.fr/"
+    ]
+  },
+  {
+    "qid": "Q99398837",
+    "name": "Éditions Lidis",
+    "prefixes": [
+      "978285032"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q99733546",
+    "name": "Nickelodeon Publishing",
+    "prefixes": [
+      "978238022"
+    ],
+    "sites": []
+  },
+  {
+    "qid": "Q99755619",
+    "name": "Mana Books",
+    "prefixes": [
+      "97910355"
+    ],
+    "sites": [
+      "http://www.ki-oon.com/",
+      "https://mana-books.com"
+    ]
+  }
+]

@@ -1,0 +1,774 @@
+{
+  "sites": {
+    "actes-sud.fr": {
+      "home": "http://www.actes-sud.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-13",
+      "witnesses": [
+        {
+          "isbn": "9782330226480",
+          "title": "Trois jours dans la neige",
+          "authors": "",
+          "url": "https://actes-sud.fr/catalogue/trois-jours-dans-la-neige-022288"
+        },
+        {
+          "isbn": "9782330226398",
+          "title": "Cette année-là",
+          "authors": "",
+          "url": "https://actes-sud.fr/catalogue/cette-annee-la-022287"
+        },
+        {
+          "isbn": "9782330203474",
+          "title": "Le Fil de l'espoir",
+          "authors": "",
+          "url": "https://actes-sud.fr/catalogue/le-fil-de-lespoir-019351"
+        }
+      ],
+      "search": {
+        "recipe": {
+          "url": "https://actes-sud.fr/catalogue?s%5Bq%5D={q}",
+          "by_isbn": true
+        },
+        "found_by_isbn": 3,
+        "found_by_title": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://actes-sud.fr/catalogue?s%5Bq%5D={q}",
+            "by_isbn": true
+          },
+          "found_by_isbn": 3,
+          "found_by_title": 0
+        }
+      ]
+    },
+    "editions-iconoclaste.fr": {
+      "home": "https://www.editions-iconoclaste.fr/",
+      "status": "no_recipe",
+      "probed_at": "2026-11-13",
+      "witnesses": [
+        {
+          "isbn": "9782378806187",
+          "title": "Et soudain, la nuit",
+          "authors": "",
+          "url": "https://www.editions-iconoclaste.fr/livre/et-soudain-la-nuit/"
+        },
+        {
+          "isbn": "9782378806156",
+          "title": "Autant que l’amour",
+          "authors": "",
+          "url": "https://www.editions-iconoclaste.fr/livre/autant-que-lamour/"
+        },
+        {
+          "isbn": "9782378806057",
+          "title": "Cancer, une affaire d’état",
+          "authors": "",
+          "url": "https://www.editions-iconoclaste.fr/livre/cancer-une-affaire-detat/"
+        }
+      ],
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.editions-iconoclaste.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-iconoclaste.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-iconoclaste.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-iconoclaste.fr/rechercher?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-iconoclaste.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-iconoclaste.fr/recherche?global_s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-iconoclaste.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-iconoclaste.fr/recherche?keys={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-iconoclaste.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-iconoclaste.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-iconoclaste.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-iconoclaste.fr/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        }
+      ]
+    },
+    "gallimard.fr": {
+      "home": "https://www.gallimard.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-13",
+      "witnesses": [
+        {
+          "isbn": "9782073154965",
+          "title": "Sa Majesté des Mouches",
+          "authors": "",
+          "url": "https://www.gallimard.fr/catalogue/sa-majeste-des-mouches-nouvelle-traduction/9782073154965"
+        },
+        {
+          "isbn": "9782073170651",
+          "title": "Le fondateur",
+          "authors": "",
+          "url": "https://www.gallimard.fr/catalogue/le-fondateur/9782073170651"
+        },
+        {
+          "isbn": "9782073148094",
+          "title": "Histoire intime de mes chefs-d'œuvre préférés",
+          "authors": "",
+          "url": "https://www.gallimard.fr/catalogue/histoire-intime-de-mes-chefs-d-oeuvre-preferes/9782073148094"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.gallimard.fr/catalogue/{slug}/{isbn}",
+          "apostrophe": "dash"
+        },
+        "checked_on": 2,
+        "mismatches": 1
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/recherche-au-coeur-des-livres?search_api_fulltext={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/catalogue?search_api_fulltext={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/catalogue?f%5B0%5D=auteurs_principaux_contenu_titre%3A{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/catalogue?f%5B0%5D=autres_contributeurs_contenu_titre%3A{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/rechercher?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/recherche?global_s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/recherche?keys={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.gallimard.fr/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        }
+      ]
+    },
+    "gallmeister.fr": {
+      "home": "http://www.gallmeister.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-13",
+      "witnesses": [
+        {
+          "isbn": "9782351788424",
+          "title": "L'île des âmes - Édition Collector",
+          "authors": "",
+          "url": "https://gallmeister.fr/livres/lile-des-ames-collector"
+        },
+        {
+          "isbn": "9782404018676",
+          "title": "Debout dans la rivière",
+          "authors": "",
+          "url": "https://gallmeister.fr/livres/debout-dans-la-riviere"
+        },
+        {
+          "isbn": "9782404005959",
+          "title": "Tout autre nom",
+          "authors": "",
+          "url": "https://gallmeister.fr/livres/tout-autre-nom"
+        }
+      ],
+      "search": {
+        "recipe": {
+          "url": "https://gallmeister.fr/recherche?q={q}"
+        },
+        "found_by_isbn": 0,
+        "found_by_title": 3
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://gallmeister.fr/recherche?mobile-search={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://gallmeister.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 3
+        },
+        {
+          "recipe": {
+            "url": "https://gallmeister.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://gallmeister.fr/rechercher?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://gallmeister.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://gallmeister.fr/recherche?global_s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://gallmeister.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://gallmeister.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://gallmeister.fr/recherche?keys={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://gallmeister.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://gallmeister.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://gallmeister.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://gallmeister.fr/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ]
+    },
+    "livredepoche.com": {
+      "home": "https://www.livredepoche.com/",
+      "status": "ok",
+      "probed_at": "2026-11-13",
+      "witnesses": [
+        {
+          "isbn": "9782253253297",
+          "title": "Criss Cross",
+          "authors": "",
+          "url": "https://www.livredepoche.com/livre/criss-cross-9782253253297/"
+        },
+        {
+          "isbn": "9782253196075",
+          "title": "Emorata",
+          "authors": "",
+          "url": "https://www.livredepoche.com/livre/emorata-9782253196075/"
+        },
+        {
+          "isbn": "9782253254607",
+          "title": "Fragrancia",
+          "authors": "",
+          "url": "https://www.livredepoche.com/livre/fragrancia-9782253254607/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.livredepoche.com/livre/{slug}-{isbn}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 3,
+        "mismatches": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.livredepoche.com/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.livredepoche.com/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.livredepoche.com/rechercher?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.livredepoche.com/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.livredepoche.com/recherche?global_s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.livredepoche.com/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.livredepoche.com/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.livredepoche.com/recherche?keys={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.livredepoche.com/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.livredepoche.com/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.livredepoche.com/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.livredepoche.com/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ]
+    },
+    "seuil.com": {
+      "home": "https://www.seuil.com/",
+      "status": "ok",
+      "probed_at": "2026-11-13",
+      "witnesses": [
+        {
+          "isbn": "9782021559781",
+          "title": "Barbe Bleue",
+          "authors": "",
+          "url": "https://www.seuil.com/ouvrage/barbe-bleue-contre-enquete-jennifer-tamas/9782021559781"
+        },
+        {
+          "isbn": "9782021594232",
+          "title": "Lilith & Cie Chloé Delaume",
+          "authors": "",
+          "url": "https://www.seuil.com/ouvrage/lilith-cie-chloe-delaume/9782021594232"
+        },
+        {
+          "isbn": "9782021626322",
+          "title": "Nos corps politiques",
+          "authors": "",
+          "url": "https://www.seuil.com/ouvrage/nos-corps-politiques-amelie-cadier-loriaud/9782021626322"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.seuil.com/ouvrage/{slug}/{isbn}",
+          "apostrophe": "drop",
+          "slug_ignored": true
+        },
+        "checked_on": 1,
+        "mismatches": 2
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.seuil.com/recherche?global_s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.seuil.com/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.seuil.com/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.seuil.com/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.seuil.com/rechercher?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.seuil.com/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://www.seuil.com/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.seuil.com/recherche?keys={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.seuil.com/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.seuil.com/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.seuil.com/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.seuil.com/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        }
+      ]
+    }
+  },
+  "checks": {
+    "actes-sud.fr": {
+      "checked_at": "2026-11-13",
+      "status": "works",
+      "tested_search": {
+        "url": "https://actes-sud.fr/catalogue?s%5Bq%5D={q}",
+        "by_isbn": true
+      }
+    },
+    "gallimard.fr": {
+      "checked_at": "2026-11-13",
+      "status": "works",
+      "tested_product": {
+        "template": "https://www.gallimard.fr/catalogue/{slug}/{isbn}",
+        "apostrophe": "dash"
+      }
+    },
+    "gallmeister.fr": {
+      "checked_at": "2026-11-13",
+      "status": "works",
+      "tested_search": {
+        "url": "https://gallmeister.fr/recherche?q={q}"
+      }
+    },
+    "livredepoche.com": {
+      "checked_at": "2026-11-13",
+      "status": "works",
+      "tested_product": {
+        "template": "https://www.livredepoche.com/livre/{slug}-{isbn}/",
+        "apostrophe": "drop"
+      }
+    },
+    "seuil.com": {
+      "checked_at": "2026-11-13",
+      "status": "works",
+      "tested_product": {
+        "template": "https://www.seuil.com/ouvrage/{slug}/{isbn}",
+        "apostrophe": "drop",
+        "slug_ignored": true
+      }
+    }
+  }
+}

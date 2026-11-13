@@ -1,0 +1,18 @@
+{
+  "prefixes": {
+    "978207": {
+      "name": "Gallimard",
+      "home": "https://www.gallimard.fr/"
+    },
+    "9782253": {
+      "name": "Le Livre de Poche",
+      "home": "https://www.livredepoche.com/"
+    }
+  },
+  "sites": {
+    "gallica.bnf.fr": {
+      "note": "Wikidata gives Mercure de France's Gallica record as its website; not a publisher site.",
+      "excluded": true
+    }
+  }
+}
