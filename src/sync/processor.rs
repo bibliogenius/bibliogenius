@@ -24,12 +24,21 @@ pub async fn run_processor(db: DatabaseConnection) {
 
 async fn process_next_batch(db: &DatabaseConnection) -> Result<(), DbErr> {
     // Fetch one pending operation (FIFO, deterministic: created_at then id)
-    let pending_op = operation_log::Entity::find()
-        .filter(operation_log::Column::Status.eq("pending"))
-        .order_by_asc(operation_log::Column::CreatedAt)
-        .order_by_asc(operation_log::Column::Id)
-        .one(db)
-        .await?;
+    let pending_op = match next_pending().one(db).await {
+        Ok(op) => op,
+        Err(e) if is_decode_error(&e) => {
+            // The head row cannot be read as a model. Retrying would read the
+            // same row forever and starve everything queued behind it, so it
+            // is set aside as failed and the queue moves on. The pause bounds
+            // the damage if the cause is not the row but the model no longer
+            // matching the schema: every row would then fail, and nothing
+            // retries a failed row, so the queue must not be emptied at once.
+            set_unreadable_head_aside(db, &e).await?;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
 
     match pending_op {
         Some(op) => {
@@ -58,6 +67,55 @@ async fn process_next_batch(db: &DatabaseConnection) -> Result<(), DbErr> {
         }
     }
 
+    Ok(())
+}
+
+/// The pending queue, oldest first.
+fn next_pending() -> Select<operation_log::Entity> {
+    operation_log::Entity::find()
+        .filter(operation_log::Column::Status.eq("pending"))
+        .order_by_asc(operation_log::Column::CreatedAt)
+        .order_by_asc(operation_log::Column::Id)
+}
+
+/// Whether `e` says a stored value does not fit the model, as opposed to the
+/// database being unavailable. Only the former is a property of the row.
+fn is_decode_error(e: &DbErr) -> bool {
+    matches!(
+        e,
+        DbErr::Type(_)
+            | DbErr::Query(RuntimeErr::SqlxError(
+                sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_)
+            ))
+    )
+}
+
+/// Mark the head of the pending queue as failed without decoding it: only its
+/// integer id is read, which no stored value can make unreadable.
+async fn set_unreadable_head_aside(db: &DatabaseConnection, cause: &DbErr) -> Result<(), DbErr> {
+    let Some(id) = next_pending()
+        .select_only()
+        .column(operation_log::Column::Id)
+        .into_tuple::<i32>()
+        .one(db)
+        .await?
+    else {
+        return Ok(());
+    };
+
+    tracing::error!("❌ Op #{id} is unreadable, marked as failed: {cause}");
+    operation_log::Entity::update_many()
+        .col_expr(
+            operation_log::Column::Status,
+            sea_query::Expr::value("failed"),
+        )
+        .col_expr(
+            operation_log::Column::ErrorMessage,
+            sea_query::Expr::value(format!("unreadable row: {cause}")),
+        )
+        .filter(operation_log::Column::Id.eq(id))
+        .exec(db)
+        .await?;
     Ok(())
 }
 
@@ -1162,6 +1220,110 @@ mod tests {
             ..Default::default()
         };
         op.insert(db).await.expect("Failed to insert op")
+    }
+
+    /// A database whose `operation_log` still has the shape of installs created
+    /// before ids became uuids: `entity_id INTEGER`, so a numeric id is stored
+    /// as an integer. The table the migrations just created is renamed aside
+    /// rather than removed: this is a throwaway in-memory database.
+    async fn legacy_oplog_db() -> DatabaseConnection {
+        let db = init_db("sqlite::memory:").await.expect("Failed to init db");
+        for sql in [
+            "ALTER TABLE operation_log RENAME TO operation_log_modern_shape",
+            "CREATE TABLE operation_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                entity_id INTEGER NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error_message TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'local'
+            )",
+            // A reading note logged with its integer key.
+            "INSERT INTO operation_log (entity_type, entity_id, operation, created_at)
+             VALUES ('book_note', '1', 'INSERT', '2026-10-20T14:35:00+00:00')",
+        ] {
+            db.execute(Statement::from_string(
+                db.get_database_backend(),
+                sql.to_owned(),
+            ))
+            .await
+            .expect("legacy schema fixture");
+        }
+        db
+    }
+
+    async fn statuses(db: &DatabaseConnection) -> Vec<(i32, String, Option<String>)> {
+        operation_log::Entity::find()
+            .select_only()
+            .column(operation_log::Column::Id)
+            .column(operation_log::Column::Status)
+            .column(operation_log::Column::ErrorMessage)
+            .order_by_asc(operation_log::Column::Id)
+            .into_tuple()
+            .all(db)
+            .await
+            .expect("statuses")
+    }
+
+    #[tokio::test]
+    async fn unreadable_head_row_does_not_block_the_queue() {
+        let db = legacy_oplog_db().await;
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "INSERT INTO operation_log (entity_type, entity_id, operation, created_at)
+             VALUES ('book', '8f14e45f-ceea-467a-9b2c-0a1b2c3d4e5f', 'UPDATE',
+                     '2026-10-21T10:00:00+00:00')"
+                .to_owned(),
+        ))
+        .await
+        .expect("second op");
+
+        process_next_batch(&db)
+            .await
+            .expect("an unreadable row is not a processing error");
+        process_next_batch(&db).await.expect("next op");
+
+        let rows = statuses(&db).await;
+        assert_eq!(rows[0].1, "failed", "the unreadable row is set aside");
+        assert!(
+            rows[0]
+                .2
+                .as_deref()
+                .is_some_and(|m| m.contains("entity_id")),
+            "the reason is kept: {:?}",
+            rows[0].2
+        );
+        assert_eq!(rows[1].1, "applied", "the row behind it is processed");
+    }
+
+    #[tokio::test]
+    async fn book_note_operations_drain_on_a_migrated_legacy_database() {
+        let db = legacy_oplog_db().await;
+        crate::infrastructure::db::migrate_operation_log_text_entity_id(&db)
+            .await
+            .expect("migrate");
+
+        // What creating, editing and deleting a note logs: its integer key.
+        for operation in ["INSERT", "UPDATE", "DELETE"] {
+            crate::sync::log_operation(&db, "book_note", "2", operation, None)
+                .await
+                .expect("log");
+        }
+
+        // The pre-existing row plus the three new ones.
+        for _ in 0..4 {
+            process_next_batch(&db).await.expect("Processing failed");
+        }
+
+        let rows = statuses(&db).await;
+        assert_eq!(rows.len(), 4);
+        for (id, status, error) in rows {
+            assert_eq!(status, "applied", "op #{id}: {error:?}");
+        }
     }
 
     #[tokio::test]

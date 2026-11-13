@@ -2724,7 +2724,91 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
         }
     }
 
+    // Migration 108: declare `operation_log.entity_id` as TEXT on databases
+    // created while it was INTEGER. The base schema has declared TEXT since
+    // ids became uuids, but an existing table keeps its original declaration,
+    // and INTEGER affinity stores any numeric-looking id as an integer: the
+    // reading notes still have an integer key and log it as "1". sqlx refuses
+    // to decode such a value into the entity's `String`, so the operation
+    // processor stalled on the first row of that kind, and the retention
+    // pruner and the delta reader failed the same way.
+    migrate_operation_log_text_entity_id(db).await?;
+
     Ok(())
+}
+
+/// Migration 108: rebuild `operation_log` so `entity_id` is TEXT.
+///
+/// A table redefinition, like the `peer_books` one: an in-place
+/// `UPDATE ... CAST` cannot work because INTEGER affinity coerces
+/// numeric-looking text right back. Row ids are kept, and so is the
+/// AUTOINCREMENT high-water mark: the delta sync cursors (ADR-028) are
+/// `operation_log.id` values and must never see an id handed out twice.
+///
+/// `operation_log` is not a replicated table and has no foreign key, so the
+/// rebuild needs no pragma window.
+///
+/// Idempotent: gated on the declared column type still being INTEGER, and the
+/// rebuild is a single transaction, so a kill mid-way rolls back and the gate
+/// re-runs cleanly on the next boot.
+pub(crate) async fn migrate_operation_log_text_entity_id(
+    db: &DatabaseConnection,
+) -> Result<(), DbErr> {
+    let is_integer = table_column_decl_type(db, "operation_log", "entity_id")
+        .await?
+        .is_some_and(|t| t.eq_ignore_ascii_case("INTEGER"));
+    if !is_integer {
+        return Ok(());
+    }
+
+    // Dropped without a commit (an early `?` return), the transaction rolls back.
+    let txn = db.begin().await?;
+    for stmt in [
+        r#"CREATE TABLE operation_log_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            payload TEXT,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            error_message TEXT,
+            pinned INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'local'
+        )"#,
+        "INSERT INTO operation_log_new \
+         (id, entity_type, entity_id, operation, payload, created_at, status, \
+          error_message, pinned, source) \
+         SELECT id, entity_type, CAST(entity_id AS TEXT), operation, payload, created_at, \
+                status, error_message, pinned, source \
+         FROM operation_log",
+        // The copy set the new sequence to the highest surviving id. Carry the
+        // old high-water mark over when it is higher (the newest rows were
+        // deleted), so no id is ever reused.
+        "UPDATE sqlite_sequence \
+            SET seq = (SELECT seq FROM sqlite_sequence WHERE name = 'operation_log') \
+          WHERE name = 'operation_log_new' \
+            AND seq < (SELECT seq FROM sqlite_sequence WHERE name = 'operation_log')",
+        // An emptied table copies no row, so the new table has no sequence
+        // entry yet: create it from the old one.
+        "INSERT INTO sqlite_sequence (name, seq) \
+         SELECT 'operation_log_new', seq FROM sqlite_sequence \
+          WHERE name = 'operation_log' \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM sqlite_sequence WHERE name = 'operation_log_new')",
+        "DROP TABLE operation_log",
+        "ALTER TABLE operation_log_new RENAME TO operation_log",
+        // The index was dropped with the old table; recreate it (migration 069).
+        "CREATE INDEX IF NOT EXISTS idx_operation_log_entity_id \
+         ON operation_log(entity_type, id)",
+    ] {
+        txn.execute(Statement::from_string(
+            txn.get_database_backend(),
+            stmt.to_owned(),
+        ))
+        .await?;
+    }
+    txn.commit().await
 }
 
 /// Migration 100: give their default copy back to the owned books created before
@@ -4905,5 +4989,191 @@ mod owned_copy_backfill_tests {
         assert_eq!(a, b);
         assert_eq!(a.len(), 36);
         assert_ne!(a, deterministic_backfill_copy_id("other"));
+    }
+}
+
+#[cfg(test)]
+mod operation_log_text_entity_id_tests {
+    use super::*;
+
+    /// `operation_log` as a database created before ids became uuids holds it:
+    /// `entity_id INTEGER`, plus the columns and the index later migrations added.
+    async fn legacy_db() -> DatabaseConnection {
+        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
+        opt.max_connections(1).min_connections(1);
+        let db = Database::connect(opt).await.expect("connect");
+        for stmt in [
+            "CREATE TABLE operation_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                entity_id INTEGER NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error_message TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'local'
+            )",
+            "CREATE INDEX idx_operation_log_entity_id ON operation_log(entity_type, id)",
+        ] {
+            exec(&db, stmt).await;
+        }
+        db
+    }
+
+    async fn exec(db: &DatabaseConnection, sql: &str) {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            sql.to_owned(),
+        ))
+        .await
+        .expect("statement");
+    }
+
+    async fn scalar<T: sea_orm::TryGetable>(db: &DatabaseConnection, sql: &str) -> T {
+        db.query_one(Statement::from_string(
+            db.get_database_backend(),
+            sql.to_owned(),
+        ))
+        .await
+        .expect("query")
+        .expect("one row")
+        .try_get_by_index(0)
+        .expect("scalar")
+    }
+
+    #[tokio::test]
+    async fn integer_entity_ids_become_text_and_rows_are_kept() {
+        let db = legacy_db().await;
+        for stmt in [
+            // Numeric id: INTEGER affinity stores it as an integer.
+            "INSERT INTO operation_log (entity_type, entity_id, operation, payload, created_at, \
+                                        status, error_message, pinned, source) \
+             VALUES ('book_note', '1', 'INSERT', '{\"page\":3}', '2026-10-20T14:35:00+00:00', \
+                     'pending', NULL, 0, 'local')",
+            // Uuid: cannot be coerced, stays TEXT.
+            "INSERT INTO operation_log (entity_type, entity_id, operation, created_at, status, \
+                                        error_message, pinned, source) \
+             VALUES ('book', '8f14e45f-ceea-467a-9b2c-0a1b2c3d4e5f', 'DELETE', \
+                     '2026-10-21T10:00:00+00:00', 'failed', 'boom', 1, 'device:2')",
+        ] {
+            exec(&db, stmt).await;
+        }
+        assert_eq!(
+            scalar::<String>(
+                &db,
+                "SELECT typeof(entity_id) FROM operation_log WHERE id = 1"
+            )
+            .await,
+            "integer",
+            "the fixture must reproduce the legacy storage class"
+        );
+
+        migrate_operation_log_text_entity_id(&db)
+            .await
+            .expect("migrate");
+
+        assert_eq!(
+            table_column_decl_type(&db, "operation_log", "entity_id")
+                .await
+                .expect("decl type")
+                .as_deref(),
+            Some("TEXT")
+        );
+        // Every row decodes through the entity, which is what all readers do.
+        use sea_orm::{EntityTrait, QueryOrder};
+        let rows = crate::models::operation_log::Entity::find()
+            .order_by_asc(crate::models::operation_log::Column::Id)
+            .all(&db)
+            .await
+            .expect("rows decode as models");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, 1);
+        assert_eq!(rows[0].entity_id, "1");
+        assert_eq!(rows[0].payload.as_deref(), Some("{\"page\":3}"));
+        assert_eq!(rows[0].status, "pending");
+        assert_eq!(rows[1].id, 2);
+        assert_eq!(rows[1].entity_id, "8f14e45f-ceea-467a-9b2c-0a1b2c3d4e5f");
+        assert_eq!(rows[1].status, "failed");
+        assert_eq!(rows[1].error_message.as_deref(), Some("boom"));
+        assert_eq!(rows[1].pinned, 1);
+        assert_eq!(rows[1].source, "device:2");
+
+        assert_eq!(
+            scalar::<i32>(
+                &db,
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_operation_log_entity_id' \
+                   AND tbl_name = 'operation_log'"
+            )
+            .await,
+            1,
+            "the delta sync index must be recreated"
+        );
+
+        // A numeric id written after the migration stays text.
+        exec(
+            &db,
+            "INSERT INTO operation_log (entity_type, entity_id, operation, created_at) \
+             VALUES ('book_note', '7', 'UPDATE', '2026-11-13T10:00:00+00:00')",
+        )
+        .await;
+        assert_eq!(
+            scalar::<String>(
+                &db,
+                "SELECT typeof(entity_id) FROM operation_log WHERE id = 3"
+            )
+            .await,
+            "text"
+        );
+
+        // Second run: nothing left to do.
+        migrate_operation_log_text_entity_id(&db)
+            .await
+            .expect("second run is a no-op");
+        assert_eq!(
+            scalar::<i32>(&db, "SELECT COUNT(*) FROM operation_log").await,
+            3
+        );
+    }
+
+    // The delta sync cursors are operation_log ids: the rebuild must not let an
+    // id that was already handed out be reused, even when the newest rows, or
+    // all of them, are gone.
+    #[tokio::test]
+    async fn rebuild_never_reuses_an_id() {
+        for rows_left in [1, 0] {
+            let db = legacy_db().await;
+            for _ in 0..3 {
+                exec(
+                    &db,
+                    "INSERT INTO operation_log (entity_type, entity_id, operation, created_at) \
+                     VALUES ('book_note', 1, 'UPDATE', '2026-10-20T14:35:00+00:00')",
+                )
+                .await;
+            }
+            exec(
+                &db,
+                &format!("DELETE FROM operation_log WHERE id > {rows_left}"),
+            )
+            .await;
+
+            migrate_operation_log_text_entity_id(&db)
+                .await
+                .expect("migrate");
+
+            exec(
+                &db,
+                "INSERT INTO operation_log (entity_type, entity_id, operation, created_at) \
+                 VALUES ('book_note', '1', 'UPDATE', '2026-11-13T10:00:00+00:00')",
+            )
+            .await;
+            assert_eq!(
+                scalar::<i32>(&db, "SELECT MAX(id) FROM operation_log").await,
+                4,
+                "with {rows_left} row(s) left before the rebuild"
+            );
+        }
     }
 }
