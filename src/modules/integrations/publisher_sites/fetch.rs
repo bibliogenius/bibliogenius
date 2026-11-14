@@ -36,6 +36,8 @@ pub struct Page {
     /// Where the page was found, after redirects.
     pub url: Url,
     pub html: String,
+    /// Cut at [`MAX_PAGE_BYTES`]: what came after is missing.
+    pub truncated: bool,
 }
 
 /// What a submitted form answered.
@@ -249,6 +251,7 @@ fn into_page(body: FetchedBody) -> Result<Page, FetchError> {
         return Err(FetchError::Blocked("firewall rejection page".into()));
     }
     Ok(Page {
+        truncated: body.bytes.len() >= MAX_PAGE_BYTES,
         html: decode_html(&body.bytes, body.content_type.as_deref()),
         url: body.final_url,
     })

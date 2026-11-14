@@ -20,8 +20,9 @@ pub const TABLE_FORMAT: u32 = 1;
 /// How to build a book page's address from its ISBN, title and author.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductRecipe {
-    /// Address with `{isbn}`, and optionally `{slug}` (from the title) and
-    /// `{author}` (from the first author's name).
+    /// Address with `{isbn}` or `{isbn_hyphens}` (`978-2-8180-5511-3`), and
+    /// optionally `{slug}` (from the title) and `{author}` (from the first
+    /// author's name).
     pub template: String,
     pub apostrophe: Apostrophe,
     /// The server finds the book by its ISBN whatever the slug: one try is
@@ -222,6 +223,10 @@ pub struct SitemapCheck {
     pub found: usize,
     /// Witnesses it was tried on.
     pub tried: usize,
+    /// The map was cut at the size cap: books listed after the cut cannot be
+    /// found through it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 /// Everything the probe learnt about one site.
@@ -343,8 +348,8 @@ pub struct Overrides {
     /// Site key (host without `www.`) -> corrections for that site.
     #[serde(default)]
     pub sites: BTreeMap<String, SiteOverride>,
-    /// Publishers Wikidata gives no ISBN prefix for. Their prefixes are read
-    /// from the books the probe finds on their site.
+    /// Publishers Wikidata lacks, or gives no usable site for. They are
+    /// added to their prefixes, after the publishers Wikidata names there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub publishers: Vec<ExtraPublisher>,
 }
@@ -352,8 +357,12 @@ pub struct Overrides {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtraPublisher {
     pub name: String,
-    /// The publisher's home page.
+    /// The publisher's home page, or the site its books are sold on.
     pub home: String,
+    /// Its ISBN prefixes (digits only). Empty: they are read from the books
+    /// the probe finds on the site, which only suits a site of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefixes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -19,6 +19,8 @@ pub struct FakeSite {
     pub forbidden: Vec<String>,
     /// Site maps robots.txt declares.
     pub sitemaps: Vec<String>,
+    /// Path prefixes the server takes too long to answer.
+    pub slow: Vec<String>,
 }
 
 impl FakeSite {
@@ -42,11 +44,15 @@ impl SiteFetcher for FakeSite {
         {
             return Err(FetchError::Disallowed);
         }
+        if self.slow.iter().any(|p| url.path().starts_with(p.as_str())) {
+            return Err(FetchError::Network);
+        }
         self.pages
             .get(url.as_str())
             .map(|html| Page {
                 url: url.clone(),
                 html: html.clone(),
+                truncated: html.len() >= super::fetch::MAX_PAGE_BYTES,
             })
             .ok_or(FetchError::Status(404))
     }

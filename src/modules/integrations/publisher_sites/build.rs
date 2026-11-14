@@ -11,6 +11,7 @@ use super::table::{
     PublisherTable, RecipeKind, SITEMAP_RECIPES, SiteOverride, SiteRecipes, TABLE_FORMAT,
     WikidataPublisher,
 };
+use super::text::publisher_prefix;
 
 /// A site to probe, and who publishes there.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,57 +47,6 @@ pub fn normalize_prefix(raw: &str) -> Option<String> {
     (MIN_DIGITS..=12).contains(&prefix.len()).then_some(prefix)
 }
 
-/// Registrant ranges of the French-language ISBN groups, from the ISBN
-/// agency's range table: (first seven digits after the group, registrant
-/// length). A range runs up to the next one.
-const RANGES_978_2: &[(u32, usize)] = &[
-    (0, 2),
-    (2_000_000, 3),
-    (3_500_000, 5),
-    (4_000_000, 3),
-    (4_870_000, 6),
-    (4_950_000, 3),
-    (4_960_000, 4),
-    (4_967_000, 5),
-    (4_970_000, 3),
-    (5_280_000, 4),
-    (5_300_000, 3),
-    (7_000_000, 4),
-    (8_400_000, 5),
-    (9_000_000, 6),
-    (9_198_000, 5),
-    (9_198_100, 6),
-    (9_199_430, 7),
-    (9_199_690, 6),
-    (9_500_000, 7),
-];
-const RANGES_979_10: &[(u32, usize)] = &[
-    (0, 2),
-    (2_000_000, 3),
-    (7_000_000, 4),
-    (9_000_000, 5),
-    (9_760_000, 6),
-];
-
-/// The publisher prefix of an ISBN-13 (`9782070360024` -> `978207`), or
-/// `None` outside the French-language groups, whose ranges are the only ones
-/// known here.
-pub fn publisher_prefix(isbn: &str) -> Option<String> {
-    let (group, ranges) = if isbn.starts_with("9782") {
-        (4, RANGES_978_2)
-    } else if isbn.starts_with("97910") {
-        (5, RANGES_979_10)
-    } else {
-        return None;
-    };
-    if isbn.len() != 13 || !isbn.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let rest: u32 = isbn[group..group + 7].parse().ok()?;
-    let (_, len) = ranges.iter().rev().find(|(start, _)| *start <= rest)?;
-    Some(isbn[..group + len].to_owned())
-}
-
 /// Every prefix -> (publisher, site key) pair, Wikidata first, the
 /// corrections replacing what Wikidata says for their exact prefix.
 fn prefix_publishers(
@@ -130,8 +80,8 @@ fn prefix_publishers(
     map
 }
 
-/// Prefix -> (publisher, site key) for the publishers Wikidata has no
-/// prefix for: the prefixes of the books the probe found on their site.
+/// Prefix -> (publisher, site key) for the publishers added by hand: their
+/// given prefixes, else those of the books the probe found on their site.
 fn read_prefixes(
     probe: &ProbeReport,
     overrides: &Overrides,
@@ -141,14 +91,25 @@ fn read_prefixes(
         let Some(key) = site_key(&extra.home) else {
             continue;
         };
-        let Some(probed) = probe.sites.get(&key) else {
-            continue;
-        };
-        for prefix in probed
-            .witnesses
+        let given: Vec<String> = extra
+            .prefixes
             .iter()
-            .filter_map(|w| publisher_prefix(&w.isbn))
-        {
+            .filter_map(|p| normalize_prefix(p))
+            .collect();
+        let read = || {
+            probe.sites.get(&key).into_iter().flat_map(|probed| {
+                probed
+                    .witnesses
+                    .iter()
+                    .filter_map(|w| publisher_prefix(&w.isbn))
+            })
+        };
+        let prefixes: Vec<String> = if given.is_empty() {
+            read().collect()
+        } else {
+            given
+        };
+        for prefix in prefixes {
             let entry = map.entry(prefix).or_default();
             if !entry.iter().any(|(_, k)| *k == key) {
                 entry.push((extra.name.clone(), key.clone()));
@@ -790,31 +751,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_a_publisher_prefix_from_an_isbn() {
-        assert_eq!(publisher_prefix("9782070360024").as_deref(), Some("978207"));
-        assert_eq!(
-            publisher_prefix("9782864329404").as_deref(),
-            Some("978286432")
-        );
-        assert_eq!(
-            publisher_prefix("9782919421589").as_deref(),
-            Some("9782919421")
-        );
-        assert_eq!(
-            publisher_prefix("9791032900123").as_deref(),
-            Some("97910329")
-        );
-        assert_eq!(
-            publisher_prefix("9791097160012").as_deref(),
-            Some("9791097160")
-        );
-        // Another language group, or not an ISBN-13.
-        assert_eq!(publisher_prefix("9780141439518"), None);
-        assert_eq!(publisher_prefix("978207036002X"), None);
-        assert_eq!(publisher_prefix("978207"), None);
-    }
-
-    #[test]
     fn a_publisher_unknown_to_wikidata_gets_the_prefixes_of_its_books() {
         use crate::modules::integrations::publisher_sites::table::{ExtraPublisher, Witness};
         let witness = |isbn: &str| Witness {
@@ -850,10 +786,19 @@ mod tests {
             ]),
         };
         let overrides = Overrides {
-            publishers: vec![ExtraPublisher {
-                name: "Verdier".into(),
-                home: "https://verdier.example/".into(),
-            }],
+            publishers: vec![
+                ExtraPublisher {
+                    name: "Verdier".into(),
+                    home: "https://verdier.example/".into(),
+                    prefixes: Vec::new(),
+                },
+                // An imprint sold on Gallimard's site, under its own prefix.
+                ExtraPublisher {
+                    name: "Imprint".into(),
+                    home: "https://www.gallimard.fr/".into(),
+                    prefixes: vec!["978-2-9999".into()],
+                },
+            ],
             ..Overrides::default()
         };
         assert!(site_sources(&wikidata, &overrides).contains_key("verdier.example"));
@@ -867,7 +812,8 @@ mod tests {
         };
         assert_eq!(owner("978286432").as_deref(), Some("verdier.example"));
         assert_eq!(owner("978207").as_deref(), Some("gallimard.fr"));
-        assert_eq!(table.prefixes.len(), 2);
+        assert_eq!(owner("97829999").as_deref(), Some("gallimard.fr"));
+        assert_eq!(table.prefixes.len(), 3);
         // The Gallimard book seen at Verdier adds its site after Gallimard's.
         let shared: Vec<&str> = table.prefixes[0]
             .publishers

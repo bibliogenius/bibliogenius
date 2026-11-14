@@ -29,7 +29,7 @@ use super::table::{
     ProbeStatus, ProductCheck, ProductRecipe, SITEMAP_RECIPES, SearchCheck, SearchRecipe,
     SiteProbe, SitemapCheck, SitemapRecipe, Witness,
 };
-use super::text::{Apostrophe, author_variants, slugify, title_variants};
+use super::text::{Apostrophe, author_variants, fold, hyphenated_isbn, slugify, title_variants};
 
 /// Witnesses looked for on the home page.
 const WANTED_WITNESSES: usize = 3;
@@ -146,6 +146,7 @@ async fn run(
     let hunted = hunt_witnesses(fetcher, &home_page).await?;
     out.book_sitemap = hunted.book_sitemap;
     let book_pages = hunted.book_pages;
+    let map_truncated = hunted.book_sitemap_truncated;
     let mut witnesses = hunted.found;
     for w in extra {
         if !witnesses.iter().any(|x| x.isbn == w.isbn) {
@@ -171,7 +172,10 @@ async fn run(
     out.search = best;
 
     if SITEMAP_RECIPES && let Some(map) = &out.book_sitemap {
-        out.sitemap = sitemap_check(map, &book_pages, &with_url);
+        out.sitemap = sitemap_check(map, &book_pages, &with_url).map(|mut c| {
+            c.truncated = map_truncated;
+            c
+        });
     }
 
     if out.product.is_some() || out.search.is_some() || out.sitemap.is_some() {
@@ -211,6 +215,7 @@ fn sitemap_check(map: &str, pages: &[Url], witnesses: &[Witness]) -> Option<Site
         },
         found,
         tried,
+        truncated: false,
     })
 }
 
@@ -378,6 +383,8 @@ fn link_shape(url: &Url) -> (usize, String) {
 struct SiteMap {
     url: Url,
     pages: Vec<Url>,
+    /// Cut at the size cap: the pages it lists after the cut are missing.
+    truncated: bool,
 }
 
 /// The site's maps: those robots.txt declares, else `/sitemap.xml`. In an
@@ -403,7 +410,11 @@ async fn site_maps(fetcher: &dyn SiteFetcher, home: &Page) -> Result<Vec<SiteMap
         let (is_index, locs) = sitemap_locs(&map.html, &home.url);
         if !is_index {
             if !locs.is_empty() {
-                maps.push(SiteMap { url, pages: locs });
+                maps.push(SiteMap {
+                    url,
+                    pages: locs,
+                    truncated: map.truncated,
+                });
             }
             continue;
         }
@@ -443,6 +454,8 @@ pub struct Witnesses {
     pub book_sitemap: Option<String>,
     /// The pages that map lists.
     pub book_pages: Vec<Url>,
+    /// That map was cut at the size cap.
+    pub book_sitemap_truncated: bool,
 }
 
 /// Books the site sells, read on their own page: see [`hunt_witnesses`].
@@ -544,6 +557,7 @@ pub async fn hunt_witnesses(
     Ok(Witnesses {
         book_sitemap: book_sitemap.map(|m| m.url.to_string()),
         book_pages: book_sitemap.map(|m| m.pages.clone()).unwrap_or_default(),
+        book_sitemap_truncated: book_sitemap.is_some_and(|m| m.truncated),
         found: hunt.found,
     })
 }
@@ -555,6 +569,8 @@ struct WitnessPattern {
     /// The apostrophe rule the address shows; `None` when the title has no
     /// apostrophe (both rules give the same slug), so the witness has no say.
     apostrophe: Option<Apostrophe>,
+    /// The witness's title, folded: editions of one book vote once.
+    title: String,
 }
 
 /// Where `slug` is in `url` as whole words: not glued to a letter or a digit
@@ -617,6 +633,7 @@ fn pattern_from_witness(w: &Witness) -> Option<WitnessPattern> {
                 return Some(WitnessPattern {
                     template,
                     apostrophe: telling.then_some(rule),
+                    title: fold(&w.title),
                 });
             }
         }
@@ -624,23 +641,31 @@ fn pattern_from_witness(w: &Witness) -> Option<WitnessPattern> {
     has_isbn.then_some(WitnessPattern {
         template: with_isbn,
         apostrophe: None,
+        title: fold(&w.title),
     })
 }
 
-/// The pattern most witnesses share (the first seen winning a tie), with
-/// the apostrophe rule most of its telling witnesses show (`Drop` when none
-/// tells).
+/// The pattern most books share (the first seen winning a tie), with the
+/// apostrophe rule most of its telling witnesses show (`Drop` when none
+/// tells). Witnesses with the same title count as one book: several
+/// editions of a title would otherwise carry a pattern with that title
+/// written into it.
 fn vote(patterns: &[WitnessPattern]) -> Option<ProductRecipe> {
-    let most_frequent = |items: Vec<&String>| -> Option<String> {
-        items
+    let books = |template: &str| {
+        let mut titles: Vec<&str> = patterns
             .iter()
-            .max_by_key(|t| {
-                let n = items.iter().filter(|u| u == t).count();
-                (n, std::cmp::Reverse(items.iter().position(|u| u == *t)))
-            })
-            .map(|t| (*t).clone())
+            .filter(|p| p.template == template)
+            .map(|p| p.title.as_str())
+            .collect();
+        titles.sort_unstable();
+        titles.dedup();
+        titles.len()
     };
-    let template = most_frequent(patterns.iter().map(|p| &p.template).collect())?;
+    let template = patterns
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, p)| (books(&p.template), std::cmp::Reverse(*i)))
+        .map(|(_, p)| p.template.clone())?;
     let rules: Vec<Apostrophe> = patterns
         .iter()
         .filter(|p| p.template == template)
@@ -659,8 +684,21 @@ fn vote(patterns: &[WitnessPattern]) -> Option<ProductRecipe> {
     })
 }
 
-/// The addresses a product recipe gives for a book, most likely first.
+/// In a product template, the ISBN with its hyphens (`978-2-8180-5511-3`).
+pub const HYPHENATED_ISBN: &str = "{isbn_hyphens}";
+
+/// The addresses a product recipe gives for a book, most likely first. None
+/// when the template wants the hyphenated ISBN of a book whose ISBN group
+/// we cannot hyphenate.
 pub fn product_urls(recipe: &ProductRecipe, isbn: &str, title: &str, authors: &str) -> Vec<String> {
+    let hyphenated = if recipe.template.contains(HYPHENATED_ISBN) {
+        match hyphenated_isbn(isbn) {
+            Some(h) => h,
+            None => return Vec::new(),
+        }
+    } else {
+        String::new()
+    };
     let authors_tried = if recipe.template.contains("{author}") {
         author_variants(authors)
     } else {
@@ -672,6 +710,7 @@ pub fn product_urls(recipe: &ProductRecipe, isbn: &str, title: &str, authors: &s
             let u = recipe
                 .template
                 .replace("{isbn}", isbn)
+                .replace(HYPHENATED_ISBN, &hyphenated)
                 .replace("{slug}", &slugify(&t, recipe.apostrophe))
                 .replace("{author}", &slugify(a, recipe.apostrophe));
             if !out.contains(&u) {
@@ -693,20 +732,24 @@ async fn probe_product(
     let Some(mut recipe) = vote(&patterns) else {
         return Ok(None);
     };
-    let mismatches = witnesses
-        .iter()
-        .filter(|w| {
-            let url = w.url.as_deref().unwrap_or("");
-            let url = url.split('?').next().unwrap_or(url);
-            !product_urls(&recipe, &w.isbn, &w.title, &w.authors)
-                .iter()
-                .any(|u| u == url)
-        })
-        .count();
 
     // Does the server ignore the slug? Nothing to ask without one, nor
-    // without the ISBN: the slug is then all the server has to go by.
-    let w = &witnesses[0];
+    // without the ISBN: the slug is then all the server has to go by. Asked
+    // with a witness the pattern does not rebuild, when there is one: the
+    // witness it was drawn from would pass whatever book number the pattern
+    // froze in it.
+    let rebuilt = |w: &Witness| {
+        let url = w.url.as_deref().unwrap_or("");
+        let url = url.split('?').next().unwrap_or(url);
+        product_urls(&recipe, &w.isbn, &w.title, &w.authors)
+            .iter()
+            .any(|u| u == url)
+    };
+    let w = witnesses
+        .iter()
+        .find(|w| !rebuilt(w))
+        .unwrap_or(&witnesses[0]);
+    let mismatches = witnesses.iter().filter(|w| !rebuilt(w)).count();
     if !recipe.template.contains("{slug}") || !recipe.template.contains("{isbn}") {
         return Ok(Some(ProductCheck {
             recipe,
@@ -1524,7 +1567,17 @@ mod tests {
         let sitemap = probe.sitemap.unwrap();
         assert_eq!(sitemap.recipe.url, map);
         assert_eq!((sitemap.found, sitemap.tried), (3, 3));
+        assert!(!sitemap.truncated);
         assert_eq!(probe.status, ProbeStatus::Ok);
+
+        // The same map past the size cap: still a recipe, marked as cut.
+        let filler = format!(
+            "<!-- {} -->",
+            "x".repeat(super::super::fetch::MAX_PAGE_BYTES)
+        );
+        let big = site.page(map, &format!("<urlset>{xml}</urlset>{filler}"));
+        let probe = probe_site(&big, &Url::parse(HOME).unwrap(), &[], "2026-11-14").await;
+        assert!(probe.sitemap.unwrap().truncated);
     }
 
     #[test]
@@ -1584,12 +1637,97 @@ mod tests {
         let same = Page {
             url: asked.clone(),
             html: String::new(),
+            truncated: false,
         };
         assert!(!redirected_to_book(&same, &asked, "9782000000011"));
         let book = Page {
             url: Url::parse("https://e.example/livre/x-9782000000011").unwrap(),
             html: String::new(),
+            truncated: false,
         };
         assert!(redirected_to_book(&book, &asked, "9782000000011"));
+    }
+
+    #[test]
+    fn a_template_can_ask_for_the_hyphenated_isbn() {
+        let recipe = ProductRecipe {
+            template: "https://e.example/index.php?spec=livre&ISBN={isbn_hyphens}".into(),
+            apostrophe: Apostrophe::Drop,
+            slug_ignored: false,
+        };
+        assert_eq!(
+            product_urls(&recipe, "9782818055113", "Finale Fantaisie", ""),
+            ["https://e.example/index.php?spec=livre&ISBN=978-2-8180-5511-3"]
+        );
+        // Another ISBN group: no hyphens known, no address.
+        assert!(product_urls(&recipe, "9780141439518", "Emma", "").is_empty());
+    }
+
+    #[test]
+    fn editions_of_one_title_vote_once() {
+        let w = |isbn: &str, title: &str, slug: &str| Witness {
+            isbn: isbn.into(),
+            title: title.into(),
+            authors: String::new(),
+            url: Some(format!("https://e.example/livres/{slug}/{isbn}")),
+        };
+        // The site drops short words from its slugs: three editions of one
+        // title give a pattern with that title frozen in it.
+        let witnesses = [
+            w(
+                "9782000000011",
+                "Dans la terre froide",
+                "dans-la-terre-froide",
+            ),
+            w("9782000000028", "Manhattan Rivals", "manhattan-rivals"),
+            w(
+                "9782000000035",
+                "Code 612. Qui a tué le Petit Prince ?",
+                "code-612-qui-tue-le-petit-prince",
+            ),
+            w(
+                "9782000000042",
+                "Code 612 Qui a tué le Petit Prince ?",
+                "code-612-qui-tue-le-petit-prince",
+            ),
+            w(
+                "9782000000059",
+                "Code 612 Qui a tué le Petit Prince ?",
+                "code-612-qui-tue-le-petit-prince",
+            ),
+        ];
+        let patterns: Vec<WitnessPattern> =
+            witnesses.iter().filter_map(pattern_from_witness).collect();
+        assert_eq!(
+            vote(&patterns).unwrap().template,
+            "https://e.example/livres/{slug}/{isbn}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_book_number_frozen_in_the_pattern_is_not_a_slug_the_server_ignores() {
+        // Each address carries the book's own number besides its ISBN, and
+        // the server finds the first book whatever the slug.
+        let books = [
+            ("9782000000011", "Le Grand Voyage", "101-book-1"),
+            ("9782000000028", "Martin Eden", "102-book-2"),
+            ("9782000000035", "Croc-Blanc", "103-book-3"),
+        ];
+        let mut site = FakeSite::default();
+        let mut home = String::new();
+        for (isbn, title, number) in books {
+            let path = format!("/fr/le-grand-voyage/{number}-{isbn}.html");
+            site = site.page(
+                &format!("https://editions.example{path}"),
+                &book_page(isbn, title),
+            );
+            home.push_str(&format!(r#"<a href="{path}">x</a>"#));
+        }
+        let site = site.page(HOME, &home).page(
+            "https://editions.example/fr/x/101-book-1-9782000000011.html",
+            &book_page("9782000000011", "Le Grand Voyage"),
+        );
+        let probe = probe_site(&site, &Url::parse(HOME).unwrap(), &[], "2026-11-14").await;
+        assert!(probe.product.is_none(), "{:?}", probe.product);
     }
 }

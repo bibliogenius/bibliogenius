@@ -149,7 +149,7 @@ const I18N = {
     tried: "Searches tried ({n})", col_address: "Address", col_by_isbn: "By ISBN", col_by_title: "By title", col_why: "Why not",
     js_results: "JavaScript results", broken: "broken",
     correct: "Correct this site", f_note: "Note (why, source)", f_excluded: "Exclude this site (publisher's request, wrong site)",
-    f_home: "Home page to probe instead", f_product_html: "Product page template (<code>{isbn}</code>, <code>{slug}</code>, <code>{author}</code>)",
+    f_home: "Home page to probe instead", f_product_html: "Product page template (<code>{isbn}</code>, <code>{isbn_hyphens}</code>, <code>{slug}</code>, <code>{author}</code>)",
     f_apostrophe: "Apostrophe", f_drop: "drop (j'ai → jai)", f_dash: "dash (j'ai → j-ai)", f_slug_ignored: "Server ignores the slug",
     f_search_html: "Search address (GET, with <code>{q}</code>)", f_post_kept: "POST search kept as is: edit overrides.json to change it",
     f_by_isbn: "Search finds books by ISBN", f_witnesses_html: "Extra witnesses, one per line: <code>ISBN | title | author | page URL</code>",
@@ -184,7 +184,7 @@ const I18N = {
     tried: "Recherches essayées ({n})", col_address: "Adresse", col_by_isbn: "Par ISBN", col_by_title: "Par titre", col_why: "Pourquoi non",
     js_results: "résultats en JavaScript", broken: "en panne",
     correct: "Corriger ce site", f_note: "Note (raison, source)", f_excluded: "Exclure ce site (demande de l'éditeur, mauvais site)",
-    f_home: "Page d'accueil à sonder à la place", f_product_html: "Modèle d'adresse de fiche (<code>{isbn}</code>, <code>{slug}</code>, <code>{author}</code>)",
+    f_home: "Page d'accueil à sonder à la place", f_product_html: "Modèle d'adresse de fiche (<code>{isbn}</code>, <code>{isbn_hyphens}</code>, <code>{slug}</code>, <code>{author}</code>)",
     f_apostrophe: "Apostrophe", f_drop: "supprimée (j'ai → jai)", f_dash: "tiret (j'ai → j-ai)", f_slug_ignored: "Le serveur ignore le slug",
     f_search_html: "Adresse de recherche (GET, avec <code>{q}</code>)", f_post_kept: "Recherche POST gardée telle quelle : modifiez overrides.json pour la changer",
     f_by_isbn: "La recherche trouve les livres par ISBN", f_witnesses_html: "Témoins supplémentaires, un par ligne : <code>ISBN | titre | auteur | adresse de la page</code>",
@@ -269,7 +269,9 @@ function slugify(s, apostrophe) {
 }
 function productUrl(recipe, w) {
   const author = (w.authors || "").split(",")[0].trim();
-  return recipe.template.replace("{isbn}", w.isbn).replace("{slug}", slugify(w.title, recipe.apostrophe))
+  // The hyphenated ISBN needs the ISBN ranges: read it from the witness's own address.
+  const hyphens = ((w.url || "").match(/97[89][\d-]{11,14}/g) || []).find(h => h.replace(/-/g, "") === w.isbn) || w.isbn;
+  return recipe.template.replace("{isbn}", w.isbn).replace("{isbn_hyphens}", hyphens).replace("{slug}", slugify(w.title, recipe.apostrophe))
     .replace("{author}", slugify(author, recipe.apostrophe));
 }
 function searchUrl(recipe, q) {

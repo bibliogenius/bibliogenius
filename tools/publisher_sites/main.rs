@@ -9,6 +9,8 @@
 //!                                                    [--workers N] [--pause SECS]
 //! cargo run --release --bin publisher_sites -- build [--offline]
 //! cargo run --release --bin publisher_sites -- report [--out FILE]
+//! cargo run --release --bin publisher_sites -- lint
+//! cargo run --release --bin publisher_sites -- diff [--base GIT_REF|FILE]
 //! ```
 //!
 //! See `data/publisher_sites/README.md` for what each step does and when to
@@ -31,11 +33,12 @@ use rust_lib_app::modules::integrations::publisher_sites::build::{
     pending_corrections, site_sources,
 };
 use rust_lib_app::modules::integrations::publisher_sites::check::{
-    CheckResult, after_reprobe, check_recipes, next_record,
+    CheckResult, after_reprobe, check_recipes, keeps_previous, next_record,
 };
 use rust_lib_app::modules::integrations::publisher_sites::fetch::{
     FetchError, PoliteFetcher, SiteFetcher,
 };
+use rust_lib_app::modules::integrations::publisher_sites::lint::{Severity, diff, lint};
 use rust_lib_app::modules::integrations::publisher_sites::probe::{find_witnesses, probe_site};
 use rust_lib_app::modules::integrations::publisher_sites::table::{
     CheckStatus, Overrides, ProbeReport, ProbeStatus, PublisherTable, RecipeCheck, RecipeKind,
@@ -142,7 +145,7 @@ async fn main() {
         dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("data/publisher_sites"),
     };
     let result = match args.first().map(String::as_str) {
-        Some(cmd @ ("wikidata" | "probe" | "check" | "build" | "report")) => {
+        Some(cmd @ ("wikidata" | "probe" | "check" | "build" | "report" | "lint" | "diff")) => {
             const PACING: [(&str, bool); 2] = [("workers", true), ("pause", true)];
             let known: Vec<(&str, bool)> = match cmd {
                 "probe" => [
@@ -161,6 +164,7 @@ async fn main() {
                     .collect(),
                 "build" => std::iter::once(("offline", false)).chain(PACING).collect(),
                 "report" => vec![("out", true)],
+                "diff" => vec![("base", true)],
                 _ => Vec::new(),
             };
             match Flags::parse(&args[1..], &known) {
@@ -169,13 +173,15 @@ async fn main() {
                     "probe" => cmd_probe(&paths, &flags).await,
                     "check" => cmd_check(&paths, &flags).await,
                     "build" => cmd_build(&paths, &flags).await,
+                    "lint" => cmd_lint(&paths),
+                    "diff" => cmd_diff(&paths, &flags),
                     _ => cmd_report(&paths, &flags),
                 },
                 Err(e) => Err(e),
             }
         }
         _ => Err(
-            "usage: publisher_sites wikidata | probe | check | build | report (see the file header)".into(),
+            "usage: publisher_sites wikidata | probe | check | build | report | lint | diff (see the file header)".into(),
         ),
     };
     if let Err(e) = result {
@@ -381,9 +387,16 @@ async fn cmd_probe(paths: &Paths, flags: &Flags) -> Result<(), String> {
                     Err(_) => failed(&source.home, date, "home page address does not parse"),
                 };
                 let n = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                println!("[{n}/{total}] {key}: {}", summary(&result));
                 let mut report = report.lock().await;
-                report.sites.insert(key, result);
+                if keeps_previous(report.sites.get(&key), &result) {
+                    println!(
+                        "[{n}/{total}] {key}: {}; last good probe kept",
+                        summary(&result)
+                    );
+                } else {
+                    println!("[{n}/{total}] {key}: {}", summary(&result));
+                    report.sites.insert(key, result);
+                }
                 // Saved after every site: a long run can be stopped and resumed with --new.
                 write_json(&paths.probe(), &*report)
             }
@@ -828,4 +841,106 @@ fn cmd_report(paths: &Paths, flags: &Flags) -> Result<(), String> {
     std::fs::write(&out, html).map_err(|e| format!("{}: {e}", out.display()))?;
     println!("{} sites -> {}", sites.len(), out.display());
     Ok(())
+}
+
+// ---------------------------------------------------------------- lint, diff
+
+/// Defects a probe can leave in the table without failing: see `lint.rs`.
+/// Fails when one of them is an error.
+fn cmd_lint(paths: &Paths) -> Result<(), String> {
+    let table = read_table(paths)?;
+    let report: ProbeReport = read_json(&paths.probe())?;
+    let findings = lint(&table, &report, &today());
+    for f in &findings {
+        let level = match f.rule.severity() {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        };
+        println!("{level} {} {}: {}", f.rule.name(), f.site, f.detail);
+    }
+    let errors = findings
+        .iter()
+        .filter(|f| f.rule.severity() == Severity::Error)
+        .count();
+    println!(
+        "{} sites: {errors} errors, {} warnings",
+        table.sites.len(),
+        findings.len() - errors
+    );
+    if errors > 0 {
+        return Err(format!("{errors} errors in table.json"));
+    }
+    Ok(())
+}
+
+/// What changed in table.json since `--base`: a git revision (`HEAD` by
+/// default) or a file.
+fn cmd_diff(paths: &Paths, flags: &Flags) -> Result<(), String> {
+    let base = flags.get("base").unwrap_or("HEAD");
+    if base.starts_with('-') {
+        return Err(format!("--base {base}: not a revision nor a file"));
+    }
+    let old_text = if Path::new(base).is_file() {
+        std::fs::read_to_string(base).map_err(|e| format!("{base}: {e}"))?
+    } else {
+        let out = std::process::Command::new("git")
+            .current_dir(&paths.dir)
+            .args(["show", &format!("{base}:./table.json")])
+            .output()
+            .map_err(|e| format!("git: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "git show {base}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        String::from_utf8(out.stdout).map_err(|e| format!("{base}: {e}"))?
+    };
+    let old: PublisherTable =
+        serde_json::from_str(&old_text).map_err(|e| format!("{base}: {e}"))?;
+    let new = read_table(paths)?;
+    let d = diff(&old, &new);
+    let kind = |k: RecipeKind| match k {
+        RecipeKind::Product => "product",
+        RecipeKind::Search => "search",
+        RecipeKind::Sitemap => "sitemap",
+    };
+    let none = |r: &Option<String>| r.clone().unwrap_or_else(|| "none".into());
+    for key in &d.added_sites {
+        println!("+ {key}");
+    }
+    for key in &d.removed_sites {
+        println!("- {key}");
+    }
+    for (key, k, before, after) in &d.changed_recipes {
+        println!("~ {key} {}: {} -> {}", kind(*k), none(before), none(after));
+    }
+    for (prefix, before, after) in &d.changed_prefixes {
+        let list = |v: &Vec<String>| {
+            if v.is_empty() {
+                "none".to_owned()
+            } else {
+                v.join(", ")
+            }
+        };
+        println!("  prefix {prefix}: {} -> {}", list(before), list(after));
+    }
+    println!(
+        "since {base}: {} sites added, {} removed, {} recipes changed, {} prefixes changed ({} -> {} sites)",
+        d.added_sites.len(),
+        d.removed_sites.len(),
+        d.changed_recipes.len(),
+        d.changed_prefixes.len(),
+        old.sites.len(),
+        new.sites.len()
+    );
+    Ok(())
+}
+
+/// table.json, which `build` writes: unlike the other files, a missing one
+/// is an error.
+fn read_table(paths: &Paths) -> Result<PublisherTable, String> {
+    let path = paths.table();
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }

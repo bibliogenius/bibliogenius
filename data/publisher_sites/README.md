@@ -33,15 +33,31 @@ cargo build --release --bin publisher_sites
 ./target/release/publisher_sites check           # replay the table's recipes (minutes)
 ./target/release/publisher_sites probe --new     # sites never probed (resumable)
 ./target/release/publisher_sites build           # -> table.json
+./target/release/publisher_sites lint            # recipes a probe got wrong (offline)
+./target/release/publisher_sites diff            # what changed since HEAD (--base REF|FILE)
 ./target/release/publisher_sites report          # -> target/publisher_sites/index.html
 ```
+
+`lint` reads the table and `probe.json` only, and fails on an error: a
+product template with one book's number frozen in it (`/2043-{slug}-{isbn}.html`,
+five digits or more, or three glued to a placeholder), or a witness titled
+after the site (its page's title was not read). Its warnings are templates
+with a fixed section of three words or more, which serve that section only,
+site maps cut at the 2 MB page cap when probed (the books listed after the
+cut are out of reach), and sites without a conclusive success for 120 days. Fix an error with a
+correction in `overrides.json`, or probe the site again. `diff` lists the
+sites added and removed, the recipes and the prefixes that changed: read it
+before committing a new table rather than the JSON diff.
 
 `probe` options: `--site a.fr,b.fr` (only these), `--status blocked` (only
 sites whose last probe ended so), `--limit N`, `--workers N` (sites probed at
 once, default 12), `--pause SECS` (between two requests to one host, default
 1.5, more when the site's Crawl-delay asks). `probe.json` is saved after every
 site, so a run can be stopped and resumed with `--new`. A whole run takes a
-few hours: about 100 requests per site.
+few hours: about 100 requests per site. A probe that finds a site blocked or
+offline keeps the site's last successful probe: a bad day says nothing about
+its recipes, and the checks take a site that stays out of reach out of the
+table.
 
 ## How the table is checked
 
@@ -145,6 +161,35 @@ French-language groups (978-2 and 979-10; a book of another group gives no
 prefix). On a prefix that already has publishers, it is added after them.
 The better fix is to complete Wikidata, then drop the entry.
 
+A hand-written product template can also use `{isbn_hyphens}`, the ISBN with
+its hyphens (`978-2-8180-5511-3`), for a site that wants it so (P.O.L). The
+probe never finds such a template itself, and it only works for the books of
+the French-language groups.
+
 When several publishers share a prefix, `sites_for` gives their sites, the
 one whose name matches the book's publisher field first, three at most, for
 the caller to try in turn.
+
+## What the first full probe taught (November 2026)
+
+- A site reported `offline` is rarely a passing failure: probed again a day
+  later, 104 of 112 were still unreachable. The usual causes are a domain
+  the publisher gave up, or a certificate that is expired or does not cover
+  the host (Dupuis, Viviane Hamy, Philippe Rey, Milady). Look for the
+  publisher's current address and set it as the site's `home` correction.
+- Try the other spelling of the host before giving up: `glenat.com` serves an
+  expired certificate, `www.glenat.com` works.
+- Wikidata often gives a group's corporate site instead of the catalogue
+  (`hachette.com`, `editis.com`, `milanpresse.com`, `cnrs.fr`): no witness is
+  found there. Same fix, a `home` correction.
+- Before adding a publisher to `publishers`, look for it in `wikidata.json`
+  under another name: Ouest-France is there as "Édilarge", Quae as
+  "Éditions Quæ".
+- The ISBN ranges in `build.rs` were written from the agency's published
+  ranges and compared with Wikidata: 1858 prefixes agree, 7 differ, all of
+  them typing mistakes in Wikidata. They were not compared with the agency's
+  range file itself.
+- A recipe with a fixed section in its template (`/glenat-bd/{slug}-{isbn}/`)
+  only serves that section's books.
+- About ten sites split their site map in several files; the site map recipe
+  knows one file only.

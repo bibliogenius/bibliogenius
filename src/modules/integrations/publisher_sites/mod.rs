@@ -16,6 +16,7 @@
 pub mod build;
 pub mod check;
 pub mod fetch;
+pub mod lint;
 pub mod page;
 pub mod probe;
 pub mod robots;

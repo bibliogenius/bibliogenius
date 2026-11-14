@@ -279,6 +279,25 @@ fn most_frequent(items: Vec<String>) -> Option<String> {
     counts.into_iter().find(|(_, n)| *n == max).map(|(i, _)| i)
 }
 
+/// Whether a title candidate is the site's name ("Honoré Champion" on
+/// honorechampion.com, "Éditions Verdier" on editions-verdier.fr): an
+/// address built on the site's name matches it better than the book's title.
+pub fn names_the_site(words: &[&str], url: &Url) -> bool {
+    const HOUSE: [&str; 3] = ["les", "editions", "edition"];
+    let squeeze = |words: &[&str]| -> String {
+        words
+            .iter()
+            .skip_while(|w| HOUSE.contains(w))
+            .copied()
+            .collect()
+    };
+    let host = bare_host(url);
+    let label = host.split('.').next().unwrap_or("");
+    let label_words: Vec<&str> = label.split('-').collect();
+    let name = squeeze(words);
+    !name.is_empty() && name == squeeze(&label_words)
+}
+
 /// The page's title as the book's title: among every `<h1>`, `og:title`,
 /// `<title>` and their parts split on ` - `, ` | `, ` – `, `, `, the one whose
 /// words best match the words of the page's URL, which almost always derives
@@ -318,7 +337,7 @@ pub fn page_title(doc: &Html, url: &Url) -> Option<String> {
         seen.push(c);
         let folded = fold(c);
         let words: Vec<&str> = folded.split(' ').filter(|w| !w.is_empty()).collect();
-        if words.is_empty() {
+        if words.is_empty() || names_the_site(&words, url) {
             continue;
         }
         let hit = words
@@ -941,6 +960,24 @@ mod tests {
         let page = url("https://www.example-editions.fr/livre/le-cerveau");
         assert_eq!(book_facts(html, &page).unwrap().isbn, "9782738112345");
         assert!(book_facts("<h1>Accueil</h1>", &page).is_none());
+    }
+
+    #[test]
+    fn page_title_is_not_the_site_name() {
+        let html = r#"<head><title>Honoré Champion</title>
+            <meta property="og:title" content="UN LIVRE DE FAMILLE - JEAN BOUTIER"></head>
+            <body><h1>UN LIVRE DE FAMILLE</h1></body>"#;
+        let doc = Html::parse_document(html);
+        let page = url(
+            "https://www.honorechampion.com/fr/editions-honore-champion/13531-book-08536565-9782745365651.html",
+        );
+        assert_eq!(
+            page_title(&doc, &page).as_deref(),
+            Some("UN LIVRE DE FAMILLE")
+        );
+        let verdier = url("https://editions-verdier.fr/livre/editions-verdier/");
+        assert!(names_the_site(&["editions", "verdier"], &verdier));
+        assert!(!names_the_site(&["le", "grand", "voyage"], &verdier));
     }
 
     #[test]

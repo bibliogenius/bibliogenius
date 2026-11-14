@@ -126,6 +126,78 @@ pub fn strip_isbn_separators(s: &str) -> String {
         .collect()
 }
 
+/// Registrant ranges of the French-language ISBN groups, from the ISBN
+/// agency's range table: (first seven digits after the group, registrant
+/// length). A range runs up to the next one.
+const RANGES_978_2: &[(u32, usize)] = &[
+    (0, 2),
+    (2_000_000, 3),
+    (3_500_000, 5),
+    (4_000_000, 3),
+    (4_870_000, 6),
+    (4_950_000, 3),
+    (4_960_000, 4),
+    (4_967_000, 5),
+    (4_970_000, 3),
+    (5_280_000, 4),
+    (5_300_000, 3),
+    (7_000_000, 4),
+    (8_400_000, 5),
+    (9_000_000, 6),
+    (9_198_000, 5),
+    (9_198_100, 6),
+    (9_199_430, 7),
+    (9_199_690, 6),
+    (9_500_000, 7),
+];
+const RANGES_979_10: &[(u32, usize)] = &[
+    (0, 2),
+    (2_000_000, 3),
+    (7_000_000, 4),
+    (9_000_000, 5),
+    (9_760_000, 6),
+];
+
+/// Where an ISBN-13 of a French-language group splits: the end of its
+/// group and of its publisher prefix, or `None` for another group (their
+/// ranges are not known here) or for anything but thirteen digits.
+fn isbn_parts(isbn: &str) -> Option<(usize, usize)> {
+    let (group, ranges) = if isbn.starts_with("9782") {
+        (4, RANGES_978_2)
+    } else if isbn.starts_with("97910") {
+        (5, RANGES_979_10)
+    } else {
+        return None;
+    };
+    if isbn.len() != 13 || !isbn.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let rest: u32 = isbn[group..group + 7].parse().ok()?;
+    let (_, len) = ranges.iter().rev().find(|(start, _)| *start <= rest)?;
+    Some((group, group + len))
+}
+
+/// The publisher prefix of an ISBN-13 (`9782070360024` -> `978207`), or
+/// `None` outside the French-language groups.
+pub fn publisher_prefix(isbn: &str) -> Option<String> {
+    let (_, publisher) = isbn_parts(isbn)?;
+    Some(isbn[..publisher].to_owned())
+}
+
+/// An ISBN-13 with its hyphens (`9782818055113` -> `978-2-8180-5511-3`), or
+/// `None` outside the French-language groups.
+pub fn hyphenated_isbn(isbn: &str) -> Option<String> {
+    let (group, publisher) = isbn_parts(isbn)?;
+    Some(format!(
+        "{}-{}-{}-{}-{}",
+        &isbn[..3],
+        &isbn[3..group],
+        &isbn[group..publisher],
+        &isbn[publisher..12],
+        &isbn[12..]
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +282,39 @@ mod tests {
             strip_isbn_separators("ISBN : 978-2-07\u{2011}012345 6"),
             "ISBN:9782070123456"
         );
+    }
+
+    #[test]
+    fn reads_a_publisher_prefix_from_an_isbn() {
+        assert_eq!(publisher_prefix("9782070360024").as_deref(), Some("978207"));
+        assert_eq!(
+            publisher_prefix("9782864329404").as_deref(),
+            Some("978286432")
+        );
+        assert_eq!(
+            publisher_prefix("9782919421589").as_deref(),
+            Some("9782919421")
+        );
+        assert_eq!(
+            publisher_prefix("9791032900123").as_deref(),
+            Some("97910329")
+        );
+        assert_eq!(
+            publisher_prefix("9791097160012").as_deref(),
+            Some("9791097160")
+        );
+        // Another language group, or not an ISBN-13.
+        assert_eq!(publisher_prefix("9780141439518"), None);
+        assert_eq!(publisher_prefix("978207036002X"), None);
+        assert_eq!(publisher_prefix("978207"), None);
+        assert_eq!(
+            hyphenated_isbn("9782818055113").as_deref(),
+            Some("978-2-8180-5511-3")
+        );
+        assert_eq!(
+            hyphenated_isbn("9791032900123").as_deref(),
+            Some("979-10-329-0012-3")
+        );
+        assert_eq!(hyphenated_isbn("9780141439518"), None);
     }
 }
