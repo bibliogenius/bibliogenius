@@ -701,6 +701,56 @@ pub fn sitemap_locs(xml: &str, site_url: &Url) -> (bool, Vec<Url>) {
     (is_index, out)
 }
 
+/// Share of a title's words, in fifths, an address must carry to be taken
+/// for the book's page in a site map.
+const SITEMAP_TITLE_FIFTHS: usize = 4;
+
+/// Among the `pages` a site map lists, those that may be the book's, best
+/// first: with the ISBN in their path, then named after the title (at least
+/// four fifths of its words, apostrophes read both ways: `l-hiver` and
+/// `lhiver`), the address with the fewest other words first. Equal pages
+/// keep the map's order.
+pub fn sitemap_book_links(pages: &[Url], isbn: &str, title: &str) -> Vec<Url> {
+    let isbn10 = to_isbn10(isbn);
+    let apostrophe = ['\'', '\u{2019}'];
+    let spellings: Vec<Vec<String>> = [
+        title_words(&title.replace(apostrophe, " ")),
+        title_words(&title.replace(apostrophe, "")),
+    ]
+    .into_iter()
+    .filter(|words| !words.is_empty())
+    .collect();
+    // (0, 0) for the ISBN, else (1, words of the address not in the title).
+    let mut ranked: Vec<((usize, usize), &Url)> = Vec::new();
+    for url in pages {
+        let path = url.path();
+        if !isbn.is_empty()
+            && (path.contains(isbn) || isbn10.as_deref().is_some_and(|i| path.contains(i)))
+        {
+            ranked.push(((0, 0), url));
+            continue;
+        }
+        if spellings.is_empty() {
+            continue;
+        }
+        let folded = fold(&decoded_path(url));
+        let hay: Vec<&str> = folded.split(' ').collect();
+        let others = spellings
+            .iter()
+            .filter_map(|words| {
+                let found = words.iter().filter(|w| hay.contains(&w.as_str())).count();
+                (found * 5 >= words.len() * SITEMAP_TITLE_FIFTHS)
+                    .then(|| hay.len().saturating_sub(found))
+            })
+            .min();
+        if let Some(others) = others {
+            ranked.push(((1, others), url));
+        }
+    }
+    ranked.sort_by_key(|(rank, _)| *rank);
+    ranked.into_iter().map(|(_, u)| u.clone()).collect()
+}
+
 /// Links to the page listing the publisher's books, the most telling name
 /// first (see [`CATALOGUE_WORDS`]), then the shortest address. Menus included:
 /// that is where such a link sits.
@@ -1094,6 +1144,31 @@ mod tests {
         );
         let index = "<sitemapindex><sitemap><loc>https://editions.example/product-sitemap.xml</loc></sitemap></sitemapindex>";
         assert!(sitemap_locs(index, &url("https://editions.example/")).0);
+    }
+
+    #[test]
+    fn sitemap_book_links_rank_the_isbn_then_the_closest_title() {
+        let pages: Vec<Url> = [
+            "https://e.example/auteur/l-hiver-des-loups-et-autres-recits",
+            "https://e.example/boutique/romans/lhiver-des-loups/",
+            "https://e.example/livre/9782000000028",
+            "https://e.example/boutique/essais/le-printemps-des-loups/",
+        ]
+        .iter()
+        .map(|u| url(u))
+        .collect();
+        let links = sitemap_book_links(&pages, "9782000000028", "L\u{2019}Hiver des loups");
+        let paths: Vec<&str> = links.iter().map(Url::path).collect();
+        assert_eq!(
+            paths,
+            [
+                "/livre/9782000000028",
+                "/boutique/romans/lhiver-des-loups/",
+                "/auteur/l-hiver-des-loups-et-autres-recits",
+            ]
+        );
+        // A title without a word worth comparing is found by its ISBN only.
+        assert!(sitemap_book_links(&pages, "9782000000035", "Ça").is_empty());
     }
 
     #[test]

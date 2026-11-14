@@ -43,6 +43,22 @@ pub struct SearchRecipe {
     pub by_isbn: bool,
 }
 
+/// Whether site map recipes ([`SitemapRecipe`]) are in use. Set to `false`,
+/// the probe looks for none and `build` ships none, whatever `probe.json`
+/// holds.
+pub const SITEMAP_RECIPES: bool = true;
+
+/// How to find a book's page in the site map that lists the site's books:
+/// the address carrying the ISBN, else the one named after the title (see
+/// `page::sitemap_book_links`). The ISBN the page shows decides, as for the
+/// other recipes. It costs the download of the map, to be kept for the next
+/// books of the same site: the recipe of last resort.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SitemapRecipe {
+    /// Address of the site map (not of an index of site maps).
+    pub url: String,
+}
+
 /// What the app needs to look for a book on one site.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SiteRecipes {
@@ -52,6 +68,8 @@ pub struct SiteRecipes {
     pub product: Option<ProductRecipe>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search: Option<SearchRecipe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sitemap: Option<SitemapRecipe>,
 }
 
 /// A publisher an ISBN prefix belongs to.
@@ -83,33 +101,53 @@ pub struct PublisherTable {
     pub sites: BTreeMap<String, SiteRecipes>,
 }
 
+/// How many sites [`PublisherTable::sites_for`] gives for one book.
+pub const MAX_SITES_PER_BOOK: usize = 3;
+
 impl PublisherTable {
-    /// The site to look on for a book: the longest prefix of `isbn13`, and
-    /// among its publishers the one whose name matches the book's
-    /// `publisher` field, else the prefix's first.
+    /// The site to look on first for a book: see [`Self::sites_for`].
     pub fn site_for(&self, isbn13: &str, publisher: Option<&str>) -> Option<(&str, &SiteRecipes)> {
-        let entry = self
+        self.sites_for(isbn13, publisher).into_iter().next()
+    }
+
+    /// The sites to look on for a book, best first, [`MAX_SITES_PER_BOOK`]
+    /// at most: those of the longest prefix of `isbn13`, starting with the
+    /// publisher whose name matches the book's `publisher` field, then in
+    /// the prefix's order. Several publishers can share a prefix, and the
+    /// book's publisher field is often missing or spelled another way.
+    pub fn sites_for(&self, isbn13: &str, publisher: Option<&str>) -> Vec<(&str, &SiteRecipes)> {
+        let Some(entry) = self
             .prefixes
             .iter()
             .filter(|e| isbn13.starts_with(&e.prefix))
-            .max_by_key(|e| e.prefix.len())?;
+            .max_by_key(|e| e.prefix.len())
+        else {
+            return Vec::new();
+        };
         let wanted = publisher.map(compact).filter(|p| !p.is_empty());
         // The exact name first, then the longest name that one contains
         // the other ("Gallimard Jeunesse" over "Gallimard").
-        let chosen = wanted
-            .and_then(|w| {
-                entry
-                    .publishers
-                    .iter()
-                    .map(|p| (compact(&p.name), p))
-                    .filter(|(name, _)| !name.is_empty() && (name.contains(&w) || w.contains(name)))
-                    .max_by_key(|(name, _)| (*name == w, name.len()))
-                    .map(|(_, p)| p)
-            })
-            .or_else(|| entry.publishers.first())?;
-        self.sites
-            .get_key_value(&chosen.site)
-            .map(|(k, v)| (k.as_str(), v))
+        let named = wanted.and_then(|w| {
+            entry
+                .publishers
+                .iter()
+                .map(|p| (compact(&p.name), p))
+                .filter(|(name, _)| !name.is_empty() && (name.contains(&w) || w.contains(name)))
+                .max_by_key(|(name, _)| (*name == w, name.len()))
+                .map(|(_, p)| p)
+        });
+        let mut out: Vec<(&str, &SiteRecipes)> = Vec::new();
+        for p in named.into_iter().chain(&entry.publishers) {
+            if out.len() == MAX_SITES_PER_BOOK {
+                break;
+            }
+            if let Some((key, site)) = self.sites.get_key_value(&p.site)
+                && !out.iter().any(|(k, _)| *k == key.as_str())
+            {
+                out.push((key.as_str(), site));
+            }
+        }
+        out
     }
 }
 
@@ -176,6 +214,16 @@ pub struct SearchCheck {
     pub note: Option<String>,
 }
 
+/// A site map recipe and how it did on the witnesses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SitemapCheck {
+    pub recipe: SitemapRecipe,
+    /// Witnesses whose page the map leads to.
+    pub found: usize,
+    /// Witnesses it was tried on.
+    pub tried: usize,
+}
+
 /// Everything the probe learnt about one site.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SiteProbe {
@@ -198,6 +246,9 @@ pub struct SiteProbe {
     /// The site map listing the witnesses' pages, hence the site's books.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub book_sitemap: Option<String>,
+    /// That map as a recipe, when it leads to enough of the witnesses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sitemap: Option<SitemapCheck>,
 }
 
 /// Outcome of replaying a site's recipes on its witnesses.
@@ -218,12 +269,13 @@ pub enum CheckStatus {
     Offline,
 }
 
-/// Which of a site's two recipes.
+/// Which of a site's recipes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipeKind {
     Product,
     Search,
+    Sitemap,
 }
 
 /// The last check of one site's recipes.
@@ -291,6 +343,17 @@ pub struct Overrides {
     /// Site key (host without `www.`) -> corrections for that site.
     #[serde(default)]
     pub sites: BTreeMap<String, SiteOverride>,
+    /// Publishers Wikidata gives no ISBN prefix for. Their prefixes are read
+    /// from the books the probe finds on their site.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publishers: Vec<ExtraPublisher>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtraPublisher {
+    pub name: String,
+    /// The publisher's home page.
+    pub home: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,6 +393,7 @@ mod tests {
             home: home.into(),
             product: None,
             search: None,
+            sitemap: None,
         }
     }
 
@@ -383,6 +447,19 @@ mod tests {
         assert_eq!(pick("Gallimard Jeunesse"), "gallimard-jeunesse.fr");
         assert_eq!(pick("GALLIMARD"), "gallimard.fr");
         assert_eq!(pick("Folio"), "gallimard.fr");
+        // Every site of the prefix, the named one first, each once.
+        let all = |p: Option<&str>| -> Vec<&str> {
+            t.sites_for("9782070000000", p)
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect()
+        };
+        assert_eq!(
+            all(Some("Gallimard Jeunesse")),
+            ["gallimard-jeunesse.fr", "gallimard.fr"]
+        );
+        assert_eq!(all(None), ["gallimard.fr", "gallimard-jeunesse.fr"]);
+        assert!(t.sites_for("9791000000000", None).is_empty());
     }
 
     #[test]

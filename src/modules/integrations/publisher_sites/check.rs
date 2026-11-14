@@ -13,11 +13,13 @@
 use url::Url;
 
 use super::fetch::{FetchError, Page, SiteFetcher};
-use super::page::{page_matches, result_links};
-use super::probe::{CONTROL_QUERY, product_urls, redirected_to_book, run_search};
+use super::page::{page_matches, result_links, sitemap_book_links, sitemap_locs};
+use super::probe::{
+    CONTROL_QUERY, MAX_SITEMAP_CANDIDATES, product_urls, redirected_to_book, run_search,
+};
 use super::table::{
     CheckStatus, ProbeStatus, ProductRecipe, RecipeCheck, RecipeKind, SearchRecipe, SiteOverride,
-    SiteProbe, SiteRecipes, Witness,
+    SiteProbe, SiteRecipes, SitemapRecipe, Witness,
 };
 
 /// Witnesses each recipe is judged on, at most.
@@ -37,6 +39,7 @@ pub struct CheckResult {
     pub live_witnesses: usize,
     pub product_works: Option<bool>,
     pub search_works: Option<bool>,
+    pub sitemap_works: Option<bool>,
 }
 
 impl CheckResult {
@@ -45,6 +48,7 @@ impl CheckResult {
         [
             (RecipeKind::Product, self.product_works),
             (RecipeKind::Search, self.search_works),
+            (RecipeKind::Sitemap, self.sitemap_works),
         ]
         .into_iter()
         .filter(|(_, works)| *works == Some(false))
@@ -58,6 +62,8 @@ impl CheckResult {
         self.failed().into_iter().any(|kind| match kind {
             RecipeKind::Product => correction.is_none_or(|o| o.product.is_none()),
             RecipeKind::Search => correction.is_none_or(|o| o.search.is_none()),
+            // Never written by hand.
+            RecipeKind::Sitemap => true,
         })
     }
 
@@ -66,6 +72,7 @@ impl CheckResult {
         self.live_witnesses > 0
             && self.product_works != Some(false)
             && self.search_works != Some(false)
+            && self.sitemap_works != Some(false)
     }
 }
 
@@ -155,6 +162,41 @@ async fn search_reaches(
     Ok(false)
 }
 
+/// The pages the recipe's site map lists, `None` when it cannot be read (a
+/// map that is gone leads nowhere).
+async fn sitemap_pages(
+    fetcher: &dyn SiteFetcher,
+    recipe: &SitemapRecipe,
+) -> Result<Option<Vec<Url>>, FetchError> {
+    let Ok(url) = Url::parse(&recipe.url) else {
+        return Ok(None);
+    };
+    match fetcher.get(&url).await {
+        Ok(map) => Ok(Some(sitemap_locs(&map.html, &url).1)),
+        Err(e) if site_down(&e) => Err(e),
+        Err(_) => Ok(None),
+    }
+}
+
+async fn sitemap_reaches(
+    fetcher: &dyn SiteFetcher,
+    pages: &[Url],
+    w: &Witness,
+) -> Result<bool, FetchError> {
+    for link in sitemap_book_links(pages, &w.isbn, &w.title)
+        .into_iter()
+        .take(MAX_SITEMAP_CANDIDATES)
+    {
+        match fetcher.get(&link).await {
+            Ok(p) if page_matches(&p.html, &w.isbn, "").is_some() => return Ok(true),
+            Ok(_) => {}
+            Err(e) if site_down(&e) => return Err(e),
+            Err(_) => {}
+        }
+    }
+    Ok(false)
+}
+
 /// Try `recipes` on the live ones among `witnesses`. An `Err` means the site
 /// is blocked or unreachable, which says nothing about the recipes.
 pub async fn check_recipes(
@@ -166,18 +208,28 @@ pub async fn check_recipes(
         live_witnesses: 0,
         product_works: recipes.product.as_ref().map(|_| false),
         search_works: recipes.search.as_ref().map(|_| false),
+        sitemap_works: recipes.sitemap.as_ref().map(|_| false),
+    };
+    let mapped = match &recipes.sitemap {
+        Some(recipe) => sitemap_pages(fetcher, recipe).await?,
+        None => None,
     };
     let control = match &recipes.search {
         Some(recipe) => control_page(fetcher, recipe).await?,
         None => None,
     };
-    let (mut product_tries, mut search_tries) = (0, 0);
+    let (mut product_tries, mut search_tries, mut sitemap_tries) = (0, 0, 0);
     for w in witnesses {
         let product_pending =
             result.product_works == Some(false) && product_tries < MAX_TRIES_PER_RECIPE;
         let search_pending =
             result.search_works == Some(false) && search_tries < MAX_TRIES_PER_RECIPE;
-        if (!product_pending && !search_pending) || result.live_witnesses >= MAX_LIVE_WITNESSES {
+        let sitemap_pending = mapped.is_some()
+            && result.sitemap_works == Some(false)
+            && sitemap_tries < MAX_TRIES_PER_RECIPE;
+        if (!product_pending && !search_pending && !sitemap_pending)
+            || result.live_witnesses >= MAX_LIVE_WITNESSES
+        {
             break;
         }
         if !is_live(fetcher, w).await? {
@@ -195,6 +247,10 @@ pub async fn check_recipes(
         if let (true, true, Some(recipe)) = (search_pending, judged, &recipes.search) {
             search_tries += 1;
             result.search_works = Some(search_reaches(fetcher, recipe, w).await?);
+        }
+        if let (true, Some(pages)) = (sitemap_pending, &mapped) {
+            sitemap_tries += 1;
+            result.sitemap_works = Some(sitemap_reaches(fetcher, pages, w).await?);
         }
     }
     Ok(result)
@@ -298,7 +354,48 @@ mod tests {
             home: "https://editions.example/".into(),
             product,
             search,
+            sitemap: None,
         }
+    }
+
+    fn with_sitemap() -> SiteRecipes {
+        SiteRecipes {
+            sitemap: Some(SitemapRecipe {
+                url: "https://editions.example/sitemap.xml".into(),
+            }),
+            ..recipes(None, None)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_site_map_recipe_finds_the_page_named_after_the_title() {
+        let book = "https://editions.example/livres/recits/le-grand-voyage/";
+        let site = FakeSite::default()
+            .page(
+                "https://editions.example/sitemap.xml",
+                &format!(
+                    "<urlset><url><loc>https://editions.example/contact</loc></url>\
+                     <url><loc>{book}</loc></url></urlset>"
+                ),
+            )
+            .page(book, &book_page(ISBN, "Le Grand Voyage"));
+        let r = check_recipes(&site, &with_sitemap(), &[witness(Some(book))])
+            .await
+            .unwrap();
+        assert_eq!(r.sitemap_works, Some(true));
+        assert!(r.all_work());
+    }
+
+    #[tokio::test]
+    async fn a_site_map_that_is_gone_breaks_its_recipe() {
+        let book = "https://editions.example/livres/recits/le-grand-voyage/";
+        let site = FakeSite::default().page(book, &book_page(ISBN, "Le Grand Voyage"));
+        let r = check_recipes(&site, &with_sitemap(), &[witness(Some(book))])
+            .await
+            .unwrap();
+        assert_eq!(r.sitemap_works, Some(false));
+        assert_eq!(r.failed(), [RecipeKind::Sitemap]);
+        assert!(r.needs_reprobe(None));
     }
 
     #[tokio::test]
@@ -463,6 +560,7 @@ mod tests {
             live_witnesses: 1,
             product_works: Some(false),
             search_works: Some(true),
+            sitemap_works: None,
         };
         assert!(result.needs_reprobe(None));
         let by_hand = SiteOverride {
@@ -569,6 +667,7 @@ mod tests {
             search: None,
             tried: Vec::new(),
             book_sitemap: None,
+            sitemap: None,
         };
         assert_eq!(
             after_reprobe(&probe(ProbeStatus::Blocked)),

@@ -8,7 +8,8 @@ use url::Url;
 use super::page::bare_host;
 use super::table::{
     MAX_UNREACHABLE_CHECKS, Overrides, PrefixEntry, PrefixPublisher, ProbeReport, ProbeStatus,
-    PublisherTable, RecipeKind, SiteOverride, SiteRecipes, TABLE_FORMAT, WikidataPublisher,
+    PublisherTable, RecipeKind, SITEMAP_RECIPES, SiteOverride, SiteRecipes, TABLE_FORMAT,
+    WikidataPublisher,
 };
 
 /// A site to probe, and who publishes there.
@@ -45,6 +46,57 @@ pub fn normalize_prefix(raw: &str) -> Option<String> {
     (MIN_DIGITS..=12).contains(&prefix.len()).then_some(prefix)
 }
 
+/// Registrant ranges of the French-language ISBN groups, from the ISBN
+/// agency's range table: (first seven digits after the group, registrant
+/// length). A range runs up to the next one.
+const RANGES_978_2: &[(u32, usize)] = &[
+    (0, 2),
+    (2_000_000, 3),
+    (3_500_000, 5),
+    (4_000_000, 3),
+    (4_870_000, 6),
+    (4_950_000, 3),
+    (4_960_000, 4),
+    (4_967_000, 5),
+    (4_970_000, 3),
+    (5_280_000, 4),
+    (5_300_000, 3),
+    (7_000_000, 4),
+    (8_400_000, 5),
+    (9_000_000, 6),
+    (9_198_000, 5),
+    (9_198_100, 6),
+    (9_199_430, 7),
+    (9_199_690, 6),
+    (9_500_000, 7),
+];
+const RANGES_979_10: &[(u32, usize)] = &[
+    (0, 2),
+    (2_000_000, 3),
+    (7_000_000, 4),
+    (9_000_000, 5),
+    (9_760_000, 6),
+];
+
+/// The publisher prefix of an ISBN-13 (`9782070360024` -> `978207`), or
+/// `None` outside the French-language groups, whose ranges are the only ones
+/// known here.
+pub fn publisher_prefix(isbn: &str) -> Option<String> {
+    let (group, ranges) = if isbn.starts_with("9782") {
+        (4, RANGES_978_2)
+    } else if isbn.starts_with("97910") {
+        (5, RANGES_979_10)
+    } else {
+        return None;
+    };
+    if isbn.len() != 13 || !isbn.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let rest: u32 = isbn[group..group + 7].parse().ok()?;
+    let (_, len) = ranges.iter().rev().find(|(start, _)| *start <= rest)?;
+    Some(isbn[..group + len].to_owned())
+}
+
 /// Every prefix -> (publisher, site key) pair, Wikidata first, the
 /// corrections replacing what Wikidata says for their exact prefix.
 fn prefix_publishers(
@@ -78,6 +130,34 @@ fn prefix_publishers(
     map
 }
 
+/// Prefix -> (publisher, site key) for the publishers Wikidata has no
+/// prefix for: the prefixes of the books the probe found on their site.
+fn read_prefixes(
+    probe: &ProbeReport,
+    overrides: &Overrides,
+) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut map: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for extra in &overrides.publishers {
+        let Some(key) = site_key(&extra.home) else {
+            continue;
+        };
+        let Some(probed) = probe.sites.get(&key) else {
+            continue;
+        };
+        for prefix in probed
+            .witnesses
+            .iter()
+            .filter_map(|w| publisher_prefix(&w.isbn))
+        {
+            let entry = map.entry(prefix).or_default();
+            if !entry.iter().any(|(_, k)| *k == key) {
+                entry.push((extra.name.clone(), key.clone()));
+            }
+        }
+    }
+    map
+}
+
 /// The sites to probe, keyed like the table.
 pub fn site_sources(
     wikidata: &[WikidataPublisher],
@@ -98,6 +178,20 @@ pub fn site_sources(
             if !source.prefixes.contains(&prefix) {
                 source.prefixes.push(prefix.clone());
             }
+        }
+    }
+    for extra in &overrides.publishers {
+        let Some(key) = site_key(&extra.home) else {
+            continue;
+        };
+        let source = sources.entry(key).or_insert_with(|| SiteSource {
+            home: extra.home.clone(),
+            publishers: Vec::new(),
+            prefixes: Vec::new(),
+            excluded: false,
+        });
+        if !source.publishers.contains(&extra.name) {
+            source.publishers.push(extra.name.clone());
         }
     }
     for (key, o) in &overrides.sites {
@@ -148,6 +242,8 @@ fn correction_state(
             correction.search.as_ref()?;
             check.and_then(|c| c.tested_search.as_ref()) == correction.search.as_ref()
         }
+        // Never written by hand.
+        RecipeKind::Sitemap => return None,
     };
     Some(if !same_as_tested {
         CorrectionState::Unverified
@@ -253,20 +349,30 @@ fn assemble(
                     .and_then(|p| p.search.as_ref())
                     .map(|c| c.recipe.clone())
             });
-        if product.is_some() || search.is_some() {
+        let sitemap = probed
+            .and_then(|p| p.sitemap.as_ref())
+            .filter(|_| SITEMAP_RECIPES)
+            .map(|c| c.recipe.clone());
+        if product.is_some() || search.is_some() || sitemap.is_some() {
             sites.insert(
                 key,
                 SiteRecipes {
                     home: source.home,
                     product,
                     search,
+                    sitemap,
                 },
             );
         }
     }
 
+    let mut by_prefix = prefix_publishers(wikidata, overrides);
+    let mut read = read_prefixes(probe, overrides);
+    for prefix in read.keys() {
+        by_prefix.entry(prefix.clone()).or_default();
+    }
     let mut prefixes: Vec<PrefixEntry> = Vec::new();
-    for (prefix, publishers) in prefix_publishers(wikidata, overrides) {
+    for (prefix, publishers) in by_prefix {
         let mut usable: Vec<PrefixPublisher> = publishers
             .into_iter()
             .filter(|(_, _, key)| sites.contains_key(key))
@@ -282,6 +388,13 @@ fn assemble(
                 p.name.clone(),
             )
         });
+        // A publisher known only by the books on its site comes after those
+        // Wikidata or a correction names for the prefix.
+        for (name, site) in read.remove(&prefix).unwrap_or_default() {
+            if sites.contains_key(&site) && !usable.iter().any(|p| p.site == site) {
+                usable.push(PrefixPublisher { name, site });
+            }
+        }
         prefixes.push(PrefixEntry {
             prefix,
             publishers: usable,
@@ -347,6 +460,7 @@ mod tests {
             search: None,
             tried: Vec::new(),
             book_sitemap: None,
+            sitemap: None,
         }
     }
 
@@ -476,6 +590,7 @@ mod tests {
                     },
                 ),
             ]),
+            ..Overrides::default()
         };
         // Not checked yet: the hand-written Livre de Poche recipe stays out.
         let unchecked = build_table(&wikidata, &probe, &overrides, "2026-11-13");
@@ -672,5 +787,93 @@ mod tests {
             "the imprint is known, without a usable site"
         );
         assert!(table.site_for("9782020000000", None).is_some());
+    }
+
+    #[test]
+    fn reads_a_publisher_prefix_from_an_isbn() {
+        assert_eq!(publisher_prefix("9782070360024").as_deref(), Some("978207"));
+        assert_eq!(
+            publisher_prefix("9782864329404").as_deref(),
+            Some("978286432")
+        );
+        assert_eq!(
+            publisher_prefix("9782919421589").as_deref(),
+            Some("9782919421")
+        );
+        assert_eq!(
+            publisher_prefix("9791032900123").as_deref(),
+            Some("97910329")
+        );
+        assert_eq!(
+            publisher_prefix("9791097160012").as_deref(),
+            Some("9791097160")
+        );
+        // Another language group, or not an ISBN-13.
+        assert_eq!(publisher_prefix("9780141439518"), None);
+        assert_eq!(publisher_prefix("978207036002X"), None);
+        assert_eq!(publisher_prefix("978207"), None);
+    }
+
+    #[test]
+    fn a_publisher_unknown_to_wikidata_gets_the_prefixes_of_its_books() {
+        use crate::modules::integrations::publisher_sites::table::{ExtraPublisher, Witness};
+        let witness = |isbn: &str| Witness {
+            isbn: isbn.into(),
+            title: "A Book".into(),
+            authors: String::new(),
+            url: None,
+        };
+        let wikidata = vec![publisher(
+            "Q1",
+            "Gallimard",
+            &["978207"],
+            Some("https://www.gallimard.fr/"),
+        )];
+        let mut verdier = ok_probe("https://verdier.example/", "https://verdier.example/{isbn}");
+        // Two books of its own, one of a publisher Wikidata already knows.
+        verdier.witnesses = vec![
+            witness("9782864329404"),
+            witness("9782864320012"),
+            witness("9782070360024"),
+        ];
+        let probe = ProbeReport {
+            checks: BTreeMap::new(),
+            sites: BTreeMap::from([
+                ("verdier.example".into(), verdier),
+                (
+                    "gallimard.fr".into(),
+                    ok_probe(
+                        "https://www.gallimard.fr/",
+                        "https://www.gallimard.fr/{isbn}",
+                    ),
+                ),
+            ]),
+        };
+        let overrides = Overrides {
+            publishers: vec![ExtraPublisher {
+                name: "Verdier".into(),
+                home: "https://verdier.example/".into(),
+            }],
+            ..Overrides::default()
+        };
+        assert!(site_sources(&wikidata, &overrides).contains_key("verdier.example"));
+        let table = build_table(&wikidata, &probe, &overrides, "d");
+        let owner = |prefix: &str| {
+            table
+                .prefixes
+                .iter()
+                .find(|e| e.prefix == prefix)
+                .map(|e| e.publishers[0].site.clone())
+        };
+        assert_eq!(owner("978286432").as_deref(), Some("verdier.example"));
+        assert_eq!(owner("978207").as_deref(), Some("gallimard.fr"));
+        assert_eq!(table.prefixes.len(), 2);
+        // The Gallimard book seen at Verdier adds its site after Gallimard's.
+        let shared: Vec<&str> = table.prefixes[0]
+            .publishers
+            .iter()
+            .map(|p| p.site.as_str())
+            .collect();
+        assert_eq!(shared, ["gallimard.fr", "verdier.example"]);
     }
 }

@@ -46,7 +46,9 @@ few hours: about 100 requests per site.
 ## How the table is checked
 
 `check` replays each recipe of `table.json` on the site's witnesses, the way
-the app will use it: a few requests per site instead of a hundred.
+the app will use it: a few requests per site instead of a hundred. A site
+map recipe is replayed too: the map is read, and the pages it gives for a
+witness opened.
 
 - A witness counts only while it is still in the catalogue (its page still
   shows its ISBN). When none is left, new ones are taken from the home page.
@@ -98,6 +100,21 @@ The outcome of each check is kept in `probe.json` (`checks`). `probe
    kept), then usual addresses, WordPress's `/?s=` first. A nonsense query is run first: a page that
    already links the witnesses proves nothing, and an answer that never
    changes means results drawn by JavaScript.
+4. Site map: when the map that lists the witnesses leads back to at least
+   two of them, and two thirds, from their ISBN or title alone, it is a
+   recipe too (`sitemap` in `probe.json` and `table.json`). The book's page
+   is the address carrying the ISBN, else the one named after the title (four
+   fifths of its words) with the fewest other words; the two best are opened
+   and the ISBN on the page decides. It serves the sites that file each book
+   under a section (`/boutique/livres/<section>/<slug>/`) and forbid their
+   search in robots.txt. It costs the download of the map (up to 2 MB, to be
+   kept for the next books of the site), so it is the recipe to try last. A
+   map split in several files is only known by the file listing the
+   witnesses.
+
+   To switch site map recipes off, set `SITEMAP_RECIPES` to `false` in
+   `src/modules/integrations/publisher_sites/table.rs` and run `build`: the
+   probe looks for none and the table ships none.
 
 ## Improving the table
 
@@ -119,3 +136,15 @@ default is the shortest name, which may be wrong), a wrong site in Wikidata
 (Mercure de France points at Gallica), a search the probe could not find
 (results loaded by JavaScript from another address: look in the browser's
 network tab).
+
+A publisher Wikidata has no ISBN prefix for goes in the `publishers` list of
+`overrides.json` (name and home page, by hand: the report page does not edit
+it). Its site is probed like any other, and `build` gives it the publisher
+prefixes of the books the probe found there, read from the ISBN ranges of the
+French-language groups (978-2 and 979-10; a book of another group gives no
+prefix). On a prefix that already has publishers, it is added after them.
+The better fix is to complete Wikidata, then drop the entry.
+
+When several publishers share a prefix, `sites_for` gives their sites, the
+one whose name matches the book's publisher field first, three at most, for
+the caller to try in turn.

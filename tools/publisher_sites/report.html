@@ -138,9 +138,9 @@ const I18N = {
     st_search_down: "Search down", st_blocked: "Blocked", st_robots_forbid: "robots.txt forbids", st_offline: "Offline",
     st_excluded: "Excluded", st_unprobed: "Not probed yet",
     ck_works: "works", ck_reprobed: "probed again", ck_broken: "broken", ck_no_witness: "no witness", ck_blocked: "blocked", ck_offline: "offline",
-    kind_product: "product page", kind_search: "search",
+    kind_product: "product page", kind_search: "search", kind_sitemap: "site map",
     in_table: "in table", pending_badge: "pending correction", prefixes_label: "ISBN prefixes",
-    product: "Product page", search: "Search", corrected: " (corrected)", note: "Note", correction_note: "Correction note",
+    product: "Product page", search: "Search", sitemap: "Site map", sitemap_found: "leads to {n} of {m} witnesses", corrected: " (corrected)", note: "Note", correction_note: "Correction note",
     probed: "Probed", last_check: "Last check",
     rebuilt: "rebuilt {n} witness(es), {m} mismatch(es)", slug_ignored: "slug ignored by the server", apostrophe: "apostrophe {rule}",
     found: "found {isbn} by ISBN, {title} by title", unreachable: "unreachable {n} day(s) in a row", failed: "failed: {kinds}",
@@ -173,9 +173,9 @@ const I18N = {
     st_search_down: "Recherche en panne", st_blocked: "Bloqué", st_robots_forbid: "Interdit par robots.txt", st_offline: "Hors ligne",
     st_excluded: "Exclu", st_unprobed: "Pas encore sondé",
     ck_works: "marche", ck_reprobed: "sondé de nouveau", ck_broken: "cassée", ck_no_witness: "aucun témoin", ck_blocked: "bloqué", ck_offline: "hors ligne",
-    kind_product: "fiche", kind_search: "recherche",
+    kind_product: "fiche", kind_search: "recherche", kind_sitemap: "plan de site",
     in_table: "dans la table", pending_badge: "correction en attente", prefixes_label: "Préfixes ISBN",
-    product: "Fiche du livre", search: "Recherche", corrected: " (corrigée)", note: "Note", correction_note: "Note de correction",
+    product: "Fiche du livre", search: "Recherche", sitemap: "Plan de site", sitemap_found: "mène à {n} témoins sur {m}", corrected: " (corrigée)", note: "Note", correction_note: "Note de correction",
     probed: "Sondé le", last_check: "Dernière vérification",
     rebuilt: "{n} témoin(s) reconstruit(s), {m} écart(s)", slug_ignored: "slug ignoré par le serveur", apostrophe: "apostrophe : {rule}",
     found: "trouvé {isbn} par ISBN, {title} par titre", unreachable: "injoignable {n} jour(s) d'affilée", failed: "en échec : {kinds}",
@@ -227,7 +227,7 @@ const STATUS_CLASS = {
   ok: "s-ok", no_witness: "s-warn", no_recipe: "s-warn", js_results: "s-warn", search_down: "s-warn",
   blocked: "s-bad", robots_forbid: "s-bad", offline: "s-bad", excluded: "s-bad", unprobed: "s-warn",
 };
-const KIND = { product: "kind_product", search: "kind_search" };
+const KIND = { product: "kind_product", search: "kind_search", sitemap: "kind_sitemap" };
 
 // Pending corrections are tied to the overrides.json they were made on. Once
 // that file changes (they were exported and committed, or someone else's
@@ -317,6 +317,10 @@ function recipeBlock(site) {
     const check = p && p.search ? ` <span class="muted">· ${esc(t("found", { isbn: p.search.found_by_isbn, title: p.search.found_by_title }))}</span>` : "";
     const post = search.post_fields ? ` <span class="muted">· POST ${esc(search.post_fields.map(f => f[0] + "=" + f[1]).join("&"))}</span>` : "";
     rows.push(`<dt>${esc(t("search"))}${c.search ? esc(t("corrected")) : ""}</dt><dd><code>${esc(search.url)}</code>${post}${check}</dd>`);
+  }
+  if (p && p.sitemap) {
+    rows.push(`<dt>${esc(t("sitemap"))}</dt><dd><code>${esc(p.sitemap.recipe.url)}</code>
+      <span class="muted">· ${esc(t("sitemap_found", { n: p.sitemap.found, m: p.sitemap.tried }))}</span></dd>`);
   }
   if (p && p.note) rows.push(`<dt>${esc(t("note"))}</dt><dd>${esc(p.note)}</dd>`);
   if (c.note) rows.push(`<dt>${esc(t("correction_note"))}</dt><dd>${esc(c.note)}</dd>`);

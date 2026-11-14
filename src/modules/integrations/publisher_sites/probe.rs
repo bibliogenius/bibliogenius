@@ -22,10 +22,12 @@ use url::Url;
 use super::fetch::{FetchError, Page, PostAnswer, SiteFetcher};
 use super::page::{
     PageMatch, announced_books, book_facts, catalogue_links, other_links, page_matches,
-    result_links, search_forms, single_book_facts, sitemap_locs, unannounced_pages, witness_links,
+    result_links, search_forms, single_book_facts, sitemap_book_links, sitemap_locs,
+    unannounced_pages, witness_links,
 };
 use super::table::{
-    ProbeStatus, ProductCheck, ProductRecipe, SearchCheck, SearchRecipe, SiteProbe, Witness,
+    ProbeStatus, ProductCheck, ProductRecipe, SITEMAP_RECIPES, SearchCheck, SearchRecipe,
+    SiteProbe, SitemapCheck, SitemapRecipe, Witness,
 };
 use super::text::{Apostrophe, author_variants, slugify, title_variants};
 
@@ -43,6 +45,11 @@ const BACKLIST_WITNESSES: usize = 2;
 const MAX_BACKLIST_LINKS: usize = 4;
 /// Site maps read for one site, an index counting as one.
 const MAX_SITEMAPS_READ: usize = 3;
+/// Pages a site map recipe may open for one book: the best matches of
+/// [`sitemap_book_links`].
+pub const MAX_SITEMAP_CANDIDATES: usize = 2;
+/// Witnesses a site map must lead to, to be a recipe.
+const MIN_SITEMAP_WITNESSES: usize = 2;
 /// Words in the address of the map that lists a site's books.
 const BOOK_SITEMAP_WORDS: [&str; 8] = [
     "product",
@@ -101,6 +108,7 @@ pub async fn probe_site(
         search: None,
         tried: Vec::new(),
         book_sitemap: None,
+        sitemap: None,
     };
     match run(fetcher, home, extra, &mut out).await {
         Ok(status) => out.status = status,
@@ -137,6 +145,7 @@ async fn run(
     let home_page = fetcher.get(home).await?;
     let hunted = hunt_witnesses(fetcher, &home_page).await?;
     out.book_sitemap = hunted.book_sitemap;
+    let book_pages = hunted.book_pages;
     let mut witnesses = hunted.found;
     for w in extra {
         if !witnesses.iter().any(|x| x.isbn == w.isbn) {
@@ -161,7 +170,11 @@ async fn run(
     out.tried = tried;
     out.search = best;
 
-    if out.product.is_some() || out.search.is_some() {
+    if SITEMAP_RECIPES && let Some(map) = &out.book_sitemap {
+        out.sitemap = sitemap_check(map, &book_pages, &with_url);
+    }
+
+    if out.product.is_some() || out.search.is_some() || out.sitemap.is_some() {
         return Ok(ProbeStatus::Ok);
     }
     Ok(
@@ -173,6 +186,32 @@ async fn run(
             ProbeStatus::NoRecipe
         },
     )
+}
+
+/// The site map as a recipe: kept when it leads to at least
+/// [`MIN_SITEMAP_WITNESSES`] of the witnesses, and to two thirds of them.
+/// No request: the witnesses' pages were read when they were found.
+fn sitemap_check(map: &str, pages: &[Url], witnesses: &[Witness]) -> Option<SitemapCheck> {
+    let found = witnesses
+        .iter()
+        .filter(|w| {
+            let Some(page) = w.url.as_deref() else {
+                return false;
+            };
+            sitemap_book_links(pages, &w.isbn, &w.title)
+                .iter()
+                .take(MAX_SITEMAP_CANDIDATES)
+                .any(|c| page_key(c.as_str()) == page_key(page))
+        })
+        .count();
+    let tried = witnesses.len();
+    (found >= MIN_SITEMAP_WITNESSES && found * 3 >= tried * 2).then(|| SitemapCheck {
+        recipe: SitemapRecipe {
+            url: map.to_owned(),
+        },
+        found,
+        tried,
+    })
 }
 
 /// A failure that should stop the probe; others just mean "not this way".
@@ -402,6 +441,8 @@ pub struct Witnesses {
     pub found: Vec<Witness>,
     /// The site map that lists the witnesses' pages, hence the site's books.
     pub book_sitemap: Option<String>,
+    /// The pages that map lists.
+    pub book_pages: Vec<Url>,
 }
 
 /// Books the site sells, read on their own page: see [`hunt_witnesses`].
@@ -499,10 +540,11 @@ pub async fn hunt_witnesses(
                 std::cmp::Reverse(maps.iter().position(|x| x.url == m.url)),
             )
         })
-        .map(|(_, m)| m.url.to_string());
+        .map(|(_, m)| m);
     Ok(Witnesses {
+        book_sitemap: book_sitemap.map(|m| m.url.to_string()),
+        book_pages: book_sitemap.map(|m| m.pages.clone()).unwrap_or_default(),
         found: hunt.found,
-        book_sitemap,
     })
 }
 
@@ -1453,6 +1495,36 @@ mod tests {
             hunted.book_sitemap.as_deref(),
             Some("https://editions.example/sitemap.xml")
         );
+    }
+
+    #[tokio::test]
+    async fn a_site_map_is_the_recipe_of_books_filed_under_sections() {
+        // Each book sits under its own section: no pattern rebuilds two of
+        // them, and the site has no search.
+        let books = [
+            ("9782000000011", "Le Grand Voyage", "recits/le-grand-voyage"),
+            ("9782000000028", "Martin Eden", "romans/martin-eden"),
+            ("9782000000035", "Croc-Blanc", "jeunesse/croc-blanc"),
+        ];
+        let mut site = FakeSite::default();
+        let mut home = String::new();
+        let mut xml = String::new();
+        for (isbn, title, path) in books {
+            let url = format!("https://editions.example/livres/{path}/");
+            site = site.page(&url, &book_page(isbn, title));
+            home.push_str(&format!(r#"<a href="/livres/{path}/">x</a>"#));
+            xml.push_str(&format!("<url><loc>{url}</loc></url>"));
+        }
+        let map = "https://editions.example/sitemap.xml";
+        let site = site
+            .page(HOME, &home)
+            .page(map, &format!("<urlset>{xml}</urlset>"));
+        let probe = probe_site(&site, &Url::parse(HOME).unwrap(), &[], "2026-11-14").await;
+        assert!(probe.product.is_none() && probe.search.is_none());
+        let sitemap = probe.sitemap.unwrap();
+        assert_eq!(sitemap.recipe.url, map);
+        assert_eq!((sitemap.found, sitemap.tried), (3, 3));
+        assert_eq!(probe.status, ProbeStatus::Ok);
     }
 
     #[test]

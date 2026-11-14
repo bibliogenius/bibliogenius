@@ -407,6 +407,7 @@ fn failed(home: &str, date: &str, why: &str) -> SiteProbe {
         search: None,
         tried: Vec::new(),
         book_sitemap: None,
+        sitemap: None,
     }
 }
 
@@ -430,6 +431,12 @@ fn summary(p: &SiteProbe) -> String {
         parts.push(format!(
             "search {} (isbn {}, title {})",
             c.recipe.url, c.found_by_isbn, c.found_by_title
+        ));
+    }
+    if let Some(c) = &p.sitemap {
+        parts.push(format!(
+            "sitemap {} ({} of {})",
+            c.recipe.url, c.found, c.tried
         ));
     }
     if let Some(n) = &p.note {
@@ -465,6 +472,7 @@ fn failed_names(result: &CheckResult) -> Vec<&'static str> {
         .map(|kind| match kind {
             RecipeKind::Product => "product",
             RecipeKind::Search => "search",
+            RecipeKind::Sitemap => "sitemap",
         })
         .collect()
 }
@@ -722,6 +730,7 @@ async fn cmd_build(paths: &Paths, flags: &Flags) -> Result<(), String> {
         let kind = match pending.kind {
             RecipeKind::Product => "product",
             RecipeKind::Search => "search",
+            RecipeKind::Sitemap => "sitemap",
         };
         let why = match pending.state {
             CorrectionState::Failed => "failed its last check",
@@ -771,7 +780,17 @@ fn cmd_report(paths: &Paths, flags: &Flags) -> Result<(), String> {
         Ok(text) => serde_json::from_str(&text).map_err(|e| format!("table.json: {e}"))?,
         Err(_) => build_table(&wikidata, &report, &overrides, &today()),
     };
-    let sources = site_sources(&wikidata, &overrides);
+    let mut sources = site_sources(&wikidata, &overrides);
+    // The prefixes `build` read from the books found on a site.
+    for entry in &table.prefixes {
+        for publisher in &entry.publishers {
+            if let Some(source) = sources.get_mut(&publisher.site)
+                && !source.prefixes.contains(&entry.prefix)
+            {
+                source.prefixes.push(entry.prefix.clone());
+            }
+        }
+    }
     let sites: Vec<ReportSite> = sources
         .iter()
         .map(|(key, s)| ReportSite {
