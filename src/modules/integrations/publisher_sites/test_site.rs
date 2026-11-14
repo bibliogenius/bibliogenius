@@ -17,6 +17,8 @@ pub struct FakeSite {
     pub blocked: bool,
     /// Path prefixes robots.txt forbids.
     pub forbidden: Vec<String>,
+    /// Site maps robots.txt declares.
+    pub sitemaps: Vec<String>,
 }
 
 impl FakeSite {
@@ -51,6 +53,13 @@ impl SiteFetcher for FakeSite {
 
     async fn post_form(&self, _: &Url, _: &[(String, String)]) -> Result<PostAnswer, FetchError> {
         Err(FetchError::Status(405))
+    }
+
+    async fn sitemaps(&self, _: &Url) -> Vec<Url> {
+        self.sitemaps
+            .iter()
+            .filter_map(|s| Url::parse(s).ok())
+            .collect()
     }
 }
 

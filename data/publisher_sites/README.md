@@ -74,14 +74,28 @@ The outcome of each check is kept in `probe.json` (`checks`). `probe
 
 ## How a site is probed
 
-1. Witnesses: books linked from the home page, read on their own page (ISBN,
-   title, author), plus the `witnesses` of `overrides.json`.
+1. Witnesses: books of the site, read on their own page (ISBN, title,
+   author), plus the `witnesses` of `overrides.json`. They are looked for,
+   until three are found, behind the links whose path announces a book (an
+   ISBN, or a word such as `livre`, `ouvrage`, `catalogue`, `product`,
+   `accueil`, `roman`, `essai`): on the home page, then on the catalogue page
+   it links, then among the pages of the site map (the one robots.txt
+   declares, else `/sitemap.xml`). When no path announces a book, a few links
+   are opened at three places of each of these lists: one that shows a single
+   ISBN is a book, and its neighbours are opened next.
+   Two older books are then taken further down the site map, among the pages
+   of the same kind: the home page shows this month's books, and a recipe
+   must hold for the backlist too. The site map that lists the witnesses is
+   kept in `probe.json` (`book_sitemap`).
 2. Product page: the witnesses' addresses with `{isbn}`, `{slug}` and
    `{author}` put back; kept when it rebuilds at least two of them, or when the
    server finds the book by its ISBN whatever the slug.
+   An address without the ISBN is a pattern too when the title's slug is in
+   it (`/livre/{slug}/`): the page is named by its title alone, and the ISBN it
+   shows tells whether it is the right book.
 3. Search: the search forms of the home page, `/catalogue`, `/recherche`,
    `/search` (a POST form is submitted once and the address it redirects to
-   kept), then usual addresses. A nonsense query is run first: a page that
+   kept), then usual addresses, WordPress's `/?s=` first. A nonsense query is run first: a page that
    already links the witnesses proves nothing, and an answer that never
    changes means results drawn by JavaScript.
 

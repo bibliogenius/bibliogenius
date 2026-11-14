@@ -195,6 +195,9 @@ pub struct SiteProbe {
     /// Every search tried, in order, for whoever wants to improve on it.
     #[serde(default)]
     pub tried: Vec<SearchCheck>,
+    /// The site map listing the witnesses' pages, hence the site's books.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub book_sitemap: Option<String>,
 }
 
 /// Outcome of replaying a site's recipes on its witnesses.

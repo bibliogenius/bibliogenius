@@ -406,6 +406,7 @@ fn failed(home: &str, date: &str, why: &str) -> SiteProbe {
         product: None,
         search: None,
         tried: Vec::new(),
+        book_sitemap: None,
     }
 }
 

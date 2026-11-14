@@ -3,6 +3,7 @@
 //! books, and which forms are search forms. Pure functions over HTML, shared
 //! by the maintenance probe and the app's lookup.
 
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use scraper::{ElementRef, Html, Selector};
@@ -15,17 +16,51 @@ use crate::utils::isbn::to_isbn10;
 /// Deepest JSON-LD nesting walked; deeper values are ignored.
 const MAX_JSON_LD_DEPTH: usize = 8;
 
-/// Path fragments of book pages on sites whose book URLs carry no ISBN.
-const PRODUCT_HINTS: [&str; 8] = [
-    "/livre/",
-    "/livres/",
-    "/ouvrage/",
-    "/catalogue/",
-    "/products/",
-    "/book/",
-    "/produit/",
-    "/titre/",
+/// Words found in the path of book pages on sites whose book URLs carry no
+/// ISBN, matched inside a lowercase path segment (`livre` also reads
+/// `/livres/` and `/fiche-livre-x/`). `accueil` is the default category of
+/// PrestaShop shops.
+const PRODUCT_HINTS: [&str; 11] = [
+    "livre",
+    "ouvrage",
+    "catalogue",
+    "product",
+    "produit",
+    "book",
+    "titre",
+    "publication",
+    "accueil",
+    "roman",
+    "essai",
 ];
+
+/// Words of a path segment naming a book by itself (`fiche-livre-serres-rose`)
+/// rather than a section (`nouveaux-livres`).
+const MIN_NAMED_SEGMENT_WORDS: usize = 3;
+
+/// Words that name the page listing a publisher's books, most telling first,
+/// compared with the folded words of a link's last path segment and text.
+const CATALOGUE_WORDS: [&str; 10] = [
+    "catalogue",
+    "catalog",
+    "livres",
+    "ouvrages",
+    "publications",
+    "parutions",
+    "nouveautes",
+    "boutique",
+    "shop",
+    "collections",
+];
+
+/// Extensions of links that are files, not pages.
+const FILE_EXTENSIONS: [&str; 9] = [
+    ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".zip", ".epub", ".xml",
+];
+
+/// A page printing more ISBNs than this in its text is a list of books (a
+/// book page may print its other formats and a few related titles).
+const MAX_BOOK_PAGE_ISBNS: usize = 4;
 
 /// Path fragments of pages about many books (an author, a collection): a
 /// result link to one of them is worth less than one to a book.
@@ -160,6 +195,17 @@ fn has_type(map: &serde_json::Map<String, Value>, names: &[&str]) -> bool {
 /// not look like one. The ISBN comes from the JSON-LD `Book` or `Product`,
 /// else from the URL, else is the one the page prints most often.
 pub fn book_facts(html: &str, url: &Url) -> Option<BookFacts> {
+    read_book_facts(html, url, usize::MAX)
+}
+
+/// [`book_facts`] for a page nothing announces as a book's (a link picked at
+/// random): when the ISBN is only read in the text, a page printing more than
+/// [`MAX_BOOK_PAGE_ISBNS`] different ones is a listing, not a book.
+pub fn single_book_facts(html: &str, url: &Url) -> Option<BookFacts> {
+    read_book_facts(html, url, MAX_BOOK_PAGE_ISBNS)
+}
+
+fn read_book_facts(html: &str, url: &Url, max_text_isbns: usize) -> Option<BookFacts> {
     let doc = Html::parse_document(html);
     let (mut isbn, mut title, mut author) = (None::<String>, None::<String>, None::<String>);
     for node in json_ld_objects(&doc) {
@@ -197,7 +243,17 @@ pub fn book_facts(html: &str, url: &Url) -> Option<BookFacts> {
     }
     if isbn.is_none() {
         let text: String = doc.root_element().text().collect::<Vec<_>>().join(" ");
-        isbn = most_frequent(find_isbns(&strip_isbn_separators(&text)));
+        let printed = find_isbns(&strip_isbn_separators(&text));
+        let mut distinct: Vec<&String> = Vec::new();
+        for i in &printed {
+            if !distinct.contains(&i) {
+                distinct.push(i);
+            }
+        }
+        if distinct.len() > max_text_isbns {
+            return None;
+        }
+        isbn = most_frequent(printed);
     }
     let title = title
         .map(|t| collapse_spaces(&t))
@@ -422,13 +478,20 @@ fn content_links<'a>(
     doc: &'a Html,
     page_url: &'a Url,
 ) -> impl Iterator<Item = (Url, ElementRef<'a>)> + 'a {
+    site_links(doc, page_url).filter(|(_, a)| !in_site_chrome(a))
+}
+
+/// The links of `html` (fetched from `page_url`) resolved, without fragment,
+/// on the same site, the site's frame included.
+fn site_links<'a>(
+    doc: &'a Html,
+    page_url: &'a Url,
+) -> impl Iterator<Item = (Url, ElementRef<'a>)> + 'a {
     let host = bare_host(page_url);
     doc.select(&LINKS).filter_map(move |a| {
         let mut url = page_url.join(a.value().attr("href")?.trim()).ok()?;
         url.set_fragment(None);
-        let ok = matches!(url.scheme(), "http" | "https")
-            && same_site(&url, &host)
-            && !in_site_chrome(&a);
+        let ok = matches!(url.scheme(), "http" | "https") && same_site(&url, &host);
         ok.then_some((url, a))
     })
 }
@@ -501,29 +564,180 @@ pub fn result_links(
     scored.into_iter().map(|(u, _)| u).collect()
 }
 
-/// Links of a home page that probably lead to books: those with an ISBN in
-/// their path first, then those under a book-like path with a slug. Without
-/// query or fragment, in page order, each once.
-pub fn witness_links(html: &str, home_url: &Url) -> Vec<Url> {
-    let doc = Html::parse_document(html);
-    let (mut with_isbn, mut hinted): (Vec<Url>, Vec<Url>) = (Vec::new(), Vec::new());
-    for (mut url, _) in content_links(&doc, home_url) {
-        url.set_query(None);
-        let path = url.path();
-        let list = if !find_isbns(path).is_empty() {
-            &mut with_isbn
-        } else if PRODUCT_HINTS.iter().any(|h| path.contains(h)) && path.contains('-') {
-            &mut hinted
+/// How much a path looks like a book page's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BookPath {
+    /// It carries an ISBN.
+    Isbn,
+    /// A book-like word and a slug: `/livre/ma-reine`, `/fiche-livre-ma-reine`.
+    Slug,
+    /// A book-like word above a bare name: `/Romans/Doigtsperdus.html`.
+    Name,
+}
+
+fn book_path(path: &str) -> Option<BookPath> {
+    if !find_isbns(path).is_empty() {
+        return Some(BookPath::Isbn);
+    }
+    let lower = path.trim_end_matches('/').to_ascii_lowercase();
+    let (above, last) = lower.rsplit_once('/')?;
+    let hinted = |s: &str| PRODUCT_HINTS.iter().any(|h| s.contains(h));
+    let words = last.split(['-', '_']).filter(|w| !w.is_empty()).count();
+    if hinted(above) {
+        Some(if words >= 2 {
+            BookPath::Slug
         } else {
-            continue;
-        };
-        if !list.contains(&url) {
-            list.push(url);
+            BookPath::Name
+        })
+    } else if hinted(last) && words >= MIN_NAMED_SEGMENT_WORDS {
+        Some(BookPath::Slug)
+    } else {
+        None
+    }
+}
+
+/// Among `urls`, those that probably lead to books: with an ISBN in their
+/// path first, then with a book-like word and a slug, then with a book-like
+/// word above a bare name. In the order given, each once.
+pub fn announced_books(urls: &[Url]) -> Vec<Url> {
+    let mut ranked: Vec<(&Url, BookPath)> = Vec::new();
+    let mut seen: HashSet<&Url> = HashSet::new();
+    for url in urls {
+        if let Some(rank) = book_path(url.path())
+            && seen.insert(url)
+        {
+            ranked.push((url, rank));
         }
     }
-    hinted.retain(|u| !with_isbn.contains(u));
-    with_isbn.extend(hinted);
-    with_isbn
+    [BookPath::Isbn, BookPath::Slug, BookPath::Name]
+        .into_iter()
+        .flat_map(|rank| {
+            ranked
+                .iter()
+                .filter(move |(_, r)| *r == rank)
+                .map(|(u, _)| (*u).clone())
+        })
+        .collect()
+}
+
+/// Among `urls`, those nothing tells apart: no book-like path (see
+/// [`announced_books`]), not the home page, a file or a listing. In the order
+/// given, each once.
+pub fn unannounced_pages(urls: &[Url]) -> Vec<Url> {
+    let mut out: Vec<Url> = Vec::new();
+    let mut seen: HashSet<&Url> = HashSet::new();
+    for url in urls {
+        let path = url.path().to_ascii_lowercase();
+        let skip = path.trim_end_matches('/').is_empty()
+            || book_path(&path).is_some()
+            || FILE_EXTENSIONS.iter().any(|e| path.ends_with(e))
+            || LISTING_HINTS.iter().any(|k| path.contains(k));
+        if !skip && seen.insert(url) {
+            out.push(url.clone());
+        }
+    }
+    out
+}
+
+/// The content links of a page, without query or fragment, in page order.
+/// A page with none has its content inside what we take for the frame (a
+/// template wrapping everything in `<header>`): all its links are given.
+fn plain_content_links(html: &str, page_url: &Url) -> Vec<Url> {
+    let doc = Html::parse_document(html);
+    let plain = |(mut url, _): (Url, ElementRef)| {
+        url.set_query(None);
+        url
+    };
+    let content: Vec<Url> = content_links(&doc, page_url).map(plain).collect();
+    if content.is_empty() {
+        site_links(&doc, page_url).map(plain).collect()
+    } else {
+        content
+    }
+}
+
+/// Links of a page that probably lead to books (see [`announced_books`]).
+pub fn witness_links(html: &str, page_url: &Url) -> Vec<Url> {
+    announced_books(&plain_content_links(html, page_url))
+}
+
+/// The content links of a page that nothing tells apart (see
+/// [`unannounced_pages`]).
+pub fn other_links(html: &str, page_url: &Url) -> Vec<Url> {
+    unannounced_pages(&plain_content_links(html, page_url))
+}
+
+/// A site map read as text: whether it is an index of site maps, and the
+/// addresses it lists that are on the site of `site_url`, without fragment,
+/// in the file's order, each once. Read by its `<loc>` elements, so a file cut
+/// short still gives what came before the cut.
+pub fn sitemap_locs(xml: &str, site_url: &Url) -> (bool, Vec<Url>) {
+    let host = bare_host(site_url);
+    let is_index = xml.contains("<sitemapindex");
+    let mut out: Vec<Url> = Vec::new();
+    let mut seen: HashSet<Url> = HashSet::new();
+    for chunk in xml.split("<loc>").skip(1) {
+        let Some((loc, _)) = chunk.split_once("</loc>") else {
+            continue;
+        };
+        let loc = loc.trim();
+        let loc = loc
+            .strip_prefix("<![CDATA[")
+            .and_then(|l| l.strip_suffix("]]>"))
+            .unwrap_or(loc)
+            .trim()
+            .replace("&amp;", "&");
+        let Ok(mut url) = Url::parse(&loc) else {
+            continue;
+        };
+        url.set_fragment(None);
+        if matches!(url.scheme(), "http" | "https")
+            && same_site(&url, &host)
+            && seen.insert(url.clone())
+        {
+            out.push(url);
+        }
+    }
+    (is_index, out)
+}
+
+/// Links to the page listing the publisher's books, the most telling name
+/// first (see [`CATALOGUE_WORDS`]), then the shortest address. Menus included:
+/// that is where such a link sits.
+pub fn catalogue_links(html: &str, page_url: &Url) -> Vec<Url> {
+    let doc = Html::parse_document(html);
+    let host = bare_host(page_url);
+    let mut ranked: Vec<(Url, usize)> = Vec::new();
+    for a in doc.select(&LINKS) {
+        let Some(mut url) = a
+            .value()
+            .attr("href")
+            .and_then(|h| page_url.join(h.trim()).ok())
+        else {
+            continue;
+        };
+        url.set_fragment(None);
+        url.set_query(None);
+        if !matches!(url.scheme(), "http" | "https") || !same_site(&url, &host) {
+            continue;
+        }
+        let path = decoded_path(&url);
+        let last = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+        let named = fold(&format!("{last} {}", element_text(&a)));
+        let Some(rank) = CATALOGUE_WORDS
+            .iter()
+            .position(|w| named.split(' ').any(|n| n == *w))
+        else {
+            continue;
+        };
+        match ranked.iter_mut().find(|(u, _)| *u == url) {
+            Some((_, r)) => *r = (*r).min(rank),
+            None => ranked.push((url, rank)),
+        }
+    }
+    // Stable: equal links keep the page's order.
+    ranked.sort_by_key(|(u, rank)| (*rank, u.path().len()));
+    ranked.into_iter().map(|(u, _)| u).collect()
 }
 
 /// How much an input looks like a search box; zero or less is not one.
@@ -789,6 +1003,110 @@ mod tests {
                 "/livres/les-voyages-de-gulliver"
             ]
         );
+    }
+
+    #[test]
+    fn witness_links_read_the_usual_book_paths() {
+        let html = r#"
+            <a href="/Romans/Doigtsperdus.html">Doigts perdus</a>
+            <a href="/Essais.html">Essais</a>
+            <a href="/nouvelles-parutions">Nouvelles parutions</a>
+            <a href="/accueil/2050-les-reseaux-europeens.html">Les réseaux</a>
+            <a href="/product/bon-marche/">Bon marché</a>
+            <a href="/fiche-livre-serres-rose/">Rose</a>
+            <a href="/catalogue-livres-jules.html">Jules</a>
+            <a href="/collections/29-albiana-jeunesse">Jeunesse</a>"#;
+        let links = witness_links(html, &url("https://editions.example/"));
+        let paths: Vec<&str> = links.iter().map(Url::path).collect();
+        // A slug with a dash first, then the bare names.
+        assert_eq!(
+            paths,
+            [
+                "/accueil/2050-les-reseaux-europeens.html",
+                "/product/bon-marche/",
+                "/fiche-livre-serres-rose/",
+                "/catalogue-livres-jules.html",
+                "/Romans/Doigtsperdus.html",
+            ]
+        );
+    }
+
+    #[test]
+    fn catalogue_links_prefer_the_catalogue_then_the_shortest_address() {
+        let html = r#"<nav><a href="/collections">Collections</a>
+            <a href="/catalogue-livres-jules.html">Jules</a>
+            <a href="/catalogue-livres.html">Catalogue</a>
+            <a href="/tous">Nos livres</a>
+            <a href="https://other.example/catalogue">Ailleurs</a></nav>
+            <a href="/contact">Contact</a>"#;
+        let links = catalogue_links(html, &url("https://editions.example/"));
+        let paths: Vec<&str> = links.iter().map(Url::path).collect();
+        assert_eq!(
+            paths,
+            [
+                "/catalogue-livres.html",
+                "/catalogue-livres-jules.html",
+                "/tous",
+                "/collections"
+            ]
+        );
+    }
+
+    #[test]
+    fn other_links_skip_files_listings_and_the_home_page() {
+        let html = r#"<a href="/">Accueil</a>
+            <a href="/Grand-Guignol">Grand-Guignol</a>
+            <a href="/IMG/catalogue.pdf">PDF</a>
+            <a href="/auteur/x">Auteur</a>
+            <a href="/En-mer?lang=fr">En mer</a>
+            <a href="/Grand-Guignol#extrait">Extrait</a>"#;
+        let links = other_links(html, &url("https://editions.example/"));
+        let paths: Vec<&str> = links.iter().map(Url::path).collect();
+        assert_eq!(paths, ["/Grand-Guignol", "/En-mer"]);
+    }
+
+    #[test]
+    fn a_page_wholly_inside_its_header_still_gives_its_links() {
+        let html = r#"<header><a href="/contact">Contact</a>
+            <a href="/catalogue-livres-le-grand-voyage.html">Le Grand Voyage</a></header>"#;
+        let links = witness_links(html, &url("https://editions.example/"));
+        let paths: Vec<&str> = links.iter().map(Url::path).collect();
+        assert_eq!(paths, ["/catalogue-livres-le-grand-voyage.html"]);
+    }
+
+    #[test]
+    fn sitemap_locs_keep_the_site_s_addresses() {
+        let xml = r#"<?xml version="1.0"?><urlset>
+            <url><loc>https://www.editions.example/livre/ma-reine</loc><image:image>
+              <image:loc>https://cdn.example/ma-reine.jpg</image:loc></image:image></url>
+            <url><loc><![CDATA[https://editions.example/recherche?a=1&amp;b=2]]></loc></url>
+            <url><loc>https://other.example/livre/x</loc></url>
+            <url><loc>https://editions.example/livre/cut"#;
+        let (is_index, locs) = sitemap_locs(xml, &url("https://editions.example/"));
+        assert!(!is_index);
+        let locs: Vec<&str> = locs.iter().map(Url::as_str).collect();
+        assert_eq!(
+            locs,
+            [
+                "https://www.editions.example/livre/ma-reine",
+                "https://editions.example/recherche?a=1&b=2"
+            ]
+        );
+        let index = "<sitemapindex><sitemap><loc>https://editions.example/product-sitemap.xml</loc></sitemap></sitemapindex>";
+        assert!(sitemap_locs(index, &url("https://editions.example/")).0);
+    }
+
+    #[test]
+    fn a_page_printing_many_isbns_is_a_listing() {
+        let page = url("https://editions.example/Essais");
+        let one = "<h1>Essais</h1><p>ISBN 978-2-7381-1234-5</p>";
+        assert!(single_book_facts(one, &page).is_some());
+        let many: String = (0..6)
+            .map(|i| format!("<p>ISBN 978200000{i:04}</p>"))
+            .collect();
+        let many = format!("<h1>Essais</h1>{many}");
+        assert!(book_facts(&many, &page).is_some());
+        assert!(single_book_facts(&many, &page).is_none());
     }
 
     #[test]

@@ -346,6 +346,7 @@ mod tests {
             }),
             search: None,
             tried: Vec::new(),
+            book_sitemap: None,
         }
     }
 

@@ -33,6 +33,9 @@ pub struct Robots {
     /// The file could not be read for a reason that is the server's
     /// (5xx, unreachable): everything is forbidden until it can (RFC 9309, 2.3.1.4).
     unreachable: bool,
+    /// The site maps the file declares, whatever the group: they are not
+    /// rules.
+    sitemaps: Vec<String>,
 }
 
 impl Robots {
@@ -61,6 +64,7 @@ impl Robots {
         // a new group).
         let mut agents: Vec<String> = Vec::new();
         let mut in_rules = false;
+        let mut sitemaps: Vec<String> = Vec::new();
         for raw in text.lines() {
             let line = raw.split('#').next().unwrap_or("").trim();
             let Some((key, value)) = line.split_once(':') else {
@@ -110,6 +114,9 @@ impl Robots {
                         any_delay = any_delay.or(delay);
                     }
                 }
+                "sitemap" if !value.is_empty() && !sitemaps.iter().any(|s| s == value) => {
+                    sitemaps.push(value.to_owned());
+                }
                 _ => {}
             }
         }
@@ -125,12 +132,14 @@ impl Robots {
                 rules: ours,
                 crawl_delay: ours_delay,
                 unreachable: false,
+                sitemaps,
             }
         } else {
             Self {
                 rules: any,
                 crawl_delay: any_delay,
                 unreachable: false,
+                sitemaps,
             }
         }
     }
@@ -160,6 +169,11 @@ impl Robots {
     /// The pause the site asks for between two requests, if any.
     pub fn crawl_delay(&self) -> Option<Duration> {
         self.crawl_delay
+    }
+
+    /// The addresses of the site maps the file declares.
+    pub fn sitemaps(&self) -> &[String] {
+        &self.sitemaps
     }
 
     /// Whether robots.txt could not be read for a reason that is the
@@ -224,6 +238,13 @@ mod tests {
     // The real Gallimard file, abridged: a blank line inside the group, a
     // query-string rule, a crawl delay, and named bots shut out.
     const GALLIMARD: &str = "User-agent: *\nCrawl-delay: 10\n\nDisallow: /recherche-au-coeur-des-livres\nDisallow: /catalogue?\n\nUser-agent: GPTBot\nDisallow: /\n\nSitemap: https://www.gallimard.fr/sitemap.xml\n";
+
+    #[test]
+    fn site_maps_are_read_whatever_the_group() {
+        let robots = Robots::parse(GALLIMARD);
+        assert_eq!(robots.sitemaps(), ["https://www.gallimard.fr/sitemap.xml"]);
+        assert!(Robots::allow_all().sitemaps().is_empty());
+    }
 
     #[test]
     fn a_blank_line_does_not_end_a_group() {

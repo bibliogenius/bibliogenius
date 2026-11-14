@@ -568,6 +568,7 @@ mod tests {
             product: None,
             search: None,
             tried: Vec::new(),
+            book_sitemap: None,
         };
         assert_eq!(
             after_reprobe(&probe(ProbeStatus::Blocked)),

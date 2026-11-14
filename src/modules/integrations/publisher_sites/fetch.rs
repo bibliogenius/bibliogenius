@@ -68,6 +68,9 @@ pub trait SiteFetcher: Send + Sync {
         url: &Url,
         fields: &[(String, String)],
     ) -> Result<PostAnswer, FetchError>;
+    /// The site maps the robots.txt of `site` declares. Empty when it declares
+    /// none or cannot be read.
+    async fn sitemaps(&self, site: &Url) -> Vec<Url>;
 }
 
 /// The production fetcher: public https only (an http address is tried over
@@ -203,6 +206,20 @@ impl SiteFetcher for PoliteFetcher {
         {
             HopOutcome::Redirect(to) => Ok(PostAnswer::Redirect(to)),
             HopOutcome::Body(body) => into_page(body).map(PostAnswer::Page),
+        }
+    }
+
+    async fn sitemaps(&self, site: &Url) -> Vec<Url> {
+        let Some(site) = upgrade_to_https(site.clone()) else {
+            return Vec::new();
+        };
+        match self.robots_for(&site).await {
+            Ok(robots) => robots
+                .sitemaps()
+                .iter()
+                .filter_map(|s| site.join(s).ok())
+                .collect(),
+            Err(_) => Vec::new(),
         }
     }
 }
