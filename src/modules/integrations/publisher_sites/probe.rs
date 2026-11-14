@@ -704,8 +704,14 @@ pub fn product_urls(recipe: &ProductRecipe, isbn: &str, title: &str, authors: &s
     } else {
         vec![String::new()]
     };
+    // A book without a title yet (scanned before its details came) still
+    // has an address under a template that needs no slug.
+    let mut titles = title_variants(title);
+    if titles.is_empty() && !recipe.template.contains("{slug}") {
+        titles.push(String::new());
+    }
     let mut out: Vec<String> = Vec::new();
-    for t in title_variants(title) {
+    for t in titles {
         for a in &authors_tried {
             let u = recipe
                 .template
@@ -885,11 +891,19 @@ pub async fn run_search(
 }
 
 /// The server sent us to the book itself: the final path is not the one
-/// asked and carries the ISBN (a `/search/<isbn>` result page does not count).
+/// asked, carries the ISBN, and is not a search's own result page (`/?s=978…`
+/// redirected to `/search/978…/` still lists results).
 pub fn redirected_to_book(page: &Page, asked: &Url, isbn: &str) -> bool {
     let fin = page.url.path().trim_end_matches('/');
-    fin != asked.path().trim_end_matches('/') && fin.contains(isbn)
+    let searching = fin.split('/').any(|segment| {
+        let segment = segment.to_ascii_lowercase();
+        SEARCH_SEGMENTS.iter().any(|w| segment.contains(w))
+    });
+    fin != asked.path().trim_end_matches('/') && fin.contains(isbn) && !searching
 }
+
+/// Path words of a search's result page, in the languages of the table.
+const SEARCH_SEGMENTS: [&str; 4] = ["search", "recherche", "resultat", "result"];
 
 /// Whether a search for `query` finds `w`, and the size of the answer (an
 /// answer whose size never changes is drawn by JavaScript).
@@ -1646,6 +1660,41 @@ mod tests {
             truncated: false,
         };
         assert!(redirected_to_book(&book, &asked, "9782000000011"));
+        // A query sent to its result page under another path.
+        let wp = Url::parse("https://e.example/?s=9782000000011").unwrap();
+        let results = Page {
+            url: Url::parse("https://e.example/search/9782000000011/").unwrap(),
+            html: String::new(),
+            truncated: false,
+        };
+        assert!(!redirected_to_book(&results, &wp, "9782000000011"));
+    }
+
+    #[test]
+    fn a_book_without_a_title_still_has_an_isbn_address() {
+        let recipe = |template: &str| ProductRecipe {
+            template: template.into(),
+            apostrophe: Apostrophe::Drop,
+            slug_ignored: false,
+        };
+        assert_eq!(
+            product_urls(
+                &recipe("https://e.example/product/{isbn}"),
+                "9782000000011",
+                "",
+                ""
+            ),
+            ["https://e.example/product/9782000000011"]
+        );
+        assert!(
+            product_urls(
+                &recipe("https://e.example/{slug}-{isbn}"),
+                "9782000000011",
+                "",
+                ""
+            )
+            .is_empty()
+        );
     }
 
     #[test]

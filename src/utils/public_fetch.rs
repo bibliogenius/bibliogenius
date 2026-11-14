@@ -300,30 +300,10 @@ pub(crate) async fn fetch_with_policy(
 ) -> Result<FetchedBody, PublicFetchError> {
     let mut url = start;
     for _hop in 0..=MAX_REDIRECTS {
-        policy.check(&url)?;
-        let client = pinned_client(&url).await?;
-
-        // Some CDNs close a connection before answering now and then. A GET
-        // with no answer yet is safe to send once more; a second failure is
-        // reported.
-        let resp = match client.get(url.clone()).send().await {
-            Ok(resp) => resp,
-            Err(_) => client
-                .get(url.clone())
-                .send()
-                .await
-                .map_err(|_| PublicFetchError::Network)?,
-        };
-        let status = resp.status();
-
-        if status.is_redirection() {
-            url = redirect_target(&url, location_of(&resp), status.as_u16(), policy)?;
-            continue;
+        match get_one_hop_with_policy(url, body_cap, policy).await? {
+            HopOutcome::Redirect(target) => url = target,
+            HopOutcome::Body(body) => return Ok(body),
         }
-        if !status.is_success() {
-            return Err(PublicFetchError::HttpStatus(status.as_u16()));
-        }
-        return read_body(resp, url, body_cap).await;
     }
     Err(PublicFetchError::TooManyRedirects)
 }
@@ -349,6 +329,9 @@ pub(crate) async fn get_one_hop_with_policy(
 ) -> Result<HopOutcome, PublicFetchError> {
     policy.check(&url)?;
     let client = pinned_client(&url).await?;
+    // Some CDNs close a connection before answering now and then. A GET
+    // with no answer yet is safe to send once more; a second failure is
+    // reported.
     let resp = match client.get(url.clone()).send().await {
         Ok(resp) => resp,
         Err(_) => client
@@ -357,16 +340,7 @@ pub(crate) async fn get_one_hop_with_policy(
             .await
             .map_err(|_| PublicFetchError::Network)?,
     };
-    let status = resp.status();
-    if status.is_redirection() {
-        let target = redirect_target(&url, location_of(&resp), status.as_u16(), policy)?;
-        policy.check(&target)?;
-        return Ok(HopOutcome::Redirect(target));
-    }
-    if !status.is_success() {
-        return Err(PublicFetchError::HttpStatus(status.as_u16()));
-    }
-    read_body(resp, url, body_cap).await.map(HopOutcome::Body)
+    hop_outcome(resp, url, body_cap, policy).await
 }
 
 /// Submit an HTML form (`application/x-www-form-urlencoded`) to `url` under
@@ -387,6 +361,18 @@ pub(crate) async fn post_form_with_policy(
         .send()
         .await
         .map_err(|_| PublicFetchError::Network)?;
+    hop_outcome(resp, url, body_cap, policy).await
+}
+
+/// What one answer means: a redirect to a target checked against `policy`
+/// (not fetched), an error status, or the body read under its cap. The one
+/// place a response is judged, for every kind of request.
+async fn hop_outcome(
+    resp: reqwest::Response,
+    url: Url,
+    body_cap: &(dyn Fn(Option<&str>) -> BodyCap + Sync),
+    policy: FetchPolicy,
+) -> Result<HopOutcome, PublicFetchError> {
     let status = resp.status();
     if status.is_redirection() {
         let target = redirect_target(&url, location_of(&resp), status.as_u16(), policy)?;

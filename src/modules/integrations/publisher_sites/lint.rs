@@ -10,7 +10,7 @@ use super::page::names_the_site;
 use super::table::{
     CheckStatus, ProbeReport, ProbeStatus, PublisherTable, RecipeKind, SiteRecipes,
 };
-use super::text::fold;
+use super::text::{Apostrophe, fold};
 
 /// How serious a finding is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -236,6 +236,10 @@ fn days_since_success(key: &str, probe: &ProbeReport, today: &str) -> Option<i64
     Some((day(today)? - day(last)?).num_days())
 }
 
+/// The sites of a prefix in a table: `None` when the table does not list
+/// the prefix.
+pub type PrefixSites = Option<Vec<String>>;
+
 /// What changed between two tables.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TableDiff {
@@ -244,7 +248,9 @@ pub struct TableDiff {
     /// Site, recipe kind, before, after (`None`: no such recipe).
     pub changed_recipes: Vec<(String, RecipeKind, Option<String>, Option<String>)>,
     /// Prefix, sites before, sites after (empty: no such prefix).
-    pub changed_prefixes: Vec<(String, Vec<String>, Vec<String>)>,
+    /// Prefix, sites before, sites after: `None` for a prefix the table
+    /// does not list, an empty list for one it keeps without a site.
+    pub changed_prefixes: Vec<(String, PrefixSites, PrefixSites)>,
 }
 
 impl TableDiff {
@@ -297,8 +303,7 @@ pub fn diff(old: &PublisherTable, new: &PublisherTable) -> TableDiff {
     prefixes.sort();
     prefixes.dedup();
     for prefix in prefixes {
-        let b = before.get(prefix).cloned().unwrap_or_default();
-        let a = after.get(prefix).cloned().unwrap_or_default();
+        let (b, a) = (before.get(prefix).cloned(), after.get(prefix).cloned());
         if b != a {
             d.changed_prefixes.push((prefix.clone(), b, a));
         }
@@ -309,8 +314,12 @@ pub fn diff(old: &PublisherTable, new: &PublisherTable) -> TableDiff {
 /// A recipe as one line of text, for comparing and printing.
 fn recipe_text(site: &SiteRecipes, kind: RecipeKind) -> Option<String> {
     match kind {
+        // Every field of the recipe shows: a change to any of them is one.
         RecipeKind::Product => site.product.as_ref().map(|p| {
             let mut s = p.template.clone();
+            if p.apostrophe == Apostrophe::Dash {
+                s.push_str(" (apostrophe as a dash)");
+            }
             if p.slug_ignored {
                 s.push_str(" (slug ignored)");
             }
@@ -318,8 +327,11 @@ fn recipe_text(site: &SiteRecipes, kind: RecipeKind) -> Option<String> {
         }),
         RecipeKind::Search => site.search.as_ref().map(|s| {
             let mut t = s.url.clone();
-            if s.post_fields.is_some() {
-                t.push_str(" (POST)");
+            if let Some(fields) = &s.post_fields {
+                t.push_str(&format!(" (POST {fields:?})"));
+            }
+            if s.by_isbn {
+                t.push_str(" (by ISBN)");
             }
             t
         }),
@@ -331,9 +343,9 @@ fn recipe_text(site: &SiteRecipes, kind: RecipeKind) -> Option<String> {
 mod tests {
     use super::*;
     use crate::modules::integrations::publisher_sites::table::{
-        PrefixEntry, PrefixPublisher, ProductRecipe, RecipeCheck, SiteProbe, TABLE_FORMAT, Witness,
+        PrefixEntry, PrefixPublisher, ProductRecipe, RecipeCheck, SearchRecipe, SiteProbe,
+        TABLE_FORMAT, Witness,
     };
-    use crate::modules::integrations::publisher_sites::text::Apostrophe;
 
     fn site(template: Option<&str>) -> SiteRecipes {
         SiteRecipes {
@@ -539,11 +551,31 @@ mod tests {
             d.changed_prefixes,
             [(
                 "978201".to_owned(),
-                vec!["gone.example".to_owned()],
-                vec!["new.example".to_owned()],
+                Some(vec!["gone.example".to_owned()]),
+                Some(vec!["new.example".to_owned()]),
             )]
         );
+        // A search that comes to find by ISBN changes; so does a prefix
+        // kept without a site, which is not one the table drops.
         new = old.clone();
-        assert!(diff(&old, &new).is_empty());
+        let mut search = site(None);
+        search.search = Some(SearchRecipe {
+            url: "https://a.example/?s={q}".into(),
+            post_fields: None,
+            by_isbn: false,
+        });
+        let mut old_search = old.clone();
+        old_search.sites.insert("a.example".into(), search.clone());
+        search.search.as_mut().unwrap().by_isbn = true;
+        new.sites.insert("a.example".into(), search);
+        new.prefixes[0].publishers.clear();
+        let d = diff(&old_search, &new);
+        assert_eq!(d.changed_recipes.len(), 1);
+        assert_eq!(
+            d.changed_prefixes[0].2,
+            Some(Vec::new()),
+            "kept empty, not dropped"
+        );
+        assert!(diff(&old, &old.clone()).is_empty());
     }
 }

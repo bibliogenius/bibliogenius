@@ -19,9 +19,11 @@ use crate::modules::integrations::web_cover::{CoverCandidates, cover_candidates}
 use crate::utils::isbn::to_isbn10;
 
 /// Addresses a product template may give for one book that are tried.
-const MAX_PRODUCT_TRIES: usize = 3;
+/// The check uses the same bounds: a recipe it passes is one the app finds
+/// books with.
+pub const MAX_PRODUCT_TRIES: usize = 3;
 /// Search results opened for one book.
-const MAX_RESULT_LINKS: usize = 3;
+pub const MAX_RESULT_LINKS: usize = 3;
 
 /// What is known of the book looked for.
 #[derive(Debug, Clone)]
@@ -194,7 +196,8 @@ async fn book_page(
     }
 }
 
-fn shows_isbn(page: &Page, isbn: &str) -> bool {
+/// Whether the page shows `isbn`: the only proof a page is the book's.
+pub fn shows_isbn(page: &Page, isbn: &str) -> bool {
     page_matches(&page.html, isbn, "") == Some(PageMatch::Isbn)
 }
 
@@ -266,16 +269,15 @@ fn names_another_book(url: &Url, isbn: &str) -> bool {
 }
 
 /// Words of an image's file name that mark a stand-in for a missing cover.
-const STAND_IN_WORDS: [&str; 9] = [
+/// Not "default", which PrestaShop puts in every image size
+/// (`123-large_default.jpg`), nor "missing" or "blank", which titles carry.
+const STAND_IN_WORDS: [&str; 6] = [
     "placeholder",
     "manquant",
     "manquante",
     "indisponible",
-    "missing",
     "noimage",
     "nocover",
-    "default",
-    "blank",
 ];
 
 /// Whether an image belongs to the site rather than to a book: kept in the
@@ -299,9 +301,16 @@ fn is_site_image(url: &Url) -> bool {
     is_stand_in(url)
 }
 
-/// Whether an image is named as a stand-in for a missing cover
-/// (`couverture-manquante.png`, `nocover.jpg`).
+/// Whether an image is a stand-in for a missing cover, by its name
+/// (`couverture-manquante.png`, `nocover.jpg`) or its folder
+/// (`/images/placeholders/…/cover.png`).
 fn is_stand_in(url: &Url) -> bool {
+    if url
+        .path_segments()
+        .is_some_and(|mut s| s.any(|seg| seg.to_lowercase().contains("placeholder")))
+    {
+        return true;
+    }
     let file = url
         .path_segments()
         .and_then(|mut s| s.next_back())
@@ -494,6 +503,15 @@ mod tests {
             <body><img src="https://e.example/storage/images/popin-newsletter/Popin-newsletter.png"></body>"#,
         );
         assert!(cover_images(&none, ISBN).is_empty());
+        // A stand-in kept in a folder named so, whatever its own name.
+        let folder = page(
+            r#"<body><img src="https://e.example/images/placeholders/maison/cover.png"></body>"#,
+        );
+        assert!(cover_images(&folder, ISBN).is_empty());
+        // PrestaShop names every size "default": not a stand-in.
+        let shop =
+            page(r#"<body><img src="https://e.example/123-large_default/la-danse.jpg"></body>"#);
+        assert_eq!(cover_images(&shop, ISBN).len(), 1);
         // A cover kept with the site's assets but named after the ISBN stays.
         let named = page(
             r#"<body><img src="https://e.example/assets/img/couvertures/9782000000011.jpg"></body>"#,

@@ -13,6 +13,12 @@ const STOP_WORDS: [&str; 21] = [
 /// Lowercase ASCII words separated by single spaces: accents dropped, every
 /// other character a separator. `"L'Île des Âmes"` gives `"l ile des ames"`.
 pub fn fold(s: &str) -> String {
+    // Ligatures have no decomposition: written out, as sites write them.
+    let s = s
+        .replace('œ', "oe")
+        .replace('Œ', "Oe")
+        .replace('æ', "ae")
+        .replace('Æ', "Ae");
     let ascii: String = s.nfkd().filter(char::is_ascii).collect();
     ascii
         .to_ascii_lowercase()
@@ -201,6 +207,14 @@ pub fn hyphenated_isbn(isbn: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fold_writes_ligatures_out() {
+        assert_eq!(
+            fold("Le Cœur de l'Œuvre, Æsope"),
+            "le coeur de l oeuvre aesope"
+        );
+    }
 
     #[test]
     fn fold_drops_accents_and_punctuation() {

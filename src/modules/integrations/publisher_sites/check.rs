@@ -13,6 +13,7 @@
 use url::Url;
 
 use super::fetch::{FetchError, Page, SiteFetcher};
+use super::lookup::{MAX_PRODUCT_TRIES, MAX_RESULT_LINKS, shows_isbn};
 use super::page::{page_matches, result_links, sitemap_book_links, sitemap_locs};
 use super::probe::{
     CONTROL_QUERY, MAX_SITEMAP_CANDIDATES, product_urls, redirected_to_book, run_search,
@@ -27,10 +28,6 @@ const MAX_TRIES_PER_RECIPE: usize = 3;
 /// Witnesses looked at, at most: some cannot judge a search (its "no result"
 /// page already links them), so more than the tries above may be needed.
 const MAX_LIVE_WITNESSES: usize = 6;
-/// Product addresses tried per witness (title and author orders).
-const MAX_PRODUCT_TRIES: usize = 6;
-/// Result links followed per search.
-const MAX_RESULT_LINKS: usize = 2;
 
 /// What a check found. `None`: the site has no such recipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,7 +175,8 @@ async fn search_reaches(
         Err(e) if gives_up(&e, answered) => return Err(e),
         Err(_) => return Ok(false),
     };
-    if redirected_to_book(&page, &asked, &w.isbn) {
+    // Judged as the app will find books: the ISBN on the page, nothing less.
+    if redirected_to_book(&page, &asked, &w.isbn) && shows_isbn(&page, &w.isbn) {
         return Ok(true);
     }
     for link in result_links(&page.html, &page.url, &w.isbn, &w.title, &w.authors)
@@ -186,7 +184,7 @@ async fn search_reaches(
         .take(MAX_RESULT_LINKS)
     {
         match fetcher.get(&link).await {
-            Ok(p) if page_matches(&p.html, &w.isbn, &w.title).is_some() => return Ok(true),
+            Ok(p) if shows_isbn(&p, &w.isbn) => return Ok(true),
             Ok(_) => {}
             Err(e) if gives_up(&e, answered) => return Err(e),
             Err(_) => {}
@@ -780,6 +778,35 @@ mod tests {
             after_reprobe(&probe(ProbeStatus::RobotsForbid)),
             CheckStatus::Reprobed
         );
+    }
+
+    #[tokio::test]
+    async fn a_search_that_finds_only_another_edition_does_not_work() {
+        // The search answers with the title's other edition: the app would
+        // not take it (no ISBN of the book on it), so the check does not.
+        let search = SearchRecipe {
+            url: "https://editions.example/recherche?q={q}".into(),
+            post_fields: None,
+            by_isbn: true,
+        };
+        let other = "https://editions.example/ouvrage/le-grand-voyage-poche";
+        let site = FakeSite::default()
+            .page(
+                &format!("https://editions.example/recherche?q={CONTROL_QUERY}"),
+                &format!("{}<main><p>Aucun résultat</p></main>", padding()),
+            )
+            .page(
+                &format!("https://editions.example/recherche?q={ISBN}"),
+                &format!(
+                    r#"{}<main><a href="/ouvrage/le-grand-voyage-poche">Le Grand Voyage</a></main>"#,
+                    padding()
+                ),
+            )
+            .page(other, &book_page("9782000000028", "Le Grand Voyage"));
+        let r = check_recipes(&site, &recipes(None, Some(search)), &[witness(None)])
+            .await
+            .unwrap();
+        assert_eq!(r.search_works, Some(false));
     }
 
     #[tokio::test]

@@ -926,12 +926,10 @@ fn cmd_diff(paths: &Paths, flags: &Flags) -> Result<(), String> {
         println!("~ {key} {}: {} -> {}", kind(*k), none(before), none(after));
     }
     for (prefix, before, after) in &d.changed_prefixes {
-        let list = |v: &Vec<String>| {
-            if v.is_empty() {
-                "none".to_owned()
-            } else {
-                v.join(", ")
-            }
+        let list = |v: &Option<Vec<String>>| match v {
+            None => "absent".to_owned(),
+            Some(v) if v.is_empty() => "kept without a site".to_owned(),
+            Some(v) => v.join(", "),
         };
         println!("  prefix {prefix}: {} -> {}", list(before), list(after));
     }

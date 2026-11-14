@@ -469,18 +469,22 @@ pub fn cover_candidates(html: &str, page_url: &Url) -> CoverCandidates {
     // Images marked as the book's first, then the other content images, the
     // site's own (logo, menu, footer badges) last: a page without hints
     // often lists those first.
-    let mut tiers: [Vec<String>; 3] = Default::default();
-    for (el, src) in doc
+    let marked: Vec<(ImgMark, String)> = doc
         .select(&IMG)
         .filter_map(|el| img_source(el.value()).map(|src| (el, src)))
         .take(MAX_IMG_TAGS)
-    {
-        let tier = if is_site_chrome(&el) {
-            2
-        } else if names_any(&el, &BOOK_WORDS, NAMED_CONTAINERS) {
-            0
-        } else {
-            1
+        .map(|(el, src)| (img_mark(&el), src))
+        .collect();
+    // Named after a book: the cover when it is the only one so named, else
+    // a list of titles, which promotes nothing.
+    let one_book = marked.iter().filter(|(m, _)| *m == ImgMark::Book).count() == 1;
+    let mut tiers: [Vec<String>; 3] = Default::default();
+    for (mark, src) in marked {
+        let tier = match mark {
+            ImgMark::Cover => 0,
+            ImgMark::Book if one_book => 0,
+            ImgMark::Site => 2,
+            _ => 1,
         };
         tiers[tier].push(src);
     }
@@ -546,48 +550,84 @@ const CHROME_WORDS: [&str; 10] = [
     "logo", "icon", "avatar", "banner", "sprite", "favicon", "header", "footer", "nav", "menu",
 ];
 
-/// Words that mark an image, or its close containers, as the book's
-/// (`<div class="image-livre">`, `book-introduction__image`).
-const BOOK_WORDS: [&str; 8] = [
-    "cover",
-    "couverture",
-    "couv",
-    "book",
-    "livre",
-    "ouvrage",
-    "product",
-    "produit",
-];
+/// Words that mark an image, or its close containers, as a cover
+/// (`couv_livre`, `book-cover`).
+const COVER_WORDS: [&str; 4] = ["cover", "couverture", "couv", "jaquette"];
+
+/// Words that mark an image, or its close containers, as a book's
+/// (`<div class="image-livre">`, `book-introduction__image`). Weaker than
+/// [`COVER_WORDS`]: a list of related titles carries them too
+/// (`<li class="product">`), so they promote an image only when no other
+/// image of the page has them.
+const BOOK_WORDS: [&str; 5] = ["book", "livre", "ouvrage", "product", "produit"];
 
 /// Containers above an `<img>` whose id and class are read: the closest
 /// ones describe it, the farther ones the whole page.
 const NAMED_CONTAINERS: usize = 3;
 
-/// Whether the id or class of `img`, or of one of its `containers`
-/// closest containers, has one of `words` (plural forms included).
-fn names_any(img: &scraper::ElementRef, words: &[&str], containers: usize) -> bool {
-    std::iter::once(img.value())
-        .chain(
-            img.ancestors()
-                .filter_map(|node| node.value().as_element())
-                .take(containers),
-        )
-        .flat_map(|e| [e.attr("id"), e.attr("class")])
+/// The id and class words of an element, lowercase, plurals made singular.
+fn name_words(e: &scraper::node::Element) -> Vec<String> {
+    [e.attr("id"), e.attr("class")]
+        .into_iter()
         .flatten()
-        .any(|text| {
-            text.split(|c: char| !c.is_alphanumeric()).any(|token| {
-                let token = token.to_lowercase();
-                let singular = token.strip_suffix('s').unwrap_or(&token);
-                words.contains(&singular)
-            })
+        .flat_map(|text| text.split(|c: char| !c.is_alphanumeric()))
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            let t = t.to_lowercase();
+            t.strip_suffix('s').map(str::to_owned).unwrap_or(t)
         })
+        .collect()
+}
+
+fn names_one_of(e: &scraper::node::Element, words: &[&str]) -> bool {
+    name_words(e).iter().any(|w| words.contains(&w.as_str()))
+}
+
+/// `img` and its [`NAMED_CONTAINERS`] closest containers.
+fn img_and_containers<'a>(
+    img: &'a scraper::ElementRef<'a>,
+) -> impl Iterator<Item = &'a scraper::node::Element> {
+    std::iter::once(img.value()).chain(
+        img.ancestors()
+            .filter_map(|node| node.value().as_element())
+            .take(NAMED_CONTAINERS),
+    )
+}
+
+/// How an `<img>` is named: as a cover, as a book, as part of the site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImgMark {
+    Cover,
+    Book,
+    Site,
+    None,
+}
+
+fn img_mark(img: &scraper::ElementRef) -> ImgMark {
+    let names_book =
+        |e: &scraper::node::Element| names_one_of(e, &COVER_WORDS) || names_one_of(e, &BOOK_WORDS);
+    // Its own id or class saying "logo" settles it, whatever its container.
+    if names_one_of(img.value(), &CHROME_WORDS) && !names_book(img.value()) {
+        return ImgMark::Site;
+    }
+    if img_and_containers(img).any(|e| names_one_of(e, &COVER_WORDS)) {
+        return ImgMark::Cover;
+    }
+    if is_site_chrome(img) {
+        return ImgMark::Site;
+    }
+    if img_and_containers(img).any(|e| names_one_of(e, &BOOK_WORDS)) {
+        return ImgMark::Book;
+    }
+    ImgMark::None
 }
 
 /// Whether an `<img>` looks like part of the site (logo, menu, footer
 /// badge) rather than the book shown: inside the site's `<header>`, `<nav>`
 /// or `<footer>` (an `<article>` or `<main>` has headers of its own, which
-/// hold content), or with an id or class, its own or a close container's,
-/// that says so (`<div class="logo">`, `<div class="header-image">`).
+/// hold content), or in a close container named so (`<div class="logo">`,
+/// `<div class="header-image">`) and not also after the book
+/// (`<div class="book-header">` holds the book).
 fn is_site_chrome(img: &scraper::ElementRef) -> bool {
     let names: Vec<&str> = img
         .ancestors()
@@ -601,8 +641,12 @@ fn is_site_chrome(img: &scraper::ElementRef) -> bool {
         return true;
     }
     // Inside an article, a container named "header" is the article's.
-    let containers = if in_content { 0 } else { NAMED_CONTAINERS };
-    names_any(img, &CHROME_WORDS, containers)
+    let containers = if in_content { 1 } else { 1 + NAMED_CONTAINERS };
+    img_and_containers(img).take(containers).any(|e| {
+        names_one_of(e, &CHROME_WORDS)
+            && !names_one_of(e, &COVER_WORDS)
+            && !names_one_of(e, &BOOK_WORDS)
+    })
 }
 
 /// The images a page's JSON-LD declares for what it sells or describes,
@@ -1601,6 +1645,42 @@ mod tests {
                 "https://example.org/images/logo.png",
                 "https://example.org/images/phrase.png",
             ]
+        );
+    }
+
+    #[test]
+    fn a_container_named_after_the_book_and_the_header_holds_the_book() {
+        let html = r#"<body>
+            <div class="book-header"><img src="https://example.org/couv/le-livre.jpg"></div>
+            <img src="https://example.org/auteur.jpg">
+            </body>"#;
+        assert_eq!(
+            first(html).as_deref(),
+            Some("https://example.org/couv/le-livre.jpg")
+        );
+    }
+
+    #[test]
+    fn a_list_of_related_titles_promotes_none_of_them() {
+        // No declared image; the cover in a plain block, then the titles of
+        // the same author, each in a "product" item.
+        let html = r#"<body>
+            <div class="visuel"><img src="https://example.org/media/le-livre.jpg"></div>
+            <ul><li class="product"><img src="https://example.org/media/autre-1.jpg"></li>
+            <li class="product"><img src="https://example.org/media/autre-2.jpg"></li></ul>
+            </body>"#;
+        assert_eq!(
+            first(html).as_deref(),
+            Some("https://example.org/media/le-livre.jpg")
+        );
+        // A single image named after the book is its cover.
+        let html = r#"<body>
+            <img src="https://example.org/media/prix.jpg">
+            <div class="image-livre"><img src="https://example.org/media/le-livre.jpg"></div>
+            </body>"#;
+        assert_eq!(
+            first(html).as_deref(),
+            Some("https://example.org/media/le-livre.jpg")
         );
     }
 }

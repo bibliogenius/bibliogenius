@@ -100,14 +100,15 @@ impl PoliteFetcher {
             return Ok(r.clone());
         }
         let robots_url = url.join("/robots.txt").map_err(|_| FetchError::Refused)?;
-        self.wait_turn(&robots_url, None).await;
-        let robots = match public_fetch::fetch_with_policy(
+        let turn = self.wait_turn(&robots_url, None).await;
+        let fetched = public_fetch::fetch_with_policy(
             robots_url,
             &|_| BodyCap::Truncate(MAX_ROBOTS_BYTES),
             FetchPolicy::PublicInternet,
         )
-        .await
-        {
+        .await;
+        drop(turn);
+        let robots = match fetched {
             Ok(body) => {
                 let text = String::from_utf8_lossy(&body.bytes);
                 if is_rejection_page(&body.bytes) {
@@ -133,8 +134,11 @@ impl PoliteFetcher {
         Ok(robots)
     }
 
-    /// Sleep until this host may be asked again, then book the slot.
-    async fn wait_turn(&self, url: &Url, crawl_delay: Option<Duration>) {
+    /// Wait for this host's turn: no request of ours in flight there, and
+    /// the pause since the last one ended. The turn is held until the
+    /// returned [`Turn`] is dropped, after the request: one request at a
+    /// time per host, however slow it answers.
+    async fn wait_turn(&self, url: &Url, crawl_delay: Option<Duration>) -> Turn {
         let slot = self
             .hosts
             .lock()
@@ -142,18 +146,18 @@ impl PoliteFetcher {
             .entry(pace_key(url))
             .or_insert_with(|| Arc::new(Mutex::new(None)))
             .clone();
-        let mut last = slot.lock().await;
+        let last = slot.lock_owned().await;
         let pause = crawl_delay.unwrap_or_default().max(self.min_interval);
         if let Some(at) = *last {
             tokio::time::sleep_until(at + pause).await;
         }
-        *last = Some(Instant::now());
+        Turn(last)
     }
 
     /// Checks made before every request, redirect hops included: https,
     /// robots.txt, our turn on the host. A robots.txt the server failed to
     /// serve (5xx) makes the site unavailable, not the address forbidden.
-    async fn prepare(&self, url: &Url) -> Result<Url, FetchError> {
+    async fn prepare(&self, url: &Url) -> Result<(Url, Turn), FetchError> {
         let url = upgrade_to_https(url.clone()).ok_or(FetchError::Refused)?;
         let robots = self.robots_for(&url).await?;
         if robots.is_unreachable() {
@@ -162,8 +166,18 @@ impl PoliteFetcher {
         if !robots.allows(&url) {
             return Err(FetchError::Disallowed);
         }
-        self.wait_turn(&url, robots.crawl_delay()).await;
-        Ok(url)
+        let turn = self.wait_turn(&url, robots.crawl_delay()).await;
+        Ok((url, turn))
+    }
+}
+
+/// A host's turn, held while our request to it is in flight. Dropped, it
+/// records when the request ended, which the next pause counts from.
+struct Turn(tokio::sync::OwnedMutexGuard<Option<Instant>>);
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        *self.0 = Some(Instant::now());
     }
 }
 
@@ -175,15 +189,15 @@ impl SiteFetcher for PoliteFetcher {
         // only to the first.
         let mut next = url.clone();
         for _hop in 0..=MAX_REDIRECTS {
-            let url = self.prepare(&next).await?;
-            match public_fetch::get_one_hop_with_policy(
+            let (url, turn) = self.prepare(&next).await?;
+            let hop = public_fetch::get_one_hop_with_policy(
                 url,
                 &|_| BodyCap::Truncate(MAX_PAGE_BYTES),
                 FetchPolicy::PublicInternet,
             )
-            .await
-            .map_err(map_error)?
-            {
+            .await;
+            drop(turn);
+            match hop.map_err(map_error)? {
                 HopOutcome::Redirect(to) => next = to,
                 HopOutcome::Body(body) => return into_page(body),
             }
@@ -196,16 +210,16 @@ impl SiteFetcher for PoliteFetcher {
         url: &Url,
         fields: &[(String, String)],
     ) -> Result<PostAnswer, FetchError> {
-        let url = self.prepare(url).await?;
-        match public_fetch::post_form_with_policy(
+        let (url, turn) = self.prepare(url).await?;
+        let answer = public_fetch::post_form_with_policy(
             url,
             fields,
             &|_| BodyCap::Truncate(MAX_PAGE_BYTES),
             FetchPolicy::PublicInternet,
         )
-        .await
-        .map_err(map_error)?
-        {
+        .await;
+        drop(turn);
+        match answer.map_err(map_error)? {
             HopOutcome::Redirect(to) => Ok(PostAnswer::Redirect(to)),
             HopOutcome::Body(body) => into_page(body).map(PostAnswer::Page),
         }
@@ -367,6 +381,33 @@ mod tests {
             key("https://gallmeister.fr/")
         );
         assert_ne!(key("https://gallmeister.fr/"), key("https://gallimard.fr/"));
+    }
+
+    #[tokio::test]
+    async fn one_request_at_a_time_per_host() {
+        let fetcher = PoliteFetcher::new(Duration::from_millis(10));
+        let page = Url::parse("https://editions.example/livre/1").unwrap();
+        let other = Url::parse("https://autre.example/").unwrap();
+        let wait = Duration::from_millis(200);
+        let first = fetcher.wait_turn(&page, None).await;
+        // While the first request is in flight, the host is not asked again,
+        // however long it takes; another host is.
+        assert!(
+            tokio::time::timeout(wait, fetcher.wait_turn(&page, None))
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(wait, fetcher.wait_turn(&other, None))
+                .await
+                .is_ok()
+        );
+        drop(first);
+        assert!(
+            tokio::time::timeout(wait, fetcher.wait_turn(&page, None))
+                .await
+                .is_ok()
+        );
     }
 
     #[test]
