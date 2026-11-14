@@ -11,6 +11,8 @@
 //! cargo run --release --bin publisher_sites -- report [--out FILE]
 //! cargo run --release --bin publisher_sites -- lint
 //! cargo run --release --bin publisher_sites -- diff [--base GIT_REF|FILE]
+//! cargo run --release --bin publisher_sites -- measure --books FILE [--out DIR]
+//!                                                      [--workers N] [--pause SECS]
 //! ```
 //!
 //! See `data/publisher_sites/README.md` for what each step does and when to
@@ -39,6 +41,9 @@ use rust_lib_app::modules::integrations::publisher_sites::fetch::{
     FetchError, PoliteFetcher, SiteFetcher,
 };
 use rust_lib_app::modules::integrations::publisher_sites::lint::{Severity, diff, lint};
+use rust_lib_app::modules::integrations::publisher_sites::lookup::{
+    BookQuery, Lookup, SitemapCache, cover_images, find_book_page,
+};
 use rust_lib_app::modules::integrations::publisher_sites::probe::{find_witnesses, probe_site};
 use rust_lib_app::modules::integrations::publisher_sites::table::{
     CheckStatus, Overrides, ProbeReport, ProbeStatus, PublisherTable, RecipeCheck, RecipeKind,
@@ -145,7 +150,7 @@ async fn main() {
         dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("data/publisher_sites"),
     };
     let result = match args.first().map(String::as_str) {
-        Some(cmd @ ("wikidata" | "probe" | "check" | "build" | "report" | "lint" | "diff")) => {
+        Some(cmd @ ("wikidata" | "probe" | "check" | "build" | "report" | "lint" | "diff" | "measure")) => {
             const PACING: [(&str, bool); 2] = [("workers", true), ("pause", true)];
             let known: Vec<(&str, bool)> = match cmd {
                 "probe" => [
@@ -165,6 +170,10 @@ async fn main() {
                 "build" => std::iter::once(("offline", false)).chain(PACING).collect(),
                 "report" => vec![("out", true)],
                 "diff" => vec![("base", true)],
+                "measure" => [("books", true), ("out", true)]
+                    .into_iter()
+                    .chain(PACING)
+                    .collect(),
                 _ => Vec::new(),
             };
             match Flags::parse(&args[1..], &known) {
@@ -175,13 +184,14 @@ async fn main() {
                     "build" => cmd_build(&paths, &flags).await,
                     "lint" => cmd_lint(&paths),
                     "diff" => cmd_diff(&paths, &flags),
+                    "measure" => cmd_measure(&paths, &flags).await,
                     _ => cmd_report(&paths, &flags),
                 },
                 Err(e) => Err(e),
             }
         }
         _ => Err(
-            "usage: publisher_sites wikidata | probe | check | build | report | lint | diff (see the file header)".into(),
+            "usage: publisher_sites wikidata | probe | check | build | report | lint | diff | measure (see the file header)".into(),
         ),
     };
     if let Err(e) = result {
@@ -943,4 +953,281 @@ fn read_table(paths: &Paths) -> Result<PublisherTable, String> {
     let path = paths.table();
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+// ------------------------------------------------------------------- measure
+
+/// A book of the measure's list, as the library export gives it.
+#[derive(serde::Deserialize)]
+struct MeasureBook {
+    isbn: String,
+    title: String,
+    #[serde(default)]
+    authors: String,
+    #[serde(default)]
+    publisher: Option<String>,
+    /// The cover the library already has, shown beside the one found.
+    #[serde(default)]
+    cover_url: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Measured {
+    isbn: String,
+    title: String,
+    publisher: String,
+    library_cover: String,
+    /// found, image_forbidden, image_broken, no_image, not_found, refused,
+    /// no_site, bad_isbn
+    outcome: &'static str,
+    site: String,
+    recipe: String,
+    page: String,
+    image: String,
+}
+
+/// Look for each book of `--books` with the table, as the app will, and
+/// write a contact sheet to judge the covers by eye: a wrong one is the
+/// failure that counts. Each image kept is loaded once, as the app would.
+async fn cmd_measure(paths: &Paths, flags: &Flags) -> Result<(), String> {
+    let books_path = flags.get("books").ok_or("--books FILE is required")?;
+    let books: Vec<MeasureBook> = serde_json::from_str(
+        &std::fs::read_to_string(books_path).map_err(|e| format!("{books_path}: {e}"))?,
+    )
+    .map_err(|e| format!("{books_path}: {e}"))?;
+    let table = Arc::new(read_table(paths)?);
+    let workers = flags.number("workers", 12usize)?.max(1);
+    let pause = flags.number("pause", 1.5f64)?.max(0.5);
+    let fetcher = Arc::new(PoliteFetcher::new(Duration::from_secs_f64(pause)));
+    let maps = Arc::new(SitemapCache::default());
+    let total = books.len();
+    println!(
+        "measuring {total} books, {workers} at a time, {pause} s between two requests to a host"
+    );
+    let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut results: Vec<(usize, Measured)> = stream::iter(books.into_iter().enumerate())
+        .map(|(i, book)| {
+            let (fetcher, table, maps, done) =
+                (fetcher.clone(), table.clone(), maps.clone(), done.clone());
+            async move {
+                let m = measure_one(fetcher.as_ref(), &table, &maps, book).await;
+                let n = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                println!(
+                    "[{n}/{total}] {} {}: {} {}",
+                    m.isbn, m.title, m.outcome, m.site
+                );
+                (i, m)
+            }
+        })
+        .buffer_unordered(workers)
+        .collect()
+        .await;
+    results.sort_by_key(|(i, _)| *i);
+    let results: Vec<Measured> = results.into_iter().map(|(_, m)| m).collect();
+
+    let out = flags.get("out").map(PathBuf::from).unwrap_or_else(|| {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("target/publisher_sites/measure")
+    });
+    std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    write_json(&out.join("results.json"), &results)?;
+    std::fs::write(out.join("index.html"), contact_sheet(&results))
+        .map_err(|e| format!("{}: {e}", out.display()))?;
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for r in &results {
+        *counts.entry(r.outcome).or_default() += 1;
+    }
+    let summary: Vec<String> = counts.iter().map(|(k, n)| format!("{k} {n}")).collect();
+    println!(
+        "{total} books: {} -> {}",
+        summary.join(", "),
+        out.join("index.html").display()
+    );
+    Ok(())
+}
+
+async fn measure_one(
+    fetcher: &PoliteFetcher,
+    table: &PublisherTable,
+    maps: &SitemapCache,
+    book: MeasureBook,
+) -> Measured {
+    let mut m = Measured {
+        isbn: book.isbn.clone(),
+        title: book.title.clone(),
+        publisher: book.publisher.clone().unwrap_or_default(),
+        library_cover: book.cover_url.clone().unwrap_or_default(),
+        outcome: "bad_isbn",
+        site: String::new(),
+        recipe: String::new(),
+        page: String::new(),
+        image: String::new(),
+    };
+    let Some(isbn) = rust_lib_app::utils::isbn::to_isbn13(&book.isbn) else {
+        return m;
+    };
+    m.isbn = isbn.clone();
+    let query = BookQuery {
+        isbn: isbn.clone(),
+        title: book.title,
+        authors: book.authors,
+        publisher: book.publisher,
+    };
+    match find_book_page(fetcher, table, &query, maps).await {
+        Lookup::NoSite => m.outcome = "no_site",
+        Lookup::NotFound { sites, refused } => {
+            m.outcome = if !refused.is_empty() && refused.len() == sites.len() {
+                "refused"
+            } else {
+                "not_found"
+            };
+            m.site = sites.join(", ");
+        }
+        Lookup::Found { site, kind, page } => {
+            m.site = site;
+            m.recipe = match kind {
+                RecipeKind::Product => "product",
+                RecipeKind::Search => "search",
+                RecipeKind::Sitemap => "sitemap",
+            }
+            .into();
+            m.page = page.url.to_string();
+            let (mut forbidden, mut broken) = (false, false);
+            for image in cover_images(&page, &isbn) {
+                match load_image(fetcher, &image).await {
+                    ImageLoad::Loads => {
+                        m.image = image.to_string();
+                        break;
+                    }
+                    // The site does not want us to have its cover: no other
+                    // image of the page stands in for it.
+                    ImageLoad::Forbidden => {
+                        forbidden = true;
+                        break;
+                    }
+                    ImageLoad::Broken => broken = true,
+                }
+            }
+            m.outcome = if !m.image.is_empty() {
+                "found"
+            } else if forbidden {
+                "image_forbidden"
+            } else if broken {
+                "image_broken"
+            } else {
+                "no_image"
+            };
+        }
+    }
+    m
+}
+
+#[derive(PartialEq, Eq)]
+enum ImageLoad {
+    Loads,
+    /// robots.txt forbids it, the server refuses us, or its robots.txt
+    /// cannot be read.
+    Forbidden,
+    /// Gone, or an error.
+    Broken,
+}
+
+/// Load an image as the app would: through the polite fetcher, so that
+/// robots.txt and the pause apply.
+async fn load_image(fetcher: &PoliteFetcher, image: &Url) -> ImageLoad {
+    match fetcher.get(image).await {
+        Ok(_) => ImageLoad::Loads,
+        // Forbidden by robots.txt, or refused (403, 429): either way the
+        // site does not want us to have it.
+        Err(FetchError::Disallowed | FetchError::Blocked(_)) => ImageLoad::Forbidden,
+        Err(FetchError::Network) => match fetcher.robots_for(image).await {
+            Ok(robots) if robots.is_unreachable() => ImageLoad::Forbidden,
+            _ => ImageLoad::Broken,
+        },
+        Err(_) => ImageLoad::Broken,
+    }
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Only http(s) addresses go into the sheet's links and images.
+fn safe_url(s: &str) -> String {
+    match Url::parse(s) {
+        Ok(u) if matches!(u.scheme(), "http" | "https") => escape_html(u.as_str()),
+        _ => String::new(),
+    }
+}
+
+/// The contact sheet: every book found, its cover beside the library's, then
+/// the books not found, by outcome.
+fn contact_sheet(results: &[Measured]) -> String {
+    let mut cards = String::new();
+    for r in results.iter().filter(|r| r.outcome == "found") {
+        let library = if r.library_cover.is_empty() {
+            "<div class=\"none\">no cover in the library</div>".to_owned()
+        } else {
+            format!(
+                "<img src=\"{}\" alt=\"Library cover\" loading=\"lazy\">",
+                safe_url(&r.library_cover)
+            )
+        };
+        cards.push_str(&format!(
+            "<figure><div class=\"pair\">{library}<img src=\"{}\" alt=\"Cover found\" loading=\"lazy\"></div>\
+             <figcaption><b>{}</b><br>{} · {}<br><a href=\"{}\">{} ({})</a></figcaption></figure>\n",
+            safe_url(&r.image),
+            escape_html(&r.title),
+            escape_html(&r.isbn),
+            escape_html(&r.publisher),
+            safe_url(&r.page),
+            escape_html(&r.site),
+            escape_html(&r.recipe),
+        ));
+    }
+    let mut rows = String::new();
+    for r in results.iter().filter(|r| r.outcome != "found") {
+        rows.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+            escape_html(r.outcome),
+            escape_html(&r.isbn),
+            escape_html(&r.title),
+            escape_html(&r.publisher),
+            escape_html(&r.site),
+        ));
+    }
+    let found = results.iter().filter(|r| r.outcome == "found").count();
+    format!(
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Cover measure</title>
+<style>
+:root {{ color-scheme: light dark; --bg: #fafaf7; --fg: #1d1d1b; --muted: #6b6b66; --line: #ddd; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg: #1b1b1a; --fg: #eee; --muted: #aaa; --line: #444; }} }}
+body {{ background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; margin: 16px; }}
+.grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }}
+figure {{ margin: 0; border: 1px solid var(--line); padding: 8px; }}
+.pair {{ display: flex; gap: 8px; height: 180px; }}
+.pair img, .none {{ flex: 1; min-width: 0; object-fit: contain; height: 100%; }}
+.none {{ display: flex; align-items: center; justify-content: center; color: var(--muted); border: 1px dashed var(--line); font-size: 12px; text-align: center; }}
+figcaption {{ margin-top: 6px; font-size: 12px; overflow-wrap: anywhere; }}
+a {{ color: inherit; }}
+table {{ border-collapse: collapse; width: 100%; font-size: 12px; }}
+td {{ border-top: 1px solid var(--line); padding: 4px; overflow-wrap: anywhere; }}
+</style></head><body>
+<h1>Cover measure</h1>
+<p>{found} of {total} books found. In each pair: the library's cover on the left, the one found on the right. Look for a wrong one.</p>
+<div class="grid">
+{cards}</div>
+<h2>Not found</h2>
+<table><tbody>
+{rows}</tbody></table>
+</body></html>
+"#,
+        total = results.len(),
+    )
 }

@@ -413,6 +413,32 @@ static IMG: LazyLock<Selector> = LazyLock::new(|| Selector::parse("img").unwrap(
 /// Every cover image a page declares, most specific first, as absolute http(s)
 /// URLs resolved against `page_url`. Duplicates are kept out.
 pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
+    let CoverCandidates {
+        mut declared,
+        book_tags,
+        tags,
+    } = cover_candidates(html, page_url);
+    declared.extend(book_tags);
+    declared.extend(tags);
+    declared
+}
+
+/// A page's cover candidates, split by how sure they are.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CoverCandidates {
+    /// Named as the page's image: JSON-LD, `og:image` and the like.
+    pub declared: Vec<Url>,
+    /// Its `<img>` tags marked, by their id or class or a close
+    /// container's, as the book's (`couv_livre`, `book-cover`).
+    pub book_tags: Vec<Url>,
+    /// Its other `<img>` tags, the site's own images last: a guess.
+    pub tags: Vec<Url>,
+}
+
+/// [`extract_cover_candidates`], the images the page declares apart from
+/// its `<img>` tags. An image found only among the tags is a guess; one
+/// the page declares is its own choice.
+pub fn cover_candidates(html: &str, page_url: &Url) -> CoverCandidates {
     let doc = Html::parse_document(html);
     let mut raw: Vec<String> = Vec::new();
 
@@ -438,16 +464,30 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
             .map(str::to_owned),
     );
     raw.append(&mut json_ld.other_products);
-    // Content images before the site's own (logo, menu, footer badges),
-    // which a page without hints often lists first.
-    let (chrome, content): (Vec<_>, Vec<_>) = doc
+    let declared_count = raw.len();
+    let mut book_count = declared_count;
+    // Images marked as the book's first, then the other content images, the
+    // site's own (logo, menu, footer badges) last: a page without hints
+    // often lists those first.
+    let mut tiers: [Vec<String>; 3] = Default::default();
+    for (el, src) in doc
         .select(&IMG)
         .filter_map(|el| img_source(el.value()).map(|src| (el, src)))
         .take(MAX_IMG_TAGS)
-        .map(|(el, src)| (is_site_chrome(&el), src))
-        .partition(|(chrome, _)| *chrome);
-    raw.extend(content.into_iter().map(|(_, src)| src));
-    raw.extend(chrome.into_iter().map(|(_, src)| src));
+    {
+        let tier = if is_site_chrome(&el) {
+            2
+        } else if names_any(&el, &BOOK_WORDS, NAMED_CONTAINERS) {
+            0
+        } else {
+            1
+        };
+        tiers[tier].push(src);
+    }
+    book_count += tiers[0].len();
+    for tier in tiers {
+        raw.extend(tier);
+    }
 
     // Relative links resolve against `<base href>` when the page sets one.
     let base = doc
@@ -457,9 +497,9 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
         .and_then(|href| page_url.join(href.trim()).ok())
         .unwrap_or_else(|| page_url.clone());
 
-    let mut out: Vec<Url> = Vec::new();
+    let mut out = CoverCandidates::default();
     let mut seen: HashSet<Url> = HashSet::new();
-    for candidate in raw {
+    for (i, candidate) in raw.iter().enumerate() {
         let candidate = candidate.trim();
         if candidate.is_empty() {
             continue;
@@ -468,7 +508,13 @@ pub fn extract_cover_candidates(html: &str, page_url: &Url) -> Vec<Url> {
             continue;
         };
         if matches!(url.scheme(), "http" | "https") && seen.insert(url.clone()) {
-            out.push(url);
+            if i < declared_count {
+                out.declared.push(url);
+            } else if i < book_count {
+                out.book_tags.push(url);
+            } else {
+                out.tags.push(url);
+            }
         }
     }
     out
@@ -493,14 +539,55 @@ fn img_source(img: &scraper::node::Element) -> Option<String> {
 }
 
 /// Words that mark an image as part of the site rather than of the page's
-/// content, in its id or class. Not in its alt text or file name: those
-/// carry the book's title, and a book can be called "No Logo".
-const CHROME_WORDS: [&str; 6] = ["logo", "icon", "avatar", "banner", "sprite", "favicon"];
+/// content, in its id or class or those of its close containers. Not in its
+/// alt text or file name: those carry the book's title, and a book can be
+/// called "No Logo".
+const CHROME_WORDS: [&str; 10] = [
+    "logo", "icon", "avatar", "banner", "sprite", "favicon", "header", "footer", "nav", "menu",
+];
+
+/// Words that mark an image, or its close containers, as the book's
+/// (`<div class="image-livre">`, `book-introduction__image`).
+const BOOK_WORDS: [&str; 8] = [
+    "cover",
+    "couverture",
+    "couv",
+    "book",
+    "livre",
+    "ouvrage",
+    "product",
+    "produit",
+];
+
+/// Containers above an `<img>` whose id and class are read: the closest
+/// ones describe it, the farther ones the whole page.
+const NAMED_CONTAINERS: usize = 3;
+
+/// Whether the id or class of `img`, or of one of its `containers`
+/// closest containers, has one of `words` (plural forms included).
+fn names_any(img: &scraper::ElementRef, words: &[&str], containers: usize) -> bool {
+    std::iter::once(img.value())
+        .chain(
+            img.ancestors()
+                .filter_map(|node| node.value().as_element())
+                .take(containers),
+        )
+        .flat_map(|e| [e.attr("id"), e.attr("class")])
+        .flatten()
+        .any(|text| {
+            text.split(|c: char| !c.is_alphanumeric()).any(|token| {
+                let token = token.to_lowercase();
+                let singular = token.strip_suffix('s').unwrap_or(&token);
+                words.contains(&singular)
+            })
+        })
+}
 
 /// Whether an `<img>` looks like part of the site (logo, menu, footer
 /// badge) rather than the book shown: inside the site's `<header>`, `<nav>`
 /// or `<footer>` (an `<article>` or `<main>` has headers of its own, which
-/// hold content), or with an id or class that says so.
+/// hold content), or with an id or class, its own or a close container's,
+/// that says so (`<div class="logo">`, `<div class="header-image">`).
 fn is_site_chrome(img: &scraper::ElementRef) -> bool {
     let names: Vec<&str> = img
         .ancestors()
@@ -513,17 +600,9 @@ fn is_site_chrome(img: &scraper::ElementRef) -> bool {
     if in_chrome && !in_content {
         return true;
     }
-    let element = img.value();
-    [element.attr("id"), element.attr("class")]
-        .into_iter()
-        .flatten()
-        .any(|text| {
-            text.split(|c: char| !c.is_alphanumeric()).any(|token| {
-                let token = token.to_lowercase();
-                let singular = token.strip_suffix('s').unwrap_or(&token);
-                CHROME_WORDS.contains(&singular)
-            })
-        })
+    // Inside an article, a container named "header" is the article's.
+    let containers = if in_content { 0 } else { NAMED_CONTAINERS };
+    names_any(img, &CHROME_WORDS, containers)
 }
 
 /// The images a page's JSON-LD declares for what it sells or describes,
@@ -1498,5 +1577,30 @@ mod tests {
             .await;
         let cover = fetch_test(format!("{}/livre", server.uri())).await.unwrap();
         assert_eq!(cover.image_url, format!("{}/couv.jpg", server.uri()));
+    }
+
+    #[test]
+    fn the_containers_of_an_img_tell_the_book_from_the_site() {
+        // A logo in a named container, a banner in the header block, then
+        // the cover in a container named after the book.
+        let html = r#"<body>
+            <div class="logo"><a href="/"><img src="https://example.org/images/logo.png"></a></div>
+            <div class="header-image"><div><img src="https://example.org/images/phrase.png"></div></div>
+            <img src="https://example.org/photos/prix.jpg">
+            <div class="image-livre"><div class="conteneur-photo-livre"><img src="https://example.org/photos/yoga.jpg"></div></div>
+            </body>"#;
+        let all: Vec<String> = extract_cover_candidates(html, &page())
+            .iter()
+            .map(Url::to_string)
+            .collect();
+        assert_eq!(
+            all,
+            [
+                "https://example.org/photos/yoga.jpg",
+                "https://example.org/photos/prix.jpg",
+                "https://example.org/images/logo.png",
+                "https://example.org/images/phrase.png",
+            ]
+        );
     }
 }

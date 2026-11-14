@@ -35,6 +35,7 @@ cargo build --release --bin publisher_sites
 ./target/release/publisher_sites build           # -> table.json
 ./target/release/publisher_sites lint            # recipes a probe got wrong (offline)
 ./target/release/publisher_sites diff            # what changed since HEAD (--base REF|FILE)
+./target/release/publisher_sites measure --books FILE  # covers found for a list of books
 ./target/release/publisher_sites report          # -> target/publisher_sites/index.html
 ```
 
@@ -169,6 +170,43 @@ the French-language groups.
 When several publishers share a prefix, `sites_for` gives their sites, the
 one whose name matches the book's publisher field first, three at most, for
 the caller to try in turn.
+
+## Measuring the table
+
+```sh
+./target/release/publisher_sites measure --books FILE   # -> target/publisher_sites/measure/
+```
+
+`FILE` is a JSON list of books (`isbn`, `title`, `authors`, `publisher`, and
+`cover_url`, the cover the library has). Each book is looked for as the app
+will (`publisher_sites::lookup`): the sites of its ISBN prefix, each recipe in
+turn, a page taken only when it shows the ISBN, then the cover image, loaded
+through the same polite client. The contact sheet (`index.html`, served like
+the report) shows each cover found beside the library's: a wrong cover is the
+failure that counts, and only an eye finds it. The results stay in `target/`:
+they hold the titles of someone's library.
+
+How the cover is chosen on the book's page, each rule from a real case:
+- an image named after the book's ISBN first; one named after another ISBN
+  is a related title's, never taken (Actes Sud declared one);
+- then the first image the page declares (JSON-LD, `og:image`), then the
+  `<img>` tags marked as the book's by their class or a close container's
+  (`couv_livre`, `image-livre`), for a declared image that is gone (Arléa),
+  then the other declared images (often a share card);
+- the other `<img>` tags only on a page that declares nothing of its own;
+- the first image robots.txt forbids (or its server refuses) ends the
+  search: the next images of the page are a close button or a banner (the
+  Points and Seuil covers are on `ref.lamartinieregroupe.com`, `Disallow: /`);
+- the site's own images are left out: kept in its theme or icon folders, or
+  named as a stand-in (`nocover.jpg`, `couverture-manquante.png`); a page
+  that declares only a stand-in has no cover.
+
+Reference measure, 2026-11-14: the 226 books of a library, ten at most per
+publisher, **137 covers found, none wrong**. The proof of concept found 103
+with the same rule (robots.txt applies to images) and a browser User-Agent.
+Of the rest: 61 not found on the sites (old ISBNs, mostly), 13 covers
+forbidden by robots.txt, 12 books without a site in the table, 3 pages
+without a usable image.
 
 ## What the first full probe taught (November 2026)
 
