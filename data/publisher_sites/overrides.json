@@ -7,12 +7,162 @@
     "9782253": {
       "name": "Le Livre de Poche",
       "home": "https://www.livredepoche.com/"
+    },
+    "978238082": {
+      "name": "Éditions Anne Carrière",
+      "home": "https://www.anne-carriere.fr/"
+    },
+    "97827445": {
+      "name": "De Boeck",
+      "home": "https://www.deboecksuperieur.com/"
+    },
+    "97828041": {
+      "name": "De Boeck",
+      "home": "https://www.deboecksuperieur.com/"
+    },
+    "978284337": {
+      "name": "Éditions Anne Carrière",
+      "home": "https://www.anne-carriere.fr/"
     }
   },
   "sites": {
+    "cnrs.fr": {
+      "note": "Wikidata gives an address that is not the publisher's catalogue (group site, or a domain since abandoned).",
+      "home": "https://www.cnrseditions.fr/"
+    },
+    "ddbeditions.com": {
+      "note": "Wikidata gives an address that is not the publisher's catalogue (group site, or a domain since abandoned).",
+      "home": "https://www.editionsddb.fr/"
+    },
+    "editions-dalloz.fr": {
+      "note": "Wikidata gives an address that is not the publisher's catalogue (group site, or a domain since abandoned).",
+      "home": "https://www.boutique.lefebvre-dalloz.fr/"
+    },
     "gallica.bnf.fr": {
       "note": "Wikidata gives Mercure de France's Gallica record as its website; not a publisher site.",
       "excluded": true
+    },
+    "glenat.com": {
+      "note": "The bare host serves an expired certificate; the www one works.",
+      "home": "https://www.glenat.com/"
+    },
+    "hachette.com": {
+      "note": "Wikidata gives an address that is not the publisher's catalogue (group site, or a domain since abandoned).",
+      "home": "https://www.hachette.fr/"
+    },
+    "lamartinierejeunesse.fr": {
+      "note": "Wikidata gives an address that is not the publisher's catalogue (group site, or a domain since abandoned).",
+      "home": "https://www.editionsdelamartiniere.fr/"
+    },
+    "milanpresse.com": {
+      "note": "Wikidata gives an address that is not the publisher's catalogue (group site, or a domain since abandoned).",
+      "home": "https://www.editionsmilan.com/"
+    },
+    "playbac.fr": {
+      "note": "Wikidata gives an address that is not the publisher's catalogue (group site, or a domain since abandoned).",
+      "home": "https://www.playbac-editions.com/"
+    },
+    "pol-editeur.fr": {
+      "note": "Wikidata gives an address that is not the publisher's catalogue (group site, or a domain since abandoned).",
+      "home": "https://www.pol-editeur.com/"
     }
-  }
+  },
+  "publishers": [
+    {
+      "name": "Auzou",
+      "home": "https://www.auzou.fr/"
+    },
+    {
+      "name": "Citadelles & Mazenod",
+      "home": "https://www.citadelles-mazenod.com/"
+    },
+    {
+      "name": "Droz",
+      "home": "https://www.droz.org/"
+    },
+    {
+      "name": "Elsevier Masson",
+      "home": "https://www.elsevier-masson.fr/"
+    },
+    {
+      "name": "Finitude",
+      "home": "https://www.finitude.fr/"
+    },
+    {
+      "name": "Fleurus",
+      "home": "https://www.fleuruseditions.com/"
+    },
+    {
+      "name": "Foucher",
+      "home": "https://www.editions-foucher.fr/"
+    },
+    {
+      "name": "Jouvence",
+      "home": "https://editions-jouvence.com/"
+    },
+    {
+      "name": "LGDJ",
+      "home": "https://www.lgdj.fr/"
+    },
+    {
+      "name": "Lavoisier",
+      "home": "https://www.lavoisier.fr/"
+    },
+    {
+      "name": "Leduc",
+      "home": "https://www.editionsleduc.com/"
+    },
+    {
+      "name": "Michelin",
+      "home": "https://editions.michelin.com/"
+    },
+    {
+      "name": "Noir sur Blanc",
+      "home": "https://www.leseditionsnoirsurblanc.fr/"
+    },
+    {
+      "name": "Petit Futé",
+      "home": "https://www.petitfute.com/"
+    },
+    {
+      "name": "Phébus",
+      "home": "https://www.editionsphebus.fr/"
+    },
+    {
+      "name": "Retz",
+      "home": "https://www.editions-retz.com/"
+    },
+    {
+      "name": "Rustica",
+      "home": "https://www.rusticaeditions.com/"
+    },
+    {
+      "name": "Tristram",
+      "home": "https://www.tristram.fr/"
+    },
+    {
+      "name": "Téqui",
+      "home": "https://www.librairietequi.com/"
+    },
+    {
+      "name": "Ulmer",
+      "home": "https://www.editions-ulmer.fr/"
+    },
+    {
+      "name": "Verdier",
+      "home": "https://editions-verdier.fr/"
+    },
+    {
+      "name": "Vrin",
+      "home": "https://www.vrin.fr/"
+    },
+    {
+      "name": "Éditions Amsterdam",
+      "home": "https://www.editionsamsterdam.fr/"
+    },
+    {
+      "name": "Éditions de l'EHESS",
+      "home": "https://editions.ehess.fr/"
+    }
+  ]
 }

@@ -142,7 +142,7 @@
     "404-editions.fr": {
       "home": "http://404-editions.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -313,7 +313,7 @@
     "acoria.site-fr.fr": {
       "home": "http://www.acoria.site-fr.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -371,7 +371,7 @@
     "adeneditions.com": {
       "home": "https://adeneditions.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -386,7 +386,7 @@
     "adfmusique.net": {
       "home": "http://www.adfmusique.net/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -543,7 +543,7 @@
     "agone.org": {
       "home": "https://agone.org/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782748906349",
@@ -655,7 +655,14 @@
           "found_by_title": 0
         }
       ],
-      "book_sitemap": "https://agone.org/livres-sitemap.xml"
+      "book_sitemap": "https://agone.org/livres-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://agone.org/livres-sitemap.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
     },
     "akata.fr": {
       "home": "http://www.akata.fr/",
@@ -767,7 +774,7 @@
     "akileos.com": {
       "home": "http://www.akileos.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -1215,7 +1222,7 @@
     "alinea.dk": {
       "home": "https://www.alinea.dk/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9788723579843",
@@ -1742,7 +1749,7 @@
     "amphora.ru": {
       "home": "http://www.amphora.ru/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -2089,10 +2096,117 @@
       "witnesses": [],
       "tried": []
     },
+    "anne-carriere.fr": {
+      "home": "https://www.anne-carriere.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782380823547",
+          "title": "De quel progrès avons-nous besoin :: Éditions Anne Carrière",
+          "authors": "",
+          "url": "https://www.anne-carriere.fr/livre/de-quel-progres-avons-nous-besoin"
+        },
+        {
+          "isbn": "9782380823455",
+          "title": "Jusqu’à l’épuisement de la nuit :: Éditions Anne Carrière",
+          "authors": "",
+          "url": "https://www.anne-carriere.fr/livre/jusqua-lepuisement-de-la-nuit-le-convoi-des-tatoues"
+        },
+        {
+          "isbn": "9782380823530",
+          "title": "Si vivant :: Éditions Anne Carrière",
+          "authors": "",
+          "url": "https://www.anne-carriere.fr/livre/si-vivant"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.anne-carriere.fr/livre/{slug}",
+          "apostrophe": "drop"
+        },
+        "checked_on": 2,
+        "mismatches": 1
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.anne-carriere.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.anne-carriere.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.anne-carriere.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.anne-carriere.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.anne-carriere.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.anne-carriere.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.anne-carriere.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.anne-carriere.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.anne-carriere.fr/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ]
+    },
     "apediteur.com": {
       "home": "http://apediteur.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "HTTP 401",
       "witnesses": [],
       "tried": []
@@ -2100,7 +2214,7 @@
     "apopsix.fr": {
       "home": "http://www.apopsix.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -2227,7 +2341,7 @@
     "arenes.fr": {
       "home": "http://www.arenes.fr/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9791037516152",
@@ -2355,12 +2469,19 @@
           "found_by_title": 0
         }
       ],
-      "book_sitemap": "https://arenes.fr/livre-sitemap.xml"
+      "book_sitemap": "https://arenes.fr/livre-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://arenes.fr/livre-sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "argranenn.net": {
       "home": "http://argranenn.net/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -2368,7 +2489,7 @@
     "argripi.com": {
       "home": "http://argripi.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -2376,7 +2497,7 @@
     "argyll.fr": {
       "home": "https://argyll.fr/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782488126748",
@@ -2490,7 +2611,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://argyll.fr/sitemap-1.xml"
+      "book_sitemap": "https://argyll.fr/sitemap-1.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://argyll.fr/sitemap-1.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "arianne-g-voyance.fr": {
       "home": "https://www.arianne-g-voyance.fr/",
@@ -2625,7 +2753,7 @@
     },
     "arkhane-asylum.fr": {
       "home": "https://www.arkhane-asylum.fr/",
-      "status": "js_results",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -2729,12 +2857,19 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://www.arkhane-asylum.fr/sitemap.xml"
+      "book_sitemap": "https://www.arkhane-asylum.fr/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.arkhane-asylum.fr/sitemap.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "arkhe-editions.com": {
       "home": "https://www.arkhe-editions.com/",
       "status": "no_recipe",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782383411390",
@@ -3044,7 +3179,7 @@
     "artcomedie.com": {
       "home": "https://www.artcomedie.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -3480,7 +3615,7 @@
     "asterix.com": {
       "home": "https://www.asterix.com/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782014001471",
@@ -3599,7 +3734,7 @@
     "atelierdecreationlibertaire.com": {
       "home": "https://www.atelierdecreationlibertaire.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -3650,7 +3785,7 @@
     "au-bord-des-continents.com": {
       "home": "https://www.au-bord-des-continents.com/",
       "status": "no_recipe",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782911684281",
@@ -4063,7 +4198,7 @@
     "austral-editions.com": {
       "home": "https://austral-editions.com/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9791091894494",
@@ -4186,15 +4321,319 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://austral-editions.com/sitemap.xml"
+      "book_sitemap": "https://austral-editions.com/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://austral-editions.com/sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "autrement.com": {
       "home": "http://www.autrement.com/",
-      "status": "offline",
-      "probed_at": "2026-11-13",
-      "note": "unreachable",
-      "witnesses": [],
-      "tried": []
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782080151810",
+          "title": "Le grand rêve noir",
+          "authors": "",
+          "url": "https://www.autrement.com/le-grand-reve-noir/9782080151810"
+        },
+        {
+          "isbn": "9782080146472",
+          "title": "La honte",
+          "authors": "",
+          "url": "https://www.autrement.com/la-honte/9782080146472"
+        },
+        {
+          "isbn": "9782080510921",
+          "title": "Grand Atlas 2027",
+          "authors": "",
+          "url": "https://www.autrement.com/grand-atlas-2027/9782080510921"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.autrement.com/{slug}/{isbn}",
+          "apostrophe": "drop"
+        },
+        "checked_on": 3,
+        "mismatches": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.autrement.com/#?text={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.autrement.com/Catalogue#?text={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.autrement.com/Catalogue",
+            "post_fields": [
+              [
+                "search[_token]",
+                "ygPzCtayZlCpUov0aVw57QVhZeBgAbBLwKa7sXMX-C4"
+              ],
+              [
+                "search[text]",
+                "{q}"
+              ]
+            ]
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.autrement.com/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.autrement.com/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.autrement.com/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.autrement.com/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: unreachable"
+        },
+        {
+          "recipe": {
+            "url": "https://www.autrement.com/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.autrement.com/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.autrement.com/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.autrement.com/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.autrement.com/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ]
+    },
+    "auzou.fr": {
+      "home": "https://www.auzou.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9791039559638",
+          "title": "MES PREMIERS GRIBOUILLIS EFFAÇABLES",
+          "authors": "",
+          "url": "https://www.auzou.fr/9791039559638-mes-premiers-gribouillis-effacables/"
+        },
+        {
+          "isbn": "9791039583732",
+          "title": "L'ANTHOLOGIE ILLUSTRÉE DE LA VIE MICROSCOPIQUE",
+          "authors": "",
+          "url": "https://www.auzou.fr/9791039583732-l-anthologie-illustree-de-la-vie-microscopique/"
+        },
+        {
+          "isbn": "9791039556620",
+          "title": "CHERCHE ET TROUVE - NOËL",
+          "authors": "",
+          "url": "https://www.auzou.fr/9791039556620-cherche-et-trouve-noel/"
+        },
+        {
+          "isbn": "9782733811832",
+          "title": "LE LOUP QUI VOULAIT CHANGER DE COULEUR",
+          "authors": "",
+          "url": "https://www.auzou.fr/9782733811832-le-loup-qui-voulait-changer-de-couleur/"
+        },
+        {
+          "isbn": "9791039552363",
+          "title": "MES TOUT PREMIERS AUTOCOLLANTS - 500 AUTOCOLLANTS LA MATERNELLE",
+          "authors": "",
+          "url": "https://www.auzou.fr/9791039552363-mes-tout-premiers-autocollants-500-autocollants-la-maternelle/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.auzou.fr/{isbn}-{slug}/",
+          "apostrophe": "dash",
+          "slug_ignored": true
+        },
+        "checked_on": 5,
+        "mismatches": 0
+      },
+      "search": {
+        "recipe": {
+          "url": "https://www.auzou.fr/la-machine-a-cadeau#iasearch",
+          "post_fields": [
+            [
+              "q",
+              "{q}"
+            ]
+          ],
+          "by_isbn": true
+        },
+        "found_by_isbn": 4,
+        "found_by_title": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.auzou.fr/rechercher/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.auzou.fr/la-machine-a-cadeau#iasearch",
+            "post_fields": [
+              [
+                "q",
+                "{q}"
+              ]
+            ],
+            "by_isbn": true
+          },
+          "found_by_isbn": 4,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://www.auzou.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.auzou.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.auzou.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.auzou.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.auzou.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.auzou.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.auzou.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.auzou.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.auzou.fr/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ],
+      "book_sitemap": "https://www.auzou.fr/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.auzou.fr/sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "avions-bateaux.com": {
       "home": "https://www.avions-bateaux.com/",
@@ -4495,7 +4934,7 @@
     "beauvechain.be": {
       "home": "https://www.beauvechain.be/economie/commerces/annuaire-commercants/edition/nauwelaerts-editions-sa",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "HTTP 404",
       "witnesses": [],
       "tried": []
@@ -4554,7 +4993,7 @@
     "belin-editeur.com": {
       "home": "https://www.belin-editeur.com/accueil",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782701132877",
@@ -4655,7 +5094,14 @@
           "note": "control query: forbidden by robots.txt"
         }
       ],
-      "book_sitemap": "https://www.belin-editeur.com/sitemap.xml"
+      "book_sitemap": "https://www.belin-editeur.com/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.belin-editeur.com/sitemap.xml"
+        },
+        "found": 2,
+        "tried": 2
+      }
     },
     "benarteditions.com": {
       "home": "http://benarteditions.com/",
@@ -4667,7 +5113,7 @@
     "benjamin.dk": {
       "home": "https://benjamin.dk/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -4682,7 +5128,7 @@
     "bibliocratie.com": {
       "home": "http://www.bibliocratie.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -4823,7 +5269,7 @@
     "bibpurl.oclc.org": {
       "home": "http://bibpurl.oclc.org/web/50809",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -4837,8 +5283,8 @@
     },
     "black-book-editions.fr": {
       "home": "https://www.black-book-editions.fr/",
-      "status": "no_recipe",
-      "probed_at": "2026-11-13",
+      "status": "ok",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782376974888",
@@ -4926,7 +5372,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://black-book-editions.fr/sitemap-site.xml"
+      "book_sitemap": "https://black-book-editions.fr/sitemap-site.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://black-book-editions.fr/sitemap-site.xml"
+        },
+        "found": 2,
+        "tried": 2
+      }
     },
     "blayfoldex.com": {
       "home": "https://blayfoldex.com/",
@@ -5437,9 +5890,8 @@
     },
     "boutique.massot.com": {
       "home": "https://boutique.massot.com/",
-      "status": "offline",
-      "probed_at": "2026-11-13",
-      "note": "unreachable",
+      "status": "no_witness",
+      "probed_at": "2026-11-14",
       "witnesses": [],
       "tried": []
     },
@@ -6402,7 +6854,7 @@
     "carnetsnord.fr": {
       "home": "http://www.carnetsnord.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -7066,7 +7518,7 @@
     "cestadire.editions.free.fr": {
       "home": "http://cestadire.editions.free.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -7610,6 +8062,113 @@
         }
       ]
     },
+    "citadelles-mazenod.com": {
+      "home": "https://www.citadelles-mazenod.com/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782386111198",
+          "title": "L'Égypte pharaonique",
+          "authors": "",
+          "url": "https://citadelles-mazenod.com/product/civilisation-et-art-de-l-egypte-pharaonique/"
+        },
+        {
+          "isbn": "9782386111181",
+          "title": "Miquel Barceló, édition limitée",
+          "authors": "",
+          "url": "https://citadelles-mazenod.com/product/miquel-barcelo-edition-limitee/"
+        },
+        {
+          "isbn": "9782386111167",
+          "title": "Miquel Barceló",
+          "authors": "",
+          "url": "https://citadelles-mazenod.com/product/miquel-barcelo/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://citadelles-mazenod.com/product/{slug}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 2,
+        "mismatches": 1
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://citadelles-mazenod.com/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://citadelles-mazenod.com/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://citadelles-mazenod.com/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://citadelles-mazenod.com/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://citadelles-mazenod.com/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://citadelles-mazenod.com/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://citadelles-mazenod.com/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://citadelles-mazenod.com/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://citadelles-mazenod.com/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        }
+      ]
+    },
     "citedudesign.com": {
       "home": "https://www.citedudesign.com/",
       "status": "no_witness",
@@ -7620,7 +8179,7 @@
     "city-editions.com": {
       "home": "http://www.city-editions.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -7887,11 +8446,92 @@
       "tried": []
     },
     "cnrs.fr": {
-      "home": "https://www.cnrs.fr/",
-      "status": "no_witness",
-      "probed_at": "2026-11-13",
-      "witnesses": [],
-      "tried": []
+      "home": "https://www.cnrseditions.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782271135612",
+          "title": "La révolution américaine",
+          "authors": "Bertrand Van Ruymbeke",
+          "url": "https://www.cnrseditions.fr/catalogue/histoire/la-revolution-americaine/"
+        },
+        {
+          "isbn": "9782271160164",
+          "title": "Atlas historique de l'Europe",
+          "authors": "Cyrille P. Coutansais",
+          "url": "https://www.cnrseditions.fr/catalogue/histoire/atlas-historique-de-l-europe/"
+        },
+        {
+          "isbn": "9782271127082",
+          "title": "Étrange et merveilleux",
+          "authors": "Patrick Gaboriau",
+          "url": "https://www.cnrseditions.fr/catalogue/anthropologie-et-mondes-contemporains/etrange-et-merveilleux/"
+        },
+        {
+          "isbn": "9782271068231",
+          "title": "Les 4 soleils",
+          "authors": "Jacques Soustelle",
+          "url": "https://www.cnrseditions.fr/catalogue/anthropologie-et-mondes-contemporains/les-4-soleils/"
+        },
+        {
+          "isbn": "9782271060877",
+          "title": "Les Marabouts africains à Paris",
+          "authors": "Liliane Kuczynski",
+          "url": "https://www.cnrseditions.fr/catalogue/anthropologie-et-mondes-contemporains/les-marabouts-africains-a-paris/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.cnrseditions.fr/catalogue/anthropologie-et-mondes-contemporains/{slug}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 3,
+        "mismatches": 2
+      },
+      "search": {
+        "recipe": {
+          "url": "https://www.cnrseditions.fr/recherche?s={q}",
+          "by_isbn": true
+        },
+        "found_by_isbn": 5,
+        "found_by_title": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.cnrseditions.fr/#?phrase={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.cnrseditions.fr/catalogue/#?phrase={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.cnrseditions.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.cnrseditions.fr/recherche?s={q}",
+            "by_isbn": true
+          },
+          "found_by_isbn": 5,
+          "found_by_title": 0
+        }
+      ],
+      "book_sitemap": "https://www.cnrseditions.fr/product-sitemap.xml"
     },
     "cnrseditions.fr": {
       "home": "https://www.cnrseditions.fr/",
@@ -7979,7 +8619,7 @@
     "codesrousseau.fr": {
       "home": "http://www.codesrousseau.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -8070,7 +8710,7 @@
     "compagnie-litteraire.com": {
       "home": "https://www.compagnie-litteraire.com/",
       "status": "no_recipe",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782876838345",
@@ -8186,7 +8826,7 @@
     "coop-breizh.fr": {
       "home": "http://www.coop-breizh.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -8304,7 +8944,7 @@
     "corsicacomixedition.com": {
       "home": "https://corsicacomixedition.com/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9791092481327",
@@ -8422,7 +9062,7 @@
     "couleurlivres.org": {
       "home": "https://www.couleurlivres.org/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -8430,7 +9070,7 @@
     "courteechelle.groupecourteechelle.com": {
       "home": "http://courteechelle.groupecourteechelle.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -8445,7 +9085,7 @@
     "crdp.ac-rennes.fr": {
       "home": "http://crdp.ac-rennes.fr/tes/site/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -8720,12 +9360,109 @@
       "tried": []
     },
     "ddbeditions.com": {
-      "home": "http://www.ddbeditions.com/",
-      "status": "offline",
-      "probed_at": "2026-11-13",
-      "note": "unreachable",
-      "witnesses": [],
-      "tried": []
+      "home": "https://www.editionsddb.fr/",
+      "status": "js_results",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782220099910",
+          "title": "Pourquoi Rome a parlé",
+          "authors": "",
+          "url": "https://www.editionsddb.fr/product/132341/pourquoi-rome-a-parle/"
+        },
+        {
+          "isbn": "9782220099927",
+          "title": "L’art de rester debout",
+          "authors": "",
+          "url": "https://www.editionsddb.fr/product/133844/l-art-de-rester-debout/"
+        },
+        {
+          "isbn": "9782220099903",
+          "title": "André Malraux",
+          "authors": "",
+          "url": "https://www.editionsddb.fr/product/133196/andre-malraux/"
+        }
+      ],
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.editionsddb.fr/search/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsddb.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsddb.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsddb.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsddb.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsddb.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsddb.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsddb.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsddb.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsddb.fr/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        }
+      ]
     },
     "deboeck.com": {
       "home": "http://www.deboeck.com/",
@@ -8737,7 +9474,7 @@
     "deboecksuperieur.com": {
       "home": "https://www.deboecksuperieur.com/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782807360617",
@@ -8746,16 +9483,16 @@
           "url": "https://www.deboecksuperieur.com/livre/9782807360617-psychologie-de-la-haute-sensibilite"
         },
         {
-          "isbn": "9782807357617",
-          "title": "Comment enseigner autrement avec les QCM électroniques ? - Livre",
-          "authors": "",
-          "url": "https://www.deboecksuperieur.com/livre/9782807357617-comment-enseigner-autrement-avec-les-qcm-electroniques"
-        },
-        {
           "isbn": "9782807348004",
           "title": "Addictions : prévention de la rechute basée sur la pleine conscience - Livre",
           "authors": "",
           "url": "https://www.deboecksuperieur.com/livre/9782807348004-addictions-prevention-de-la-rechute-basee-sur-la-pleine-conscience"
+        },
+        {
+          "isbn": "9782807357617",
+          "title": "Comment enseigner autrement avec les QCM électroniques ? - Livre",
+          "authors": "",
+          "url": "https://www.deboecksuperieur.com/livre/9782807357617-comment-enseigner-autrement-avec-les-qcm-electroniques"
         }
       ],
       "search": {
@@ -9328,15 +10065,15 @@
     "donquichotte-editions.com": {
       "home": "http://www.donquichotte-editions.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
     },
     "dorbestier.com": {
       "home": "https://www.dorbestier.com/",
-      "status": "no_recipe",
-      "probed_at": "2026-11-13",
+      "status": "ok",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782842384432",
@@ -9442,7 +10179,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://www.dorbestier.com/store-products-sitemap.xml"
+      "book_sitemap": "https://www.dorbestier.com/store-products-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.dorbestier.com/store-products-sitemap.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
     },
     "dramaturges.qc.ca": {
       "home": "http://dramaturges.qc.ca/",
@@ -9552,18 +10296,181 @@
       "witnesses": [],
       "tried": []
     },
+    "droz.org": {
+      "home": "https://www.droz.org/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782600067775",
+          "title": "Librairie Droz (France)",
+          "authors": "",
+          "url": "https://www.droz.org/france/product/9782600067775"
+        },
+        {
+          "isbn": "9782600067393",
+          "title": "Librairie Droz (France)",
+          "authors": "",
+          "url": "https://www.droz.org/france/product/9782600067393"
+        },
+        {
+          "isbn": "9782600068024",
+          "title": "Librairie Droz (France)",
+          "authors": "",
+          "url": "https://www.droz.org/france/product/9782600068024"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.droz.org/france/product/{isbn}",
+          "apostrophe": "drop"
+        },
+        "checked_on": 3,
+        "mismatches": 0
+      },
+      "search": {
+        "recipe": {
+          "url": "https://www.droz.org/france/search?keywords={q}",
+          "by_isbn": true
+        },
+        "found_by_isbn": 3,
+        "found_by_title": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.droz.org/france/search?keywords={q}",
+            "by_isbn": true
+          },
+          "found_by_isbn": 3,
+          "found_by_title": 0
+        }
+      ]
+    },
     "dunod.com": {
       "home": "https://www.dunod.com/",
-      "status": "offline",
-      "probed_at": "2026-11-13",
-      "note": "unreachable",
-      "witnesses": [],
-      "tried": []
+      "status": "no_recipe",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782100889648",
+          "title": "La gestion d'actifs",
+          "authors": "",
+          "url": "https://www.dunod.com/livres-pierre-clauss"
+        },
+        {
+          "isbn": "9782100888955",
+          "title": "Statistiques en psychologie et neuropsychologie",
+          "authors": "",
+          "url": "https://www.dunod.com/livres-beatrice-degraeve"
+        },
+        {
+          "isbn": "9782100897292",
+          "title": "L'Astronomie comme vous ne l'avez jamais vue",
+          "authors": "",
+          "url": "https://www.dunod.com/livres-emmanuel-beaudoin"
+        },
+        {
+          "isbn": "9782100574049",
+          "title": "La vie psychique du bébé",
+          "authors": "",
+          "url": "https://www.dunod.com/livres-maurice-despinoy"
+        },
+        {
+          "isbn": "9782100515240",
+          "title": "Les matériaux de A à Z",
+          "authors": "",
+          "url": "https://www.dunod.com/livres-jean-steinmetz"
+        }
+      ],
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.dunod.com/recherche?text={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.dunod.com/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.dunod.com/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.dunod.com/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.dunod.com/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.dunod.com/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.dunod.com/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.dunod.com/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.dunod.com/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.dunod.com/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        }
+      ],
+      "book_sitemap": "https://www.dunod.com/sitemap.xml"
     },
     "dupuis.com": {
       "home": "http://www.dupuis.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -9834,7 +10741,7 @@
     },
     "ecoledesloisirs.fr": {
       "home": "http://www.ecoledesloisirs.fr/",
-      "status": "js_results",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -9938,7 +10845,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://www.ecoledesloisirs.fr/sitemap.xml"
+      "book_sitemap": "https://www.ecoledesloisirs.fr/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.ecoledesloisirs.fr/sitemap.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "economica.fr": {
       "home": "https://www.economica.fr/",
@@ -9986,7 +10900,7 @@
     "ecosociete.org": {
       "home": "http://ecosociete.org/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782898571718",
@@ -10101,12 +11015,19 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://ecosociete.org/sitemaps-1-section-livres-1-sitemap.xml"
+      "book_sitemap": "https://ecosociete.org/sitemaps-1-section-livres-1-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://ecosociete.org/sitemaps-1-section-livres-1-sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "edatlas.it": {
       "home": "https://www.edatlas.it/",
       "status": "no_recipe",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9788826821986",
@@ -10658,7 +11579,7 @@
     "editions-allia.com": {
       "home": "http://www.editions-allia.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "HTTP 404",
       "witnesses": [],
       "tried": []
@@ -10989,7 +11910,7 @@
     "editions-beauchesne.com": {
       "home": "https://www.editions-beauchesne.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -11111,7 +12032,7 @@
     "editions-bordas.fr": {
       "home": "http://www.editions-bordas.fr/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782047409558",
@@ -11130,6 +12051,18 @@
           "title": "Les années de collège - Anglais - Livre parascolaire",
           "authors": "",
           "url": "https://www.editions-bordas.fr/ouvrage/les-annees-de-college-anglais-livre-parascolaire-9782047357736.html"
+        },
+        {
+          "isbn": "9782047406854",
+          "title": "Cahier pour améliorer son écriture du CE2 au CM2 - Livre parascolaire",
+          "authors": "",
+          "url": "https://www.editions-bordas.fr/ouvrage/cahier-pour-ameliorer-son-ecriture-du-ce2-au-cm2-livre-parascolaire-9782047406854.html"
+        },
+        {
+          "isbn": "9782047406861",
+          "title": "Indice Maths 1re enseignement de spécialité - Manuel papier et numérique enseignant (Ed. 2026)",
+          "authors": "",
+          "url": "https://www.editions-bordas.fr/ouvrage/indice-maths-1re-enseignement-de-specialite-manuel-papier-et-numerique-enseignant-ed-2026-9782047406861.html"
         }
       ],
       "product": {
@@ -11137,7 +12070,7 @@
           "template": "https://www.editions-bordas.fr/ouvrage/{slug}-{isbn}.html",
           "apostrophe": "drop"
         },
-        "checked_on": 3,
+        "checked_on": 5,
         "mismatches": 0
       },
       "tried": [
@@ -11147,15 +12080,15 @@
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
-          "note": "control query: unreachable"
+          "broken": true,
+          "note": ""
         },
         {
           "recipe": {
             "url": "https://www.editions-bordas.fr/?s={q}"
           },
           "found_by_isbn": 0,
-          "found_by_title": 0,
-          "note": "control query: unreachable"
+          "found_by_title": 0
         },
         {
           "recipe": {
@@ -11163,7 +12096,8 @@
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
-          "note": "control query: unreachable"
+          "broken": true,
+          "note": ""
         },
         {
           "recipe": {
@@ -11171,7 +12105,7 @@
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
-          "note": "control query: unreachable"
+          "note": "control query: HTTP 404"
         },
         {
           "recipe": {
@@ -11179,7 +12113,8 @@
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
-          "note": "control query: unreachable"
+          "broken": true,
+          "note": ""
         },
         {
           "recipe": {
@@ -11187,7 +12122,7 @@
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
-          "note": "control query: unreachable"
+          "note": "control query: HTTP 404"
         },
         {
           "recipe": {
@@ -11195,7 +12130,8 @@
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
-          "note": "control query: unreachable"
+          "broken": true,
+          "note": ""
         },
         {
           "recipe": {
@@ -11203,7 +12139,7 @@
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
-          "note": "control query: unreachable"
+          "note": "control query: HTTP 404"
         },
         {
           "recipe": {
@@ -11211,7 +12147,7 @@
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
-          "note": "control query: unreachable"
+          "note": "control query: HTTP 404"
         },
         {
           "recipe": {
@@ -11222,12 +12158,19 @@
           "note": "control query: forbidden by robots.txt"
         }
       ],
-      "book_sitemap": "https://www.editions-bordas.fr/sitemap.xml"
+      "book_sitemap": "https://www.editions-bordas.fr/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.editions-bordas.fr/sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "editions-breal.fr": {
       "home": "http://www.editions-breal.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -11235,7 +12178,7 @@
     "editions-chandeigne.com": {
       "home": "http://www.editions-chandeigne.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -11423,7 +12366,7 @@
     "editions-chronique.com": {
       "home": "http://www.editions-chronique.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -11744,12 +12687,118 @@
       ]
     },
     "editions-dalloz.fr": {
-      "home": "http://www.editions-dalloz.fr/",
-      "status": "offline",
-      "probed_at": "2026-11-13",
-      "note": "unreachable",
-      "witnesses": [],
-      "tried": []
+      "home": "https://www.boutique.lefebvre-dalloz.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782247225620",
+          "title": "Codes",
+          "authors": "",
+          "url": "https://boutique.lefebvre-dalloz.fr/codes-mementos-livres.html"
+        },
+        {
+          "isbn": "9782247228133",
+          "title": "Compliance et droits de la défense",
+          "authors": "",
+          "url": "https://boutique.lefebvre-dalloz.fr/compliance-et-droits-de-la-defense.html"
+        },
+        {
+          "isbn": "9782247221257",
+          "title": "La garde à vue",
+          "authors": "",
+          "url": "https://boutique.lefebvre-dalloz.fr/la-garde-a-vue.html"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://boutique.lefebvre-dalloz.fr/{slug}.html",
+          "apostrophe": "drop"
+        },
+        "checked_on": 2,
+        "mismatches": 1
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://boutique.lefebvre-dalloz.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://boutique.lefebvre-dalloz.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://boutique.lefebvre-dalloz.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://boutique.lefebvre-dalloz.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://boutique.lefebvre-dalloz.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://boutique.lefebvre-dalloz.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://boutique.lefebvre-dalloz.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://boutique.lefebvre-dalloz.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://boutique.lefebvre-dalloz.fr/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ],
+      "book_sitemap": "https://boutique.lefebvre-dalloz.fr/media/sitemap/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://boutique.lefebvre-dalloz.fr/media/sitemap/sitemap.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "editions-dangles.com": {
       "home": "http://www.editions-dangles.com/",
@@ -11838,7 +12887,7 @@
     "editions-du-relie.com": {
       "home": "https://www.editions-du-relie.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -12141,7 +13190,7 @@
     "editions-etrave.fr": {
       "home": "http://www.editions-etrave.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -12149,7 +13198,7 @@
     "editions-exaequo.fr": {
       "home": "http://www.editions-exaequo.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -12290,6 +13339,55 @@
           "note": "the control page already links the witnesses"
         }
       ]
+    },
+    "editions-foucher.fr": {
+      "home": "https://www.editions-foucher.fr/",
+      "status": "blocked",
+      "probed_at": "2026-11-14",
+      "note": "blocked: HTTP 429",
+      "witnesses": [
+        {
+          "isbn": "9782216177950",
+          "title": "Les Nouveaux Cahiers - Prévention Santé Environnement (PSE) - 2de Bac Pro - Ed. 2026 - Livre élève",
+          "authors": "",
+          "url": "https://www.editions-foucher.fr/livre/les-nouveaux-cahiers-prevention-sante-environnement-pse-2de-bac-pro-ed-2026-livre-eleve-9782216177950"
+        },
+        {
+          "isbn": "9782216177875",
+          "title": "Les Nouveaux Cahiers - Histoire-Géographie-EMC - Tle Bac Pro - Éd. 2026 - Livre élève",
+          "authors": "",
+          "url": "https://www.editions-foucher.fr/livre/les-nouveaux-cahiers-histoire-geographie-emc-tle-bac-pro-ed-2026-livre-eleve-9782216177875"
+        },
+        {
+          "isbn": "9782216179923",
+          "title": "Cahier de Français 5e Enseignement adapté - Éd. 2026",
+          "authors": "",
+          "url": "https://www.editions-foucher.fr/livre/cahier-de-francais-5e-enseignement-adapte-ed-2026-9782216179923"
+        },
+        {
+          "isbn": "9782216163960",
+          "title": "Réussir mon BUT : Bachelor universitaire de technologie - Economie",
+          "authors": "Rémi Leurion",
+          "url": "https://boutique.editions-foucher.fr/produit/848/9782216161591/reussir-mon-but-bachelor-universitaire-de-technologie-economie"
+        },
+        {
+          "isbn": "9782216172788",
+          "title": "BTS 1re et 2e années",
+          "authors": "",
+          "url": "https://www.editions-foucher.fr/livre/les-nouveaux-cahiers-culture-generale-et-expression-bts-1re-et-2e-annees-ed2024-livre-eleve-9782216172788"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.editions-foucher.fr/livre/{slug}-{isbn}",
+          "apostrophe": "drop",
+          "slug_ignored": true
+        },
+        "checked_on": 3,
+        "mismatches": 2
+      },
+      "tried": [],
+      "book_sitemap": "https://www.editions-foucher.fr/sitemap.xml?page=2"
     },
     "editions-fournel.fr": {
       "home": "https://editions-fournel.fr/",
@@ -12691,14 +13789,14 @@
     "editions-goater.org": {
       "home": "http://www.editions-goater.org/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
     },
     "editions-hapax.org": {
       "home": "https://editions-hapax.org/",
-      "status": "js_results",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -12800,7 +13898,14 @@
           "js_results": true
         }
       ],
-      "book_sitemap": "https://editions-hapax.org/sitemap.xml"
+      "book_sitemap": "https://editions-hapax.org/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://editions-hapax.org/sitemap.xml"
+        },
+        "found": 4,
+        "tried": 4
+      }
     },
     "editions-harmattan.fr": {
       "home": "https://www.editions-harmattan.fr/",
@@ -13021,8 +14126,8 @@
     },
     "editions-hermann.fr": {
       "home": "http://www.editions-hermann.fr/",
-      "status": "no_recipe",
-      "probed_at": "2026-11-13",
+      "status": "ok",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9791037049926",
@@ -13119,12 +14224,19 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://www.editions-hermann.fr/sitemap.xml"
+      "book_sitemap": "https://www.editions-hermann.fr/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.editions-hermann.fr/sitemap.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "editions-iconoclaste.fr": {
       "home": "https://www.editions-iconoclaste.fr/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782378806187",
@@ -13239,7 +14351,14 @@
           "js_results": true
         }
       ],
-      "book_sitemap": "https://www.editions-iconoclaste.fr/livre-sitemap.xml"
+      "book_sitemap": "https://www.editions-iconoclaste.fr/livre-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.editions-iconoclaste.fr/livre-sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "editions-ivrea.fr": {
       "home": "https://www.editions-ivrea.fr/",
@@ -13392,6 +14511,138 @@
       "probed_at": "2026-11-13",
       "witnesses": [],
       "tried": []
+    },
+    "editions-jouvence.com": {
+      "home": "https://editions-jouvence.com/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782889841578",
+          "title": "Carnet d'enquête d'un magnétiseur",
+          "authors": "",
+          "url": "https://editions-jouvence.com/livre/carnet-denquete-dun-magnetiseur/"
+        },
+        {
+          "isbn": "9782889841356",
+          "title": "Apaisez votre système nerveux grâce à la naturopathie",
+          "authors": "",
+          "url": "https://editions-jouvence.com/livre/apaisez-votre-systeme-nerveux-grace-a-la-naturopathie/"
+        },
+        {
+          "isbn": "9782889841189",
+          "title": "La Constellation des 13 missions d'âme",
+          "authors": "",
+          "url": "https://editions-jouvence.com/livre/la-constellation-des-13-missions-dame/"
+        },
+        {
+          "isbn": "9782889535323",
+          "title": "60 recettes réconfortantes de votre naturopathe",
+          "authors": "",
+          "url": "https://editions-jouvence.com/livre/60-recettes-reconfortantes-de-votre-naturopathe/"
+        },
+        {
+          "isbn": "9782889539871",
+          "title": "L'Amour au temps du swipe",
+          "authors": "",
+          "url": "https://editions-jouvence.com/livre/lamour-au-temps-du-swipe/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://editions-jouvence.com/livre/{slug}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 5,
+        "mismatches": 0
+      },
+      "search": {
+        "recipe": {
+          "url": "https://editions-jouvence.com/?post_type=product&type_aws=true&s={q}"
+        },
+        "found_by_isbn": 0,
+        "found_by_title": 5
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://editions-jouvence.com/?post_type=product&type_aws=true&s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 5
+        },
+        {
+          "recipe": {
+            "url": "https://editions-jouvence.com/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://editions-jouvence.com/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-jouvence.com/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-jouvence.com/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-jouvence.com/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-jouvence.com/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-jouvence.com/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-jouvence.com/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-jouvence.com/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        }
+      ],
+      "book_sitemap": "https://editions-jouvence.com/sitemap.xml"
     },
     "editions-label-ln.com": {
       "home": "http://www.editions-label-ln.com/",
@@ -13640,22 +14891,22 @@
       "probed_at": "2026-11-14",
       "witnesses": [
         {
+          "isbn": "9782130795087",
+          "title": "Le totémisme aujourd'hui",
+          "authors": "",
+          "url": "https://www.puf.com/le-totemisme-aujourdhui-0"
+        },
+        {
+          "isbn": "9782130795278",
+          "title": "L'aventure",
+          "authors": "",
+          "url": "https://www.puf.com/laventure"
+        },
+        {
           "isbn": "9782130795285",
           "title": "Précis de culture biblique",
           "authors": "",
           "url": "https://www.puf.com/precis-de-culture-biblique"
-        },
-        {
-          "isbn": "9782130795292",
-          "title": "Philosophie grecque",
-          "authors": "",
-          "url": "https://www.puf.com/philosophie-grecque"
-        },
-        {
-          "isbn": "9782130795582",
-          "title": "Colonisation et décolonisation (XVIe-XXe siècle)",
-          "authors": "",
-          "url": "https://www.puf.com/colonisation-et-decolonisation-xvie-xxe-siecle"
         }
       ],
       "product": {
@@ -13663,8 +14914,8 @@
           "template": "https://www.puf.com/{slug}",
           "apostrophe": "drop"
         },
-        "checked_on": 3,
-        "mismatches": 0
+        "checked_on": 2,
+        "mismatches": 1
       },
       "tried": [
         {
@@ -13747,12 +14998,19 @@
           "note": "control query: forbidden by robots.txt"
         }
       ],
-      "book_sitemap": "https://www.puf.com/sitemap.xml?page=2"
+      "book_sitemap": "https://www.puf.com/sitemap.xml?page=2",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.puf.com/sitemap.xml?page=2"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "editions-libertaires.org": {
       "home": "https://editions-libertaires.org/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782900886472",
@@ -13865,7 +15123,14 @@
           "found_by_title": 0
         }
       ],
-      "book_sitemap": "https://editions-libertaires.org/wp-sitemap-posts-product-1.xml"
+      "book_sitemap": "https://editions-libertaires.org/wp-sitemap-posts-product-1.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://editions-libertaires.org/wp-sitemap-posts-product-1.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "editions-lignes.com": {
       "home": "https://www.editions-lignes.com/",
@@ -13913,7 +15178,7 @@
     "editions-lyonnaises.fr": {
       "home": "http://www.editions-lyonnaises.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -14063,7 +15328,7 @@
     "editions-motus.com": {
       "home": "http://www.editions-motus.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -14273,7 +15538,7 @@
     "editions-picard.com": {
       "home": "http://www.editions-picard.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -14668,6 +15933,133 @@
         }
       ]
     },
+    "editions-retz.com": {
+      "home": "https://www.editions-retz.com/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782725646770",
+          "title": "Mon année de prof des écoles élémentaire avec Lutin Bazar",
+          "authors": "",
+          "url": "https://www.editions-retz.com/enrichir-sa-pedagogie/mon-metier/mon-annee-de-prof-des-ecoles-elementaire-avec-lutin-bazar-9782725646770.html"
+        },
+        {
+          "isbn": "9782366381498",
+          "title": "Ma super classe de A à Z - à partir de 5 ans",
+          "authors": "",
+          "url": "https://www.editions-retz.com/parents-enfants/culture-et-curiosites/ma-super-classe-de-a-a-z-a-partir-de-5-ans-9782366381498.html"
+        },
+        {
+          "isbn": "9782725649412",
+          "title": "La grammaire avec des jeux de cartes - Maternelle (+ ressources numériques)",
+          "authors": "",
+          "url": "https://www.editions-retz.com/ecole-maternelle/ms/francais/la-grammaire-avec-des-jeux-de-cartes-maternelle-ressources-numeriques-9782725649412.html"
+        },
+        {
+          "isbn": "9782725633107",
+          "title": "Communiquer avec les parents pour la réussite des élèves",
+          "authors": "",
+          "url": "https://www.editions-retz.com/enrichir-sa-pedagogie/mon-metier/communiquer-avec-les-parents-pour-la-reussite-des-eleves-9782725633107.html"
+        },
+        {
+          "isbn": "9782725621647",
+          "title": "Il croit que...",
+          "authors": "",
+          "url": "https://www.editions-retz.com/ecole-maternelle/ms/francais/il-croit-que-9782725621647.html"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.editions-retz.com/enrichir-sa-pedagogie/mon-metier/{slug}-{isbn}.html",
+          "apostrophe": "drop"
+        },
+        "checked_on": 2,
+        "mismatches": 3
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.editions-retz.com/recherche?text={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-retz.com/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-retz.com/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-retz.com/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-retz.com/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-retz.com/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-retz.com/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-retz.com/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-retz.com/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editions-retz.com/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        }
+      ],
+      "book_sitemap": "https://www.editions-retz.com/sitemap.xml?page=2"
+    },
     "editions-rm.ca": {
       "home": "http://editions-rm.ca/",
       "status": "blocked",
@@ -14796,13 +16188,13 @@
     "editions-sarbacane.com": {
       "home": "http://www.editions-sarbacane.com/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
-          "isbn": "9791040808770",
-          "title": "Le Journal de Gurty&#160;: La Nuit des Monstres",
-          "authors": "Bertrand Santini",
-          "url": "https://editions-sarbacane.com/romans/le-journal-de-gurty-la-nuit-des-monstres"
+          "isbn": "9791040809630",
+          "title": "Reine des dragons",
+          "authors": "H. Lenoir",
+          "url": "https://editions-sarbacane.com/romans/reine-des-dragons"
         },
         {
           "isbn": "9791040809968",
@@ -14811,10 +16203,10 @@
           "url": "https://editions-sarbacane.com/romans/songe-a-la-douceur-edition-2026"
         },
         {
-          "isbn": "9791040809630",
-          "title": "Reine des dragons",
-          "authors": "H. Lenoir",
-          "url": "https://editions-sarbacane.com/romans/reine-des-dragons"
+          "isbn": "9791040808770",
+          "title": "Le Journal de Gurty&#160;: La Nuit des Monstres",
+          "authors": "Bertrand Santini",
+          "url": "https://editions-sarbacane.com/romans/le-journal-de-gurty-la-nuit-des-monstres"
         },
         {
           "isbn": "9782377319190",
@@ -14930,7 +16322,7 @@
     "editions-sedes.com": {
       "home": "http://www.editions-sedes.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -15093,7 +16485,7 @@
     "editions-soleildeminuit.com": {
       "home": "https://www.editions-soleildeminuit.com/",
       "status": "no_recipe",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782922691580",
@@ -15421,6 +16813,188 @@
       "witnesses": [],
       "tried": []
     },
+    "editions-ulmer.fr": {
+      "home": "https://www.editions-ulmer.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782379225031",
+          "title": "Dragons | Editions Ulmer",
+          "authors": "",
+          "url": "https://www.editions-ulmer.fr/editions-ulmer/dragons-1072-cl.htm"
+        },
+        {
+          "isbn": "9782379224027",
+          "title": "Palmiers | Editions Ulmer",
+          "authors": "",
+          "url": "https://www.editions-ulmer.fr/editions-ulmer/palmiers-au-c-ur-de-l-ecorce-1090-cl.htm"
+        },
+        {
+          "isbn": "9782841389216",
+          "title": "La forêt-jardin | Editions Ulmer",
+          "authors": "",
+          "url": "https://www.editions-ulmer.fr/editions-ulmer/la-foret-jardin-creer-une-foret-comestible-en-permaculture-pour-retrouver-autonomie-et-abondance-600-cl.htm"
+        }
+      ],
+      "search": {
+        "recipe": {
+          "url": "https://www.editions-ulmer.fr/editions-ulmer/recherche.php",
+          "post_fields": [
+            [
+              "recherche",
+              "{q}"
+            ]
+          ],
+          "by_isbn": true
+        },
+        "found_by_isbn": 3,
+        "found_by_title": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.editions-ulmer.fr/editions-ulmer/recherche.php",
+            "post_fields": [
+              [
+                "recherche",
+                "{q}"
+              ]
+            ],
+            "by_isbn": true
+          },
+          "found_by_isbn": 3,
+          "found_by_title": 0
+        }
+      ]
+    },
+    "editions-verdier.fr": {
+      "home": "https://editions-verdier.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782378562977",
+          "title": "Déclin et fascination",
+          "authors": "",
+          "url": "https://editions-verdier.fr/livre/declin-et-fascination/"
+        },
+        {
+          "isbn": "9782378562953",
+          "title": "N’efface pas mes cercles",
+          "authors": "",
+          "url": "https://editions-verdier.fr/livre/nefface-pas-mes-cercles/"
+        },
+        {
+          "isbn": "9782378562960",
+          "title": "Mon œil",
+          "authors": "",
+          "url": "https://editions-verdier.fr/livre/mon-oeil/"
+        },
+        {
+          "isbn": "9782864321439",
+          "title": "Le balcon d’Angelo",
+          "authors": "",
+          "url": "https://editions-verdier.fr/livre/le-balcon-dangelo/"
+        },
+        {
+          "isbn": "9782864321613",
+          "title": "Les grands textes de la cabale",
+          "authors": "",
+          "url": "https://editions-verdier.fr/livre/les-grands-textes-de-la-cabale/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://editions-verdier.fr/livre/{slug}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 5,
+        "mismatches": 0
+      },
+      "search": {
+        "recipe": {
+          "url": "https://editions-verdier.fr/?s={q}",
+          "by_isbn": true
+        },
+        "found_by_isbn": 2,
+        "found_by_title": 2
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://editions-verdier.fr/?s={q}",
+            "by_isbn": true
+          },
+          "found_by_isbn": 2,
+          "found_by_title": 2
+        },
+        {
+          "recipe": {
+            "url": "https://editions-verdier.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-verdier.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-verdier.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-verdier.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-verdier.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-verdier.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-verdier.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ],
+      "book_sitemap": "https://editions-verdier.fr/wp-sitemap-posts-book-1.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://editions-verdier.fr/wp-sitemap-posts-book-1.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
+    },
     "editions-voyel.fr": {
       "home": "http://www.editions-voyel.fr/",
       "status": "ok",
@@ -15659,9 +17233,17 @@
         }
       ]
     },
+    "editions.ehess.fr": {
+      "home": "https://editions.ehess.fr/",
+      "status": "offline",
+      "probed_at": "2026-11-14",
+      "note": "unreachable",
+      "witnesses": [],
+      "tried": []
+    },
     "editions.flammarion.com": {
       "home": "https://editions.flammarion.com/",
-      "status": "js_results",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -15691,6 +17273,32 @@
           "found_by_isbn": 0,
           "found_by_title": 0,
           "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://editions.flammarion.com/Catalogue#?text={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: unreachable"
+        },
+        {
+          "recipe": {
+            "url": "https://editions.flammarion.com/Catalogue",
+            "post_fields": [
+              [
+                "search[_token]",
+                "zYL2F4UMiOklE7eWf5mO3iJ9CzKMS6LUealF3RU7x5s"
+              ],
+              [
+                "search[text]",
+                "{q}"
+              ]
+            ]
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
         },
         {
           "recipe": {
@@ -15746,7 +17354,7 @@
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
-          "js_results": true
+          "note": "control query: unreachable"
         },
         {
           "recipe": {
@@ -15765,7 +17373,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://editions.flammarion.com/sitemap.xml"
+      "book_sitemap": "https://editions.flammarion.com/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://editions.flammarion.com/sitemap.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "editions.hannenorak.com": {
       "home": "https://editions.hannenorak.com/",
@@ -15905,16 +17520,99 @@
     "editions.librairie-critic.fr": {
       "home": "http://editions.librairie-critic.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
     },
+    "editions.michelin.com": {
+      "home": "https://editions.michelin.com/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782067270862",
+          "title": "Pays Basque (France, Espagne) et Navarre",
+          "authors": "",
+          "url": "https://editions.michelin.com/produits/pays-basque-france-espagne-et-navarre/"
+        },
+        {
+          "isbn": "9782067269804",
+          "title": "OFF - Japon",
+          "authors": "",
+          "url": "https://editions.michelin.com/produits/guide-off-japon/"
+        },
+        {
+          "isbn": "9782067271777",
+          "title": "OFF - Vietnam",
+          "authors": "",
+          "url": "https://editions.michelin.com/produits/guide-off-vietnam/"
+        },
+        {
+          "isbn": "9782067262034",
+          "title": "Marseille",
+          "authors": "",
+          "url": "https://editions.michelin.com/produits/marseille/"
+        },
+        {
+          "isbn": "9782067184220",
+          "title": "España Noreste [Cataluña/Catalunya Aragón, Andorra]",
+          "authors": "",
+          "url": "https://editions.michelin.com/produits/espana-noreste-cataluna-catalunya-aragon-andorra/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://editions.michelin.com/produits/{slug}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 3,
+        "mismatches": 2
+      },
+      "search": {
+        "recipe": {
+          "url": "https://editions.michelin.com/?s={q}",
+          "by_isbn": true
+        },
+        "found_by_isbn": 5,
+        "found_by_title": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://editions.michelin.com/?s={q}",
+            "by_isbn": true
+          },
+          "found_by_isbn": 5,
+          "found_by_title": 0
+        }
+      ],
+      "book_sitemap": "https://editions.michelin.com/products-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://editions.michelin.com/products-sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
+    },
     "editions.ouest-france.fr": {
       "home": "https://editions.ouest-france.fr/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
+        {
+          "isbn": "9782737392511",
+          "title": "BRETAGNE MONDES",
+          "authors": "",
+          "url": "https://boutique.ouest-france.fr/bretagne-mondes-9782737392511.html"
+        },
+        {
+          "isbn": "9782737393006",
+          "title": "MA BRETAGNE EN 120 BONNES IDEES",
+          "authors": "",
+          "url": "https://boutique.ouest-france.fr/ma-bretagne-en-120-bonnes-idees-9782737393006.html"
+        },
         {
           "isbn": "9782737392801",
           "title": "SUR LES SEPT MERS DU MONDE",
@@ -15922,16 +17620,16 @@
           "url": "https://boutique.ouest-france.fr/sur-les-sept-mers-du-monde-9782737392801.html"
         },
         {
-          "isbn": "9782737392948",
-          "title": "TRAILS DE BRETAGNE",
+          "isbn": "9782737376870",
+          "title": "L'ILE DE RE",
           "authors": "",
-          "url": "https://boutique.ouest-france.fr/trails-de-bretagne-9782737392948.html"
+          "url": "https://boutique.ouest-france.fr/l-ile%20de%20re-9782737376870.html"
         },
         {
-          "isbn": "9782737392511",
-          "title": "BRETAGNE MONDES",
+          "isbn": "9782737388842",
+          "title": "LA FRANCE LIBEREE PAR SON EMPIRE. PARCOURS D'ENGAGES COLONIAUX",
           "authors": "",
-          "url": "https://boutique.ouest-france.fr/bretagne-mondes-9782737392511.html"
+          "url": "https://boutique.ouest-france.fr/la%20france%20liberee%20par%20son%20empire.%20parcours%20d-engages%20coloniaux-9782737388842.html"
         }
       ],
       "product": {
@@ -15940,7 +17638,7 @@
           "apostrophe": "drop"
         },
         "checked_on": 3,
-        "mismatches": 0
+        "mismatches": 2
       },
       "tried": [
         {
@@ -15953,7 +17651,14 @@
         },
         {
           "recipe": {
-            "url": "https://boutique.ouest-france.fr/recherche?q={q}"
+            "url": "https://boutique.ouest-france.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://boutique.ouest-france.fr/recherche?s={q}"
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
@@ -15969,47 +17674,7 @@
         },
         {
           "recipe": {
-            "url": "https://boutique.ouest-france.fr/rechercher?q={q}"
-          },
-          "found_by_isbn": 0,
-          "found_by_title": 0,
-          "note": "control query: HTTP 404"
-        },
-        {
-          "recipe": {
-            "url": "https://boutique.ouest-france.fr/recherche?s={q}"
-          },
-          "found_by_isbn": 0,
-          "found_by_title": 0,
-          "note": "control query: HTTP 404"
-        },
-        {
-          "recipe": {
-            "url": "https://boutique.ouest-france.fr/recherche?global_s={q}"
-          },
-          "found_by_isbn": 0,
-          "found_by_title": 0,
-          "note": "control query: HTTP 404"
-        },
-        {
-          "recipe": {
-            "url": "https://boutique.ouest-france.fr/catalogue?s%5Bq%5D={q}"
-          },
-          "found_by_isbn": 0,
-          "found_by_title": 0,
-          "note": "control query: HTTP 404"
-        },
-        {
-          "recipe": {
-            "url": "https://boutique.ouest-france.fr/?s={q}"
-          },
-          "found_by_isbn": 0,
-          "found_by_title": 0,
-          "note": "the control page already links the witnesses"
-        },
-        {
-          "recipe": {
-            "url": "https://boutique.ouest-france.fr/recherche?keys={q}"
+            "url": "https://boutique.ouest-france.fr/recherche?q={q}"
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
@@ -16033,13 +17698,29 @@
         },
         {
           "recipe": {
+            "url": "https://boutique.ouest-france.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
             "url": "https://boutique.ouest-france.fr/search/{q}"
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
           "note": "control query: HTTP 404"
         }
-      ]
+      ],
+      "book_sitemap": "https://boutique.ouest-france.fr/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://boutique.ouest-france.fr/sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "editions2031.fr": {
       "home": "https://www.editions2031.fr/",
@@ -16059,7 +17740,7 @@
     "editions400coups.ca": {
       "home": "http://www.editions400coups.ca/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -16283,10 +17964,130 @@
         }
       ]
     },
+    "editionsamsterdam.fr": {
+      "home": "https://www.editionsamsterdam.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782354803285",
+          "title": "La Fabrique du roman national-républicain",
+          "authors": "",
+          "url": "https://www.editionsamsterdam.fr/la-fabrique-du-roman-national-republicain/"
+        },
+        {
+          "isbn": "9782354802165",
+          "title": "L’hypothèse autonome",
+          "authors": "",
+          "url": "https://www.editionsamsterdam.fr/lhypothese-autonome/"
+        },
+        {
+          "isbn": "9782354801526",
+          "title": "Pour un féminisme de la totalité",
+          "authors": "",
+          "url": "https://www.editionsamsterdam.fr/pour-un-feminisme-de-la-totalite/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.editionsamsterdam.fr/{slug}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 3,
+        "mismatches": 0
+      },
+      "search": {
+        "recipe": {
+          "url": "https://www.editionsamsterdam.fr/?s={q}"
+        },
+        "found_by_isbn": 0,
+        "found_by_title": 3
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.editionsamsterdam.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 3
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsamsterdam.fr/catalogue/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsamsterdam.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsamsterdam.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsamsterdam.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsamsterdam.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsamsterdam.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsamsterdam.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://www.editionsamsterdam.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ],
+      "book_sitemap": "https://www.editionsamsterdam.fr/wp-sitemap-posts-post-1.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.editionsamsterdam.fr/wp-sitemap-posts-post-1.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
+    },
     "editionsandrefontaine.ca": {
       "home": "https://editionsandrefontaine.ca/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782981931733",
@@ -16741,7 +18542,7 @@
     "editionsbaudez.fr": {
       "home": "http://www.editionsbaudez.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -17784,8 +19585,8 @@
     },
     "editionsdentdelion.com": {
       "home": "http://editionsdentdelion.com/",
-      "status": "no_recipe",
-      "probed_at": "2026-11-13",
+      "status": "ok",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782924926338",
@@ -17880,7 +19681,14 @@
           "note": "control query: forbidden by robots.txt"
         }
       ],
-      "book_sitemap": "https://www.editionsdentdelion.com/sitemap.xml"
+      "book_sitemap": "https://www.editionsdentdelion.com/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.editionsdentdelion.com/sitemap.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "editionsdesequateurs.fr": {
       "home": "https://editionsdesequateurs.fr/",
@@ -17985,7 +19793,7 @@
     "editionsdianedeselliers.com": {
       "home": "http://www.editionsdianedeselliers.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -18157,7 +19965,7 @@
     "editionsdruide.com": {
       "home": "https://www.editionsdruide.com/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782897118082",
@@ -18272,7 +20080,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://www.editionsdruide.com/sitemap.xml"
+      "book_sitemap": "https://www.editionsdruide.com/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.editionsdruide.com/sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "editionsducerf.fr": {
       "home": "https://www.editionsducerf.fr/",
@@ -19175,7 +20990,14 @@
           "found_by_title": 0
         }
       ],
-      "book_sitemap": "https://www.editionsduquartz.com/wp-sitemap-posts-product-1.xml"
+      "book_sitemap": "https://www.editionsduquartz.com/wp-sitemap-posts-product-1.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.editionsduquartz.com/wp-sitemap-posts-product-1.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
     },
     "editionsdutullinois.ca": {
       "home": "http://www.editionsdutullinois.ca/",
@@ -19417,7 +21239,7 @@
     "editionsfonfon.com": {
       "home": "http://editionsfonfon.com/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782924984864",
@@ -19493,7 +21315,7 @@
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
-          "note": "control query: unreachable"
+          "note": "control query: HTTP 404"
         },
         {
           "recipe": {
@@ -19501,7 +21323,7 @@
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
-          "note": "control query: unreachable"
+          "note": "control query: HTTP 404"
         },
         {
           "recipe": {
@@ -19509,7 +21331,7 @@
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
-          "note": "control query: unreachable"
+          "note": "control query: HTTP 404"
         },
         {
           "recipe": {
@@ -19517,10 +21339,17 @@
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
-          "note": "control query: unreachable"
+          "note": "control query: HTTP 500"
         }
       ],
-      "book_sitemap": "https://editionsfonfon.com/books-sitemap.xml"
+      "book_sitemap": "https://editionsfonfon.com/books-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://editionsfonfon.com/books-sitemap.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "editionsgrandir.eu": {
       "home": "https://www.editionsgrandir.eu/",
@@ -20175,7 +22004,7 @@
     "editionsjasor.com": {
       "home": "http://www.editionsjasor.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -21020,6 +22849,57 @@
         }
       ]
     },
+    "editionsleduc.com": {
+      "home": "https://www.editionsleduc.com/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782385295622",
+          "title": "Orlando",
+          "authors": "Lucinda Riley",
+          "url": "https://www.editionsleduc.com/produit/4436/9782385298326/orlando"
+        },
+        {
+          "isbn": "9791028538880",
+          "title": "J'aurais dû te le dire",
+          "authors": "Jean Testanière",
+          "url": "https://www.editionsleduc.com/produit/4431/9791028539276/j-aurais-du-te-le-dire"
+        },
+        {
+          "isbn": "9782488853507",
+          "title": "Le Refuge",
+          "authors": "Pétronille Rostagnat",
+          "url": "https://www.editionsleduc.com/produit/4366/9782488853507/le-refuge"
+        }
+      ],
+      "search": {
+        "recipe": {
+          "url": "https://www.editionsleduc.com/search?utf8=%E2%9C%93&q={q}",
+          "by_isbn": true
+        },
+        "found_by_isbn": 3,
+        "found_by_title": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.editionsleduc.com/search?utf8=%E2%9C%93&q={q}",
+            "by_isbn": true
+          },
+          "found_by_isbn": 3,
+          "found_by_title": 0
+        }
+      ],
+      "book_sitemap": "https://www.editionsleduc.com/sitemaps/products.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.editionsleduc.com/sitemaps/products.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
+    },
     "editionslesliensquiliberent.fr": {
       "home": "http://www.editionslesliensquiliberent.fr/",
       "status": "ok",
@@ -21543,7 +23423,7 @@
     "editionsmondelibertaire.org": {
       "home": "http://www.editionsmondelibertaire.org/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -21786,6 +23666,41 @@
           "note": "control query: HTTP 404"
         }
       ]
+    },
+    "editionsphebus.fr": {
+      "home": "https://www.editionsphebus.fr/",
+      "status": "blocked",
+      "probed_at": "2026-11-14",
+      "note": "blocked: HTTP 403",
+      "witnesses": [
+        {
+          "isbn": "9782752915436",
+          "title": "Madame Verlaine",
+          "authors": "",
+          "url": "https://www.editionsphebus.fr/catalogue/madame-verlaine/"
+        },
+        {
+          "isbn": "9782752915795",
+          "title": "La Boîte en os",
+          "authors": "",
+          "url": "https://www.editionsphebus.fr/catalogue/la-boite-en-os/"
+        },
+        {
+          "isbn": "9782752915610",
+          "title": "Ce qui tournoie dans la nuit",
+          "authors": "",
+          "url": "https://www.editionsphebus.fr/catalogue/ce-qui-tournoie-dans-la-nuit/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.editionsphebus.fr/catalogue/{slug}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 3,
+        "mismatches": 0
+      },
+      "tried": []
     },
     "editionspno.com": {
       "home": "https://editionspno.com/",
@@ -22609,7 +24524,14 @@
           "note": "control query: forbidden by robots.txt"
         }
       ],
-      "book_sitemap": "https://www.editionssylvainharvey.com/sitemap.xml"
+      "book_sitemap": "https://www.editionssylvainharvey.com/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.editionssylvainharvey.com/sitemap.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "editionstatamis.com": {
       "home": "https://www.editionstatamis.com/",
@@ -23214,6 +25136,140 @@
         }
       ]
     },
+    "elsevier-masson.fr": {
+      "home": "https://www.elsevier-masson.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782294786310",
+          "title": "Urgences vitales et soins critiques pédiatriques",
+          "authors": "",
+          "url": "https://www.elsevier-masson.fr/urgences-vitales-et-soins-critiques-pediatriques-9782294786310.html"
+        },
+        {
+          "isbn": "9782294775239",
+          "title": "Manuel de diagnostics infirmiers",
+          "authors": "",
+          "url": "https://www.elsevier-masson.fr/manuel-de-diagnostics-infirmiers-9782294775239.html"
+        },
+        {
+          "isbn": "9782294792021",
+          "title": "Guide du CS. Cadre de Santé-Formateur",
+          "authors": "",
+          "url": "https://www.elsevier-masson.fr/guide-du-cs-cadre-de-sante-formateur-9782294792021.html"
+        },
+        {
+          "isbn": "9782294007279",
+          "title": "L'hystérique, le sexe et le médecin",
+          "authors": "",
+          "url": "https://www.elsevier-masson.fr/lhysterique-le-sexe-et-le-medecin-9782294007279.html"
+        },
+        {
+          "isbn": "9782842995317",
+          "title": "Techniques chirurgicales - Tête et cou",
+          "authors": "",
+          "url": "https://www.elsevier-masson.fr/techniques-chirurgicales-tete-et-cou-2211-0402-clinicalkey-now-emc-web-papier.html"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.elsevier-masson.fr/{slug}-{isbn}.html",
+          "apostrophe": "drop"
+        },
+        "checked_on": 4,
+        "mismatches": 1
+      },
+      "search": {
+        "recipe": {
+          "url": "https://www.elsevier-masson.fr/recherche/{q}",
+          "by_isbn": true
+        },
+        "found_by_isbn": 3,
+        "found_by_title": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.elsevier-masson.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.elsevier-masson.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://www.elsevier-masson.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.elsevier-masson.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.elsevier-masson.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.elsevier-masson.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.elsevier-masson.fr/recherche/{q}",
+            "by_isbn": true
+          },
+          "found_by_isbn": 3,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://www.elsevier-masson.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.elsevier-masson.fr/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        }
+      ],
+      "book_sitemap": "https://www.elsevier-masson.fr/media/sitemap_fr.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.elsevier-masson.fr/media/sitemap_fr.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
+    },
     "elsevier.com": {
       "home": "https://www.elsevier.com/",
       "status": "js_results",
@@ -23713,7 +25769,7 @@
     },
     "erickbonnier-editions.com": {
       "home": "https://www.erickbonnier-editions.com/",
-      "status": "js_results",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -23803,7 +25859,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://www.erickbonnier-editions.com/sitemap.xml"
+      "book_sitemap": "https://www.erickbonnier-editions.com/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.erickbonnier-editions.com/sitemap.xml"
+        },
+        "found": 2,
+        "tried": 2
+      }
     },
     "erosonyx.com": {
       "home": "https://www.erosonyx.com/",
@@ -24310,7 +26373,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://www.exemplaire-editions.fr/sitemap.xml"
+      "book_sitemap": "https://www.exemplaire-editions.fr/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.exemplaire-editions.fr/sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "fabert.com": {
       "home": "http://www.fabert.com/",
@@ -24712,6 +26782,133 @@
         }
       ]
     },
+    "finitude.fr": {
+      "home": "https://www.finitude.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782363392589",
+          "title": "Wilderness",
+          "authors": "",
+          "url": "https://www.finitude.fr/produit/wilderness-journal-dune-paisible-aventure-en-alaska/"
+        },
+        {
+          "isbn": "9782363392602",
+          "title": "Le vent dans le rosier",
+          "authors": "",
+          "url": "https://www.finitude.fr/produit/le-vent-dans-le-rosier/"
+        },
+        {
+          "isbn": "9782363392541",
+          "title": "Fille de",
+          "authors": "",
+          "url": "https://www.finitude.fr/produit/fille-de/"
+        },
+        {
+          "isbn": "9782363390530",
+          "title": "Dingue de la vie & de toi & de tout",
+          "authors": "",
+          "url": "https://www.finitude.fr/produit/dingue-de-la-vie-de-toi-de-tout/"
+        },
+        {
+          "isbn": "9782912667700",
+          "title": "Voyager vers des noms magnifiques",
+          "authors": "",
+          "url": "https://www.finitude.fr/produit/voyager-vers-des-noms-magnifiques/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.finitude.fr/produit/{slug}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 4,
+        "mismatches": 1
+      },
+      "search": {
+        "recipe": {
+          "url": "https://www.finitude.fr/?post_type=product&dgwt_wcas=1&s={q}",
+          "by_isbn": true
+        },
+        "found_by_isbn": 4,
+        "found_by_title": 1
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.finitude.fr/?post_type=product&dgwt_wcas=1&s={q}",
+            "by_isbn": true
+          },
+          "found_by_isbn": 4,
+          "found_by_title": 1
+        },
+        {
+          "recipe": {
+            "url": "https://www.finitude.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 5
+        },
+        {
+          "recipe": {
+            "url": "https://www.finitude.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.finitude.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.finitude.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.finitude.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.finitude.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.finitude.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.finitude.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ],
+      "book_sitemap": "https://www.finitude.fr/product-sitemap1.xml"
+    },
     "firstforum.org": {
       "home": "http://firstforum.org/",
       "status": "no_witness",
@@ -24835,6 +27032,113 @@
         }
       ],
       "book_sitemap": "https://www.flblb.com/livre-sitemap.xml"
+    },
+    "fleuruseditions.com": {
+      "home": "https://www.fleuruseditions.com/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782215199342",
+          "title": "Pour Clara. Nouvelles d'ados. Prix Clara 2026",
+          "authors": "",
+          "url": "https://www.fleuruseditions.com/9782215199342-pour-clara-nouvelles-d-ados-prix-clara-2026-group.html"
+        },
+        {
+          "isbn": "9782215204893",
+          "title": "Not so Undercover",
+          "authors": "",
+          "url": "https://www.fleuruseditions.com/9782215204893-not-so-undercover-group.html"
+        },
+        {
+          "isbn": "9782215204428",
+          "title": "échange ! (coffret)",
+          "authors": "",
+          "url": "https://www.fleuruseditions.com/9782215204428-bracelets-d-amitie-cree-collectionne-echange-coffret.html"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.fleuruseditions.com/{isbn}-{slug}-group.html",
+          "apostrophe": "dash"
+        },
+        "checked_on": 2,
+        "mismatches": 1
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.fleuruseditions.com/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.fleuruseditions.com/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.fleuruseditions.com/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.fleuruseditions.com/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.fleuruseditions.com/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.fleuruseditions.com/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.fleuruseditions.com/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.fleuruseditions.com/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.fleuruseditions.com/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ]
     },
     "fondtonne.ca": {
       "home": "https://www.fondtonne.ca/",
@@ -25143,7 +27447,7 @@
     "fr.vidacom.ca": {
       "home": "https://fr.vidacom.ca/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -25550,7 +27854,7 @@
     },
     "fypeditions.com": {
       "home": "https://www.fypeditions.com/",
-      "status": "js_results",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -25670,12 +27974,19 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://fypeditions.com/sitemap.xml"
+      "book_sitemap": "https://fypeditions.com/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://fypeditions.com/sitemap.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "galaade.com": {
       "home": "http://www.galaade.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -25997,7 +28308,7 @@
     "gerard-louis.com": {
       "home": "http://www.gerard-louis.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -26126,20 +28437,139 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://www.ginkgo-editeur.fr/store-products-sitemap.xml"
+      "book_sitemap": "https://www.ginkgo-editeur.fr/store-products-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.ginkgo-editeur.fr/store-products-sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "glenat.com": {
-      "home": "https://glenat.com/",
-      "status": "offline",
-      "probed_at": "2026-11-13",
-      "note": "unreachable",
-      "witnesses": [],
-      "tried": []
+      "home": "https://www.glenat.com/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782749310503",
+          "title": "Griffonne - Tome 02",
+          "authors": "",
+          "url": "https://www.glenat.com/vents-douest/griffonne-tome-02-9782749310503/"
+        },
+        {
+          "isbn": "9782344078105",
+          "title": "À jamais les premières",
+          "authors": "",
+          "url": "https://www.glenat.com/glenat-livres/jamais-les-premieres-9782344078105/"
+        },
+        {
+          "isbn": "9782344070383",
+          "title": "Islander - Tome 02",
+          "authors": "",
+          "url": "https://www.glenat.com/glenat-bd/islander-tome-02-9782344070383/"
+        },
+        {
+          "isbn": "9782226155337",
+          "title": "Glam et Comet - Tome 01",
+          "authors": "",
+          "url": "https://www.glenat.com/glenat-bd/glam-et-comet-tome-01-9782226155337/"
+        },
+        {
+          "isbn": "9782344015896",
+          "title": "Balades à vélo dans les Alpilles",
+          "authors": "",
+          "url": "https://www.glenat.com/glenat-livres/balades-velo-dans-les-alpilles-9782344015896/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.glenat.com/glenat-bd/{slug}-{isbn}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 2,
+        "mismatches": 3
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.glenat.com/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.glenat.com/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.glenat.com/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.glenat.com/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.glenat.com/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.glenat.com/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.glenat.com/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.glenat.com/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.glenat.com/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ],
+      "book_sitemap": "https://www.glenat.com/products.xml"
     },
     "glenatbd.com": {
       "home": "http://www.glenatbd.com/bd/collections/treize-etrange.htm",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -26147,7 +28577,7 @@
     "glycines-editions.fr": {
       "home": "http://www.glycines-editions.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -26583,7 +29013,7 @@
     "groupe-dargaud.com": {
       "home": "http://www.groupe-dargaud.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -26880,7 +29310,7 @@
     "guides-gallimard.fr": {
       "home": "http://guides-gallimard.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -27019,11 +29449,124 @@
       ]
     },
     "hachette.com": {
-      "home": "https://www.hachette.com/fr/accueil/",
-      "status": "no_witness",
-      "probed_at": "2026-11-13",
-      "witnesses": [],
-      "tried": []
+      "home": "https://www.hachette.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782213736464",
+          "title": "Seine de crime",
+          "authors": "",
+          "url": "https://www.hachette.fr/livre/prix-du-quai-des-orfevres-2027-9782213736464/"
+        },
+        {
+          "isbn": "9782213736235",
+          "title": "Les Villages préférés des Français - 15e édition",
+          "authors": "",
+          "url": "https://www.hachette.fr/livre/les-villages-preferes-des-francais-15e-edition-9782213736235/"
+        },
+        {
+          "isbn": "9782700285802",
+          "title": "Le charme secret des monstres",
+          "authors": "",
+          "url": "https://www.hachette.fr/livre/le-charme-secret-des-monstres-9782700285802/"
+        },
+        {
+          "isbn": "9782213608976",
+          "title": "Staline",
+          "authors": "",
+          "url": "https://www.hachette.fr/livre/staline-9782213608976/"
+        },
+        {
+          "isbn": "9782253186250",
+          "title": "Je vis pas ma vie, je la rêve",
+          "authors": "",
+          "url": "https://www.hachette.fr/livre/je-vis-pas-ma-vie-je-la-reve-9782253186250/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.hachette.fr/livre/{slug}-{isbn}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 4,
+        "mismatches": 1
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.hachette.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.hachette.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.hachette.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.hachette.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.hachette.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.hachette.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.hachette.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.hachette.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.hachette.fr/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ],
+      "book_sitemap": "https://www.hachette.fr/products-1.xml"
     },
     "hachetteromans.fr": {
       "home": "https://www.hachetteromans.fr/livre-de-poche-jeunesse/",
@@ -27539,7 +30082,7 @@
     "heuresbleues.com": {
       "home": "http://heuresbleues.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "HTTP 404",
       "witnesses": [],
       "tried": []
@@ -27665,12 +30208,19 @@
           "note": ""
         }
       ],
-      "book_sitemap": "https://histoirequebec.qc.ca/product-sitemap.xml"
+      "book_sitemap": "https://histoirequebec.qc.ca/product-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://histoirequebec.qc.ca/product-sitemap.xml"
+        },
+        "found": 4,
+        "tried": 4
+      }
     },
     "hodder.co.uk": {
       "home": "http://www.hodder.co.uk/sceptre/index.page",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "HTTP 404",
       "witnesses": [],
       "tried": []
@@ -27678,7 +30228,7 @@
     "hoebeke.fr": {
       "home": "http://www.hoebeke.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -27826,7 +30376,7 @@
     "housieaux.eu": {
       "home": "http://www.housieaux.eu/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -28172,7 +30722,7 @@
     "ieo-oc.org": {
       "home": "http://www.ieo-oc.org/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -28194,7 +30744,7 @@
     "inculte.fr": {
       "home": "http://www.inculte.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -28210,7 +30760,7 @@
     "insomniaqueediteur.org": {
       "home": "http://www.insomniaqueediteur.org/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -28580,7 +31130,7 @@
     "jabremedit.free.fr": {
       "home": "http://jabremedit.free.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -29276,7 +31826,7 @@
     "joellelosfeld.fr": {
       "home": "http://www.joellelosfeld.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -29632,7 +32182,7 @@
     "keltiagraphiceditions.com": {
       "home": "http://www.keltiagraphiceditions.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -30290,7 +32840,7 @@
     "ladylongsolo.com": {
       "home": "https://www.ladylongsolo.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -30563,23 +33113,86 @@
     "lamartinieregroupe.com": {
       "home": "http://www.lamartinieregroupe.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
     },
     "lamartinierejeunesse.fr": {
-      "home": "http://www.lamartinierejeunesse.fr/",
-      "status": "offline",
-      "probed_at": "2026-11-13",
-      "note": "unreachable",
-      "witnesses": [],
-      "tried": []
+      "home": "https://www.editionsdelamartiniere.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9791040127680",
+          "title": "Maya-fantôme",
+          "authors": "Caroline Dorka-Fenech",
+          "url": "https://www.editionsdelamartiniere.fr/livres/maya-fantome/"
+        },
+        {
+          "isbn": "9791040126652",
+          "title": "Alec &#8211; La Trilogie de Cristal vol.1",
+          "authors": "Arttu Tuominen",
+          "url": "https://www.editionsdelamartiniere.fr/livres/alec-la-trilogie-de-cristal-vol-1/"
+        },
+        {
+          "isbn": "9791040125853",
+          "title": "Cakes culte",
+          "authors": "Christophe Felder",
+          "url": "https://www.editionsdelamartiniere.fr/livres/cakes-culte/"
+        },
+        {
+          "isbn": "9791040115397",
+          "title": "Un destin sauvage, si sauvage",
+          "authors": "Inga Vesper",
+          "url": "https://www.editionsdelamartiniere.fr/livres/un-destin-sauvage-si-sauvage/"
+        },
+        {
+          "isbn": "9782732450971",
+          "title": "Roulottes",
+          "authors": "Jeanne Bayol",
+          "url": "https://www.editionsdelamartiniere.fr/livres/roulottes/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.editionsdelamartiniere.fr/livres/{slug}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 4,
+        "mismatches": 1
+      },
+      "search": {
+        "recipe": {
+          "url": "https://www.editionsdelamartiniere.fr/catalogue/?recherche={q}",
+          "by_isbn": true
+        },
+        "found_by_isbn": 5,
+        "found_by_title": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.editionsdelamartiniere.fr/catalogue/?recherche={q}",
+            "by_isbn": true
+          },
+          "found_by_isbn": 5,
+          "found_by_title": 0
+        }
+      ],
+      "book_sitemap": "https://www.editionsdelamartiniere.fr/livres-sitemap2.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.editionsdelamartiniere.fr/livres-sitemap2.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
     },
     "lambertlucas.com": {
       "home": "http://www.lambertlucas.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -30863,7 +33476,7 @@
     "lanovel-edition.fr": {
       "home": "https://www.lanovel-edition.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -31028,7 +33641,14 @@
           "found_by_title": 0
         }
       ],
-      "book_sitemap": "http://lapeuplade.com/book-sitemap.xml"
+      "book_sitemap": "http://lapeuplade.com/book-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "http://lapeuplade.com/book-sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "lapin.lapin.org": {
       "home": "https://lapin.lapin.org/",
@@ -31307,6 +33927,13 @@
           "note": "control query: HTTP 404"
         }
       ]
+    },
+    "lavoisier.fr": {
+      "home": "https://www.lavoisier.fr/",
+      "status": "no_witness",
+      "probed_at": "2026-11-14",
+      "witnesses": [],
+      "tried": []
     },
     "lavolte.net": {
       "home": "https://lavolte.net/",
@@ -31654,7 +34281,7 @@
     },
     "lechevaldaout.com": {
       "home": "https://lechevaldaout.com/",
-      "status": "no_recipe",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -31769,7 +34396,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://lechevaldaout.com/sitemap-page1.xml"
+      "book_sitemap": "https://lechevaldaout.com/sitemap-page1.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://lechevaldaout.com/sitemap-page1.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
     },
     "lecrou.com": {
       "home": "http://lecrou.com/",
@@ -32444,7 +35078,7 @@
     },
     "lemieux-editeur.fr": {
       "home": "http://www.lemieux-editeur.fr/",
-      "status": "js_results",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -32552,7 +35186,14 @@
           "note": "control query: forbidden by robots.txt"
         }
       ],
-      "book_sitemap": "https://www.lemieux-editeur.fr/page-sitemap.xml"
+      "book_sitemap": "https://www.lemieux-editeur.fr/page-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.lemieux-editeur.fr/page-sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "lenoroit.com": {
       "home": "https://lenoroit.com/",
@@ -32781,7 +35422,14 @@
           "note": "control query: forbidden by robots.txt"
         }
       ],
-      "book_sitemap": "https://www.lepassagerclandestin.fr/product-sitemap.xml"
+      "book_sitemap": "https://www.lepassagerclandestin.fr/product-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.lepassagerclandestin.fr/product-sitemap.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
     },
     "lepreauxclercs.com": {
       "home": "http://www.lepreauxclercs.com/",
@@ -32836,7 +35484,7 @@
     },
     "lequartanier.com": {
       "home": "https://www.lequartanier.com/",
-      "status": "no_recipe",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -32951,7 +35599,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://lequartanier.com/sitemap-page1.xml"
+      "book_sitemap": "https://lequartanier.com/sitemap-page1.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://lequartanier.com/sitemap-page1.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "lerobert.com": {
       "home": "https://www.lerobert.com/",
@@ -33086,12 +35741,19 @@
           "note": "control query: forbidden by robots.txt"
         }
       ],
-      "book_sitemap": "https://www.lerobert.com/sitemap2.xml"
+      "book_sitemap": "https://www.lerobert.com/sitemap2.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.lerobert.com/sitemap2.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "lerouergue.com": {
       "home": "http://www.lerouergue.com/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782812629259",
@@ -33112,16 +35774,16 @@
           "url": "https://www.lerouergue.com/catalogue/devorer-le-vieux-monde"
         },
         {
-          "isbn": "9782812612275",
-          "title": "La trace du sang",
+          "isbn": "9782812617416",
+          "title": "Grise Fiord",
           "authors": "",
-          "url": "https://www.lerouergue.com/catalogue/la-trace-du-sang"
+          "url": "https://www.lerouergue.com/catalogue/grise-fiord"
         },
         {
-          "isbn": "9782812610110",
-          "title": "vienne",
+          "isbn": "9782812610141",
+          "title": "Au feu, Gilda !",
           "authors": "",
-          "url": "https://www.lerouergue.com/catalogue/et-que-celui-qui-soif-vienne-0"
+          "url": "https://www.lerouergue.com/catalogue/au-feu-gilda-0"
         }
       ],
       "product": {
@@ -33398,7 +36060,14 @@
           "found_by_title": 0
         }
       ],
-      "book_sitemap": "https://www.lescuisinieres.fr/product-sitemap.xml"
+      "book_sitemap": "https://www.lescuisinieres.fr/product-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.lescuisinieres.fr/product-sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "lesechappes.com": {
       "home": "https://lesechappes.com/",
@@ -33937,6 +36606,112 @@
       "witnesses": [],
       "tried": []
     },
+    "leseditionsnoirsurblanc.fr": {
+      "home": "https://www.leseditionsnoirsurblanc.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782889832187",
+          "title": "François d’Assise, l’insensé de Dieu",
+          "authors": "",
+          "url": "https://www.leseditionsnoirsurblanc.fr/catalogue/francois-dassise-linsense-de-dieu/"
+        },
+        {
+          "isbn": "9782889832316",
+          "title": "Amer, amer",
+          "authors": "",
+          "url": "https://www.leseditionsnoirsurblanc.fr/catalogue/amer-amer/"
+        },
+        {
+          "isbn": "9782889832408",
+          "title": "La Conspiration des cyclistes",
+          "authors": "",
+          "url": "https://www.leseditionsnoirsurblanc.fr/catalogue/la-conspiration-des-cyclistes/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.leseditionsnoirsurblanc.fr/catalogue/{slug}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 3,
+        "mismatches": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.leseditionsnoirsurblanc.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.leseditionsnoirsurblanc.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.leseditionsnoirsurblanc.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.leseditionsnoirsurblanc.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.leseditionsnoirsurblanc.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.leseditionsnoirsurblanc.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.leseditionsnoirsurblanc.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://www.leseditionsnoirsurblanc.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.leseditionsnoirsurblanc.fr/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        }
+      ]
+    },
     "lesescales.fr": {
       "home": "http://www.lesescales.fr/",
       "status": "ok",
@@ -34132,7 +36907,7 @@
     "leslibraires.ca": {
       "home": "https://www.leslibraires.ca/editeur/varia/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "HTTP 404",
       "witnesses": [],
       "tried": []
@@ -34787,7 +37562,7 @@
     "lextenso-editions.fr": {
       "home": "http://www.lextenso-editions.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -34795,7 +37570,7 @@
     "lgdj.fr": {
       "home": "https://www.lgdj.fr/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782247230129",
@@ -34814,6 +37589,18 @@
           "title": "Mémento sociétés commerciales 2027",
           "authors": "",
           "url": "https://www.lgdj.fr/memento-societes-commerciales-2027-9782368937785.html"
+        },
+        {
+          "isbn": "9782842001759",
+          "title": "QCM. L&#039;euro en 188 questions",
+          "authors": "",
+          "url": "https://www.lgdj.fr/qcm-l-euro-en-188-questions-9782842001759.html"
+        },
+        {
+          "isbn": "9782275025360",
+          "title": "Les fonctions du document en droit privé",
+          "authors": "",
+          "url": "https://www.lgdj.fr/les-fonctions-du-document-en-droit-prive-9782275025360.html"
         }
       ],
       "product": {
@@ -34822,23 +37609,32 @@
           "apostrophe": "drop",
           "slug_ignored": true
         },
-        "checked_on": 2,
-        "mismatches": 1
+        "checked_on": 3,
+        "mismatches": 2
       },
       "search": {
         "recipe": {
-          "url": "https://www.lgdj.fr/recherche?s={q}"
+          "url": "https://www.lgdj.fr/recherche?s={q}",
+          "by_isbn": true
         },
-        "found_by_isbn": 0,
+        "found_by_isbn": 1,
         "found_by_title": 1
       },
       "tried": [
         {
           "recipe": {
-            "url": "https://www.lgdj.fr/recherche?q={q}"
+            "url": "https://www.lgdj.fr/?s={q}"
           },
           "found_by_isbn": 0,
           "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://www.lgdj.fr/recherche?s={q}",
+            "by_isbn": true
+          },
+          "found_by_isbn": 1,
+          "found_by_title": 1
         },
         {
           "recipe": {
@@ -34850,45 +37646,7 @@
         },
         {
           "recipe": {
-            "url": "https://www.lgdj.fr/rechercher?q={q}"
-          },
-          "found_by_isbn": 0,
-          "found_by_title": 0,
-          "note": "control query: HTTP 404"
-        },
-        {
-          "recipe": {
-            "url": "https://www.lgdj.fr/recherche?s={q}"
-          },
-          "found_by_isbn": 0,
-          "found_by_title": 1
-        },
-        {
-          "recipe": {
-            "url": "https://www.lgdj.fr/recherche?global_s={q}"
-          },
-          "found_by_isbn": 0,
-          "found_by_title": 0
-        },
-        {
-          "recipe": {
-            "url": "https://www.lgdj.fr/catalogue?s%5Bq%5D={q}"
-          },
-          "found_by_isbn": 0,
-          "found_by_title": 0,
-          "note": "control query: HTTP 404"
-        },
-        {
-          "recipe": {
-            "url": "https://www.lgdj.fr/?s={q}"
-          },
-          "found_by_isbn": 0,
-          "found_by_title": 0,
-          "note": "the control page already links the witnesses"
-        },
-        {
-          "recipe": {
-            "url": "https://www.lgdj.fr/recherche?keys={q}"
+            "url": "https://www.lgdj.fr/recherche?q={q}"
           },
           "found_by_isbn": 0,
           "found_by_title": 0
@@ -34896,14 +37654,6 @@
         {
           "recipe": {
             "url": "https://www.lgdj.fr/search?query={q}"
-          },
-          "found_by_isbn": 0,
-          "found_by_title": 0,
-          "note": "control query: forbidden by robots.txt"
-        },
-        {
-          "recipe": {
-            "url": "https://www.lgdj.fr/catalogsearch/result/?q={q}"
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
@@ -34919,13 +37669,30 @@
         },
         {
           "recipe": {
+            "url": "https://www.lgdj.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.lgdj.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
             "url": "https://www.lgdj.fr/search/{q}"
           },
           "found_by_isbn": 0,
           "found_by_title": 0,
           "note": "control query: forbidden by robots.txt"
         }
-      ]
+      ],
+      "book_sitemap": "https://www.lgdj.fr/1_fr_0_sitemap.xml"
     },
     "lianalevi.fr": {
       "home": "https://www.lianalevi.fr/",
@@ -35058,6 +37825,14 @@
         }
       ]
     },
+    "librairietequi.com": {
+      "home": "https://www.librairietequi.com/",
+      "status": "offline",
+      "probed_at": "2026-11-14",
+      "note": "HTTP 418",
+      "witnesses": [],
+      "tried": []
+    },
     "libreriaeditricevaticana.va": {
       "home": "http://www.libreriaeditricevaticana.va/",
       "status": "ok",
@@ -35104,7 +37879,7 @@
     "lidec.qc.ca": {
       "home": "https://www.lidec.qc.ca/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -35342,7 +38117,14 @@
           "found_by_title": 0
         }
       ],
-      "book_sitemap": "https://www.lirabelle.fr/product-sitemap.xml"
+      "book_sitemap": "https://www.lirabelle.fr/product-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.lirabelle.fr/product-sitemap.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
     },
     "lisez.com": {
       "home": "https://www.lisez.com/",
@@ -35645,7 +38427,7 @@
     "livresgaisetlesbiens.fr": {
       "home": "http://www.livresgaisetlesbiens.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -35751,7 +38533,7 @@
     },
     "locus-solus.fr": {
       "home": "https://www.locus-solus.fr/",
-      "status": "no_recipe",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -35764,7 +38546,7 @@
           "isbn": "9782368336199",
           "title": "Le Marin tatoué",
           "authors": "",
-          "url": "https://www.locus-solus.fr/product-page/le-marin-tatou%C3%A9?lang=en"
+          "url": "https://www.locus-solus.fr/product-page/le-marin-tatou%C3%A9"
         },
         {
           "isbn": "9782368336021",
@@ -35855,11 +38637,18 @@
           "found_by_title": 0
         }
       ],
-      "book_sitemap": "https://www.locus-solus.fr/en_en-store-products-sitemap.xml"
+      "book_sitemap": "https://www.locus-solus.fr/en_en-store-products-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.locus-solus.fr/en_en-store-products-sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "loeildorenligne.com": {
       "home": "https://www.loeildorenligne.com/",
-      "status": "no_recipe",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -35966,7 +38755,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://www.loeildorenligne.com/store-products-sitemap.xml"
+      "book_sitemap": "https://www.loeildorenligne.com/store-products-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.loeildorenligne.com/store-products-sitemap.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
     },
     "lonelyplanet.com": {
       "home": "https://www.lonelyplanet.com/",
@@ -36255,7 +39051,7 @@
     "ludopathes.com": {
       "home": "http://www.ludopathes.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -36263,7 +39059,7 @@
     "lune-ecarlate.com": {
       "home": "http://lune-ecarlate.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -36988,7 +39784,7 @@
     "manga.kaze.fr": {
       "home": "http://manga.kaze.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -37559,7 +40355,7 @@
     "marsupro.com": {
       "home": "http://www.marsupro.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -37567,7 +40363,7 @@
     "marval.fr": {
       "home": "http://www.marval.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -37575,7 +40371,7 @@
     "massin.fr": {
       "home": "http://www.massin.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -37698,7 +40494,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://www.materiologiques.com/sitemap.xml"
+      "book_sitemap": "https://www.materiologiques.com/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.materiologiques.com/sitemap.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
     },
     "maurice-nadeau.net": {
       "home": "http://www.maurice-nadeau.net/",
@@ -37997,7 +40800,7 @@
     "mecaniquegenerale.org": {
       "home": "http://www.mecaniquegenerale.org/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -38104,7 +40907,7 @@
     "megara-entertainment.com": {
       "home": "http://www.megara-entertainment.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -38213,7 +41016,14 @@
           "found_by_title": 0
         }
       ],
-      "book_sitemap": "https://meme-pas-mal.fr/wp-sitemap-posts-product-1.xml"
+      "book_sitemap": "https://meme-pas-mal.fr/wp-sitemap-posts-product-1.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://meme-pas-mal.fr/wp-sitemap-posts-product-1.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "memoiredencrier.com": {
       "home": "http://memoiredencrier.com/",
@@ -38546,9 +41356,8 @@
     },
     "metailie.fr": {
       "home": "http://www.metailie.fr/",
-      "status": "blocked",
+      "status": "ok",
       "probed_at": "2026-11-14",
-      "note": "blocked: HTTP 429",
       "witnesses": [
         {
           "isbn": "9791022613750",
@@ -38589,8 +41398,82 @@
         "checked_on": 5,
         "mismatches": 0
       },
-      "tried": [],
-      "book_sitemap": "https://editions-metailie.com/livre-sitemap1.xml"
+      "search": {
+        "recipe": {
+          "url": "https://editions-metailie.com/?s={q}"
+        },
+        "found_by_isbn": 0,
+        "found_by_title": 2
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://editions-metailie.com/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 2
+        },
+        {
+          "recipe": {
+            "url": "https://editions-metailie.com/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://editions-metailie.com/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://editions-metailie.com/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-metailie.com/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://editions-metailie.com/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://editions-metailie.com/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://editions-metailie.com/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ],
+      "book_sitemap": "https://editions-metailie.com/livre-sitemap1.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://editions-metailie.com/livre-sitemap1.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
     },
     "michel-lafon.fr": {
       "home": "http://www.michel-lafon.fr/",
@@ -38645,7 +41528,7 @@
     "michelhoudiardediteur.com": {
       "home": "http://www.michelhoudiardediteur.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -39030,16 +41913,36 @@
     "milady.fr": {
       "home": "http://www.milady.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
     },
     "milanpresse.com": {
-      "home": "http://milanpresse.com/",
-      "status": "no_witness",
-      "probed_at": "2026-11-13",
-      "witnesses": [],
+      "home": "https://www.editionsmilan.com/",
+      "status": "blocked",
+      "probed_at": "2026-11-14",
+      "note": "blocked: HTTP 403",
+      "witnesses": [
+        {
+          "isbn": "9782408064228",
+          "title": "Benji Davies",
+          "authors": "",
+          "url": "https://www.editionsmilan.com/livres/intervenants/8083-benji-davies/"
+        },
+        {
+          "isbn": "9782408063795",
+          "title": "Je prends le bain",
+          "authors": "",
+          "url": "https://www.editionsmilan.com/livres/60524-je-prends-le-bain/"
+        },
+        {
+          "isbn": "9782408064792",
+          "title": "Je m’habille",
+          "authors": "",
+          "url": "https://www.editionsmilan.com/livres/66870-je-mhabille/"
+        }
+      ],
       "tried": []
     },
     "mirobole-editions.com": {
@@ -39186,12 +42089,19 @@
           "note": "control query: forbidden by robots.txt"
         }
       ],
-      "book_sitemap": "https://mnemos.com/sitemap-post-type-product.xml"
+      "book_sitemap": "https://mnemos.com/sitemap-post-type-product.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://mnemos.com/sitemap-post-type-product.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "mondadori.fr": {
       "home": "http://www.mondadori.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -41207,7 +44117,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://panini.com.br/sitemap.xml"
+      "book_sitemap": "https://panini.com.br/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://panini.com.br/sitemap.xml"
+        },
+        "found": 3,
+        "tried": 4
+      }
     },
     "parigramme.com": {
       "home": "https://www.parigramme.com/",
@@ -41856,6 +44773,13 @@
       ],
       "book_sitemap": "https://www.petitapetit.fr/product-sitemap.xml"
     },
+    "petitfute.com": {
+      "home": "https://www.petitfute.com/",
+      "status": "no_witness",
+      "probed_at": "2026-11-14",
+      "witnesses": [],
+      "tried": []
+    },
     "phbeditions.fr": {
       "home": "https://www.phbeditions.fr/",
       "status": "no_witness",
@@ -41909,7 +44833,7 @@
     "philippe-rey.fr": {
       "home": "http://www.philippe-rey.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -42161,7 +45085,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://www.plaines.ca/store-products-sitemap.xml"
+      "book_sitemap": "https://www.plaines.ca/store-products-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.plaines.ca/store-products-sitemap.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
     },
     "planeterebelle.qc.ca": {
       "home": "https://planeterebelle.qc.ca/",
@@ -42306,11 +45237,68 @@
       "tried": []
     },
     "playbac.fr": {
-      "home": "http://www.playbac.fr/",
-      "status": "no_witness",
-      "probed_at": "2026-11-13",
-      "witnesses": [],
-      "tried": []
+      "home": "https://www.playbac-editions.com/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9791070163054",
+          "title": "Harry Potter - Coffret Mon mug à sticker",
+          "authors": "",
+          "url": "https://www.playbac-editions.com/product/harry-potter-coffret-mon-mug-a-sticker/"
+        },
+        {
+          "isbn": "9791070163061",
+          "title": "Atelier cosy - Mes boutiques cocooning à sticker",
+          "authors": "",
+          "url": "https://www.playbac-editions.com/product/atelier-cosy-mes-boutiques-cocooning/"
+        },
+        {
+          "isbn": "9791070163115",
+          "title": "Boîte Quiz - Incollables - T'as pas la ref",
+          "authors": "",
+          "url": "https://www.playbac-editions.com/product/boite-quizz-incollables-tas-pas-la-ref/"
+        },
+        {
+          "isbn": "9782809651676",
+          "title": "Minimiki - Le merveilleux caméléon de Nayah - Tome 12",
+          "authors": "",
+          "url": "https://www.playbac-editions.com/product/minimiki-le-merveilleux-cameleon-de-nayah-tome-12/"
+        },
+        {
+          "isbn": "9782809657586",
+          "title": "Animal Style - Chats",
+          "authors": "",
+          "url": "https://www.playbac-editions.com/product/animal-style-chats/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.playbac-editions.com/product/{slug}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 3,
+        "mismatches": 2
+      },
+      "search": {
+        "recipe": {
+          "url": "https://www.playbac-editions.com/?id=1191688&s={q}",
+          "by_isbn": true
+        },
+        "found_by_isbn": 5,
+        "found_by_title": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.playbac-editions.com/?id=1191688&s={q}",
+            "by_isbn": true
+          },
+          "found_by_isbn": 5,
+          "found_by_title": 0
+        }
+      ],
+      "book_sitemap": "https://www.playbac-editions.com/product-sitemap2.xml"
     },
     "pleinelune.qc.ca": {
       "home": "https://www.pleinelune.qc.ca/",
@@ -42605,7 +45593,7 @@
     },
     "plumedecarotte.com": {
       "home": "https://www.plumedecarotte.com/",
-      "status": "no_recipe",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -42708,7 +45696,14 @@
           "found_by_title": 0
         }
       ],
-      "book_sitemap": "https://www.plumedecarotte.com/store-products-sitemap.xml"
+      "book_sitemap": "https://www.plumedecarotte.com/store-products-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.plumedecarotte.com/store-products-sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "pocket.fr": {
       "home": "http://www.pocket.fr/",
@@ -42924,17 +45919,131 @@
       ]
     },
     "pol-editeur.fr": {
-      "home": "http://www.pol-editeur.fr/",
-      "status": "offline",
-      "probed_at": "2026-11-13",
-      "note": "unreachable",
-      "witnesses": [],
-      "tried": []
+      "home": "https://www.pol-editeur.com/",
+      "status": "no_recipe",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782818019276",
+          "title": "À la une",
+          "authors": "",
+          "url": "https://www.pol-editeur.com/index.php?spec=livre&ISBN=978-2-8180-1927-6"
+        },
+        {
+          "isbn": "9782818014110",
+          "title": "À la une",
+          "authors": "",
+          "url": "https://www.pol-editeur.com/index.php?spec=livre&ISBN=978-2-8180-1411-0"
+        },
+        {
+          "isbn": "9782818017654",
+          "title": "À la une",
+          "authors": "",
+          "url": "https://www.pol-editeur.com/index.php?spec=livre&ISBN=978-2-8180-1765-4"
+        },
+        {
+          "isbn": "9782818017234",
+          "title": "À la une",
+          "authors": "",
+          "url": "https://www.pol-editeur.com/index.php?spec=livre&ISBN=978-2-8180-1723-4"
+        }
+      ],
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.pol-editeur.com/index.php?id=&cnx=&pg_admin=&spec=includes/home&numpage=1&numrub=5&numcateg=0&numsscateg=&numproduit=&numbillet=&cont=&numtheme=&lg=fr",
+            "post_fields": [
+              [
+                "pictocrypt",
+                "71e3d5fe84be9b8ef12889d2b959e2a9"
+              ],
+              [
+                "picto",
+                "{q}"
+              ]
+            ]
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://www.pol-editeur.com/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://www.pol-editeur.com/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.pol-editeur.com/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.pol-editeur.com/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.pol-editeur.com/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.pol-editeur.com/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.pol-editeur.com/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.pol-editeur.com/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.pol-editeur.com/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ],
+      "book_sitemap": "https://www.pol-editeur.com/sitemap.xml"
     },
     "polar.jigal.com": {
       "home": "http://www.polar.jigal.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -43114,7 +46223,7 @@
     "presses-polytechnique.ca": {
       "home": "http://www.presses-polytechnique.ca/fr/accueil",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -43713,7 +46822,7 @@
     "pressesdulanguedoc.free.fr": {
       "home": "http://pressesdulanguedoc.free.fr/BK/presentation.htm",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -43941,7 +47050,7 @@
     "pub.u-bordeaux3.fr": {
       "home": "http://www.pub.u-bordeaux3.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -44261,7 +47370,7 @@
     "pubp.univ-bpclermont.fr": {
       "home": "http://pubp.univ-bpclermont.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -44279,22 +47388,22 @@
       "probed_at": "2026-11-14",
       "witnesses": [
         {
+          "isbn": "9782130795087",
+          "title": "Le totémisme aujourd'hui",
+          "authors": "",
+          "url": "https://www.puf.com/le-totemisme-aujourdhui-0"
+        },
+        {
+          "isbn": "9782130795278",
+          "title": "L'aventure",
+          "authors": "",
+          "url": "https://www.puf.com/laventure"
+        },
+        {
           "isbn": "9782130795285",
           "title": "Précis de culture biblique",
           "authors": "",
           "url": "https://www.puf.com/precis-de-culture-biblique"
-        },
-        {
-          "isbn": "9782130795292",
-          "title": "Philosophie grecque",
-          "authors": "",
-          "url": "https://www.puf.com/philosophie-grecque"
-        },
-        {
-          "isbn": "9782130795582",
-          "title": "Colonisation et décolonisation (XVIe-XXe siècle)",
-          "authors": "",
-          "url": "https://www.puf.com/colonisation-et-decolonisation-xvie-xxe-siecle"
         }
       ],
       "product": {
@@ -44302,8 +47411,8 @@
           "template": "https://www.puf.com/{slug}",
           "apostrophe": "drop"
         },
-        "checked_on": 3,
-        "mismatches": 0
+        "checked_on": 2,
+        "mismatches": 1
       },
       "tried": [
         {
@@ -44386,7 +47495,14 @@
           "note": "control query: forbidden by robots.txt"
         }
       ],
-      "book_sitemap": "https://www.puf.com/sitemap.xml?page=2"
+      "book_sitemap": "https://www.puf.com/sitemap.xml?page=2",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.puf.com/sitemap.xml?page=2"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "pufc.univ-fcomte.fr": {
       "home": "https://pufc.univ-fcomte.fr/",
@@ -44875,11 +47991,130 @@
     },
     "pum.univ-tlse2.fr": {
       "home": "http://pum.univ-tlse2.fr/",
-      "status": "offline",
-      "probed_at": "2026-11-13",
-      "note": "unreachable",
-      "witnesses": [],
-      "tried": []
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782810713875",
+          "title": "Les mots de la communication politique à l’ère du numérique",
+          "authors": "",
+          "url": "https://pum.univ-tlse2.fr/produit/les-mots-de-la-communication-politique-a-lere-du-numerique/"
+        },
+        {
+          "isbn": "9782810713868",
+          "title": "Dictionnaire de l’Italie fasciste",
+          "authors": "",
+          "url": "https://pum.univ-tlse2.fr/produit/dictionnaire-de-litalie-fasciste/"
+        },
+        {
+          "isbn": "9782810713912",
+          "title": "Végétaliser les fortifications. Une histoire d’art militaire",
+          "authors": "",
+          "url": "https://pum.univ-tlse2.fr/produit/vegetaliser-les-fortifications-une-histoire-dart-militaire/"
+        },
+        {
+          "isbn": "9782810712847",
+          "title": "La Ville Indécente",
+          "authors": "",
+          "url": "https://pum.univ-tlse2.fr/produit/la-ville-indecente/"
+        },
+        {
+          "isbn": "9782858166572",
+          "title": "Horizons Maghrébins n° 47 - Musiques d’Algérie (cultures et société)",
+          "authors": "",
+          "url": "https://pum.univ-tlse2.fr/produit/n-47-musiques-dalgerie-cultures-et-societe/"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://pum.univ-tlse2.fr/produit/{slug}/",
+          "apostrophe": "drop"
+        },
+        "checked_on": 4,
+        "mismatches": 1
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://pum.univ-tlse2.fr/?post_type=product&type_aws=true&s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://pum.univ-tlse2.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://pum.univ-tlse2.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://pum.univ-tlse2.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://pum.univ-tlse2.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://pum.univ-tlse2.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://pum.univ-tlse2.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://pum.univ-tlse2.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://pum.univ-tlse2.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://pum.univ-tlse2.fr/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        }
+      ],
+      "book_sitemap": "https://pum.univ-tlse2.fr/product-sitemap.xml"
     },
     "puq.ca": {
       "home": "https://www.puq.ca/",
@@ -45415,7 +48650,14 @@
           "found_by_title": 0
         }
       ],
-      "book_sitemap": "https://www.puv-editions.fr/product-sitemap.xml"
+      "book_sitemap": "https://www.puv-editions.fr/product-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.puv-editions.fr/product-sitemap.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
     },
     "pyramyd-editions.com": {
       "home": "https://pyramyd-editions.com/",
@@ -45463,7 +48705,7 @@
     "quae.com": {
       "home": "http://www.quae.com/",
       "status": "ok",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "witnesses": [
         {
           "isbn": "9782759244010",
@@ -45501,7 +48743,15 @@
           "found_by_isbn": 3,
           "found_by_title": 0
         }
-      ]
+      ],
+      "book_sitemap": "https://www.quae.com/sitemaps/products.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.quae.com/sitemaps/products.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "racine.be": {
       "home": "https://www.racine.be/fr",
@@ -45797,21 +49047,12 @@
         "checked_on": 5,
         "mismatches": 0
       },
-      "search": {
-        "recipe": {
-          "url": "https://www.raisonsdagir-editions.org/?s={q}",
-          "by_isbn": true
-        },
-        "found_by_isbn": 2,
-        "found_by_title": 0
-      },
       "tried": [
         {
           "recipe": {
-            "url": "https://www.raisonsdagir-editions.org/?s={q}",
-            "by_isbn": true
+            "url": "https://www.raisonsdagir-editions.org/?s={q}"
           },
-          "found_by_isbn": 2,
+          "found_by_isbn": 0,
           "found_by_title": 0
         },
         {
@@ -45868,9 +49109,23 @@
           "found_by_isbn": 0,
           "found_by_title": 0,
           "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.raisonsdagir-editions.org/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
         }
       ],
-      "book_sitemap": "https://www.raisonsdagir-editions.org/book-sitemap.xml"
+      "book_sitemap": "https://www.raisonsdagir-editions.org/book-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.raisonsdagir-editions.org/book-sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "ramsay.fr": {
       "home": "https://ramsay.fr/",
@@ -46031,7 +49286,7 @@
     "revuelespritlibre.org": {
       "home": "https://revuelespritlibre.org/maison-edition",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -46054,7 +49309,7 @@
     "rue-des-scribes.com": {
       "home": "http://www.rue-des-scribes.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -46295,6 +49550,113 @@
           },
           "found_by_isbn": 3,
           "found_by_title": 0
+        }
+      ]
+    },
+    "rusticaeditions.com": {
+      "home": "https://www.rusticaeditions.com/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782815325028",
+          "title": "Jardin, la bible pour débuter",
+          "authors": "",
+          "url": "https://www.rusticaeditions.com/9782815325028-jardin-la-bible-pour-debuter.html"
+        },
+        {
+          "isbn": "9782815325202",
+          "title": "Le guide du savoir-vivre",
+          "authors": "",
+          "url": "https://www.rusticaeditions.com/9782815325202-le-guide-du-savoir-vivre.html"
+        },
+        {
+          "isbn": "9782815325325",
+          "title": "Vivre à la campagne - potager, petit élevage, cuisine, ruches, conserves, pêche ...",
+          "authors": "",
+          "url": "https://www.rusticaeditions.com/9782815325325-vivre-a-la-campagne-potager-petit-elevage-cuisine-ruches-conserves-peche.html"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.rusticaeditions.com/{isbn}-{slug}.html",
+          "apostrophe": "drop"
+        },
+        "checked_on": 3,
+        "mismatches": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.rusticaeditions.com/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.rusticaeditions.com/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.rusticaeditions.com/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.rusticaeditions.com/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.rusticaeditions.com/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.rusticaeditions.com/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.rusticaeditions.com/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.rusticaeditions.com/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: forbidden by robots.txt"
+        },
+        {
+          "recipe": {
+            "url": "https://www.rusticaeditions.com/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
         }
       ]
     },
@@ -46931,7 +50293,7 @@
     "sfhom.free.fr": {
       "home": "http://sfhom.free.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -47139,7 +50501,7 @@
     "somogy.fr": {
       "home": "http://www.somogy.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -47345,7 +50707,7 @@
     "storylab.fr": {
       "home": "http://www.storylab.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -48414,7 +51776,7 @@
     },
     "terrasses.net": {
       "home": "https://terrasses.net/",
-      "status": "no_recipe",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -48509,7 +51871,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://terrasses.net/wp-sitemap-posts-post-1.xml"
+      "book_sitemap": "https://terrasses.net/wp-sitemap-posts-post-1.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://terrasses.net/wp-sitemap-posts-post-1.xml"
+        },
+        "found": 3,
+        "tried": 3
+      }
     },
     "terre-daccueil.ca": {
       "home": "https://terre-daccueil.ca/",
@@ -48957,7 +52326,14 @@
           "found_by_title": 0
         }
       ],
-      "book_sitemap": "https://www.terrevivante.org/product-sitemap.xml"
+      "book_sitemap": "https://www.terrevivante.org/product-sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.terrevivante.org/product-sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "tertium-editions.fr": {
       "home": "https://www.tertium-editions.fr/",
@@ -49124,7 +52500,7 @@
     "theles.fr": {
       "home": "http://www.theles.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -49132,7 +52508,7 @@
     "theloma.free.fr": {
       "home": "http://theloma.free.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -49432,6 +52808,13 @@
       "witnesses": [],
       "tried": []
     },
+    "tristram.fr": {
+      "home": "https://www.tristram.fr/",
+      "status": "no_witness",
+      "probed_at": "2026-11-14",
+      "witnesses": [],
+      "tried": []
+    },
     "uga-editions.com": {
       "home": "https://www.uga-editions.com/",
       "status": "no_recipe",
@@ -49537,23 +52920,22 @@
     "ultimanecat.fr": {
       "home": "http://ultimanecat.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
     },
     "unicaen.fr": {
       "home": "https://www.unicaen.fr/recherche/communication-scientifique/presses-universitaires-de-caen/",
-      "status": "offline",
-      "probed_at": "2026-11-13",
-      "note": "unreachable",
+      "status": "no_witness",
+      "probed_at": "2026-11-14",
       "witnesses": [],
       "tried": []
     },
     "uniteddeadartists.com": {
       "home": "http://www.uniteddeadartists.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -49606,7 +52988,7 @@
     "univ-provence.fr": {
       "home": "http://www.univ-provence.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -49753,7 +53135,7 @@
     "ut-capitole.fr": {
       "home": "http://www.ut-capitole.fr/recherche/publications-de-l-universite/presses-de-l-universite/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "HTTP 404",
       "witnesses": [],
       "tried": []
@@ -49761,7 +53143,7 @@
     "vega-dupuis.com": {
       "home": "https://www.vega-dupuis.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -49783,7 +53165,7 @@
     "viviane-hamy.fr": {
       "home": "http://www.viviane-hamy.fr/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -49875,6 +53257,121 @@
         }
       ]
     },
+    "vrin.fr": {
+      "home": "https://www.vrin.fr/",
+      "status": "ok",
+      "probed_at": "2026-11-14",
+      "witnesses": [
+        {
+          "isbn": "9782711632695",
+          "title": "Éléments de théologie",
+          "authors": "",
+          "url": "https://www.vrin.fr/livre/9782711632695/elements-de-theologie"
+        },
+        {
+          "isbn": "9782711632367",
+          "title": "Mythes religieux et philosophie dans l’Antiquité",
+          "authors": "",
+          "url": "https://www.vrin.fr/livre/9782711632367/mythes-religieux-et-philosophie-dans-lantiquite"
+        },
+        {
+          "isbn": "9782919067756",
+          "title": "Réflexions nouvelles sur les femmes & autres essais",
+          "authors": "",
+          "url": "https://www.vrin.fr/livre/9782919067756/reflexions-nouvelles-sur-les-femmes-autres-essais"
+        }
+      ],
+      "product": {
+        "recipe": {
+          "template": "https://www.vrin.fr/livre/{isbn}/{slug}",
+          "apostrophe": "drop",
+          "slug_ignored": true
+        },
+        "checked_on": 3,
+        "mismatches": 0
+      },
+      "tried": [
+        {
+          "recipe": {
+            "url": "https://www.vrin.fr/catalogue?q=&refine_search_value={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0
+        },
+        {
+          "recipe": {
+            "url": "https://www.vrin.fr/?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "the control page already links the witnesses"
+        },
+        {
+          "recipe": {
+            "url": "https://www.vrin.fr/recherche?s={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.vrin.fr/search?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.vrin.fr/recherche?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.vrin.fr/search?query={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.vrin.fr/recherche/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.vrin.fr/catalogue?s%5Bq%5D={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "js_results": true
+        },
+        {
+          "recipe": {
+            "url": "https://www.vrin.fr/catalogsearch/result/?q={q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://www.vrin.fr/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
+        }
+      ]
+    },
     "vuibert.fr": {
       "home": "https://www.vuibert.fr/",
       "status": "ok",
@@ -49924,10 +53421,10 @@
       "probed_at": "2026-11-14",
       "witnesses": [
         {
-          "isbn": "9782381140957",
-          "title": "Être femelle",
+          "isbn": "9782381141039",
+          "title": "Savoirs situés",
           "authors": "",
-          "url": "https://wildproject.org/livres/etre-femelle"
+          "url": "https://wildproject.org/livres/savoirs-situes"
         },
         {
           "isbn": "9782381140940",
@@ -49962,21 +53459,12 @@
         "checked_on": 5,
         "mismatches": 0
       },
-      "search": {
-        "recipe": {
-          "url": "https://wildproject.org/?s={q}",
-          "by_isbn": true
-        },
-        "found_by_isbn": 1,
-        "found_by_title": 0
-      },
       "tried": [
         {
           "recipe": {
-            "url": "https://wildproject.org/?s={q}",
-            "by_isbn": true
+            "url": "https://wildproject.org/?s={q}"
           },
-          "found_by_isbn": 1,
+          "found_by_isbn": 0,
           "found_by_title": 0
         },
         {
@@ -50034,9 +53522,24 @@
           "found_by_isbn": 0,
           "found_by_title": 0,
           "note": "control query: HTTP 404"
+        },
+        {
+          "recipe": {
+            "url": "https://wildproject.org/search/{q}"
+          },
+          "found_by_isbn": 0,
+          "found_by_title": 0,
+          "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://wildproject.org/sitemap.xml"
+      "book_sitemap": "https://wildproject.org/sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://wildproject.org/sitemap.xml"
+        },
+        "found": 5,
+        "tried": 5
+      }
     },
     "wydawnictwoalbatros.com": {
       "home": "https://www.wydawnictwoalbatros.com/",
@@ -50434,7 +53937,7 @@
     },
     "yvert.com": {
       "home": "http://www.yvert.com/",
-      "status": "js_results",
+      "status": "ok",
       "probed_at": "2026-11-14",
       "witnesses": [
         {
@@ -50550,7 +54053,14 @@
           "note": "control query: HTTP 404"
         }
       ],
-      "book_sitemap": "https://www.yvert.com/1_fr_0_sitemap.xml"
+      "book_sitemap": "https://www.yvert.com/1_fr_0_sitemap.xml",
+      "sitemap": {
+        "recipe": {
+          "url": "https://www.yvert.com/1_fr_0_sitemap.xml"
+        },
+        "found": 4,
+        "tried": 5
+      }
     },
     "yvon.net": {
       "home": "http://www.yvon.net/",
@@ -50563,7 +54073,7 @@
     "zailees.com": {
       "home": "http://www.zailees.com/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
@@ -50571,7 +54081,7 @@
     "zones-sensibles.org": {
       "home": "http://www.zones-sensibles.org/",
       "status": "offline",
-      "probed_at": "2026-11-13",
+      "probed_at": "2026-11-14",
       "note": "unreachable",
       "witnesses": [],
       "tried": []
