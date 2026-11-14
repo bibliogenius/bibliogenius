@@ -306,10 +306,6 @@
         {
           "name": "Dalloz",
           "site": "editions-dalloz.fr"
-        },
-        {
-          "name": "LGDJ",
-          "site": "lgdj.fr"
         }
       ]
     },
@@ -364,6 +360,10 @@
         {
           "name": "Presses de la Cité",
           "site": "pressesdelacite.com"
+        },
+        {
+          "name": "Omnibus",
+          "site": "lisez.com"
         }
       ]
     },
@@ -409,6 +409,15 @@
         {
           "name": "Éditions Solar",
           "site": "solar.fr"
+        }
+      ]
+    },
+    {
+      "prefix": "9782264",
+      "publishers": [
+        {
+          "name": "10/18",
+          "site": "10-18.fr"
         }
       ]
     },
@@ -498,6 +507,19 @@
         {
           "name": "J'ai lu",
           "site": "jailu.com"
+        },
+        {
+          "name": "Librio",
+          "site": "editions.flammarion.com"
+        }
+      ]
+    },
+    {
+      "prefix": "9782292",
+      "publishers": [
+        {
+          "name": "Librio",
+          "site": "editions.flammarion.com"
         }
       ]
     },
@@ -565,11 +587,11 @@
       ]
     },
     {
-      "prefix": "9782323",
+      "prefix": "9782324",
       "publishers": [
         {
-          "name": "Éditions Édilivre",
-          "site": "edilivre.com"
+          "name": "Gründ",
+          "site": "lisez.com"
         }
       ]
     },
@@ -579,42 +601,6 @@
         {
           "name": "Actes Sud",
           "site": "actes-sud.fr"
-        }
-      ]
-    },
-    {
-      "prefix": "9782332",
-      "publishers": [
-        {
-          "name": "Éditions Édilivre",
-          "site": "edilivre.com"
-        }
-      ]
-    },
-    {
-      "prefix": "9782334",
-      "publishers": [
-        {
-          "name": "Éditions Édilivre",
-          "site": "edilivre.com"
-        }
-      ]
-    },
-    {
-      "prefix": "9782337",
-      "publishers": [
-        {
-          "name": "Éditions Édilivre",
-          "site": "edilivre.com"
-        }
-      ]
-    },
-    {
-      "prefix": "9782342",
-      "publishers": [
-        {
-          "name": "Publibook",
-          "site": "publibook.com"
         }
       ]
     },
@@ -668,6 +654,15 @@
       ]
     },
     {
+      "prefix": "978235087",
+      "publishers": [
+        {
+          "name": "Éditions Héloïse d'Ormesson",
+          "site": "editions-heloisedormesson.com"
+        }
+      ]
+    },
+    {
       "prefix": "978235122",
       "publishers": [
         {
@@ -709,15 +704,6 @@
         {
           "name": "De Boeck Supérieur",
           "site": "deboecksuperieur.com"
-        }
-      ]
-    },
-    {
-      "prefix": "978235335",
-      "publishers": [
-        {
-          "name": "Éditions Édilivre",
-          "site": "edilivre.com"
         }
       ]
     },
@@ -812,15 +798,6 @@
         {
           "name": "Sonatine Éditions",
           "site": "sonatine-editions.fr"
-        }
-      ]
-    },
-    {
-      "prefix": "978235607",
-      "publishers": [
-        {
-          "name": "Éditions Édilivre",
-          "site": "edilivre.com"
         }
       ]
     },
@@ -1162,15 +1139,6 @@
       ]
     },
     {
-      "prefix": "978236493",
-      "publishers": [
-        {
-          "name": "Éditions Cépaduès",
-          "site": "cepadues.com"
-        }
-      ]
-    },
-    {
       "prefix": "978236512",
       "publishers": [
         {
@@ -1306,15 +1274,6 @@
       ]
     },
     {
-      "prefix": "978236781",
-      "publishers": [
-        {
-          "name": "Presses universitaires de la Méditerranée",
-          "site": "pulm.fr"
-        }
-      ]
-    },
-    {
       "prefix": "978236785",
       "publishers": [
         {
@@ -1369,15 +1328,6 @@
       ]
     },
     {
-      "prefix": "978236893",
-      "publishers": [
-        {
-          "name": "LGDJ",
-          "site": "lgdj.fr"
-        }
-      ]
-    },
-    {
       "prefix": "978236935",
       "publishers": [
         {
@@ -1401,6 +1351,15 @@
         {
           "name": "Rue de Sèvres",
           "site": "editions-ruedesevres.fr"
+        }
+      ]
+    },
+    {
+      "prefix": "978237039",
+      "publishers": [
+        {
+          "name": "Milan Presse",
+          "site": "milanpresse.com"
         }
       ]
     },
@@ -1549,15 +1508,6 @@
       ]
     },
     {
-      "prefix": "978237582",
-      "publishers": [
-        {
-          "name": "Éditions Nouvelle Cité",
-          "site": "nouvellecite.fr"
-        }
-      ]
-    },
-    {
       "prefix": "978237591",
       "publishers": [
         {
@@ -1599,15 +1549,6 @@
         {
           "name": "Éditions Sarbacane",
           "site": "editions-sarbacane.com"
-        }
-      ]
-    },
-    {
-      "prefix": "978237754",
-      "publishers": [
-        {
-          "name": "Lapin Éditions",
-          "site": "lapin.org"
         }
       ]
     },
@@ -1774,20 +1715,11 @@
       ]
     },
     {
-      "prefix": "978238177",
+      "prefix": "978238195",
       "publishers": [
         {
-          "name": "500 nuances de geek",
-          "site": "500nuancesdegeek.fr"
-        }
-      ]
-    },
-    {
-      "prefix": "978238190",
-      "publishers": [
-        {
-          "name": "An Alarc'h embannadurioù",
-          "site": "brezhoneg.org"
+          "name": "Presses du Châtelet",
+          "site": "editionsarchipel.com"
         }
       ]
     },
@@ -1837,6 +1769,15 @@
       ]
     },
     {
+      "prefix": "978238292",
+      "publishers": [
+        {
+          "name": "Bouquins",
+          "site": "lisez.com"
+        }
+      ]
+    },
+    {
       "prefix": "978238316",
       "publishers": [
         {
@@ -1860,24 +1801,6 @@
         {
           "name": "Gulf Stream Éditeur",
           "site": "gulfstream.fr"
-        }
-      ]
-    },
-    {
-      "prefix": "978238395",
-      "publishers": [
-        {
-          "name": "Éditions Cépaduès",
-          "site": "cepadues.com"
-        }
-      ]
-    },
-    {
-      "prefix": "978238422",
-      "publishers": [
-        {
-          "name": "Éditions Magnus",
-          "site": "editionsmagnus.fr"
         }
       ]
     },
@@ -1954,6 +1877,15 @@
       ]
     },
     {
+      "prefix": "9782408",
+      "publishers": [
+        {
+          "name": "Milan Presse",
+          "site": "milanpresse.com"
+        }
+      ]
+    },
+    {
       "prefix": "9782409",
       "publishers": [
         {
@@ -1972,11 +1904,11 @@
       ]
     },
     {
-      "prefix": "9782414",
+      "prefix": "9782412",
       "publishers": [
         {
-          "name": "Éditions Édilivre",
-          "site": "edilivre.com"
+          "name": "Éditions First",
+          "site": "editionsfirst.fr"
         }
       ]
     },
@@ -2170,6 +2102,15 @@
       ]
     },
     {
+      "prefix": "97827000",
+      "publishers": [
+        {
+          "name": "Gründ",
+          "site": "lisez.com"
+        }
+      ]
+    },
+    {
       "prefix": "97827002",
       "publishers": [
         {
@@ -2323,6 +2264,15 @@
       ]
     },
     {
+      "prefix": "97827100",
+      "publishers": [
+        {
+          "name": "Milan Presse",
+          "site": "milanpresse.com"
+        }
+      ]
+    },
+    {
       "prefix": "97827103",
       "publishers": [
         {
@@ -2383,6 +2333,10 @@
     {
       "prefix": "97827144",
       "publishers": [
+        {
+          "name": "Éditions Belfond",
+          "site": "belfond.fr"
+        },
         {
           "name": "Éditions Le Pré aux clercs",
           "site": "lepreauxclercs.com"
@@ -2654,6 +2608,15 @@
       ]
     },
     {
+      "prefix": "97827459",
+      "publishers": [
+        {
+          "name": "Milan Presse",
+          "site": "milanpresse.com"
+        }
+      ]
+    },
+    {
       "prefix": "97827460",
       "publishers": [
         {
@@ -2677,15 +2640,6 @@
         {
           "name": "Autrement",
           "site": "autrement.com"
-        }
-      ]
-    },
-    {
-      "prefix": "97827483",
-      "publishers": [
-        {
-          "name": "Publibook",
-          "site": "publibook.com"
         }
       ]
     },
@@ -3008,15 +2962,6 @@
       ]
     },
     {
-      "prefix": "97828121",
-      "publishers": [
-        {
-          "name": "Éditions Édilivre",
-          "site": "edilivre.com"
-        }
-      ]
-    },
-    {
       "prefix": "97828122",
       "publishers": [
         {
@@ -3094,6 +3039,15 @@
         {
           "name": "Lonely Planet",
           "site": "lonelyplanet.com"
+        }
+      ]
+    },
+    {
+      "prefix": "97828180",
+      "publishers": [
+        {
+          "name": "Éditions P.O.L",
+          "site": "pol-editeur.fr"
         }
       ]
     },
@@ -3224,15 +3178,6 @@
       ]
     },
     {
-      "prefix": "978284058",
-      "publishers": [
-        {
-          "name": "Le Souffle d'or",
-          "site": "souffledor.fr"
-        }
-      ]
-    },
-    {
       "prefix": "978284070",
       "publishers": [
         {
@@ -3296,6 +3241,15 @@
       ]
     },
     {
+      "prefix": "978284113",
+      "publishers": [
+        {
+          "name": "Milan Presse",
+          "site": "milanpresse.com"
+        }
+      ]
+    },
+    {
       "prefix": "978284114",
       "publishers": [
         {
@@ -3341,6 +3295,15 @@
       ]
     },
     {
+      "prefix": "978284166",
+      "publishers": [
+        {
+          "name": "Éditions Grandir",
+          "site": "editionsgrandir.eu"
+        }
+      ]
+    },
+    {
       "prefix": "978284172",
       "publishers": [
         {
@@ -3364,10 +3327,6 @@
         {
           "name": "Gualino",
           "site": "gualino.fr"
-        },
-        {
-          "name": "LGDJ",
-          "site": "lgdj.fr"
         }
       ]
     },
@@ -3431,15 +3390,6 @@
         {
           "name": "Le Dilettante",
           "site": "ledilettante.com"
-        }
-      ]
-    },
-    {
-      "prefix": "978284269",
-      "publishers": [
-        {
-          "name": "Presses universitaires de la Méditerranée",
-          "site": "pulm.fr"
         }
       ]
     },
@@ -3597,6 +3547,24 @@
       ]
     },
     {
+      "prefix": "978284567",
+      "publishers": [
+        {
+          "name": "Tana Éditions",
+          "site": "lisez.com"
+        }
+      ]
+    },
+    {
+      "prefix": "978284592",
+      "publishers": [
+        {
+          "name": "Presses du Châtelet",
+          "site": "editionsarchipel.com"
+        }
+      ]
+    },
+    {
       "prefix": "978284597",
       "publishers": [
         {
@@ -3647,6 +3615,15 @@
         {
           "name": "Ginkgo éditeur",
           "site": "ginkgo-editeur.fr"
+        }
+      ]
+    },
+    {
+      "prefix": "978284682",
+      "publishers": [
+        {
+          "name": "Éditions P.O.L",
+          "site": "pol-editeur.fr"
         }
       ]
     },
@@ -3858,29 +3835,11 @@
       ]
     },
     {
-      "prefix": "978285313",
-      "publishers": [
-        {
-          "name": "Éditions Nouvelle Cité",
-          "site": "nouvellecite.fr"
-        }
-      ]
-    },
-    {
       "prefix": "978285399",
       "publishers": [
         {
           "name": "Presses universitaires de Provence",
           "site": "presses-universitaires.univ-amu.fr"
-        }
-      ]
-    },
-    {
-      "prefix": "978285428",
-      "publishers": [
-        {
-          "name": "Éditions Cépaduès",
-          "site": "cepadues.com"
         }
       ]
     },
@@ -4047,11 +4006,29 @@
       ]
     },
     {
+      "prefix": "978286726",
+      "publishers": [
+        {
+          "name": "Milan Presse",
+          "site": "milanpresse.com"
+        }
+      ]
+    },
+    {
       "prefix": "978286738",
       "publishers": [
         {
           "name": "Syros",
           "site": "syros.fr"
+        }
+      ]
+    },
+    {
+      "prefix": "978286744",
+      "publishers": [
+        {
+          "name": "Éditions P.O.L",
+          "site": "pol-editeur.fr"
         }
       ]
     },
@@ -4371,6 +4348,15 @@
       ]
     },
     {
+      "prefix": "978288927",
+      "publishers": [
+        {
+          "name": "Éditions Zoé",
+          "site": "editionszoe.ch"
+        }
+      ]
+    },
+    {
       "prefix": "978288953",
       "publishers": [
         {
@@ -4466,6 +4452,15 @@
         {
           "name": "Éditions Novalis",
           "site": "fr.novalis.ca"
+        }
+      ]
+    },
+    {
+      "prefix": "978289091",
+      "publishers": [
+        {
+          "name": "Éditions du remue-ménage",
+          "site": "editions-rm.ca"
         }
       ]
     },
@@ -5127,20 +5122,20 @@
       ]
     },
     {
+      "prefix": "9782904292",
+      "publishers": [
+        {
+          "name": "Éditions Grandir",
+          "site": "editionsgrandir.eu"
+        }
+      ]
+    },
+    {
       "prefix": "9782904631",
       "publishers": [
         {
           "name": "Alinéa",
           "site": "alinea.dk"
-        }
-      ]
-    },
-    {
-      "prefix": "9782904670",
-      "publishers": [
-        {
-          "name": "Le Souffle d'or",
-          "site": "souffledor.fr"
         }
       ]
     },
@@ -5420,6 +5415,15 @@
         {
           "name": "Éditions Sulliver",
           "site": "sulliver.com"
+        }
+      ]
+    },
+    {
+      "prefix": "9782911217",
+      "publishers": [
+        {
+          "name": "Presses du Châtelet",
+          "site": "editionsarchipel.com"
         }
       ]
     },
@@ -5910,29 +5914,11 @@
       ]
     },
     {
-      "prefix": "9782916835",
-      "publishers": [
-        {
-          "name": "An Alarc'h embannadurioù",
-          "site": "brezhoneg.org"
-        }
-      ]
-    },
-    {
       "prefix": "9782916952",
       "publishers": [
         {
           "name": "Le Passager clandestin",
           "site": "lepassagerclandestin.fr"
-        }
-      ]
-    },
-    {
-      "prefix": "9782917135",
-      "publishers": [
-        {
-          "name": "Éditions Édilivre",
-          "site": "edilivre.com"
         }
       ]
     },
@@ -6023,15 +6009,6 @@
         {
           "name": "Même Pas Mal",
           "site": "meme-pas-mal.fr"
-        }
-      ]
-    },
-    {
-      "prefix": "9782918653",
-      "publishers": [
-        {
-          "name": "Lapin Éditions",
-          "site": "lapin.org"
         }
       ]
     },
@@ -6900,6 +6877,15 @@
       ]
     },
     {
+      "prefix": "9782925064",
+      "publishers": [
+        {
+          "name": "Les éditions Pacifique Nord-Ouest",
+          "site": "editionspno.com"
+        }
+      ]
+    },
+    {
       "prefix": "9782925073",
       "publishers": [
         {
@@ -7098,15 +7084,6 @@
       ]
     },
     {
-      "prefix": "97829520238",
-      "publishers": [
-        {
-          "name": "An Alarc'h embannadurioù",
-          "site": "brezhoneg.org"
-        }
-      ]
-    },
-    {
       "prefix": "97829521446",
       "publishers": [
         {
@@ -7152,29 +7129,11 @@
       ]
     },
     {
-      "prefix": "97829524703",
-      "publishers": [
-        {
-          "name": "Lapin Éditions",
-          "site": "lapin.org"
-        }
-      ]
-    },
-    {
       "prefix": "97829528292",
       "publishers": [
         {
           "name": "Libertalia",
           "site": "editionslibertalia.com"
-        }
-      ]
-    },
-    {
-      "prefix": "97829528929",
-      "publishers": [
-        {
-          "name": "Éditions Édilivre",
-          "site": "edilivre.com"
         }
       ]
     },
@@ -7238,6 +7197,15 @@
         {
           "name": "Éditions Kontre Kulture",
           "site": "kontrekulture.com"
+        }
+      ]
+    },
+    {
+      "prefix": "97829543027",
+      "publishers": [
+        {
+          "name": "Milan Presse",
+          "site": "milanpresse.com"
         }
       ]
     },
@@ -7525,6 +7493,15 @@
       ]
     },
     {
+      "prefix": "97910301",
+      "publishers": [
+        {
+          "name": "Tana Éditions",
+          "site": "lisez.com"
+        }
+      ]
+    },
+    {
       "prefix": "97910307",
       "publishers": [
         {
@@ -7732,24 +7709,6 @@
       ]
     },
     {
-      "prefix": "9791090138",
-      "publishers": [
-        {
-          "name": "Éditions Cépaduès",
-          "site": "cepadues.com"
-        }
-      ]
-    },
-    {
-      "prefix": "9791090692",
-      "publishers": [
-        {
-          "name": "500 nuances de geek",
-          "site": "500nuancesdegeek.fr"
-        }
-      ]
-    },
-    {
       "prefix": "9791090724",
       "publishers": [
         {
@@ -7940,19 +7899,21 @@
     }
   ],
   "sites": {
+    "10-18.fr": {
+      "home": "http://www.10-18.fr",
+      "product": {
+        "template": "https://www.lisez.com/livres/{slug}/{isbn}",
+        "apostrophe": "drop"
+      }
+    },
     "12bis.com": {
       "home": "http://12bis.com",
       "product": {
         "template": "https://www.glenat.com/glenat-bd/{slug}-{isbn}/",
         "apostrophe": "drop"
-      }
-    },
-    "500nuancesdegeek.fr": {
-      "home": "http://www.500nuancesdegeek.fr/",
-      "product": {
-        "template": "https://www.500nuancesdegeek.fr/boutique/accueil/135-79-{slug}-guide-de-l-univers-de-berlin-xviii-{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
+      },
+      "sitemap": {
+        "url": "https://www.glenat.com/products.xml"
       }
     },
     "actes-sud.fr": {
@@ -7964,9 +7925,8 @@
     },
     "adverbum.fr": {
       "home": "https://www.adverbum.fr/",
-      "search": {
-        "url": "https://www.adverbum.fr/recherche?q={q}",
-        "by_isbn": true
+      "sitemap": {
+        "url": "https://www.adverbum.fr/sitemap.xml"
       }
     },
     "agone.org": {
@@ -8002,8 +7962,16 @@
     },
     "alice-editions.be": {
       "home": "https://www.alice-editions.be/",
+      "product": {
+        "template": "https://www.alice-editions.be/catalogue/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
-        "url": "https://www.alice-editions.be/?s={q}"
+        "url": "https://www.alice-editions.be/?s={q}",
+        "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.alice-editions.be/book-sitemap.xml"
       }
     },
     "alinea.dk": {
@@ -8015,15 +7983,29 @@
     },
     "allary-editions.fr": {
       "home": "http://www.allary-editions.fr/",
+      "product": {
+        "template": "https://allary-editions.fr/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://allary-editions.fr/search?type=product&q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://allary-editions.fr/sitemap_products_1.xml?from=9240498247&to=10898336416083"
       }
     },
     "alma-editeur.fr": {
       "home": "http://www.alma-editeur.fr/",
+      "product": {
+        "template": "https://www.alma-editeur.fr/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.alma-editeur.fr/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.alma-editeur.fr/wp-sitemap-posts-page-1.xml"
       }
     },
     "amanuensis.fr": {
@@ -8031,19 +8013,36 @@
       "search": {
         "url": "https://amanuensis.fr/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://amanuensis.fr/product-sitemap.xml"
       }
     },
     "anamosa.fr": {
       "home": "https://anamosa.fr/",
+      "product": {
+        "template": "https://anamosa.fr/livre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://anamosa.fr/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://anamosa.fr/product-sitemap.xml"
       }
     },
     "andara.ca": {
       "home": "http://www.andara.ca/",
+      "product": {
+        "template": "https://andara.ca/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://andara.ca/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://andara.ca/sitemap-1.xml"
       }
     },
     "anne-carriere.fr": {
@@ -8089,6 +8088,9 @@
       "search": {
         "url": "https://www.arianne-g-voyance.fr/search/{q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.arianne-g-voyance.fr/page-sitemap.xml"
       }
     },
     "arkhane-asylum.fr": {
@@ -8119,10 +8121,8 @@
     },
     "assimil.com": {
       "home": "http://www.assimil.com/",
-      "product": {
-        "template": "https://www.assimil.com/fr/cahiers-d-exercices/2043-{slug}-{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
+      "sitemap": {
+        "url": "https://www.assimil.com/1_fr_0_sitemap.xml"
       }
     },
     "asterix.com": {
@@ -8141,13 +8141,24 @@
     },
     "auberon.fr": {
       "home": "http://www.auberon.fr/f/index.php",
+      "product": {
+        "template": "https://www.auberon.fr/catalogue/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.auberon.fr/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.auberon.fr/wp-sitemap-posts-catalogue-1.xml"
       }
     },
     "audiable.com": {
       "home": "http://www.audiable.com/",
+      "product": {
+        "template": "https://audiable.com/boutique/cat_litterature-etrangere/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://audiable.com/?s={q}"
       }
@@ -8157,6 +8168,9 @@
       "product": {
         "template": "https://www.audiolib.fr/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.audiolib.fr/products.xml"
       }
     },
     "austral-editions.com": {
@@ -8174,6 +8188,9 @@
       "product": {
         "template": "https://www.autrement.com/{slug}/{isbn}",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.autrement.com/sitemap.xml"
       }
     },
     "auzou.fr": {
@@ -8199,9 +8216,16 @@
     },
     "avuedoeil.fr": {
       "home": "http://www.avuedoeil.fr",
+      "product": {
+        "template": "https://www.avuedoeil.fr/livres/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.avuedoeil.fr/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.avuedoeil.fr/product-sitemap.xml"
       }
     },
     "bamboo.fr": {
@@ -8213,9 +8237,23 @@
     },
     "bayardlivres.ca": {
       "home": "http://bayardlivres.ca/",
+      "product": {
+        "template": "https://www.bayardjeunesse.ca/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.bayardjeunesse.ca/search?options%5Bprefix%5D=last&q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.bayardjeunesse.ca/sitemap_products_2.xml?from=7139058253929&to=15443847184750"
+      }
+    },
+    "belfond.fr": {
+      "home": "http://www.belfond.fr/",
+      "product": {
+        "template": "https://www.lisez.com/livres/{slug}/{isbn}",
+        "apostrophe": "drop"
       }
     },
     "belial.fr": {
@@ -8237,8 +8275,15 @@
     },
     "bibliopolis.it": {
       "home": "http://www.bibliopolis.it",
+      "product": {
+        "template": "https://bibliopolis.it/shop/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://bibliopolis.it/?post_type%5B%5D=&s={q}"
+      },
+      "sitemap": {
+        "url": "https://bibliopolis.it/wp-sitemap-posts-product-1.xml"
       }
     },
     "black-book-editions.fr": {
@@ -8255,23 +8300,26 @@
     },
     "boomerangjeunesse.com": {
       "home": "http://boomerangjeunesse.com/",
+      "product": {
+        "template": "https://boomerangjeunesse.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://boomerangjeunesse.com/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://boomerangjeunesse.com/sitemap-1.xml"
       }
     },
     "bourgoisediteur.fr": {
       "home": "https://bourgoisediteur.fr/",
+      "product": {
+        "template": "https://bourgoisediteur.fr/catalogue/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://bourgoisediteur.fr/?s={q}"
-      }
-    },
-    "brezhoneg.org": {
-      "home": "http://www.brezhoneg.org/fr",
-      "product": {
-        "template": "https://brezhoneg.org/fr/albums-jeunesse/3442-{slug}-{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
       }
     },
     "buchetchastel.fr": {
@@ -8300,16 +8348,30 @@
       "product": {
         "template": "https://www.calmann-levy.fr/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.calmann-levy.fr/products.xml"
       }
     },
     "cambourakis.com": {
       "home": "http://www.cambourakis.com/",
+      "product": {
+        "template": "https://www.cambourakis.com/tout/jeunesse/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.cambourakis.com/?post_type=product&s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.cambourakis.com/product-sitemap1.xml"
       }
     },
     "casadevelazquez.org": {
       "home": "https://www.casadevelazquez.org/",
+      "product": {
+        "template": "https://www.casadevelazquez.org/publications/librairie-en-ligne/publication/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.casadevelazquez.org/recherche?tx_solr%5Bq%5D={q}",
         "by_isbn": true
@@ -8331,34 +8393,40 @@
     },
     "castorastral.com": {
       "home": "http://www.castorastral.com/",
+      "product": {
+        "template": "https://www.castorastral.com/livre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.castorastral.com/?s={q}",
         "by_isbn": true
       }
     },
-    "cepadues.com": {
-      "home": "http://www.cepadues.com",
-      "product": {
-        "template": "https://www.cepadues.com/livres/pilotage-aeronautique/histoire-recits/1514-{slug}-{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
-      },
-      "search": {
-        "url": "https://www.cepadues.com/recherche?controller=search&s={q}",
-        "by_isbn": true
-      }
-    },
     "cercledart.com": {
       "home": "http://www.cercledart.com/",
+      "product": {
+        "template": "https://www.cercledart.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.cercledart.com/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.cercledart.com/product-sitemap.xml"
       }
     },
     "champ-vallon.com": {
       "home": "http://www.champ-vallon.com/",
+      "product": {
+        "template": "https://www.champ-vallon.com/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.champ-vallon.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.champ-vallon.com/post-sitemap1.xml"
       }
     },
     "chemindescretes.fr": {
@@ -8373,6 +8441,9 @@
       "search": {
         "url": "https://www.chroniquesociale.com/recherche?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.chroniquesociale.com/sitemap.xml"
       }
     },
     "citadelles-mazenod.com": {
@@ -8393,7 +8464,10 @@
       "home": "https://www.cle-international.com/",
       "product": {
         "template": "https://www.cle-international.com/{slug}-{isbn}",
-        "apostrophe": "drop"
+        "apostrophe": "dash"
+      },
+      "sitemap": {
+        "url": "https://www.cle-international.com/sitemap.xml"
       }
     },
     "cnrs.fr": {
@@ -8409,6 +8483,10 @@
     },
     "cnrseditions.fr": {
       "home": "https://www.cnrseditions.fr/",
+      "product": {
+        "template": "https://www.cnrseditions.fr/catalogue/anthropologie-et-mondes-contemporains/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.cnrseditions.fr/recherche?s={q}",
         "by_isbn": true
@@ -8416,11 +8494,6 @@
     },
     "coffre-a-bd.com": {
       "home": "https://coffre-a-bd.com/",
-      "product": {
-        "template": "https://coffre-a-bd.com/tex-willer-jeunesse/2152-{slug}-{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
-      },
       "search": {
         "url": "https://coffre-a-bd.com/recherche?s={q}",
         "by_isbn": true
@@ -8473,12 +8546,22 @@
       "search": {
         "url": "https://www.delachauxetniestle.com/recherche/{q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.delachauxetniestle.com/dynamic-sitemap.xml"
       }
     },
     "delagrenouillere.com": {
       "home": "http://delagrenouillere.com/",
+      "product": {
+        "template": "https://delagrenouillere.com/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://delagrenouillere.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://delagrenouillere.com/wp-sitemap-posts-post-1.xml"
       }
     },
     "denoel.fr": {
@@ -8490,6 +8573,9 @@
       "search": {
         "url": "https://www.denoel.fr/catalogue?search_api_fulltext={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.denoel.fr/sitemap.xml?page=2"
       }
     },
     "didierjeunesse.com": {
@@ -8497,18 +8583,19 @@
       "product": {
         "template": "https://www.didier-jeunesse.com/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.didier-jeunesse.com/products.xml"
       }
     },
     "dominiqueleroy.fr": {
       "home": "https://www.dominiqueleroy.fr/",
-      "product": {
-        "template": "https://www.dominiqueleroy.fr/produit/17/{isbn}/{slug}",
-        "apostrophe": "dash",
-        "slug_ignored": true
-      },
       "search": {
         "url": "https://www.dominiqueleroy.fr/search?utf8=%E2%9C%93&q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.dominiqueleroy.fr/sitemaps/products.xml"
       }
     },
     "dorbestier.com": {
@@ -8530,14 +8617,28 @@
     },
     "ecartsmbh.wordpress.com": {
       "home": "http://ecartsmbh.wordpress.com/",
+      "product": {
+        "template": "https://ecartsmbh.wordpress.com/2010/03/09/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://ecartsmbh.wordpress.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://ecartsmbh.wordpress.com/sitemap.xml"
       }
     },
     "eclm.fr": {
       "home": "http://www.eclm.fr",
+      "product": {
+        "template": "https://www.eclm.fr/livre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.eclm.fr/search/{q}"
+      },
+      "sitemap": {
+        "url": "https://www.eclm.fr/wp-sitemap-posts-livre-1.xml"
       }
     },
     "ecoledesloisirs.fr": {
@@ -8563,24 +8664,30 @@
         "url": "https://ecosociete.org/sitemaps-1-section-livres-1-sitemap.xml"
       }
     },
-    "edilivre.com": {
-      "home": "http://www.edilivre.com/",
-      "product": {
-        "template": "https://librairie.edilivre.com/roman/37950-{slug}-{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
-      }
-    },
     "editeurs-reunis.fr": {
       "home": "https://www.editeurs-reunis.fr/",
+      "product": {
+        "template": "https://www.editeurs-reunis.fr/product-page/{slug}",
+        "apostrophe": "dash"
+      },
       "search": {
         "url": "https://www.editeurs-reunis.fr/search?q={q}"
+      },
+      "sitemap": {
+        "url": "https://www.editeurs-reunis.fr/store-products-sitemap.xml"
       }
     },
     "editions-alcide.com": {
       "home": "http://www.editions-alcide.com/",
+      "product": {
+        "template": "https://www.editions-alcide.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.editions-alcide.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.editions-alcide.com/product-sitemap.xml"
       }
     },
     "editions-apogee.com": {
@@ -8592,8 +8699,15 @@
     },
     "editions-ariane.com": {
       "home": "https://editions-ariane.com/",
+      "product": {
+        "template": "https://editions-ariane.com/livre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editions-ariane.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://editions-ariane.com/livre-sitemap1.xml"
       }
     },
     "editions-bordas.fr": {
@@ -8608,18 +8722,20 @@
     },
     "editions-chariot-dor.fr": {
       "home": "http://editions-chariot-dor.fr",
-      "product": {
-        "template": "https://www.editions-chariot-dor.fr/produit/198/{isbn}/{slug}",
-        "apostrophe": "drop",
-        "slug_ignored": true
-      },
       "search": {
         "url": "https://www.editions-chariot-dor.fr/search?utf8=%E2%9C%93&q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.editions-chariot-dor.fr/sitemaps/products.xml"
       }
     },
     "editions-chouette.com": {
       "home": "http://editions-chouette.com/",
+      "product": {
+        "template": "https://editions-chouette.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editions-chouette.com/?s={q}"
       }
@@ -8633,14 +8749,25 @@
     },
     "editions-corti.fr": {
       "home": "https://editions-corti.fr/",
+      "product": {
+        "template": "https://editions-corti.fr/livres/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editions-corti.fr/livres?q={q}"
       }
     },
     "editions-croquant.org": {
       "home": "https://editions-croquant.org/",
+      "product": {
+        "template": "https://editions-croquant.org/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editions-croquant.org/search?options%5Bprefix%5D=last&q={q}"
+      },
+      "sitemap": {
+        "url": "https://editions-croquant.org/sitemap_products_1.xml?from=11414243541334&to=11464447852886"
       }
     },
     "editions-dalloz.fr": {
@@ -8658,10 +8785,17 @@
       "search": {
         "url": "https://www.editions-delagrave.fr/recherche?text={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.editions-delagrave.fr/sitemap.xml?page=2"
       }
     },
     "editions-du-sous-sol.com": {
       "home": "http://www.editions-du-sous-sol.com/",
+      "product": {
+        "template": "https://editions-du-sous-sol.com/publication/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editions-du-sous-sol.com/?s={q}"
       }
@@ -8675,14 +8809,28 @@
     },
     "editions-eyrolles.com": {
       "home": "https://www.editions-eyrolles.com/",
+      "product": {
+        "template": "https://www.editions-eyrolles.com/livre/{slug}",
+        "apostrophe": "dash"
+      },
       "search": {
         "url": "https://www.editions-eyrolles.com/recherche/resultats?search_form%5Bquery%5D={q}"
+      },
+      "sitemap": {
+        "url": "https://www.editions-eyrolles.com/sitemap/products.xml?page=2"
       }
     },
     "editions-fournel.fr": {
       "home": "https://editions-fournel.fr/",
+      "product": {
+        "template": "https://editions-fournel.fr/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editions-fournel.fr/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://editions-fournel.fr/product-sitemap.xml"
       }
     },
     "editions-hapax.org": {
@@ -8707,6 +8855,16 @@
       "product": {
         "template": "https://www.editions-hazan.fr/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.editions-hazan.fr/products.xml"
+      }
+    },
+    "editions-heloisedormesson.com": {
+      "home": "http://www.editions-heloisedormesson.com/",
+      "product": {
+        "template": "https://www.lisez.com/livres/{slug}/{isbn}",
+        "apostrophe": "drop"
       }
     },
     "editions-hermann.fr": {
@@ -8730,6 +8888,9 @@
       "product": {
         "template": "https://www.editions-jclattes.fr/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.editions-jclattes.fr/products.xml"
       }
     },
     "editions-jouvence.com": {
@@ -8744,8 +8905,15 @@
     },
     "editions-leha.com": {
       "home": "https://editions-leha.com",
+      "product": {
+        "template": "https://editions-leha.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editions-leha.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "http://editions-leha.com/product-sitemap.xml"
       }
     },
     "editions-lepommier.fr": {
@@ -8773,16 +8941,30 @@
       "search": {
         "url": "https://www.editions-lignes.com/spip.php?page=recherche&recherche={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.editions-lignes.com/sitemap.xml"
       }
     },
     "editions-memo.fr": {
       "home": "http://www.editions-memo.fr/",
+      "product": {
+        "template": "https://www.editions-memo.fr/livre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.editions-memo.fr/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.editions-memo.fr/wp-sitemap-posts-livre-1.xml"
       }
     },
     "editions-orphie.com": {
       "home": "https://www.editions-orphie.com/shop/",
+      "product": {
+        "template": "https://editions-orphie.com/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editions-orphie.com/search?q={q}",
         "by_isbn": true
@@ -8790,6 +8972,10 @@
     },
     "editions-pantheon.fr": {
       "home": "http://www.editions-pantheon.fr",
+      "product": {
+        "template": "https://www.editions-pantheon.fr/catalogue/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.editions-pantheon.fr/?s={q}",
         "by_isbn": true
@@ -8797,16 +8983,30 @@
     },
     "editions-picquier.com": {
       "home": "http://www.editions-picquier.com/",
+      "product": {
+        "template": "https://www.editions-picquier.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.editions-picquier.com/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.editions-picquier.com/product-sitemap.xml"
       }
     },
     "editions-privat.com": {
       "home": "http://www.editions-privat.com",
+      "product": {
+        "template": "https://www.editions-privat.com/nos-livres/patrimoine-culturel/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.editions-privat.com/search?search_api_fulltext={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.editions-privat.com/sitemap.xml"
       }
     },
     "editions-pygmalion.fr": {
@@ -8818,8 +9018,15 @@
     },
     "editions-rackham.com": {
       "home": "https://www.editions-rackham.com/",
+      "product": {
+        "template": "https://www.editions-rackham.com/catalogue/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.editions-rackham.com/?post_type=product&dgwt_wcas=1&s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.editions-rackham.com/wp-sitemap-posts-product-1.xml"
       }
     },
     "editions-retz.com": {
@@ -8827,6 +9034,19 @@
       "product": {
         "template": "https://www.editions-retz.com/enrichir-sa-pedagogie/mon-metier/{slug}-{isbn}.html",
         "apostrophe": "drop"
+      }
+    },
+    "editions-rm.ca": {
+      "home": "http://editions-rm.ca/",
+      "product": {
+        "template": "https://www.editions-rm.ca/livres/{slug}/",
+        "apostrophe": "drop"
+      },
+      "search": {
+        "url": "https://www.editions-rm.ca/?post_type=livres&s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.editions-rm.ca/livres-sitemap.xml"
       }
     },
     "editions-ruedesevres.fr": {
@@ -8862,8 +9082,15 @@
     },
     "editions-seguier.fr": {
       "home": "http://www.editions-seguier.fr/",
+      "product": {
+        "template": "https://editions-seguier.fr/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editions-seguier.fr/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://editions-seguier.fr/product-sitemap.xml"
       }
     },
     "editions-stock.fr": {
@@ -8871,13 +9098,23 @@
       "product": {
         "template": "https://www.editions-stock.fr/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.editions-stock.fr/products.xml"
       }
     },
     "editions-talaia.com": {
       "home": "http://www.editions-talaia.com",
+      "product": {
+        "template": "https://editions-talaia.com/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editions-talaia.com/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://editions-talaia.com/post-sitemap.xml"
       }
     },
     "editions-thierry-magnier.com": {
@@ -8916,6 +9153,10 @@
     },
     "editions-voyel.fr": {
       "home": "http://www.editions-voyel.fr",
+      "product": {
+        "template": "https://www.editions-voyel.fr/produit/{slug}-novella/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.editions-voyel.fr/?s={q}",
         "by_isbn": true
@@ -8926,18 +9167,32 @@
       "product": {
         "template": "https://www.editions-zones.fr/livres/{slug}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.editions-zones.fr/zones-book-sitemap1.xml"
       }
     },
     "editions.flammarion.com": {
       "home": "https://editions.flammarion.com/",
+      "product": {
+        "template": "https://editions.flammarion.com/{slug}/{isbn}",
+        "apostrophe": "drop"
+      },
       "sitemap": {
         "url": "https://editions.flammarion.com/sitemap.xml"
       }
     },
     "editions.hannenorak.com": {
       "home": "https://editions.hannenorak.com/",
+      "product": {
+        "template": "https://editions.hannenorak.com/catalogue/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editions.hannenorak.com/?post_type=product&s={q}"
+      },
+      "sitemap": {
+        "url": "https://editions.hannenorak.com/product-sitemap.xml"
       }
     },
     "editions.michelin.com": {
@@ -8966,15 +9221,29 @@
     },
     "editionsalaska.com": {
       "home": "https://www.editionsalaska.com/",
+      "product": {
+        "template": "https://editionsalaska.com/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editionsalaska.com/search?options%5Bprefix%5D=last&q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://editionsalaska.com/sitemap_products_1.xml?from=7701953642710&to=15374738981078"
       }
     },
     "editionsalto.com": {
       "home": "http://www.editionsalto.com",
+      "product": {
+        "template": "https://editionsalto.com/livres/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editionsalto.com/recherche/?search={q}"
+      },
+      "sitemap": {
+        "url": "https://editionsalto.com/product-sitemap.xml"
       }
     },
     "editionsamsterdam.fr": {
@@ -8997,6 +9266,13 @@
         "apostrophe": "drop"
       }
     },
+    "editionsarchipel.com": {
+      "home": "http://www.editionsarchipel.com/",
+      "product": {
+        "template": "https://www.lisez.com/livres/{slug}/{isbn}",
+        "apostrophe": "drop"
+      }
+    },
     "editionsartege.fr": {
       "home": "http://www.editionsartege.fr",
       "search": {
@@ -9006,11 +9282,6 @@
     },
     "editionsatelier.com": {
       "home": "http://www.editionsatelier.com/",
-      "product": {
-        "template": "https://editionsatelier.com/boutique/accueil/478-{slug}--{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
-      },
       "search": {
         "url": "https://editionsatelier.com/boutique/recherche?controller=search&s={q}",
         "by_isbn": true
@@ -9018,12 +9289,23 @@
     },
     "editionsaucarre.com": {
       "home": "http://editionsaucarre.com/",
+      "product": {
+        "template": "https://lisonlescarbeaueditrice.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://lisonlescarbeaueditrice.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "http://lisonlescarbeaueditrice.com/product-sitemap.xml"
       }
     },
     "editionsbdl.com": {
       "home": "http://www.editionsbdl.com/",
+      "product": {
+        "template": "https://www.editionsbdl.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.editionsbdl.com/?s={q}"
       }
@@ -9045,30 +9327,45 @@
       "search": {
         "url": "https://editionscritiques.fr/?ct_post_type=post%3Apage%3Aproduct&s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://editionscritiques.fr/product-sitemap.xml"
       }
     },
     "editionsdelasorbonne.fr": {
       "home": "http://editionsdelasorbonne.fr/",
-      "product": {
-        "template": "https://www.editionsdelasorbonne.fr/produit/1196/{isbn}/{slug}",
-        "apostrophe": "drop",
-        "slug_ignored": true
-      },
       "search": {
         "url": "https://www.editionsdelasorbonne.fr/search?utf8=%E2%9C%93&q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.editionsdelasorbonne.fr/sitemaps/products.xml"
       }
     },
     "editionsdelaube.fr": {
       "home": "https://editionsdelaube.fr/",
+      "product": {
+        "template": "https://editionsdelaube.fr/catalogue_de_livres/{slug}-2/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editionsdelaube.fr/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://editionsdelaube.fr/catalogue_de_livres-sitemap2.xml"
       }
     },
     "editionsdelisatis.com": {
       "home": "http://editionsdelisatis.com/",
+      "product": {
+        "template": "https://editionsdelisatis.com/livres/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editionsdelisatis.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://editionsdelisatis.com/livres-sitemap.xml"
       }
     },
     "editionsdelolivier.fr": {
@@ -9077,12 +9374,15 @@
         "template": "https://www.editionsdelolivier.fr/catalogue/{isbn}-{slug}",
         "apostrophe": "dash",
         "slug_ignored": true
+      },
+      "sitemap": {
+        "url": "https://www.editionsdelolivier.fr/sitemap.xml"
       }
     },
     "editionsdemortagne.com": {
       "home": "http://www.editionsdemortagne.com",
       "search": {
-        "url": "https://editionsdemortagne.com/livres/?_wpnonce=80e361cf22&_wp_http_referer=%2F&_search_catalog={q}",
+        "url": "https://editionsdemortagne.com/livres/?_wpnonce=3fb3f73e44&_wp_http_referer=%2F&_search_catalog={q}",
         "by_isbn": true
       }
     },
@@ -9094,8 +9394,15 @@
     },
     "editionsdivergences.com": {
       "home": "https://www.editionsdivergences.com",
+      "product": {
+        "template": "https://www.editionsdivergences.com/livre/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.editionsdivergences.com/search?query={q}"
+      },
+      "sitemap": {
+        "url": "https://www.editionsdivergences.com/sitemap.xml"
       }
     },
     "editionsdruide.com": {
@@ -9120,18 +9427,32 @@
       "product": {
         "template": "https://www.editionsduchene.fr/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.editionsduchene.fr/products.xml"
       }
     },
     "editionsducommun.org": {
       "home": "https://www.editionsducommun.org",
+      "product": {
+        "template": "https://www.editionsducommun.org/collections/all/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.editionsducommun.org/search?q={q}"
       }
     },
     "editionsducrabe.fr": {
       "home": "https://www.editionsducrabe.fr/",
+      "product": {
+        "template": "https://editionsducrabe.fr/ouvrage/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editionsducrabe.fr/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://editionsducrabe.fr/wp-sitemap-posts-ouvrage-1.xml"
       }
     },
     "editionsdumercredi.com": {
@@ -9143,9 +9464,16 @@
     },
     "editionsdupassage.com": {
       "home": "http://www.editionsdupassage.com/",
+      "product": {
+        "template": "https://www.editionsdupassage.com/catalogue/nouveautes/{slug}/",
+        "apostrophe": "dash"
+      },
       "search": {
         "url": "https://www.editionsdupassage.com/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.editionsdupassage.com/wp-sitemap-posts-page-1.xml"
       }
     },
     "editionsduquartz.com": {
@@ -9160,8 +9488,19 @@
     },
     "editionsfides.com": {
       "home": "https://editionsfides.com/",
+      "product": {
+        "template": "https://editionsfides.com/collections/nos-livres/products/{slug}-1",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editionsfides.com/search?q={q}"
+      }
+    },
+    "editionsfirst.fr": {
+      "home": "https://www.editionsfirst.fr/",
+      "product": {
+        "template": "https://www.lisez.com/livres/{slug}/{isbn}",
+        "apostrophe": "drop"
       }
     },
     "editionsfonfon.com": {
@@ -9174,25 +9513,45 @@
         "url": "https://editionsfonfon.com/books-sitemap.xml"
       }
     },
+    "editionsgrandir.eu": {
+      "home": "https://www.editionsgrandir.eu",
+      "product": {
+        "template": "https://www.editionsgrandir.eu/produit/{slug}/",
+        "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.editionsgrandir.eu/product-sitemap.xml"
+      }
+    },
     "editionshashtag.com": {
       "home": "https://editionshashtag.com/",
+      "product": {
+        "template": "https://editionshashtag.com/product/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
-        "url": "https://editionshashtag.com/?s={q}"
+        "url": "https://editionshashtag.com/?s={q}",
+        "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://editionshashtag.com/product-sitemap.xml"
       }
     },
     "editionsheliotrope.com": {
       "home": "https://www.editionsheliotrope.com/",
+      "product": {
+        "template": "https://www.editionsheliotrope.com/livres/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.editionsheliotrope.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.editionsheliotrope.com/livres-sitemap1.xml"
       }
     },
     "editionshibou.com": {
       "home": "https://www.editionshibou.com/",
-      "product": {
-        "template": "https://www.editionshibou.com/accueil/3768-{slug}-{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
-      },
       "search": {
         "url": "https://www.editionshibou.com/recherche?s={q}",
         "by_isbn": true
@@ -9207,18 +9566,33 @@
     },
     "editionsjcgodefroy.fr": {
       "home": "http://www.editionsjcgodefroy.fr",
+      "product": {
+        "template": "https://www.editionsjcgodefroy.fr/livre/{slug}-3/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.editionsjcgodefroy.fr/?post_type=product&s={q}"
       }
     },
     "editionsjcl.com": {
       "home": "https://www.editionsjcl.com",
+      "product": {
+        "template": "https://editionsjcl.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editionsjcl.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "http://editionsjcl.com/product-sitemap.xml"
       }
     },
     "editionskime.fr": {
       "home": "https://www.editionskime.fr/",
+      "product": {
+        "template": "https://editionskime.fr/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editionskime.fr/?post_type=product&type_aws=true&aws_id=1&aws_filter=1&s={q}",
         "by_isbn": true
@@ -9228,10 +9602,17 @@
       "home": "http://www.editionsladecouverte.fr/",
       "search": {
         "url": "https://www.editionsladecouverte.fr/recherche?AuteurId=&detail=1&recherche={q}"
+      },
+      "sitemap": {
+        "url": "https://www.editionsladecouverte.fr/sitemap1.xml"
       }
     },
     "editionslapresse.ca": {
       "home": "https://editionslapresse.ca/",
+      "product": {
+        "template": "https://editionslapresse.ca/collections/nos-livres/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editionslapresse.ca/search?q={q}",
         "by_isbn": true
@@ -9269,6 +9650,10 @@
     },
     "editionslibertalia.com": {
       "home": "https://editionslibertalia.com/",
+      "product": {
+        "template": "https://editionslibertalia.com/catalogue/poche/{slug}",
+        "apostrophe": "dash"
+      },
       "search": {
         "url": "https://editionslibertalia.com/spip.php?page=recherche&recherche={q}",
         "by_isbn": true
@@ -9281,16 +9666,13 @@
         "apostrophe": "drop"
       }
     },
-    "editionsmagnus.fr": {
-      "home": "https://editionsmagnus.fr/",
-      "search": {
-        "url": "https://editionsmagnus.fr/search?options%5Bprefix%5D=last&q={q}"
-      }
-    },
     "editionsmardaga.com": {
       "home": "http://www.editionsmardaga.com/",
       "search": {
         "url": "https://www.editionsmardaga.com/website/search?order=name+asc&search={q}"
+      },
+      "sitemap": {
+        "url": "https://www.editionsmardaga.com/sitemap.xml"
       }
     },
     "editionsmichelquintin.ca": {
@@ -9313,6 +9695,16 @@
         "url": "https://editionsperceneige.ca/recherche?q={q}"
       }
     },
+    "editionspno.com": {
+      "home": "https://editionspno.com/",
+      "product": {
+        "template": "https://editionspno.com/titres/{slug}/",
+        "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://editionspno.com/wp-sitemap-posts-page-1.xml"
+      }
+    },
     "editionspoints.com": {
       "home": "https://www.editionspoints.com/",
       "product": {
@@ -9330,14 +9722,29 @@
     },
     "editionssemaphore.qc.ca": {
       "home": "https://www.editionssemaphore.qc.ca",
+      "product": {
+        "template": "https://www.editionssemaphore.qc.ca/catalogue/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.editionssemaphore.qc.ca/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.editionssemaphore.qc.ca/wp-sitemap-posts-catalogue-1.xml"
       }
     },
     "editionssommetoute.com": {
       "home": "https://editionssommetoute.com/",
+      "product": {
+        "template": "https://editionssommetoute.com/livre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
-        "url": "https://editionssommetoute.com/?s={q}"
+        "url": "https://editionssommetoute.com/?s={q}",
+        "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://editionssommetoute.com/livre-sitemap.xml"
       }
     },
     "editionssylvainharvey.com": {
@@ -9364,15 +9771,29 @@
     },
     "editionstheatrales.fr": {
       "home": "https://www.editionstheatrales.fr/",
+      "product": {
+        "template": "https://www.editionstheatrales.fr/{slug}",
+        "apostrophe": "dash"
+      },
       "search": {
         "url": "https://www.editionstheatrales.fr/catalogue?search_api_fulltext={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.editionstheatrales.fr/sitemap.xml?page=1"
       }
     },
     "editionstnt.com": {
       "home": "https://editionstnt.com",
+      "product": {
+        "template": "https://editionstnt.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editionstnt.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://editionstnt.com/product-sitemap2.xml"
       }
     },
     "editionsxyz.com": {
@@ -9380,6 +9801,17 @@
       "product": {
         "template": "https://editionsxyz.com/livre/{slug}/",
         "apostrophe": "dash"
+      }
+    },
+    "editionszoe.ch": {
+      "home": "http://www.editionszoe.ch",
+      "product": {
+        "template": "https://editionszoe.ch/livre/{slug}/",
+        "apostrophe": "drop"
+      },
+      "search": {
+        "url": "https://editionszoe.ch/catalogue/?_book_search={q}",
+        "by_isbn": true
       }
     },
     "elkar.eus": {
@@ -9410,6 +9842,10 @@
     },
     "emdl.fr": {
       "home": "https://www.emdl.fr/",
+      "product": {
+        "template": "https://www.emdl.fr/italien/catalogue/adultes/dai/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.emdl.fr/search/{q}"
       }
@@ -9422,9 +9858,16 @@
     },
     "epo.be": {
       "home": "http://www.epo.be",
+      "product": {
+        "template": "https://epo.be/shop/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://epo.be/?post_type=product&dgwt_wcas=1&s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://epo.be/product-sitemap.xml"
       }
     },
     "erickbonnier-editions.com": {
@@ -9437,18 +9880,19 @@
       "home": "https://www.erosonyx.com/",
       "search": {
         "url": "https://www.erosonyx.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.erosonyx.com/post-sitemap.xml"
       }
     },
     "espacesetsignes.com": {
       "home": "http://www.espacesetsignes.com/",
-      "product": {
-        "template": "https://www.espacesetsignes.com/produit/117/{isbn}/{slug}",
-        "apostrophe": "drop",
-        "slug_ignored": true
-      },
       "search": {
         "url": "https://www.espacesetsignes.com/search?utf8=%E2%9C%93&q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.espacesetsignes.com/sitemaps/products.xml"
       }
     },
     "exemplaire-editions.fr": {
@@ -9470,6 +9914,10 @@
     },
     "fage-editions.com": {
       "home": "http://www.fage-editions.com/",
+      "product": {
+        "template": "https://www.fage-editions.com/livre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.fage-editions.com/",
         "post_fields": [
@@ -9477,7 +9925,11 @@
             "s",
             "{q}"
           ]
-        ]
+        ],
+        "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.fage-editions.com/livre-sitemap.xml"
       }
     },
     "fayard.fr": {
@@ -9514,12 +9966,23 @@
     },
     "fondtonne.ca": {
       "home": "https://www.fondtonne.ca/",
+      "product": {
+        "template": "https://www.fondtonne.ca/livre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.fondtonne.ca/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.fondtonne.ca/product-sitemap.xml"
       }
     },
     "foulire.com": {
       "home": "https://www.foulire.com",
+      "product": {
+        "template": "https://www.foulire.com/romans-{slug}.php",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.foulire.com/recherche.php?recherche={q}",
         "by_isbn": true
@@ -9527,6 +9990,10 @@
     },
     "fr.novalis.ca": {
       "home": "https://fr.novalis.ca",
+      "product": {
+        "template": "https://fr.novalis.ca/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://fr.novalis.ca/search?options%5Bprefix%5D=last&q={q}",
         "by_isbn": true
@@ -9555,6 +10022,9 @@
       "search": {
         "url": "https://www.futuropolis.fr/catalogue.html?text={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.futuropolis.fr/sitemap.xml"
       }
     },
     "fypeditions.com": {
@@ -9567,11 +10037,15 @@
       "home": "https://www.gallimard.fr/",
       "product": {
         "template": "https://www.gallimard.fr/catalogue/{slug}/{isbn}",
-        "apostrophe": "dash"
+        "apostrophe": "drop"
       }
     },
     "gallmeister.fr": {
       "home": "http://www.gallmeister.fr/",
+      "product": {
+        "template": "https://gallmeister.fr/livres/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://gallmeister.fr/recherche?q={q}"
       }
@@ -9595,9 +10069,16 @@
     },
     "gm-editions.com": {
       "home": "https://gm-editions.com",
+      "product": {
+        "template": "https://gm-editions.com/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://gm-editions.com/search?type=product&q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://gm-editions.com/sitemap_products_2.xml?from=14932481606018&to=15428424040834"
       }
     },
     "grasset.fr": {
@@ -9605,6 +10086,9 @@
       "product": {
         "template": "https://www.grasset.fr/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.grasset.fr/products.xml"
       }
     },
     "gremese.com": {
@@ -9615,6 +10099,10 @@
     },
     "groupenotabene.com": {
       "home": "http://www.groupenotabene.com/",
+      "product": {
+        "template": "https://editionsnotabene.com/publication/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://editionsnotabene.com/?s={q}"
       }
@@ -9625,13 +10113,23 @@
         "template": "https://www.gualino.fr/livres/{slug}/{isbn}",
         "apostrophe": "drop",
         "slug_ignored": true
+      },
+      "sitemap": {
+        "url": "https://www.gualino.fr/sitemap-books.xml"
       }
     },
     "gulfstream.fr": {
       "home": "https://gulfstream.fr/",
+      "product": {
+        "template": "https://gulfstream.fr/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://gulfstream.fr/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://gulfstream.fr/product-sitemap.xml"
       }
     },
     "hachette.com": {
@@ -9646,6 +10144,9 @@
       "product": {
         "template": "https://www.hachetteromans.fr/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.hachetteromans.fr/products.xml"
       }
     },
     "harlequin.com": {
@@ -9665,8 +10166,15 @@
     },
     "heracleseditions.com": {
       "home": "https://heracleseditions.com/",
+      "product": {
+        "template": "https://heracleseditions.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://heracleseditions.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://heracleseditions.com/product-sitemap.xml"
       }
     },
     "histoirequebec.qc.ca": {
@@ -9681,14 +10189,16 @@
     },
     "honorechampion.com": {
       "home": "https://www.honorechampion.com/",
-      "product": {
-        "template": "https://www.honorechampion.com/fr/{slug}/13531-book-08536565-{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
+      "sitemap": {
+        "url": "https://www.honorechampion.com/1_fr_1_sitemap.xml"
       }
     },
     "hugopublishing.fr": {
       "home": "https://www.hugopublishing.fr/",
+      "product": {
+        "template": "https://www.hugopublishing.fr/produits/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.hugopublishing.fr/?s={q}",
         "by_isbn": true
@@ -9696,8 +10206,15 @@
     },
     "instantmeme.com": {
       "home": "https://instantmeme.com/",
+      "product": {
+        "template": "https://instantmeme.com/livres/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://instantmeme.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://instantmeme.com/wp-sitemap-posts-book-1.xml"
       }
     },
     "institut-etudes-slaves.fr": {
@@ -9712,10 +10229,17 @@
       "product": {
         "template": "https://www.jailu.com/{slug}/{isbn}",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.jailu.com/sitemap.xml"
       }
     },
     "jeanmichelplace.fr": {
       "home": "https://jeanmichelplace.fr/",
+      "product": {
+        "template": "https://jeanmichelplace.fr/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://jeanmichelplace.fr/?s={q}",
         "by_isbn": true
@@ -9739,22 +10263,29 @@
       "product": {
         "template": "https://www.lisez.com/livres/{slug}/{isbn}",
         "apostrophe": "drop"
-      },
-      "search": {
-        "url": "https://www.lisez.com/search/commerce_product?search={q}",
-        "by_isbn": true
       }
     },
     "kana.fr": {
       "home": "http://www.kana.fr/",
+      "product": {
+        "template": "https://www.kana.fr/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.kana.fr/?s={q}"
       }
     },
     "keitvimpbev.bzh": {
       "home": "https://www.keitvimpbev.bzh/",
+      "product": {
+        "template": "https://www.keitvimpbev.bzh/produit/{slug}-fr/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.keitvimpbev.bzh/?post_type=product&lang=fr&s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.keitvimpbev.bzh/product-sitemap.xml"
       }
     },
     "klincksieck.com": {
@@ -9771,9 +10302,16 @@
     },
     "kontrekulture.com": {
       "home": "http://www.kontrekulture.com/",
+      "product": {
+        "template": "https://kontrekulture.com/produit/{slug}/",
+        "apostrophe": "dash"
+      },
       "search": {
         "url": "https://kontrekulture.com/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://kontrekulture.com/product-sitemap.xml"
       }
     },
     "kurokawa.fr": {
@@ -9781,10 +10319,6 @@
       "product": {
         "template": "https://www.lisez.com/livres/{slug}/{isbn}",
         "apostrophe": "drop"
-      },
-      "search": {
-        "url": "https://www.lisez.com/search/commerce_product?search={q}",
-        "by_isbn": true
       }
     },
     "l-atalante.com": {
@@ -9799,12 +10333,23 @@
     },
     "lacontreallee.com": {
       "home": "http://www.lacontreallee.com",
+      "product": {
+        "template": "https://lacontreallee.com/catalogue/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://lacontreallee.com/?post_type%5B%5D=product&s={q}"
+      },
+      "sitemap": {
+        "url": "https://lacontreallee.com/product-sitemap.xml"
       }
     },
     "lafabrique.fr": {
       "home": "https://lafabrique.fr",
+      "product": {
+        "template": "https://lafabrique.fr/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://lafabrique.fr/?s={q}"
       }
@@ -9814,21 +10359,28 @@
       "product": {
         "template": "https://www.lisez.com/livres/{slug}/{isbn}",
         "apostrophe": "drop"
-      },
-      "search": {
-        "url": "https://www.lisez.com/search/commerce_product?search={q}",
-        "by_isbn": true
       }
     },
     "lajoiedelire.ch": {
       "home": "http://www.lajoiedelire.ch",
+      "product": {
+        "template": "https://www.lajoiedelire.ch/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.lajoiedelire.ch/search?q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.lajoiedelire.ch/sitemap_products_1.xml?from=9800561328471&to=11329517027671"
       }
     },
     "lamanufacturedelivres.com": {
       "home": "https://www.lamanufacturedelivres.com/",
+      "product": {
+        "template": "https://www.lamanufacturedelivres.com/livre/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.lamanufacturedelivres.com/search/results?q={q}",
         "by_isbn": true
@@ -9850,6 +10402,10 @@
     },
     "lameche.ca": {
       "home": "http://lameche.ca/",
+      "product": {
+        "template": "https://groupecourteechelle.com/la-meche/livres/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://groupecourteechelle.com/la-meche/recherche?page=1&recherche={q}",
         "by_isbn": true
@@ -9857,12 +10413,20 @@
     },
     "lamiroy.be": {
       "home": "https://lamiroy.be",
+      "product": {
+        "template": "https://lamiroy.net/collections/vitrine/products/{slug}",
+        "apostrophe": "dash"
+      },
       "search": {
         "url": "https://lamiroy.net/search?q={q}"
       }
     },
     "lamontagnesecrete.com": {
       "home": "https://lamontagnesecrete.com/",
+      "product": {
+        "template": "https://www.lamontagnesecrete.com/portfolio/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.lamontagnesecrete.com/?swpmfe=652ea0d21b1427a1bfa685e40d9bc1de&s={q}",
         "by_isbn": true
@@ -9877,9 +10441,16 @@
     },
     "lapasteque.com": {
       "home": "http://www.lapasteque.com",
+      "product": {
+        "template": "https://www.lapasteque.com/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.lapasteque.com/search?options%5Bprefix%5D=last&q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.lapasteque.com/sitemap_products_1.xml?from=10387455967416&to=10537204580536"
       }
     },
     "lapeuplade.com": {
@@ -9892,31 +10463,40 @@
         "url": "http://lapeuplade.com/book-sitemap.xml"
       }
     },
-    "lapin.org": {
-      "home": "https://www.lapin.org/",
-      "product": {
-        "template": "https://librairie.lapin.org/fr/causes-en-corps/1672-{slug}-prevente-{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
-      }
-    },
     "laplage.fr": {
       "home": "https://www.laplage.fr/",
       "search": {
         "url": "https://www.laplage.fr/search?utf8=%E2%9C%93&q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.laplage.fr/sitemaps/products.xml"
       }
     },
     "lavolte.net": {
       "home": "https://lavolte.net/",
+      "product": {
+        "template": "https://lavolte.net/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://lavolte.net/search?q={q}"
+      },
+      "sitemap": {
+        "url": "https://lavolte.net/sitemap_products_1.xml?from=8585933783374&to=16042490560846"
       }
     },
     "le-tripode.net": {
       "home": "https://le-tripode.net/",
+      "product": {
+        "template": "https://le-tripode.net/livre/keiji-nakazawa/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://le-tripode.net/search?q={q}"
+      },
+      "sitemap": {
+        "url": "https://le-tripode.net/sitemap-ouvrages.xml"
       }
     },
     "lechevaldaout.com": {
@@ -9927,8 +10507,15 @@
     },
     "ledilettante.com": {
       "home": "https://www.ledilettante.com/",
+      "product": {
+        "template": "https://www.ledilettante.com/product/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.ledilettante.com/?post_type=product&type_aws=true&id=1&filter=1&s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.ledilettante.com/sitemap.xml"
       }
     },
     "lelombard.com": {
@@ -9943,10 +10530,17 @@
       "product": {
         "template": "https://www.editions-jclattes.fr/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.editions-jclattes.fr/products.xml"
       }
     },
     "lemeac.com": {
       "home": "http://www.lemeac.com/",
+      "product": {
+        "template": "https://lemeac.com/livres/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://lemeac.com/?post_types=&s={q}"
       }
@@ -9955,6 +10549,9 @@
       "home": "https://lemerveilleux.com/",
       "search": {
         "url": "https://lemerveilleux.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://lemerveilleux.com/product-sitemap.xml"
       }
     },
     "lemieux-editeur.fr": {
@@ -9978,10 +10575,6 @@
       "product": {
         "template": "https://www.lisez.com/livres/{slug}/{isbn}",
         "apostrophe": "drop"
-      },
-      "search": {
-        "url": "https://www.lisez.com/search/commerce_product?search={q}",
-        "by_isbn": true
       }
     },
     "lequartanier.com": {
@@ -10011,7 +10604,7 @@
       "home": "https://www.lesbelleslettres.com/",
       "product": {
         "template": "https://www.lesbelleslettres.com/livre/{isbn}/{slug}",
-        "apostrophe": "drop",
+        "apostrophe": "dash",
         "slug_ignored": true
       },
       "search": {
@@ -10034,12 +10627,23 @@
     },
     "lesechappes.com": {
       "home": "https://lesechappes.com/",
+      "product": {
+        "template": "https://lesechappes.com/ouvrages/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://lesechappes.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://lesechappes.com/product-sitemap.xml"
       }
     },
     "lesediteursreunis.com": {
       "home": "http://lesediteursreunis.com/",
+      "product": {
+        "template": "https://www.lesediteursreunis.com/shop/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.lesediteursreunis.com/?s={q}"
       }
@@ -10052,8 +10656,15 @@
     },
     "leseditionsdeparis.com": {
       "home": "http://www.leseditionsdeparis.com/index.php",
+      "product": {
+        "template": "https://leseditionsdeparis.com/collection/essais-et-documents/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://leseditionsdeparis.com/recherche?q={q}"
+      },
+      "sitemap": {
+        "url": "https://leseditionsdeparis.com/sitemap.xml"
       }
     },
     "leseditionsnoirsurblanc.fr": {
@@ -10068,17 +10679,20 @@
       "product": {
         "template": "https://www.lisez.com/livres/{slug}/{isbn}",
         "apostrophe": "drop"
-      },
-      "search": {
-        "url": "https://www.lisez.com/search/commerce_product?search={q}",
-        "by_isbn": true
       }
     },
     "lesherbesrouges.com": {
       "home": "http://lesherbesrouges.com/",
+      "product": {
+        "template": "https://lesherbesrouges.com/toutes-les-collections/romans-recits-nouvelles/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://lesherbesrouges.com/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "http://lesherbesrouges.com/page-sitemap.xml"
       }
     },
     "lesmalins.ca": {
@@ -10096,27 +10710,35 @@
     },
     "lespressesdumidi.fr": {
       "home": "http://www.lespressesdumidi.fr",
-      "product": {
-        "template": "https://lespressesdumidi.com/polar-thriller/1317-{slug}-{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
-      },
       "search": {
         "url": "https://lespressesdumidi.com/recherche?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://lespressesdumidi.com/1_fr_0_sitemap.xml"
       }
     },
     "letoileflamboyante.org": {
       "home": "https://letoileflamboyante.org/",
       "search": {
         "url": "https://letoileflamboyante.org/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://letoileflamboyante.org/product-sitemap.xml"
       }
     },
     "levesqueediteur.com": {
       "home": "https://levesqueediteur.com",
+      "product": {
+        "template": "https://levesqueediteur.com/livre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://levesqueediteur.com/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://levesqueediteur.com/livre-sitemap.xml"
       }
     },
     "lgdj.fr": {
@@ -10133,9 +10755,16 @@
     },
     "lianalevi.fr": {
       "home": "https://www.lianalevi.fr/",
+      "product": {
+        "template": "https://www.lianalevi.fr/catalogue/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.lianalevi.fr/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.lianalevi.fr/catalogue-sitemap.xml"
       }
     },
     "libreriaeditricevaticana.va": {
@@ -10160,10 +10789,6 @@
       "product": {
         "template": "https://www.lisez.com/livres/{slug}/{isbn}",
         "apostrophe": "drop"
-      },
-      "search": {
-        "url": "https://www.lisez.com/search/commerce_product?search={q}",
-        "by_isbn": true
       }
     },
     "livredepoche.com": {
@@ -10200,18 +10825,36 @@
     },
     "luxediteur.com": {
       "home": "https://luxediteur.com",
+      "product": {
+        "template": "https://luxediteur.com/catalogue/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://luxediteur.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://luxediteur.com/product-sitemap.xml"
       }
     },
     "lyber-eclat.net": {
       "home": "http://www.lyber-eclat.net/",
+      "product": {
+        "template": "https://www.lyber-eclat.net/livres/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.lyber-eclat.net/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.lyber-eclat.net/wp-sitemap-posts-books-1.xml"
       }
     },
     "magnard.fr": {
       "home": "https://www.magnard.fr/",
+      "product": {
+        "template": "https://www.magnard.fr/livre/{isbn}-{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.magnard.fr/recherche?text={q}",
         "by_isbn": true
@@ -10219,9 +10862,16 @@
     },
     "makaka-editions.com": {
       "home": "http://www.makaka-editions.com",
+      "product": {
+        "template": "https://makaka-editions.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://makaka-editions.com/?s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://makaka-editions.com/product-sitemap.xml"
       }
     },
     "maloine.fr": {
@@ -10229,6 +10879,9 @@
       "product": {
         "template": "https://www.maloine.fr/{slug}-{isbn}-maloine.html",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.maloine.fr/sitemap/maloine.xml"
       }
     },
     "mameeditions.com": {
@@ -10254,6 +10907,9 @@
       "product": {
         "template": "https://www.marabout.com/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.marabout.com/products.xml"
       }
     },
     "marshallcavendish.com": {
@@ -10287,9 +10943,16 @@
     },
     "maxmilo.com": {
       "home": "http://www.maxmilo.com",
+      "product": {
+        "template": "https://maxmilo.com/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://maxmilo.com/search?type=product&options%5Bprefix%5D=last&q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://maxmilo.com/sitemap_products_1.xml?from=7323912470776&to=10507367776585"
       }
     },
     "meme-pas-mal.fr": {
@@ -10304,6 +10967,10 @@
     },
     "memoiredencrier.com": {
       "home": "http://memoiredencrier.com/",
+      "product": {
+        "template": "https://memoiredencrier.com/catalogue/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://memoiredencrier.com/recherche/",
         "post_fields": [
@@ -10316,10 +10983,17 @@
             "{q}"
           ]
         ]
+      },
+      "sitemap": {
+        "url": "https://memoiredencrier.com/sitemap.php"
       }
     },
     "mera-editions.com": {
       "home": "https://mera-editions.com/",
+      "product": {
+        "template": "https://mera-editions.com/no-livres/{slug}",
+        "apostrophe": "dash"
+      },
       "search": {
         "url": "https://mera-editions.com/?s={q}",
         "by_isbn": true
@@ -10330,6 +11004,9 @@
       "product": {
         "template": "https://www.meslivresjeunesse.fr/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.meslivresjeunesse.fr/products.xml"
       }
     },
     "metailie.fr": {
@@ -10362,7 +11039,7 @@
     "microsoftpressstore.com": {
       "home": "https://microsoftpressstore.com/",
       "product": {
-        "template": "https://www.microsoftpressstore.com/store/{slug}-second-edition-{isbn}",
+        "template": "https://www.microsoftpressstore.com/store/{slug}-{isbn}",
         "apostrophe": "drop",
         "slug_ignored": true
       },
@@ -10380,6 +11057,13 @@
       },
       "search": {
         "url": "https://www.mila-editions.fr/recherche/{q}",
+        "by_isbn": true
+      }
+    },
+    "milanpresse.com": {
+      "home": "https://www.editionsmilan.com/",
+      "search": {
+        "url": "https://www.editionsmilan.com/?type=books&text={q}",
         "by_isbn": true
       }
     },
@@ -10402,9 +11086,16 @@
     },
     "monsieurtoussaintlouverture.com": {
       "home": "https://www.monsieurtoussaintlouverture.com/",
+      "product": {
+        "template": "https://www.monsieurtoussaintlouverture.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.monsieurtoussaintlouverture.com/?post_type=product&s={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.monsieurtoussaintlouverture.com/product-sitemap.xml"
       }
     },
     "nathan.fr": {
@@ -10413,6 +11104,9 @@
         "template": "https://www.nathan.fr/catalogue/{slug}-livre-de-l-eleve-{isbn}",
         "apostrophe": "drop",
         "slug_ignored": true
+      },
+      "sitemap": {
+        "url": "https://www.nathan.fr/sitemap-produits.xml"
       }
     },
     "nobi-nobi.fr": {
@@ -10420,6 +11114,9 @@
       "product": {
         "template": "https://www.nobi-nobi.fr/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.nobi-nobi.fr/products.xml"
       }
     },
     "noeve.com": {
@@ -10432,24 +11129,28 @@
       "home": "http://www.nord-sued.com/",
       "search": {
         "url": "https://nord-sued.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://nord-sued.com/product-sitemap.xml"
       }
     },
     "nouveau-monde.net": {
       "home": "https://www.nouveau-monde.net/",
+      "product": {
+        "template": "https://www.nouveau-monde.net/catalogue/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.nouveau-monde.net/?s={q}",
         "by_isbn": true
       }
     },
-    "nouvellecite.fr": {
-      "home": "https://www.nouvellecite.fr/",
-      "search": {
-        "url": "https://www.nouvellecite.fr/search/?q={q}",
-        "by_isbn": true
-      }
-    },
     "nouvelles-editionslatines.com": {
       "home": "http://nouvelles-editionslatines.com",
+      "product": {
+        "template": "https://nouvelles-editionslatines.com/livre/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://nouvelles-editionslatines.com/?s={q}"
       }
@@ -10463,20 +11164,39 @@
     },
     "oheditions.com": {
       "home": "http://www.oheditions.com/",
+      "product": {
+        "template": "https://xoeditions.com/livres/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.xoeditions.com/?s={q}"
       }
     },
     "omakebooks.com": {
       "home": "https://omakebooks.com/",
+      "product": {
+        "template": "https://omakebooks.com/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://omakebooks.com/search?options%5Bprefix%5D=last&q={q}"
+      },
+      "sitemap": {
+        "url": "https://omakebooks.com/sitemap_products_1.xml?from=9238739059030&to=10897639801174"
       }
     },
     "onlit.net": {
       "home": "https://www.onlit.net/",
+      "product": {
+        "template": "https://emotions-comptoir.com/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
-        "url": "https://emotions-comptoir.com/search?options%5Bprefix%5D=last&q={q}"
+        "url": "https://emotions-comptoir.com/search?options%5Bprefix%5D=last&q={q}",
+        "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://emotions-comptoir.com/sitemap_products_1.xml?from=206474241&to=10774210609485"
       }
     },
     "opus.u-paris.fr": {
@@ -10525,12 +11245,22 @@
       "search": {
         "url": "https://www.erpi.com/fr/catalogsearch/result/?q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.erpi.com/media/sitemap_erpi_product_fr_product.xml"
       }
     },
     "pedone.info": {
       "home": "https://pedone.info/",
+      "product": {
+        "template": "https://pedone.info/livre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://pedone.info/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://pedone.info/sitemap-posttype-livre.xml"
       }
     },
     "penguin.com": {
@@ -10548,6 +11278,10 @@
     },
     "phidal.com": {
       "home": "http://phidal.com/",
+      "product": {
+        "template": "https://phidal.com/collections/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://phidal.com/search?options%5Bprefix%5D=last&q={q}",
         "by_isbn": true
@@ -10558,6 +11292,9 @@
       "product": {
         "template": "https://www.pika.fr/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.pika.fr/products.xml"
       }
     },
     "plaines.ca": {
@@ -10572,6 +11309,10 @@
     },
     "planeterebelle.qc.ca": {
       "home": "https://planeterebelle.qc.ca",
+      "product": {
+        "template": "https://planeterebelle.qc.ca/product/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://planeterebelle.qc.ca/?post_type=product&s={q}",
         "by_isbn": true
@@ -10603,8 +11344,15 @@
     },
     "plumeblanche-editions.fr": {
       "home": "https://plumeblanche-editions.fr/",
+      "product": {
+        "template": "https://plumeblanche-editions.fr/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://plumeblanche-editions.fr/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://plumeblanche-editions.fr/wp-sitemap-posts-page-1.xml"
       }
     },
     "plumedecarotte.com": {
@@ -10618,10 +11366,6 @@
       "product": {
         "template": "https://www.lisez.com/livres/{slug}/{isbn}",
         "apostrophe": "drop"
-      },
-      "search": {
-        "url": "https://www.lisez.com/search/commerce_product?search={q}",
-        "by_isbn": true
       }
     },
     "pocketjeunesse.fr": {
@@ -10629,16 +11373,19 @@
       "product": {
         "template": "https://www.lisez.com/livres/{slug}/{isbn}",
         "apostrophe": "drop"
-      },
-      "search": {
-        "url": "https://www.lisez.com/search/commerce_product?search={q}",
-        "by_isbn": true
       }
     },
     "poissonsoluble.com": {
       "home": "https://www.poissonsoluble.com/",
       "product": {
         "template": "https://www.poissonsoluble.com/produit/{slug}/",
+        "apostrophe": "drop"
+      }
+    },
+    "pol-editeur.fr": {
+      "home": "https://www.pol-editeur.com/",
+      "product": {
+        "template": "https://www.pol-editeur.com/index.php?spec=livre&ISBN={isbn_hyphens}",
         "apostrophe": "drop"
       }
     },
@@ -10658,6 +11405,10 @@
     },
     "presses-universitaires.parisnanterre.fr": {
       "home": "https://presses-universitaires.parisnanterre.fr/",
+      "product": {
+        "template": "https://presses-universitaires.parisnanterre.fr/index.php/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://presses-universitaires.parisnanterre.fr/?s={q}"
       }
@@ -10678,8 +11429,15 @@
     },
     "presses.uliege.be": {
       "home": "http://www.presses.uliege.be",
+      "product": {
+        "template": "https://presses.uliege.be/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://presses.uliege.be/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://presses.uliege.be/wp-sitemap-posts-product-1.xml"
       }
     },
     "pressesdelacite.com": {
@@ -10689,8 +11447,7 @@
         "apostrophe": "drop"
       },
       "search": {
-        "url": "https://www.lisez.com/search/commerce_product?search={q}",
-        "by_isbn": true
+        "url": "https://www.lisez.com/?s={q}"
       }
     },
     "psn.sorbonne-nouvelle.fr": {
@@ -10700,16 +11457,12 @@
         "apostrophe": "drop"
       }
     },
-    "publibook.com": {
-      "home": "http://www.publibook.com/",
-      "product": {
-        "template": "https://librairie.publibook.com/roman/19253-{slug}-{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
-      }
-    },
     "publicationschretiennes.com": {
       "home": "https://publicationschretiennes.com",
+      "product": {
+        "template": "https://publicationschretiennes.com/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://publicationschretiennes.com/search?q={q}",
         "by_isbn": true
@@ -10717,8 +11470,13 @@
     },
     "publie.net": {
       "home": "https://www.publie.net/",
+      "product": {
+        "template": "https://www.publie.net/livre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
-        "url": "https://www.publie.net/search/{q}"
+        "url": "https://www.publie.net/search/{q}",
+        "by_isbn": true
       }
     },
     "puf.com": {
@@ -10733,14 +11491,12 @@
     },
     "pug.fr": {
       "home": "http://www.pug.fr",
-      "product": {
-        "template": "https://www.pug.fr/produit/2139/{isbn}/{slug}",
-        "apostrophe": "dash",
-        "slug_ignored": true
-      },
       "search": {
         "url": "https://www.pug.fr/search?utf8=%E2%9C%93&q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.pug.fr/sitemaps/products.xml"
       }
     },
     "pulaval.com": {
@@ -10748,19 +11504,23 @@
       "search": {
         "url": "https://www.pulaval.com/livres?search={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.pulaval.com/sitemap.xml"
       }
     },
     "pulim.unilim.fr": {
       "home": "https://www.pulim.unilim.fr/",
+      "product": {
+        "template": "https://www.pulim.unilim.fr/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.pulim.unilim.fr/?s={q}",
         "by_isbn": true
-      }
-    },
-    "pulm.fr": {
-      "home": "https://www.pulm.fr/",
-      "search": {
-        "url": "https://www.pulm.fr/default/catalogsearch/result/?q={q}"
+      },
+      "sitemap": {
+        "url": "https://www.pulim.unilim.fr/product-sitemap.xml"
       }
     },
     "pum.univ-tlse2.fr": {
@@ -10786,6 +11546,10 @@
     },
     "pus.unistra.fr": {
       "home": "http://pus.unistra.fr/",
+      "product": {
+        "template": "https://pus.unistra.fr/ouvrage/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://pus.unistra.fr/?s={q}&post_types=product"
       }
@@ -10802,9 +11566,16 @@
     },
     "pyramyd-editions.com": {
       "home": "https://pyramyd-editions.com/",
+      "product": {
+        "template": "https://pyramyd-editions.com/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://pyramyd-editions.com/search?q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://pyramyd-editions.com/sitemap_products_1.xml?from=10463313353&to=16134978568536"
       }
     },
     "quae.com": {
@@ -10822,6 +11593,9 @@
       "product": {
         "template": "https://www.rageot.fr/livre/{slug}-{isbn}/",
         "apostrophe": "drop"
+      },
+      "sitemap": {
+        "url": "https://www.rageot.fr/products.xml"
       }
     },
     "raisonsdagir-editions.org": {
@@ -10830,12 +11604,20 @@
         "template": "https://www.raisonsdagir-editions.org/catalogue/{slug}/",
         "apostrophe": "drop"
       },
+      "search": {
+        "url": "https://www.raisonsdagir-editions.org/recherche?q={q}",
+        "by_isbn": true
+      },
       "sitemap": {
         "url": "https://www.raisonsdagir-editions.org/book-sitemap.xml"
       }
     },
     "ramsay.fr": {
       "home": "https://ramsay.fr/",
+      "product": {
+        "template": "https://ramsay.fr/dd-product/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://ramsay.fr/?post_type=dd-product&s={q}"
       }
@@ -10868,12 +11650,23 @@
     },
     "scrineo.fr": {
       "home": "http://www.scrineo.fr/",
+      "product": {
+        "template": "https://www.scrineo.fr/boutique/non%20class%C3%A9/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.scrineo.fr/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.scrineo.fr/product-sitemap.xml"
       }
     },
     "septembre.com": {
       "home": "https://www.septembre.com",
+      "product": {
+        "template": "https://www.septembre.com/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.septembre.com/search?options%5Bprefix%5D=last&q={q}",
         "by_isbn": true
@@ -10881,6 +11674,10 @@
     },
     "septentrion.qc.ca": {
       "home": "https://www.septentrion.qc.ca/",
+      "product": {
+        "template": "https://www.septentrion.qc.ca/catalogue/{slug}",
+        "apostrophe": "dash"
+      },
       "search": {
         "url": "https://www.septentrion.qc.ca/recherche?q={q}",
         "by_isbn": true
@@ -10904,6 +11701,10 @@
     },
     "skira.net": {
       "home": "https://www.skira.net/",
+      "product": {
+        "template": "https://skira-arte.com/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://skira-arte.com/search?options%5Bprefix%5D=last&q={q}",
         "by_isbn": true
@@ -10914,10 +11715,6 @@
       "product": {
         "template": "https://www.lisez.com/livres/{slug}/{isbn}",
         "apostrophe": "drop"
-      },
-      "search": {
-        "url": "https://www.lisez.com/search/commerce_product?search={q}",
-        "by_isbn": true
       }
     },
     "sonatine-editions.fr": {
@@ -10925,18 +11722,6 @@
       "product": {
         "template": "https://www.lisez.com/livres/{slug}/{isbn}",
         "apostrophe": "drop"
-      },
-      "search": {
-        "url": "https://www.lisez.com/search/commerce_product?search={q}",
-        "by_isbn": true
-      }
-    },
-    "souffledor.fr": {
-      "home": "https://www.souffledor.fr/",
-      "product": {
-        "template": "https://www.souffledor.fr/accueil/8342-{slug}--{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
       }
     },
     "sulliver.com": {
@@ -10955,8 +11740,15 @@
     },
     "swediteur.com": {
       "home": "https://www.swediteur.com/",
+      "product": {
+        "template": "https://www.swediteur.com/titre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.swediteur.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.swediteur.com/book-sitemap.xml"
       }
     },
     "syllepse.net": {
@@ -10967,9 +11759,9 @@
     },
     "symbolicone.com": {
       "home": "https://www.symbolicone.com/",
-      "search": {
-        "url": "https://symbolicone.com/search?options%5Bprefix%5D=last&q={q}",
-        "by_isbn": true
+      "product": {
+        "template": "https://symbolicone.com/collections/{slug}",
+        "apostrophe": "drop"
       }
     },
     "syros.fr": {
@@ -10977,19 +11769,10 @@
       "product": {
         "template": "https://www.lisez.com/livres/{slug}/{isbn}",
         "apostrophe": "drop"
-      },
-      "search": {
-        "url": "https://www.lisez.com/search/commerce_product?search={q}",
-        "by_isbn": true
       }
     },
     "tabou-editions.com": {
       "home": "https://www.tabou-editions.com/",
-      "product": {
-        "template": "https://www.tabou-editions.com/bandes-dessinees/71140-{slug}-{isbn}.html",
-        "apostrophe": "drop",
-        "slug_ignored": true
-      },
       "search": {
         "url": "https://www.tabou-editions.com/recherche?s={q}",
         "by_isbn": true
@@ -11004,6 +11787,10 @@
     },
     "tamere.org": {
       "home": "http://www.tamere.org",
+      "product": {
+        "template": "https://www.tamere.org/nos-livres/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.tamere.org/?s={q}"
       }
@@ -11016,20 +11803,35 @@
     },
     "terre-daccueil.ca": {
       "home": "https://terre-daccueil.ca/",
+      "product": {
+        "template": "https://terre-daccueil.com/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
-        "url": "https://terre-daccueil.com/search?options%5Bprefix%5D=last&q={q}"
+        "url": "https://terre-daccueil.com/search?options%5Bprefix%5D=last&q={q}",
+        "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://terre-daccueil.com/sitemap_products_1.xml?from=6905332760768&to=10280089288896"
       }
     },
     "terredebrume.com": {
       "home": "http://www.terredebrume.com",
+      "product": {
+        "template": "https://www.terredebrume.com/catalogue/litteratures-de-limaginaire/terres-fantastiques/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.terredebrume.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.terredebrume.com/sitemap-product.xml"
       }
     },
     "terrevivante.org": {
       "home": "https://www.terrevivante.org/",
       "product": {
-        "template": "https://www.terrevivante.org/boutique/livres/cuisine-saine/dessert-boulangerie/{slug}/",
+        "template": "https://www.terrevivante.org/boutique/livres/cuisine-saine/manger-bio/{slug}/",
         "apostrophe": "drop"
       },
       "sitemap": {
@@ -11038,21 +11840,43 @@
     },
     "tetepremiere.com": {
       "home": "http://tetepremiere.com/",
+      "product": {
+        "template": "https://tetepremiere.com/livre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
-        "url": "https://tetepremiere.com/?s={q}"
+        "url": "https://tetepremiere.com/?s={q}",
+        "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://tetepremiere.com/livre-sitemap.xml"
       }
     },
     "thirdeditions.com": {
       "home": "https://www.thirdeditions.com//en/",
+      "product": {
+        "template": "https://www.thirdeditions.com/products/{slug}",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.thirdeditions.com/search?type=product&q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.thirdeditions.com/sitemap_products_1.xml?from=10000016179533&to=10988046549325"
       }
     },
     "trabucaire.com": {
       "home": "https://www.trabucaire.com/",
+      "product": {
+        "template": "https://www.trabucaire.com/boutique/essai-societe/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.trabucaire.com/?s={q}"
+      },
+      "sitemap": {
+        "url": "https://www.trabucaire.com/wp-sitemap-posts-product-1.xml"
       }
     },
     "univ-perp.fr": {
@@ -11064,8 +11888,13 @@
     },
     "urban-comics.com": {
       "home": "http://www.urban-comics.com/",
+      "product": {
+        "template": "https://www.urban-comics.com/produit/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
-        "url": "https://www.urban-comics.com/?s={q}"
+        "url": "https://www.urban-comics.com/?s={q}",
+        "by_isbn": true
       }
     },
     "vrin.fr": {
@@ -11081,6 +11910,9 @@
       "search": {
         "url": "https://www.vuibert.fr/recherche?text={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.vuibert.fr/sitemap.xml?page=1"
       }
     },
     "wildproject.org": {
@@ -11088,6 +11920,9 @@
       "product": {
         "template": "https://wildproject.org/livres/{slug}",
         "apostrophe": "dash"
+      },
+      "search": {
+        "url": "https://wildproject.org/?s={q}"
       },
       "sitemap": {
         "url": "https://wildproject.org/sitemap.xml"
@@ -11103,16 +11938,23 @@
       "home": "https://www.xl6.com/",
       "product": {
         "template": "https://www.xl6.com/articles/{isbn}-{slug}",
-        "apostrophe": "drop",
+        "apostrophe": "dash",
         "slug_ignored": true
       },
       "search": {
         "url": "https://www.xl6.com/recherche?q={q}",
         "by_isbn": true
+      },
+      "sitemap": {
+        "url": "https://www.xl6.com/sitemaps/articles-1.xml"
       }
     },
     "xoeditions.com": {
       "home": "http://www.xoeditions.com",
+      "product": {
+        "template": "https://xoeditions.com/livres/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.xoeditions.com/?s={q}"
       }
@@ -11132,6 +11974,10 @@
     },
     "zulma.fr": {
       "home": "http://www.zulma.fr",
+      "product": {
+        "template": "https://www.zulma.fr/livre/{slug}/",
+        "apostrophe": "drop"
+      },
       "search": {
         "url": "https://www.zulma.fr/recherche?s={q}",
         "by_isbn": true

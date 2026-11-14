@@ -38,6 +38,13 @@
       "note": "Wikidata gives an address that is not the publisher's catalogue (group site, or a domain since abandoned).",
       "home": "https://www.boutique.lefebvre-dalloz.fr/"
     },
+    "editions.flammarion.com": {
+      "note": "The probe found the site map only; the page is also reached by slug and ISBN.",
+      "product": {
+        "template": "https://editions.flammarion.com/{slug}/{isbn}",
+        "apostrophe": "drop"
+      }
+    },
     "gallica.bnf.fr": {
       "note": "Wikidata gives Mercure de France's Gallica record as its website; not a publisher site.",
       "excluded": true
@@ -63,14 +70,25 @@
       "home": "https://www.playbac-editions.com/"
     },
     "pol-editeur.fr": {
-      "note": "Wikidata gives an address that is not the publisher's catalogue (group site, or a domain since abandoned).",
-      "home": "https://www.pol-editeur.com/"
+      "note": "Wikidata gives a domain since abandoned. The page is reached by its hyphenated ISBN, in the query: the probe does not look there.",
+      "home": "https://www.pol-editeur.com/",
+      "product": {
+        "template": "https://www.pol-editeur.com/index.php?spec=livre&ISBN={isbn_hyphens}",
+        "apostrophe": "drop"
+      }
     }
   },
   "publishers": [
     {
       "name": "Auzou",
       "home": "https://www.auzou.fr/"
+    },
+    {
+      "name": "Bouquins",
+      "home": "https://www.lisez.com/",
+      "prefixes": [
+        "978238292"
+      ]
     },
     {
       "name": "Citadelles & Mazenod",
@@ -97,12 +115,16 @@
       "home": "https://www.editions-foucher.fr/"
     },
     {
-      "name": "Jouvence",
-      "home": "https://editions-jouvence.com/"
+      "name": "Gründ",
+      "home": "https://www.lisez.com/",
+      "prefixes": [
+        "9782324",
+        "97827000"
+      ]
     },
     {
-      "name": "LGDJ",
-      "home": "https://www.lgdj.fr/"
+      "name": "Jouvence",
+      "home": "https://editions-jouvence.com/"
     },
     {
       "name": "Lavoisier",
@@ -113,12 +135,27 @@
       "home": "https://www.editionsleduc.com/"
     },
     {
+      "name": "Librio",
+      "home": "https://editions.flammarion.com/",
+      "prefixes": [
+        "9782290",
+        "9782292"
+      ]
+    },
+    {
       "name": "Michelin",
       "home": "https://editions.michelin.com/"
     },
     {
       "name": "Noir sur Blanc",
       "home": "https://www.leseditionsnoirsurblanc.fr/"
+    },
+    {
+      "name": "Omnibus",
+      "home": "https://www.lisez.com/",
+      "prefixes": [
+        "9782258"
+      ]
     },
     {
       "name": "Petit Futé",
@@ -135,6 +172,14 @@
     {
       "name": "Rustica",
       "home": "https://www.rusticaeditions.com/"
+    },
+    {
+      "name": "Tana Éditions",
+      "home": "https://www.lisez.com/",
+      "prefixes": [
+        "97910301",
+        "978284567"
+      ]
     },
     {
       "name": "Tristram",
