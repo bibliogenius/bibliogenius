@@ -45,6 +45,13 @@
         "apostrophe": "drop"
       }
     },
+    "editionsdemortagne.com": {
+      "note": "The probe kept a token issued for one visit in the search address; the same search without it.",
+      "search": {
+        "url": "https://editionsdemortagne.com/livres/?_search_catalog={q}",
+        "by_isbn": true
+      }
+    },
     "gallica.bnf.fr": {
       "note": "Wikidata gives Mercure de France's Gallica record as its website; not a publisher site.",
       "excluded": true
@@ -60,6 +67,13 @@
     "lamartinierejeunesse.fr": {
       "note": "Wikidata gives an address that is not the publisher's catalogue (group site, or a domain since abandoned).",
       "home": "https://www.editionsdelamartiniere.fr/"
+    },
+    "lamontagnesecrete.com": {
+      "note": "The probe kept a token issued for one visit in the search address; the same search without it.",
+      "search": {
+        "url": "https://www.lamontagnesecrete.com/?s={q}",
+        "by_isbn": true
+      }
     },
     "milanpresse.com": {
       "note": "Wikidata gives an address that is not the publisher's catalogue (group site, or a domain since abandoned).",
