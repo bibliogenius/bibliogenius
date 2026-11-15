@@ -109,15 +109,7 @@ impl PoliteFetcher {
         .await;
         drop(turn);
         let robots = match fetched {
-            Ok(body) => {
-                let text = String::from_utf8_lossy(&body.bytes);
-                if is_rejection_page(&body.bytes) {
-                    // A firewall page instead of the file: read as no file.
-                    Robots::allow_all()
-                } else {
-                    Robots::parse(&text)
-                }
-            }
+            Ok(body) => read_robots(&body.bytes)?,
             // Rate-limited on robots.txt itself: the site is turning us
             // away, not saying it has no rules. Not cached.
             Err(PublicFetchError::HttpStatus(429)) => {
@@ -260,6 +252,19 @@ fn is_rejection_page(bytes: &[u8]) -> bool {
     bytes.len() < REJECTION_PAGE_MAX_BYTES && bytes.windows(16).any(|w| w == b"Request Rejected")
 }
 
+/// The rules a robots.txt body gives. A firewall's rejection page in its
+/// place is the site turning us away, as a 429 there is: not cached, and
+/// no rules inferred from it (the F5 firewalls met reject the whole
+/// address, robots.txt included).
+fn read_robots(bytes: &[u8]) -> Result<Robots, FetchError> {
+    if is_rejection_page(bytes) {
+        return Err(FetchError::Blocked(
+            "firewall rejection page on robots.txt".into(),
+        ));
+    }
+    Ok(Robots::parse(&String::from_utf8_lossy(bytes)))
+}
+
 fn into_page(body: FetchedBody) -> Result<Page, FetchError> {
     if is_rejection_page(&body.bytes) {
         return Err(FetchError::Blocked("firewall rejection page".into()));
@@ -371,6 +376,17 @@ mod tests {
             b"<html><title>Request Rejected</title></html>"
         ));
         assert!(!is_rejection_page(&[b'a'; 700]));
+    }
+
+    #[test]
+    fn a_rejection_page_for_robots_txt_turns_us_away_instead_of_allowing_all() {
+        assert!(matches!(
+            read_robots(b"<html><title>Request Rejected</title></html>"),
+            Err(FetchError::Blocked(_))
+        ));
+        let robots = read_robots(b"User-agent: *\nDisallow: /panier\n").unwrap();
+        assert!(!robots.allows(&Url::parse("https://editions.example/panier").unwrap()));
+        assert!(robots.allows(&Url::parse("https://editions.example/livre").unwrap()));
     }
 
     #[test]

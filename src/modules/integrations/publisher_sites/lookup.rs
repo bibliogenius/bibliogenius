@@ -47,17 +47,20 @@ pub enum Lookup {
     },
     /// No site in the table for the book's ISBN prefix.
     NoSite,
-    /// The sites were asked and none showed the book. `refused` lists the
-    /// ones that turned us away or did not answer.
+    /// None of the sites showed the book. `refused` lists the ones that
+    /// turned us away, `unreachable` the ones that did not answer at all:
+    /// for those, the book may well be there, to ask again later.
     NotFound {
         sites: Vec<String>,
         refused: Vec<String>,
+        unreachable: Vec<String>,
     },
 }
 
 /// Site maps already read in this run, by address: one download per site,
 /// however many books are looked for there. `None` for a map that could not
-/// be read.
+/// be read; a map the network failed to bring is not kept, and is asked for
+/// again with the next book.
 #[derive(Default)]
 pub struct SitemapCache(Mutex<HashMap<String, Arc<OnceCell<MapPages>>>>);
 
@@ -65,7 +68,7 @@ pub struct SitemapCache(Mutex<HashMap<String, Arc<OnceCell<MapPages>>>>);
 type MapPages = Option<Arc<Vec<Url>>>;
 
 impl SitemapCache {
-    async fn pages(&self, fetcher: &dyn SiteFetcher, url: &str) -> MapPages {
+    async fn pages(&self, fetcher: &dyn SiteFetcher, url: &str) -> Result<MapPages, FetchError> {
         // One cell per map: two books of one site wait for one download,
         // the books of other sites do not wait at all.
         let cell = self
@@ -75,13 +78,59 @@ impl SitemapCache {
             .entry(url.to_owned())
             .or_default()
             .clone();
-        cell.get_or_init(|| async {
-            let u = Url::parse(url).ok()?;
-            let map = fetcher.get(&u).await.ok()?;
-            Some(Arc::new(sitemap_locs(&map.html, &u).1))
+        cell.get_or_try_init(|| async {
+            let Ok(u) = Url::parse(url) else {
+                return Ok(None);
+            };
+            match fetcher.get(&u).await {
+                Ok(map) => Ok(Some(Arc::new(sitemap_locs(&map.html, &u).1))),
+                Err(e @ (FetchError::Network | FetchError::Blocked(_))) => Err(e),
+                Err(_) => Ok(None),
+            }
         })
         .await
-        .clone()
+        .cloned()
+    }
+}
+
+/// Whether a site has answered during one lookup, to read a network error:
+/// once it has, a timeout is that address failing (some servers take longer
+/// than our timeout to say 404); before, it may be the whole site, or our
+/// own connection, down. The same rule as the check's.
+struct SiteState<'a> {
+    home: &'a str,
+    answered: bool,
+}
+
+impl SiteState<'_> {
+    /// `Ok` when `e` only rules its address out, `Err` when it ends the
+    /// lookup on this site: refused, or down. The home page is asked only
+    /// on a network error met before the site answered.
+    async fn tolerate(
+        &mut self,
+        fetcher: &dyn SiteFetcher,
+        e: FetchError,
+    ) -> Result<(), FetchError> {
+        match e {
+            FetchError::Blocked(_) => Err(e),
+            FetchError::Network if !self.answered => {
+                let Ok(home) = Url::parse(self.home) else {
+                    return Err(e);
+                };
+                match fetcher.get(&home).await {
+                    Ok(_) | Err(FetchError::Status(_) | FetchError::Disallowed) => {
+                        self.answered = true;
+                        Ok(())
+                    }
+                    Err(down) => Err(down),
+                }
+            }
+            FetchError::Status(_) | FetchError::Disallowed => {
+                self.answered = true;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -97,7 +146,7 @@ pub async fn find_book_page(
     if sites.is_empty() {
         return Lookup::NoSite;
     }
-    let mut refused = Vec::new();
+    let (mut refused, mut unreachable) = (Vec::new(), Vec::new());
     for (key, recipes) in &sites {
         match on_site(fetcher, recipes, book, maps).await {
             Ok(Some((kind, page))) => {
@@ -108,12 +157,14 @@ pub async fn find_book_page(
                 };
             }
             Ok(None) => {}
-            Err(_) => refused.push((*key).to_owned()),
+            Err(FetchError::Blocked(_)) => refused.push((*key).to_owned()),
+            Err(_) => unreachable.push((*key).to_owned()),
         }
     }
     Lookup::NotFound {
         sites: sites.iter().map(|(k, _)| (*k).to_owned()).collect(),
         refused,
+        unreachable,
     }
 }
 
@@ -125,13 +176,17 @@ async fn on_site(
     book: &BookQuery,
     maps: &SitemapCache,
 ) -> Result<Option<(RecipeKind, Page)>, FetchError> {
+    let mut state = SiteState {
+        home: &recipes.home,
+        answered: false,
+    };
     if let Some(recipe) = &recipes.product {
         for raw in product_urls(recipe, &book.isbn, &book.title, &book.authors)
             .into_iter()
             .take(MAX_PRODUCT_TRIES)
         {
             let Ok(url) = Url::parse(&raw) else { continue };
-            if let Some(page) = book_page(fetcher, &url, &book.isbn).await? {
+            if let Some(page) = book_page(fetcher, &mut state, &url, &book.isbn).await? {
                 return Ok(Some((RecipeKind::Product, page)));
             }
         }
@@ -144,6 +199,7 @@ async fn on_site(
         };
         match run_search(fetcher, recipe, query).await {
             Ok((page, asked)) => {
+                state.answered = true;
                 if redirected_to_book(&page, &asked, &book.isbn) && shows_isbn(&page, &book.isbn) {
                     return Ok(Some((RecipeKind::Search, page)));
                 }
@@ -157,23 +213,30 @@ async fn on_site(
                 .into_iter()
                 .take(MAX_RESULT_LINKS)
                 {
-                    if let Some(found) = book_page(fetcher, &link, &book.isbn).await? {
+                    if let Some(found) = book_page(fetcher, &mut state, &link, &book.isbn).await? {
                         return Ok(Some((RecipeKind::Search, found)));
                     }
                 }
             }
-            Err(e) if refuses(&e) => return Err(e),
-            Err(_) => {}
+            Err(e) => state.tolerate(fetcher, e).await?,
         }
     }
-    if let Some(recipe) = &recipes.sitemap
-        && let Some(pages) = maps.pages(fetcher, &recipe.url).await
-    {
-        for link in sitemap_book_links(&pages, &book.isbn, &book.title)
+    if let Some(recipe) = &recipes.sitemap {
+        let pages = match maps.pages(fetcher, &recipe.url).await {
+            Ok(pages) => pages,
+            Err(e) => {
+                state.tolerate(fetcher, e).await?;
+                None
+            }
+        };
+        for link in pages
+            .as_deref()
+            .map(|p| sitemap_book_links(p, &book.isbn, &book.title))
+            .unwrap_or_default()
             .into_iter()
             .take(MAX_SITEMAP_CANDIDATES)
         {
-            if let Some(found) = book_page(fetcher, &link, &book.isbn).await? {
+            if let Some(found) = book_page(fetcher, &mut state, &link, &book.isbn).await? {
                 return Ok(Some((RecipeKind::Sitemap, found)));
             }
         }
@@ -181,29 +244,30 @@ async fn on_site(
     Ok(None)
 }
 
-/// The page at `url` when it shows `isbn`. A missing page, a timeout or an
-/// address robots.txt forbids only rule this address out.
+/// The page at `url` when it shows `isbn`. A missing page, an address
+/// robots.txt forbids, or a timeout on a site that answers only rule this
+/// address out.
 async fn book_page(
     fetcher: &dyn SiteFetcher,
+    state: &mut SiteState<'_>,
     url: &Url,
     isbn: &str,
 ) -> Result<Option<Page>, FetchError> {
     match fetcher.get(url).await {
-        Ok(page) if shows_isbn(&page, isbn) => Ok(Some(page)),
-        Ok(_) => Ok(None),
-        Err(e) if refuses(&e) => Err(e),
-        Err(_) => Ok(None),
+        Ok(page) => {
+            state.answered = true;
+            Ok(shows_isbn(&page, isbn).then_some(page))
+        }
+        Err(e) => {
+            state.tolerate(fetcher, e).await?;
+            Ok(None)
+        }
     }
 }
 
 /// Whether the page shows `isbn`: the only proof a page is the book's.
 pub fn shows_isbn(page: &Page, isbn: &str) -> bool {
     page_matches(&page.html, isbn, "") == Some(PageMatch::Isbn)
-}
-
-/// The site turns us away: stop asking it.
-fn refuses(e: &FetchError) -> bool {
-    matches!(e, FetchError::Blocked(_))
 }
 
 /// The images to take `isbn`'s cover from on its `page`, to try in turn,
@@ -447,6 +511,87 @@ mod tests {
             Lookup::NotFound { refused, .. } => assert_eq!(refused, ["editions.example"]),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_site_that_does_not_answer_is_unreachable_not_missing_the_book() {
+        let site = FakeSite::default();
+        site.offline
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let t = table(product("https://editions.example/livre/{slug}-{isbn}"));
+        match find_book_page(&site, &t, &query(), &SitemapCache::default()).await {
+            Lookup::NotFound {
+                refused,
+                unreachable,
+                ..
+            } => {
+                assert!(refused.is_empty());
+                assert_eq!(unreachable, ["editions.example"]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_timeout_on_a_site_that_answers_only_rules_the_address_out() {
+        // The home page answers, the book's address hangs: the book is not
+        // there as far as we can tell, the site is not down.
+        let site = FakeSite {
+            slow: vec!["/livre/".into()],
+            ..FakeSite::default()
+        }
+        .page(
+            "https://editions.example/",
+            "<html><body>Accueil</body></html>",
+        );
+        let t = table(product("https://editions.example/livre/{slug}-{isbn}"));
+        match find_book_page(&site, &t, &query(), &SitemapCache::default()).await {
+            Lookup::NotFound { unreachable, .. } => assert!(unreachable.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        let asked = site.asked.lock().unwrap();
+        // The home page, once, to tell the two apart.
+        assert_eq!(
+            asked
+                .iter()
+                .filter(|u| u.as_str() == "https://editions.example/")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_site_map_the_network_failed_to_bring_is_asked_for_again() {
+        let map = "https://editions.example/sitemap.xml";
+        let book = "https://editions.example/romans/le-grand-voyage/";
+        let site = FakeSite::default()
+            .page(
+                map,
+                &format!("<urlset><url><loc>{book}</loc></url></urlset>"),
+            )
+            .page(book, &book_page(ISBN, "Le Grand Voyage"));
+        let t = table(SiteRecipes {
+            home: "https://editions.example/".into(),
+            product: None,
+            search: None,
+            sitemap: Some(SitemapRecipe { url: map.into() }),
+        });
+        let maps = SitemapCache::default();
+        site.offline
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            find_book_page(&site, &t, &query(), &maps).await,
+            Lookup::NotFound { ref unreachable, .. } if unreachable == &["editions.example"]
+        ));
+        site.offline
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            find_book_page(&site, &t, &query(), &maps).await,
+            Lookup::Found {
+                kind: RecipeKind::Sitemap,
+                ..
+            }
+        ));
     }
 
     #[test]

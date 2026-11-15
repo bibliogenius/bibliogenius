@@ -201,6 +201,16 @@ How the cover is chosen on the book's page, each rule from a real case:
   named as a stand-in (`nocover.jpg`, `couverture-manquante.png`); a page
   that declares only a stand-in has no cover.
 
+A book is `not_found` only when its sites answered. A site that did not
+answer at all (its home page neither) makes it `unreachable`, and one that
+turned us away (403, 429, a firewall's "Request Rejected" page, robots.txt
+included) `refused`: both say nothing of the book, so measure them again
+rather than count them. Run one full measure a day at most: after three
+passes over the same 600 books in a day, the F5 firewalls of Gallimard,
+J'ai lu and Flammarion rejected the whole address, the owner's own browser
+included, for hours. The app asks for one book at a time and does not meet
+this; a bulk pass does.
+
 Reference measure, 2026-11-14: the 226 books of a library, ten at most per
 publisher, **137 covers found, none wrong**. The proof of concept found 103
 with the same rule (robots.txt applies to images) and a browser User-Agent.

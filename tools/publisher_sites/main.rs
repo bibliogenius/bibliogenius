@@ -976,7 +976,7 @@ struct Measured {
     publisher: String,
     library_cover: String,
     /// found, image_forbidden, image_broken, no_image, not_found, refused,
-    /// no_site, bad_isbn
+    /// unreachable, no_site, bad_isbn
     outcome: &'static str,
     site: String,
     recipe: String,
@@ -1072,8 +1072,16 @@ async fn measure_one(
     };
     match find_book_page(fetcher, table, &query, maps).await {
         Lookup::NoSite => m.outcome = "no_site",
-        Lookup::NotFound { sites, refused } => {
-            m.outcome = if !refused.is_empty() && refused.len() == sites.len() {
+        Lookup::NotFound {
+            sites,
+            refused,
+            unreachable,
+        } => {
+            // A site that did not answer proves nothing: the book is not
+            // counted missing, whatever the other sites said.
+            m.outcome = if !unreachable.is_empty() {
+                "unreachable"
+            } else if !refused.is_empty() && refused.len() == sites.len() {
                 "refused"
             } else {
                 "not_found"
@@ -1139,6 +1147,7 @@ async fn load_image(fetcher: &PoliteFetcher, image: &Url) -> ImageLoad {
         Err(FetchError::Disallowed | FetchError::Blocked(_)) => ImageLoad::Forbidden,
         Err(FetchError::Network) => match fetcher.robots_for(image).await {
             Ok(robots) if robots.is_unreachable() => ImageLoad::Forbidden,
+            Err(FetchError::Blocked(_)) => ImageLoad::Forbidden,
             _ => ImageLoad::Broken,
         },
         Err(_) => ImageLoad::Broken,

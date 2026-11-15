@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use url::Url;
@@ -21,6 +22,8 @@ pub struct FakeSite {
     pub sitemaps: Vec<String>,
     /// Path prefixes the server takes too long to answer.
     pub slow: Vec<String>,
+    /// No answer at all, as when our own connection is down.
+    pub offline: AtomicBool,
 }
 
 impl FakeSite {
@@ -34,6 +37,9 @@ impl FakeSite {
 impl SiteFetcher for FakeSite {
     async fn get(&self, url: &Url) -> Result<Page, FetchError> {
         self.asked.lock().unwrap().push(url.to_string());
+        if self.offline.load(Ordering::SeqCst) {
+            return Err(FetchError::Network);
+        }
         if self.blocked {
             return Err(FetchError::Blocked("HTTP 403".into()));
         }
