@@ -200,3 +200,67 @@ pub async fn record_web_cover_origin(book_id: String, image_url: String) -> Resu
     let dir = covers_dir().ok_or("Covers directory not registered")?;
     crate::services::web_cover_service::record_cover_origin(db, dir, &book_id, &image_url).await
 }
+
+/// A cover found on the book's page on its publisher's site.
+///
+/// `candidates` are the page's images robots.txt lets us fetch, best first,
+/// `image_url` included: "next image" fetches them with
+/// [`fetch_web_cover_image`]. `page_url` is the book's page, for the user to
+/// open; `site` the publisher's site, as the table names it.
+pub struct FrbPublisherCover {
+    pub bytes: Vec<u8>,
+    pub image_url: String,
+    pub candidates: Vec<String>,
+    pub page_url: String,
+    pub site: String,
+}
+
+impl From<crate::modules::integrations::publisher_sites::app::PublisherCover>
+    for FrbPublisherCover
+{
+    fn from(c: crate::modules::integrations::publisher_sites::app::PublisherCover) -> Self {
+        FrbPublisherCover {
+            bytes: c.cover.bytes,
+            image_url: c.cover.image_url,
+            candidates: c.cover.candidates,
+            page_url: c.page_url,
+            site: c.site,
+        }
+    }
+}
+
+/// Look for the book's cover on its publisher's own site, with the publisher
+/// site table shipped in the engine: the ISBN prefix gives the site, the
+/// site's recipe its page for the book, which must state the ISBN. robots.txt
+/// is honoured for the page and the image alike. The bytes are returned
+/// unprocessed, like [`fetch_cover_from_web_page`]'s.
+///
+/// `publisher` is the book's publisher field, to pick among the publishers of
+/// a shared prefix; `authors` helps the recipes that need the author's name.
+///
+/// On failure the error is a stable code: `invalid_isbn`, `no_site` (no site
+/// known for this publisher), `not_found` (the site answered, without the
+/// book), `blocked_by_site`, `network` (a site did not answer: worth trying
+/// later), `image_forbidden` (the site does not let us have the cover),
+/// `no_image_found`.
+///
+/// FFI only, with no Axum route on purpose: a route would let any peer make
+/// this device send requests to publisher sites.
+pub async fn find_cover_on_publisher_site(
+    isbn: String,
+    title: String,
+    authors: String,
+    publisher: Option<String>,
+) -> Result<FrbPublisherCover, String> {
+    use crate::modules::integrations::publisher_sites::{app, lookup::BookQuery};
+    let book = BookQuery {
+        isbn,
+        title,
+        authors,
+        publisher,
+    };
+    app::find_publisher_cover(&book)
+        .await
+        .map(Into::into)
+        .map_err(|e| e.code().to_string())
+}

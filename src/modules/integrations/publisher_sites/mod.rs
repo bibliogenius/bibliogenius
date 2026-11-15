@@ -13,6 +13,7 @@
 //! that turns scripts away is left alone, and a publisher that asks is
 //! removed from the table.
 
+pub mod app;
 pub mod build;
 pub mod check;
 pub mod cover;
