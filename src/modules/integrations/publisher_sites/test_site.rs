@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use url::Url;
@@ -24,6 +25,10 @@ pub struct FakeSite {
     pub slow: Vec<String>,
     /// No answer at all, as when our own connection is down.
     pub offline: AtomicBool,
+    /// Address -> image bytes, for [`SiteFetcher::get_image`].
+    pub images: HashMap<String, Vec<u8>>,
+    /// How long each page takes to come.
+    pub latency: Duration,
 }
 
 impl FakeSite {
@@ -31,11 +36,15 @@ impl FakeSite {
         self.pages.insert(url.to_owned(), html.to_owned());
         self
     }
-}
 
-#[async_trait]
-impl SiteFetcher for FakeSite {
-    async fn get(&self, url: &Url) -> Result<Page, FetchError> {
+    pub fn image(mut self, url: &str, bytes: &[u8]) -> Self {
+        self.images.insert(url.to_owned(), bytes.to_vec());
+        self
+    }
+
+    /// What every address answers before its content: offline, blocked,
+    /// forbidden, too slow.
+    fn gate(&self, url: &Url) -> Result<(), FetchError> {
         self.asked.lock().unwrap().push(url.to_string());
         if self.offline.load(Ordering::SeqCst) {
             return Err(FetchError::Network);
@@ -43,16 +52,27 @@ impl SiteFetcher for FakeSite {
         if self.blocked {
             return Err(FetchError::Blocked("HTTP 403".into()));
         }
-        if self
-            .forbidden
-            .iter()
-            .any(|p| url.path().starts_with(p.as_str()))
-        {
+        if self.is_forbidden(url) {
             return Err(FetchError::Disallowed);
         }
         if self.slow.iter().any(|p| url.path().starts_with(p.as_str())) {
             return Err(FetchError::Network);
         }
+        Ok(())
+    }
+
+    fn is_forbidden(&self, url: &Url) -> bool {
+        self.forbidden
+            .iter()
+            .any(|p| url.path().starts_with(p.as_str()))
+    }
+}
+
+#[async_trait]
+impl SiteFetcher for FakeSite {
+    async fn get(&self, url: &Url) -> Result<Page, FetchError> {
+        tokio::time::sleep(self.latency).await;
+        self.gate(url)?;
         self.pages
             .get(url.as_str())
             .map(|html| Page {
@@ -72,6 +92,24 @@ impl SiteFetcher for FakeSite {
             .iter()
             .filter_map(|s| Url::parse(s).ok())
             .collect()
+    }
+
+    async fn get_image(&self, url: &Url) -> Result<Vec<u8>, FetchError> {
+        self.gate(url)?;
+        self.images
+            .get(url.as_str())
+            .cloned()
+            .ok_or(FetchError::Status(404))
+    }
+
+    async fn may_fetch(&self, url: &Url) -> Result<bool, FetchError> {
+        if self.offline.load(Ordering::SeqCst) {
+            return Err(FetchError::Network);
+        }
+        if self.blocked {
+            return Err(FetchError::Blocked("HTTP 403".into()));
+        }
+        Ok(!self.is_forbidden(url))
     }
 }
 

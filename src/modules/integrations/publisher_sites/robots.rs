@@ -9,6 +9,7 @@
 //! follows a rule; blank lines do not end them (Python's robotparser does,
 //! and drops the `?` of `Disallow: /catalogue?`: both mislead on real sites).
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use url::Url;
@@ -59,12 +60,14 @@ impl Robots {
         let mut any = Vec::new();
         let (mut ours_delay, mut any_delay) = (None, None);
 
-        // Agents named by the group being read, and whether a rule has been
-        // seen since its last User-agent line (a new User-agent then starts
-        // a new group).
-        let mut agents: Vec<String> = Vec::new();
+        // Whether the group being read names us, or `*`, and whether a rule
+        // has been seen since its last User-agent line (a new User-agent
+        // then starts a new group). Kept up to date line by line: a file of
+        // thousands of User-agent lines is read in one pass.
+        let (mut names_us, mut names_any) = (false, false);
         let mut in_rules = false;
         let mut sitemaps: Vec<String> = Vec::new();
+        let mut seen_sitemaps: HashSet<String> = HashSet::new();
         for raw in text.lines() {
             let line = raw.split('#').next().unwrap_or("").trim();
             let Some((key, value)) = line.split_once(':') else {
@@ -72,25 +75,25 @@ impl Robots {
             };
             let key = key.trim().to_ascii_lowercase();
             let value = value.trim();
-            let names_us = agents.iter().any(|a| is_our_token(a));
-            let names_any = agents.iter().any(|a| a == "*");
             match key.as_str() {
                 "user-agent" => {
                     if in_rules {
-                        agents.clear();
+                        (names_us, names_any) = (false, false);
                         in_rules = false;
                     }
-                    agents.push(value.to_ascii_lowercase());
+                    let agent = value.to_ascii_lowercase();
+                    names_us |= is_our_token(&agent);
+                    names_any |= agent == "*";
                 }
                 "allow" | "disallow" => {
                     in_rules = true;
                     // An empty Disallow allows everything: no rule to keep.
-                    if value.is_empty() {
+                    if value.is_empty() || !(names_us || names_any) {
                         continue;
                     }
                     let rule = Rule {
                         allow: key == "allow",
-                        pattern: value.to_owned(),
+                        pattern: normalize_path(value),
                     };
                     if names_us {
                         ours.push(rule.clone());
@@ -114,7 +117,7 @@ impl Robots {
                         any_delay = any_delay.or(delay);
                     }
                 }
-                "sitemap" if !value.is_empty() && !sitemaps.iter().any(|s| s == value) => {
+                "sitemap" if !value.is_empty() && seen_sitemaps.insert(value.to_owned()) => {
                     sitemaps.push(value.to_owned());
                 }
                 _ => {}
@@ -154,6 +157,7 @@ impl Robots {
             target.push('?');
             target.push_str(q);
         }
+        let target = normalize_path(&target);
         // robots.txt itself is always allowed.
         if target == "/robots.txt" {
             return true;
@@ -195,7 +199,50 @@ impl Robots {
 }
 
 fn is_our_token(agent: &str) -> bool {
-    agent == PRODUCT_TOKEN || agent.starts_with(&format!("{PRODUCT_TOKEN}/"))
+    agent
+        .strip_prefix(PRODUCT_TOKEN)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Characters RFC 3986 reserves: percent-encoded, they mean something else
+/// than written out, so they stay encoded for comparison.
+const RESERVED: &[u8] = b":/?#[]@!$&'()*+,;=";
+
+/// A path, or a rule's pattern, in the form RFC 9309 (2.2.2) compares:
+/// octets outside US-ASCII percent-encoded, a percent-encoded US-ASCII octet
+/// decoded unless it is reserved (or `%` itself), hex digits in capitals. So
+/// `Disallow: /recherche-avancée` matches the address a browser sends,
+/// `/recherche-avanc%C3%A9e`.
+fn normalize_path(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let escaped = (b == b'%')
+            .then(|| bytes.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
+        match escaped {
+            Some(v) if v.is_ascii() && v != b'%' && !RESERVED.contains(&v) => {
+                out.push(char::from(v));
+                i += 3;
+            }
+            Some(v) => {
+                out.push_str(&format!("%{v:02X}"));
+                i += 3;
+            }
+            None if !b.is_ascii() => {
+                out.push_str(&format!("%{b:02X}"));
+                i += 1;
+            }
+            None => {
+                out.push(char::from(b));
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Whether a robots.txt path pattern matches the start of `target`.
@@ -330,5 +377,38 @@ mod tests {
     fn a_byte_order_mark_does_not_hide_the_first_group() {
         let robots = Robots::parse("\u{feff}User-agent: *\nDisallow: /\n");
         assert!(!allows(&robots, "/livre"));
+    }
+
+    #[test]
+    fn paths_and_patterns_are_compared_normalized() {
+        // A pattern written with an accent, an address percent-encoded.
+        let robots = Robots::parse("User-agent: *\nDisallow: /recherche-avancée\n");
+        assert!(!allows(&robots, "/recherche-avanc%C3%A9e?q=x"));
+        assert!(!allows(&robots, "/recherche-avancée"));
+        // Lowercase escapes in the file, an unreserved letter escaped.
+        let robots = Robots::parse("User-agent: *\nDisallow: /x%c3%a9\nDisallow: /a%62c\n");
+        assert!(!allows(&robots, "/x%C3%A9"));
+        assert!(!allows(&robots, "/abc"));
+        // A reserved character escaped means something else than written.
+        let robots = Robots::parse("User-agent: *\nDisallow: /a%2Fb\n");
+        assert!(allows(&robots, "/a/b"));
+        assert!(!allows(&robots, "/a%2fb"));
+        assert_eq!(normalize_path("/50%25"), "/50%25");
+        assert_eq!(normalize_path("/100%"), "/100%");
+    }
+
+    #[test]
+    fn a_file_of_many_agents_is_read_in_one_pass() {
+        // 512 KiB of User-agent lines took over a minute when every line
+        // rescanned the agents of the group.
+        let text = "User-agent: a\n".repeat(512 * 1024 / 14) + "Disallow: /\n";
+        let started = std::time::Instant::now();
+        let robots = Robots::parse(&text);
+        assert!(allows(&robots, "/livre"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }

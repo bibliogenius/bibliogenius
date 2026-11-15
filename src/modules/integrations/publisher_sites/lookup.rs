@@ -6,17 +6,19 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::{Mutex, OnceCell};
+use tokio::time::Instant;
 use url::Url;
 
 use super::fetch::{FetchError, Page, SiteFetcher};
 use super::page::{PageMatch, page_matches, result_links, sitemap_book_links, sitemap_locs};
-use super::probe::{MAX_SITEMAP_CANDIDATES, product_urls, redirected_to_book, run_search};
+use super::recipes::{MAX_SITEMAP_CANDIDATES, product_urls, redirected_to_book, run_search};
 use super::table::{PublisherTable, RecipeKind, SiteRecipes};
 use super::text::find_isbns;
 use crate::modules::integrations::web_cover::{CoverCandidates, cover_candidates};
-use crate::utils::isbn::to_isbn10;
+use crate::utils::isbn::{to_isbn10, to_isbn13};
 
 /// Addresses a product template may give for one book that are tried.
 /// The check uses the same bounds: a recipe it passes is one the app finds
@@ -45,6 +47,8 @@ pub enum Lookup {
         kind: RecipeKind,
         page: Page,
     },
+    /// The book's ISBN is not one.
+    InvalidIsbn,
     /// No site in the table for the book's ISBN prefix.
     NoSite,
     /// None of the sites showed the book. `refused` lists the ones that
@@ -83,7 +87,9 @@ impl SitemapCache {
                 return Ok(None);
             };
             match fetcher.get(&u).await {
-                Ok(map) => Ok(Some(Arc::new(sitemap_locs(&map.html, &u).1))),
+                Ok(map) => Ok(off_runtime(move || sitemap_locs(&map.html, &u).1)
+                    .await
+                    .map(Arc::new)),
                 Err(e @ (FetchError::Network | FetchError::Blocked(_))) => Err(e),
                 Err(_) => Ok(None),
             }
@@ -134,21 +140,53 @@ impl SiteState<'_> {
     }
 }
 
-/// Look for `book` on the sites the table gives for its ISBN, best first,
-/// each with its recipes in turn: page template, search, site map.
+/// Longest a lookup runs: behind a click, someone waits for it. The sites
+/// not done with by then are reported unreachable, the book may be there.
+pub const LOOKUP_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Look for `book` on the sites the table gives for its ISBN (13 or 10
+/// digits, hyphens allowed), best first, each with its recipes in turn: page
+/// template, search, site map. Within [`LOOKUP_DEADLINE`].
 pub async fn find_book_page(
     fetcher: &dyn SiteFetcher,
     table: &PublisherTable,
     book: &BookQuery,
     maps: &SitemapCache,
 ) -> Lookup {
+    find_book_page_within(fetcher, table, book, maps, LOOKUP_DEADLINE).await
+}
+
+/// [`find_book_page`] within `budget`. A bulk run that looks for many books
+/// of one host at once gives a longer one: their lookups wait for each
+/// other's turn on the host, which the app, one book at a time, does not.
+pub async fn find_book_page_within(
+    fetcher: &dyn SiteFetcher,
+    table: &PublisherTable,
+    book: &BookQuery,
+    maps: &SitemapCache,
+    budget: Duration,
+) -> Lookup {
+    let Some(isbn) = to_isbn13(&book.isbn) else {
+        return Lookup::InvalidIsbn;
+    };
+    let book = &BookQuery {
+        isbn,
+        ..book.clone()
+    };
     let sites = table.sites_for(&book.isbn, book.publisher.as_deref());
     if sites.is_empty() {
         return Lookup::NoSite;
     }
+    let deadline = Instant::now() + budget;
     let (mut refused, mut unreachable) = (Vec::new(), Vec::new());
-    for (key, recipes) in &sites {
-        match on_site(fetcher, recipes, book, maps).await {
+    for (i, (key, recipes)) in sites.iter().enumerate() {
+        let Ok(answer) =
+            tokio::time::timeout_at(deadline, on_site(fetcher, recipes, book, maps)).await
+        else {
+            unreachable.extend(sites[i..].iter().map(|(k, _)| (*k).to_owned()));
+            break;
+        };
+        match answer {
             Ok(Some((kind, page))) => {
                 return Lookup::Found {
                     site: (*key).to_owned(),
@@ -200,19 +238,28 @@ async fn on_site(
         match run_search(fetcher, recipe, query).await {
             Ok((page, asked)) => {
                 state.answered = true;
-                if redirected_to_book(&page, &asked, &book.isbn) && shows_isbn(&page, &book.isbn) {
+                let wanted = book.clone();
+                let (found, links) = off_runtime(move || {
+                    if redirected_to_book(&page, &asked, &wanted.isbn)
+                        && shows_isbn(&page, &wanted.isbn)
+                    {
+                        return (Some(page), Vec::new());
+                    }
+                    let links = result_links(
+                        &page.html,
+                        &page.url,
+                        &wanted.isbn,
+                        &wanted.title,
+                        &wanted.authors,
+                    );
+                    (None, links)
+                })
+                .await
+                .unwrap_or_default();
+                if let Some(page) = found {
                     return Ok(Some((RecipeKind::Search, page)));
                 }
-                for link in result_links(
-                    &page.html,
-                    &page.url,
-                    &book.isbn,
-                    &book.title,
-                    &book.authors,
-                )
-                .into_iter()
-                .take(MAX_RESULT_LINKS)
-                {
+                for link in links.into_iter().take(MAX_RESULT_LINKS) {
                     if let Some(found) = book_page(fetcher, &mut state, &link, &book.isbn).await? {
                         return Ok(Some((RecipeKind::Search, found)));
                     }
@@ -256,7 +303,12 @@ async fn book_page(
     match fetcher.get(url).await {
         Ok(page) => {
             state.answered = true;
-            Ok(shows_isbn(&page, isbn).then_some(page))
+            let isbn = isbn.to_owned();
+            Ok(
+                off_runtime(move || shows_isbn(&page, &isbn).then_some(page))
+                    .await
+                    .flatten(),
+            )
         }
         Err(e) => {
             state.tolerate(fetcher, e).await?;
@@ -268,6 +320,15 @@ async fn book_page(
 /// Whether the page shows `isbn`: the only proof a page is the book's.
 pub fn shows_isbn(page: &Page, isbn: &str) -> bool {
     page_matches(&page.html, isbn, "") == Some(PageMatch::Isbn)
+}
+
+/// Run `f`, which parses a page or a site map of up to 2 MB, on the blocking
+/// pool: in the app, the engine's async workers serve every other call
+/// meanwhile. `None` when `f` panicked.
+pub(crate) async fn off_runtime<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    tokio::task::spawn_blocking(f).await.ok()
 }
 
 /// The images to take `isbn`'s cover from on its `page`, to try in turn,
@@ -395,7 +456,7 @@ mod tests {
     use crate::modules::integrations::publisher_sites::test_site::{FakeSite, book_page};
     use crate::modules::integrations::publisher_sites::text::Apostrophe;
 
-    const ISBN: &str = "9782000000011";
+    const ISBN: &str = "9782000000013";
 
     fn table(recipes: SiteRecipes) -> PublisherTable {
         PublisherTable {
@@ -436,7 +497,7 @@ mod tests {
 
     #[tokio::test]
     async fn finds_the_page_that_shows_the_isbn() {
-        let book = "https://editions.example/livre/le-grand-voyage-9782000000011";
+        let book = "https://editions.example/livre/le-grand-voyage-9782000000013";
         let site = FakeSite::default().page(book, &book_page(ISBN, "Le Grand Voyage"));
         let t = table(product("https://editions.example/livre/{slug}-{isbn}"));
         match find_book_page(&site, &t, &query(), &SitemapCache::default()).await {
@@ -449,7 +510,7 @@ mod tests {
         }
         // Another prefix: no site to ask.
         let other = BookQuery {
-            isbn: "9791000000017".into(),
+            isbn: "9791000000015".into(),
             ..query()
         };
         assert!(matches!(
@@ -459,9 +520,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_isbn_10_or_with_hyphens_is_looked_for_as_its_isbn_13() {
+        let book = "https://editions.example/livre/le-grand-voyage-9782000000013";
+        let site = FakeSite::default().page(book, &book_page(ISBN, "Le Grand Voyage"));
+        let t = table(product("https://editions.example/livre/{slug}-{isbn}"));
+        for isbn in ["978-2-00-000001-3", "2000000010"] {
+            let asked = BookQuery {
+                isbn: isbn.into(),
+                ..query()
+            };
+            assert!(
+                matches!(
+                    find_book_page(&site, &t, &asked, &SitemapCache::default()).await,
+                    Lookup::Found { .. }
+                ),
+                "{isbn}"
+            );
+        }
+        let bad = BookQuery {
+            isbn: "12345".into(),
+            ..query()
+        };
+        assert!(matches!(
+            find_book_page(&site, &t, &bad, &SitemapCache::default()).await,
+            Lookup::InvalidIsbn
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_lookup_past_its_deadline_reports_the_site_unreachable() {
+        let site = FakeSite {
+            latency: Duration::from_millis(300),
+            ..FakeSite::default()
+        };
+        let t = table(product("https://editions.example/livre/{slug}-{isbn}"));
+        let lookup = find_book_page_within(
+            &site,
+            &t,
+            &query(),
+            &SitemapCache::default(),
+            Duration::from_millis(50),
+        )
+        .await;
+        match lookup {
+            Lookup::NotFound { unreachable, .. } => {
+                assert_eq!(unreachable, ["editions.example"]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn a_page_with_the_title_but_not_the_isbn_is_not_taken() {
         // Another edition of the same title, under its own ISBN.
-        let book = "https://editions.example/livre/le-grand-voyage-9782000000011";
+        let book = "https://editions.example/livre/le-grand-voyage-9782000000013";
         let site = FakeSite::default().page(book, &book_page("9782000000028", "Le Grand Voyage"));
         let t = table(product("https://editions.example/livre/{slug}-{isbn}"));
         assert!(matches!(
@@ -597,22 +709,22 @@ mod tests {
     #[test]
     fn a_page_that_declares_its_image_gives_no_other() {
         let page = |html: &str| Page {
-            url: Url::parse("https://e.example/ouvrage/x/9782000000011").unwrap(),
+            url: Url::parse("https://e.example/ouvrage/x/9782000000013").unwrap(),
             html: html.into(),
             truncated: false,
         };
         // The cover on another host, then a close button among the tags.
         let declared = page(
-            r#"<head><meta property="og:image" content="https://images.example/9782000000011.jpg"></head>
+            r#"<head><meta property="og:image" content="https://images.example/9782000000013.jpg"></head>
             <body><img src="/assets/fermer.jpg" width="400" height="400"></body>"#,
         );
         let images: Vec<String> = cover_images(&declared, ISBN)
             .iter()
             .map(Url::to_string)
             .collect();
-        assert_eq!(images, ["https://images.example/9782000000011.jpg"]);
+        assert_eq!(images, ["https://images.example/9782000000013.jpg"]);
         // Nothing declared: the tags are all there is.
-        let bare = page(r#"<body><img src="/couv/9782000000011.jpg" width="400"></body>"#);
+        let bare = page(r#"<body><img src="/couv/9782000000013.jpg" width="400"></body>"#);
         assert_eq!(cover_images(&bare, ISBN).len(), 1);
     }
 
@@ -659,7 +771,7 @@ mod tests {
         assert_eq!(cover_images(&shop, ISBN).len(), 1);
         // A cover kept with the site's assets but named after the ISBN stays.
         let named = page(
-            r#"<body><img src="https://e.example/assets/img/couvertures/9782000000011.jpg"></body>"#,
+            r#"<body><img src="https://e.example/assets/img/couvertures/9782000000013.jpg"></body>"#,
         );
         assert_eq!(cover_images(&named, ISBN).len(), 1);
     }
@@ -670,7 +782,7 @@ mod tests {
             url: Url::parse("https://e.example/catalogue/x").unwrap(),
             // The page declares a related title's cover; its own is a tag.
             html: r#"<head><meta property="og:image" content="https://e.example/cover/9782000000028.jpg"></head>
-                <body><img src="https://e.example/portrait/cover/9782000000011.jpg"></body>"#
+                <body><img src="https://e.example/portrait/cover/9782000000013.jpg"></body>"#
                 .into(),
             truncated: false,
         };
@@ -680,7 +792,7 @@ mod tests {
             .collect();
         assert_eq!(
             images,
-            ["https://e.example/portrait/cover/9782000000011.jpg"]
+            ["https://e.example/portrait/cover/9782000000013.jpg"]
         );
     }
 

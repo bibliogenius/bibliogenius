@@ -4,7 +4,7 @@
 //! pause between two requests to the same host, and tells a site that turns
 //! scripts away from one that fails.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +15,7 @@ use url::Url;
 
 use super::page::bare_host;
 use super::robots::Robots;
+use crate::utils::cover_image::COVER_MAX_INPUT_BYTES;
 use crate::utils::public_fetch::{
     self, BodyCap, FetchPolicy, FetchedBody, HopOutcome, MAX_REDIRECTS, PublicFetchError,
     upgrade_to_https,
@@ -26,6 +27,10 @@ pub const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Longest robots.txt read (Google stops at 500 KiB).
 const MAX_ROBOTS_BYTES: usize = 512 * 1024;
+
+/// What a plain 403 is reported as: [`FetchError::Blocked`], but not a
+/// reason to leave the whole host alone (see `PoliteFetcher::noted`).
+const FORBIDDEN: &str = "HTTP 403";
 
 /// A firewall's rejection page (F5 "Request Rejected") is a few hundred bytes.
 const REJECTION_PAGE_MAX_BYTES: usize = 600;
@@ -73,24 +78,70 @@ pub trait SiteFetcher: Send + Sync {
     /// The site maps the robots.txt of `site` declares. Empty when it declares
     /// none or cannot be read.
     async fn sitemaps(&self, site: &Url) -> Vec<Url>;
+    /// An image's raw bytes, up to the cover input cap, under the same rules
+    /// as a page: robots.txt and the pause apply to every hop.
+    async fn get_image(&self, url: &Url) -> Result<Vec<u8>, FetchError>;
+    /// Whether robots.txt lets us fetch `url`, without fetching it. `Err`
+    /// when the rules cannot be had: the site refuses us (`Blocked`) or does
+    /// not answer (`Network`).
+    async fn may_fetch(&self, url: &Url) -> Result<bool, FetchError>;
 }
 
 /// The production fetcher: public https only (an http address is tried over
 /// https), robots.txt honoured, one request at a time per host with at least
 /// `min_interval` (or the site's Crawl-delay) between two.
+///
+/// A host that turned us away once (429, a firewall's rejection page, a
+/// Crawl-delay over the cap) is not asked again by this fetcher: over a run
+/// of many books, asking again is what gets an address banned.
 pub struct PoliteFetcher {
     min_interval: Duration,
+    /// Longest Crawl-delay we wait for; a site asking more is left alone.
+    max_crawl_delay: Option<Duration>,
     robots: Mutex<HashMap<String, Arc<Robots>>>,
     hosts: Mutex<HashMap<String, Arc<Mutex<Option<Instant>>>>>,
+    /// Hosts (as [`pace_key`] names them) that turned us away.
+    refused: std::sync::Mutex<HashSet<String>>,
 }
 
 impl PoliteFetcher {
     pub fn new(min_interval: Duration) -> Self {
         Self {
             min_interval,
+            max_crawl_delay: None,
             robots: Mutex::new(HashMap::new()),
             hosts: Mutex::new(HashMap::new()),
+            refused: std::sync::Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Leave alone the sites whose Crawl-delay is longer than `max`, instead
+    /// of waiting for them: behind a click, nobody waits a minute between
+    /// two requests. The site is reported as refusing us.
+    pub fn with_max_crawl_delay(mut self, max: Duration) -> Self {
+        self.max_crawl_delay = Some(max);
+        self
+    }
+
+    fn refused_before(&self, url: &Url) -> bool {
+        self.refused
+            .lock()
+            .is_ok_and(|hosts| hosts.contains(&pace_key(url)))
+    }
+
+    /// `result`, after remembering that `url`'s host turned us away if it
+    /// did in a way that asking again makes worse: a rate limit, a
+    /// firewall's rejection page, a Crawl-delay over the cap. Not a plain
+    /// 403, which a CDN answers for one missing image and some sites for one
+    /// page: it rules that address out, not the host.
+    fn noted<T>(&self, url: &Url, result: Result<T, FetchError>) -> Result<T, FetchError> {
+        if let Err(FetchError::Blocked(why)) = &result
+            && why != FORBIDDEN
+            && let Ok(mut hosts) = self.refused.lock()
+        {
+            hosts.insert(pace_key(url));
+        }
+        result
     }
 
     /// The robots.txt rules of `url`'s site, read once per run.
@@ -151,15 +202,58 @@ impl PoliteFetcher {
     /// serve (5xx) makes the site unavailable, not the address forbidden.
     async fn prepare(&self, url: &Url) -> Result<(Url, Turn), FetchError> {
         let url = upgrade_to_https(url.clone()).ok_or(FetchError::Refused)?;
-        let robots = self.robots_for(&url).await?;
+        if self.refused_before(&url) {
+            return Err(FetchError::Blocked("refused us earlier in this run".into()));
+        }
+        let robots = self.noted(&url, self.robots_for(&url).await)?;
         if robots.is_unreachable() {
             return Err(FetchError::Network);
         }
         if !robots.allows(&url) {
             return Err(FetchError::Disallowed);
         }
-        let turn = self.wait_turn(&url, robots.crawl_delay()).await;
+        let delay = robots.crawl_delay();
+        if let (Some(delay), Some(max)) = (delay, self.max_crawl_delay)
+            && delay > max
+        {
+            return self.noted(
+                &url,
+                Err(FetchError::Blocked(format!(
+                    "Crawl-delay of {} s",
+                    delay.as_secs()
+                ))),
+            );
+        }
+        let turn = self.wait_turn(&url, delay).await;
         Ok((url, turn))
+    }
+
+    /// GET `url`, its redirects followed here, one hop at a time, so that
+    /// robots.txt and the pause apply to every address (another host
+    /// included), not only to the first.
+    async fn follow(&self, url: &Url, cap: BodyCap) -> Result<FetchedBody, FetchError> {
+        let mut next = url.clone();
+        for _hop in 0..=MAX_REDIRECTS {
+            let (url, turn) = self.prepare(&next).await?;
+            let hop = public_fetch::get_one_hop_with_policy(
+                url.clone(),
+                &|_| cap,
+                FetchPolicy::PublicInternet,
+            )
+            .await;
+            drop(turn);
+            let hop = hop.map_err(map_error).and_then(|hop| match hop {
+                HopOutcome::Body(body) if is_rejection_page(&body.bytes) => {
+                    Err(FetchError::Blocked("firewall rejection page".into()))
+                }
+                hop => Ok(hop),
+            });
+            match self.noted(&url, hop)? {
+                HopOutcome::Redirect(to) => next = to,
+                HopOutcome::Body(body) => return Ok(body),
+            }
+        }
+        Err(FetchError::Network)
     }
 }
 
@@ -176,25 +270,25 @@ impl Drop for Turn {
 #[async_trait]
 impl SiteFetcher for PoliteFetcher {
     async fn get(&self, url: &Url) -> Result<Page, FetchError> {
-        // Redirects are followed here, one hop at a time, so that robots.txt
-        // and the pause apply to every address (another host included), not
-        // only to the first.
-        let mut next = url.clone();
-        for _hop in 0..=MAX_REDIRECTS {
-            let (url, turn) = self.prepare(&next).await?;
-            let hop = public_fetch::get_one_hop_with_policy(
-                url,
-                &|_| BodyCap::Truncate(MAX_PAGE_BYTES),
-                FetchPolicy::PublicInternet,
-            )
-            .await;
-            drop(turn);
-            match hop.map_err(map_error)? {
-                HopOutcome::Redirect(to) => next = to,
-                HopOutcome::Body(body) => return into_page(body),
-            }
+        into_page(self.follow(url, BodyCap::Truncate(MAX_PAGE_BYTES)).await?)
+    }
+
+    async fn get_image(&self, url: &Url) -> Result<Vec<u8>, FetchError> {
+        let body = self
+            .follow(url, BodyCap::Refuse(COVER_MAX_INPUT_BYTES))
+            .await?;
+        Ok(body.bytes)
+    }
+
+    async fn may_fetch(&self, url: &Url) -> Result<bool, FetchError> {
+        let url = upgrade_to_https(url.clone()).ok_or(FetchError::Refused)?;
+        if self.refused_before(&url) {
+            return Err(FetchError::Blocked("refused us earlier in this run".into()));
         }
-        Err(FetchError::Network)
+        let robots = self.noted(&url, self.robots_for(&url).await)?;
+        // A robots.txt the server fails to serve forbids everything
+        // (RFC 9309, 2.3.1.4).
+        Ok(!robots.is_unreachable() && robots.allows(&url))
     }
 
     async fn post_form(
@@ -204,17 +298,18 @@ impl SiteFetcher for PoliteFetcher {
     ) -> Result<PostAnswer, FetchError> {
         let (url, turn) = self.prepare(url).await?;
         let answer = public_fetch::post_form_with_policy(
-            url,
+            url.clone(),
             fields,
             &|_| BodyCap::Truncate(MAX_PAGE_BYTES),
             FetchPolicy::PublicInternet,
         )
         .await;
         drop(turn);
-        match answer.map_err(map_error)? {
+        let answer = answer.map_err(map_error).and_then(|hop| match hop {
             HopOutcome::Redirect(to) => Ok(PostAnswer::Redirect(to)),
             HopOutcome::Body(body) => into_page(body).map(PostAnswer::Page),
-        }
+        });
+        self.noted(&url, answer)
     }
 
     async fn sitemaps(&self, site: &Url) -> Vec<Url> {
@@ -239,7 +334,8 @@ fn pace_key(url: &Url) -> String {
 
 fn map_error(e: PublicFetchError) -> FetchError {
     match e {
-        PublicFetchError::HttpStatus(s @ (403 | 429)) => FetchError::Blocked(format!("HTTP {s}")),
+        PublicFetchError::HttpStatus(403) => FetchError::Blocked(FORBIDDEN.into()),
+        PublicFetchError::HttpStatus(429) => FetchError::Blocked("HTTP 429".into()),
         PublicFetchError::HttpStatus(s) => FetchError::Status(s),
         PublicFetchError::Network | PublicFetchError::TooManyRedirects => FetchError::Network,
         PublicFetchError::InvalidUrl
@@ -397,6 +493,65 @@ mod tests {
             key("https://gallmeister.fr/")
         );
         assert_ne!(key("https://gallmeister.fr/"), key("https://gallimard.fr/"));
+    }
+
+    /// A fetcher that already holds `robots` for editions.example, a name
+    /// that resolves nowhere: a test reaching the network gets `Network`.
+    async fn with_robots(robots: &str) -> PoliteFetcher {
+        let fetcher = PoliteFetcher::new(Duration::from_millis(10));
+        fetcher.robots.lock().await.insert(
+            "https://editions.example".into(),
+            Arc::new(Robots::parse(robots)),
+        );
+        fetcher
+    }
+
+    #[tokio::test]
+    async fn a_host_that_refused_us_is_not_asked_again() {
+        let fetcher = with_robots("User-agent: *\nAllow: /\n").await;
+        let page = Url::parse("https://editions.example/livre/1").unwrap();
+        // Not refused yet: the request goes out (and finds no such host).
+        assert_eq!(fetcher.get(&page).await.unwrap_err(), FetchError::Network);
+        // A plain 403 rules one address out, not the host.
+        let _ = fetcher.noted::<()>(&page, Err(FetchError::Blocked(FORBIDDEN.into())));
+        assert!(!fetcher.refused_before(&page));
+        let _ = fetcher.noted::<()>(&page, Err(FetchError::Blocked("HTTP 429".into())));
+        let other = Url::parse("https://www.editions.example/livre/2").unwrap();
+        assert!(matches!(
+            fetcher.get(&other).await,
+            Err(FetchError::Blocked(_))
+        ));
+        assert!(matches!(
+            fetcher.may_fetch(&other).await,
+            Err(FetchError::Blocked(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_crawl_delay_over_the_cap_leaves_the_site_alone() {
+        let page = Url::parse("https://editions.example/livre/1").unwrap();
+        let fetcher = with_robots("User-agent: *\nCrawl-delay: 30\n")
+            .await
+            .with_max_crawl_delay(Duration::from_secs(10));
+        assert!(matches!(
+            fetcher.get(&page).await,
+            Err(FetchError::Blocked(_))
+        ));
+        assert!(fetcher.refused_before(&page));
+        // Without a cap, the delay is waited for: the request goes out.
+        let patient = with_robots("User-agent: *\nCrawl-delay: 30\n").await;
+        assert_eq!(patient.get(&page).await.unwrap_err(), FetchError::Network);
+    }
+
+    #[tokio::test]
+    async fn a_server_that_fails_robots_txt_forbids_every_image() {
+        let fetcher = PoliteFetcher::new(Duration::from_millis(10));
+        fetcher.robots.lock().await.insert(
+            "https://editions.example".into(),
+            Arc::new(Robots::unreachable()),
+        );
+        let image = Url::parse("https://editions.example/couv/1.jpg").unwrap();
+        assert_eq!(fetcher.may_fetch(&image).await, Ok(false));
     }
 
     #[tokio::test]

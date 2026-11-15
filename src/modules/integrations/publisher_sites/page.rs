@@ -371,12 +371,45 @@ fn split_title_parts(t: &str) -> Vec<String> {
         .collect()
 }
 
-/// Where a page states an ISBN: its visible text, its JSON-LD, and its
-/// ISBN, GTIN or EAN metadata. Not its attributes or other scripts, which
+/// Where a page states an ISBN. Not its attributes or other scripts, which
 /// echo the address asked (canonical, og:url, hreflang, a search box's
 /// value): a "not found" page would then pass for the book's.
-fn isbn_evidence(doc: &Html) -> String {
-    let mut out = String::new();
+struct IsbnEvidence {
+    /// Its JSON-LD and its ISBN, GTIN or EAN metadata: what the page says
+    /// it is about.
+    declared: String,
+    /// Its visible text, which also prints related titles and searches.
+    shown: String,
+}
+
+/// Distinct ISBNs past which a page is a list (a series, a catalogue, a
+/// search's results) rather than one book's page. A book's page prints its
+/// other editions too: Actes Sud shows four (paperback, Babel, e-book,
+/// audio), Minuit three (paper, PDF, ePub).
+const MAX_PAGE_ISBNS: usize = 6;
+
+/// Characters before an ISBN, in the visible text without spaces, where its
+/// label, or the words of a search echoing it, are looked for.
+const ISBN_CONTEXT_REACH: usize = 32;
+
+/// Labels an ISBN is printed after on a book's page.
+const ISBN_LABELS: [&str; 3] = ["isbn", "ean", "gtin"];
+
+/// Words before an ISBN that a search answer echoing the query prints
+/// ("Aucun résultat pour « 978... »", "Results for 978..."), lowercase,
+/// accents left out ("sultat" for "résultat").
+const ECHO_WORDS: [&str; 7] = [
+    "sultat",
+    "recherch",
+    "search",
+    "result",
+    "aucun",
+    "introuvable",
+    "notfound",
+];
+
+fn isbn_evidence(doc: &Html) -> IsbnEvidence {
+    let mut shown = String::new();
     for node in doc.root_element().descendants() {
         let Some(text) = node.value().as_text() else {
             continue;
@@ -390,17 +423,18 @@ fn isbn_evidence(doc: &Html) -> String {
             })
         });
         if !hidden {
-            out.push_str(text);
-            out.push(' ');
+            shown.push_str(text);
+            shown.push(' ');
         }
     }
+    let mut declared = String::new();
     for script in doc.select(&JSON_LD).filter(|s| {
         s.value()
             .attr("type")
             .is_some_and(|t| t.to_ascii_lowercase().contains("ld+json"))
     }) {
-        out.extend(script.text());
-        out.push(' ');
+        declared.extend(script.text());
+        declared.push(' ');
     }
     for meta in doc.select(&META_CONTENT) {
         let e = meta.value();
@@ -410,23 +444,78 @@ fn isbn_evidence(doc: &Html) -> String {
             ["isbn", "gtin", "ean"].iter().any(|k| n.contains(k))
         });
         if about_isbn {
-            out.push_str(e.attr("content").unwrap_or(""));
-            out.push(' ');
+            declared.push_str(e.attr("content").unwrap_or(""));
+            declared.push(' ');
         }
     }
-    out
+    IsbnEvidence { declared, shown }
 }
 
-/// Whether the page is the book's: it states the ISBN (13 or 10 digits,
-/// printed with or without separators, see [`isbn_evidence`]), or, when
-/// `title` is not empty, its headings hold at least 80 % of the title's
-/// words.
+/// Whether the page states `isbn` (13 or 10 digits, printed with or without
+/// separators) as the book it is about:
+/// - when its JSON-LD and ISBN metadata give ISBNs, they decide alone: they
+///   must give `isbn`, among at most [`MAX_PAGE_ISBNS`]. Another edition's
+///   page declares its own, and may print ours under "also available".
+/// - otherwise its visible text must print `isbn` other than as the echo of a
+///   search (a "no result for 978..." page: [`ECHO_WORDS`] just before it,
+///   no [`ISBN_LABELS`]), and print at most [`MAX_PAGE_ISBNS`]: a series
+///   page prints every volume's.
+fn states_isbn(evidence: &IsbnEvidence, isbn: &str) -> bool {
+    let isbn10 = to_isbn10(isbn);
+    let forms: Vec<&str> = std::iter::once(isbn).chain(isbn10.as_deref()).collect();
+    let declared = strip_isbn_separators(&evidence.declared);
+    let declared_isbns = printed_isbns(&evidence.declared);
+    let declares_ours = forms.iter().any(|f| declared.contains(f));
+    if declares_ours || declared_isbns > 0 {
+        return declares_ours && declared_isbns <= MAX_PAGE_ISBNS;
+    }
+    if printed_isbns(&evidence.shown) > MAX_PAGE_ISBNS {
+        return false;
+    }
+    let shown = strip_isbn_separators(&evidence.shown).to_ascii_lowercase();
+    forms.iter().any(|f| {
+        shown.match_indices(f).any(|(at, _)| {
+            let before = context_before(&shown, at);
+            ISBN_LABELS.iter().any(|l| before.contains(l))
+                || !ECHO_WORDS.iter().any(|w| before.contains(w))
+        })
+    })
+}
+
+/// How many distinct ISBN-13 `text` prints as numbers of their own (hyphens
+/// allowed): not a run cut out of a longer one, as a list of years written
+/// one after the other ("1968 1969 1970...") would give once its spaces are
+/// gone.
+fn printed_isbns(text: &str) -> usize {
+    let digits: String = text
+        .chars()
+        .filter(|c| !matches!(c, '-' | '\u{2010}' | '\u{2011}'))
+        .collect();
+    let mut found: Vec<&str> = digits
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|run| run.len() == 13 && (run.starts_with("978") || run.starts_with("979")))
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    found.len()
+}
+
+/// The [`ISBN_CONTEXT_REACH`] bytes before byte `at` of `lower`, cut on a
+/// character boundary.
+fn context_before(lower: &str, at: usize) -> &str {
+    let mut start = at.saturating_sub(ISBN_CONTEXT_REACH);
+    while !lower.is_char_boundary(start) {
+        start -= 1;
+    }
+    &lower[start..at]
+}
+
+/// Whether the page is the book's: it states the ISBN as its book's (see
+/// [`states_isbn`]), or, when `title` is not empty, its headings hold at
+/// least 80 % of the title's words.
 pub fn page_matches(html: &str, isbn: &str, title: &str) -> Option<PageMatch> {
     let doc = Html::parse_document(html);
-    let flat = strip_isbn_separators(&isbn_evidence(&doc));
-    if !isbn.is_empty()
-        && (flat.contains(isbn) || to_isbn10(isbn).is_some_and(|i| flat.contains(&i)))
-    {
+    if !isbn.is_empty() && states_isbn(&isbn_evidence(&doc), isbn) {
         return Some(PageMatch::Isbn);
     }
     let words = title_words(title);
@@ -881,7 +970,8 @@ pub fn search_forms(html: &str, page_url: &Url) -> Vec<SearchForm> {
             fields.extend(
                 action
                     .query_pairs()
-                    .map(|(k, v)| (k.into_owned(), v.into_owned())),
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .filter(|(k, v)| !is_one_time_token(k, v)),
             );
             action.set_query(None);
         }
@@ -890,12 +980,12 @@ pub fn search_forms(html: &str, page_url: &Url) -> Vec<SearchForm> {
                 .attr("type")
                 .is_some_and(|t| t.eq_ignore_ascii_case("hidden"))
         }) {
-            let name = hidden.value().attr("name").unwrap_or("").to_owned();
-            set_field(
-                &mut fields,
-                name,
-                hidden.value().attr("value").unwrap_or("").to_owned(),
-            );
+            let name = hidden.value().attr("name").unwrap_or("");
+            let value = hidden.value().attr("value").unwrap_or("");
+            // A recipe holding it would break once the token expires.
+            if !is_one_time_token(name, value) {
+                set_field(&mut fields, name.to_owned(), value.to_owned());
+            }
         }
         let query_name = query_input.value().attr("name").unwrap_or("").to_owned();
         set_field(&mut fields, query_name, "{q}".to_owned());
@@ -909,6 +999,42 @@ pub fn search_forms(html: &str, page_url: &Url) -> Vec<SearchForm> {
         }
     }
     out
+}
+
+/// Words in a form field's name that mark a token issued for one visit.
+const TOKEN_NAME_WORDS: [&str; 4] = ["nonce", "token", "csrf", "referer"];
+
+/// Hex digits from which a field's value is taken for a token (WordPress
+/// nonces have ten).
+const TOKEN_HEX_DIGITS: usize = 10;
+
+/// Whether a form field, or a query parameter, is a token the site issued
+/// for one visit (`_wpnonce`, a CSRF token, a hash of the session), which a
+/// recipe must not keep: it stops working once the token expires.
+pub fn is_one_time_token(name: &str, value: &str) -> bool {
+    if value.contains("{q}") {
+        return false;
+    }
+    let name = name.to_ascii_lowercase();
+    TOKEN_NAME_WORDS.iter().any(|w| name.contains(w))
+        || (value.len() >= TOKEN_HEX_DIGITS
+            && value.chars().all(|c| c.is_ascii_hexdigit())
+            && value.chars().any(|c| c.is_ascii_digit())
+            && value.chars().any(|c| c.is_ascii_alphabetic()))
+}
+
+/// The name of the first one-time token ([`is_one_time_token`]) a recipe
+/// sends: among the query parameters of its `address` (placeholders kept, as
+/// the table writes them) and its POST `fields`.
+pub fn sent_token(address: &str, fields: &[(String, String)]) -> Option<String> {
+    let query = address.split_once('?').map(|(_, q)| q).unwrap_or("");
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| pair.split_once('=').unwrap_or((pair, "")))
+        .chain(fields.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .find(|(k, v)| is_one_time_token(k, v))
+        .map(|(k, _)| k.to_owned())
 }
 
 fn set_field(fields: &mut Vec<(String, String)>, name: String, value: String) {
@@ -1001,7 +1127,16 @@ mod tests {
         // The 10-digit form of the same ISBN.
         let isbn10 = to_isbn10("9782070123452").unwrap();
         assert_eq!(
-            page_matches(&format!("<p>{isbn10}</p>"), "9782070123452", ""),
+            page_matches(&format!("<p>ISBN : {isbn10}</p>"), "9782070123452", ""),
+            Some(PageMatch::Isbn)
+        );
+        // Its label in a table cell of its own.
+        assert_eq!(
+            page_matches(
+                "<table><tr><th>EAN</th><td>9782070123452</td></tr></table>",
+                "9782070123452",
+                ""
+            ),
             Some(PageMatch::Isbn)
         );
         let html = "<title>Le Palais des miroirs</title><h1>Le Palais des miroirs</h1>";
@@ -1034,6 +1169,50 @@ mod tests {
             page_matches(json_ld, "9782070123452", ""),
             Some(PageMatch::Isbn)
         );
+    }
+
+    #[test]
+    fn a_page_that_only_mentions_the_isbn_is_not_the_book() {
+        let isbn = "9782070123452";
+        // A search that found nothing, answered with a 200.
+        let none = format!("<h1>Recherche</h1><p>Aucun résultat pour « {isbn} »</p>");
+        assert_eq!(page_matches(&none, isbn, ""), None);
+        let none = format!("<p>Results for {isbn}: 0</p>");
+        assert_eq!(page_matches(&none, isbn, ""), None);
+        // A series page printing every volume's ISBN.
+        let series: String = (0..7)
+            .map(|i| format!("<li>Tome {i} · ISBN 978207012345{i}</li>"))
+            .collect();
+        assert_eq!(page_matches(&series, "9782070123452", ""), None);
+        // Another edition's page, which declares its own ISBN and prints
+        // ours among the other formats.
+        let other = format!(
+            r#"<script type="application/ld+json">{{"@type":"Book","isbn":"9782070999999"}}</script>
+            <p>Aussi disponible en poche : ISBN {isbn}</p>"#
+        );
+        assert_eq!(page_matches(&other, isbn, ""), None);
+        // Book pages as real sites print them. Le Tripode: no label.
+        let tripode = format!("<h1>Le Tombeau</h1><p>Roman</p><p>144 pages</p><p>{isbn}</p>");
+        assert_eq!(page_matches(&tripode, isbn, ""), Some(PageMatch::Isbn));
+        // Minuit: three formats, and a list of years that, its spaces gone,
+        // would read as an ISBN.
+        let years: String = (1960..2000).map(|y| format!("<a>{y}</a> ")).collect();
+        let minuit = format!(
+            "<p>752 pages ISBN : {isbn}</p><p>ISBN PDF : 9782707356765 ePub : 9782707356758</p>{years}"
+        );
+        assert_eq!(page_matches(&minuit, isbn, ""), Some(PageMatch::Isbn));
+        // Actes Sud: four editions, each after its EAN.
+        let actes: String = [isbn, "9782330186463", "9782330161309", "9782330161316"]
+            .iter()
+            .map(|i| format!("<li>EAN {i}</li>"))
+            .collect();
+        assert_eq!(page_matches(&actes, isbn, ""), Some(PageMatch::Isbn));
+        // The book's own page with its other formats: declared, it counts.
+        let own = format!(
+            r#"<script type="application/ld+json">{{"@type":"Book","isbn":"{isbn}"}}</script>
+            <p>Aussi disponible en poche : ISBN 9782070999999</p>"#
+        );
+        assert_eq!(page_matches(&own, isbn, ""), Some(PageMatch::Isbn));
     }
 
     #[test]
@@ -1249,5 +1428,26 @@ mod tests {
             forms[1].action.as_str(),
             "https://actes-sud.example/index.php?page=recherche"
         );
+    }
+
+    #[test]
+    fn search_forms_leave_one_time_tokens_out() {
+        let html = r#"<form action="/livres/?_wpnonce=3fb3f73e44">
+            <input type="hidden" name="_wp_http_referer" value="/">
+            <input type="hidden" name="swpmfe" value="652ea0d21b1427a1bfa685e40d9bc1de">
+            <input type="hidden" name="lang" value="fr">
+            <input type="text" name="_search_catalog" placeholder="Rechercher"></form>"#;
+        let forms = search_forms(html, &url("https://mortagne.example/"));
+        assert_eq!(
+            forms[0].fields,
+            [
+                ("lang".into(), "fr".into()),
+                ("_search_catalog".into(), "{q}".into())
+            ]
+        );
+        // Neither a year, an ISBN nor a word is a token.
+        for value in ["2024", "9782070123452", "romans", "{q}"] {
+            assert!(!is_one_time_token("x", value), "{value}");
+        }
     }
 }

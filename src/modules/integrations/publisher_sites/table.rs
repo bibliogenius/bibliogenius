@@ -325,6 +325,40 @@ pub struct ProbeReport {
     pub checks: BTreeMap<String, RecipeCheck>,
 }
 
+impl ProbeReport {
+    /// The report as `probe.json` keeps it: valid JSON, one site per line,
+    /// sites in key order. A probe or a check rewrites only the lines of the
+    /// sites it looked at, and the history shows which ones changed.
+    pub fn to_json_by_site(&self) -> serde_json::Result<String> {
+        fn section<V: Serialize>(
+            out: &mut String,
+            name: &str,
+            map: &BTreeMap<String, V>,
+        ) -> serde_json::Result<()> {
+            out.push_str(&format!("{}: {{\n", serde_json::to_string(name)?));
+            let lines: Vec<String> = map
+                .iter()
+                .map(|(k, v)| {
+                    Ok(format!(
+                        "{}: {}",
+                        serde_json::to_string(k)?,
+                        serde_json::to_string(v)?
+                    ))
+                })
+                .collect::<serde_json::Result<_>>()?;
+            out.push_str(&lines.join(",\n"));
+            out.push_str("\n}");
+            Ok(())
+        }
+        let mut out = String::from("{\n");
+        section(&mut out, "sites", &self.sites)?;
+        out.push_str(",\n");
+        section(&mut out, "checks", &self.checks)?;
+        out.push_str("\n}\n");
+        Ok(out)
+    }
+}
+
 /// One publisher as Wikidata knows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WikidataPublisher {
@@ -476,5 +510,48 @@ mod tests {
         let t = table();
         let json = serde_json::to_string(&t).unwrap();
         assert_eq!(serde_json::from_str::<PublisherTable>(&json).unwrap(), t);
+    }
+
+    #[test]
+    fn the_probe_report_is_written_one_site_per_line() {
+        let probe = |home: &str| SiteProbe {
+            home: home.into(),
+            status: ProbeStatus::Ok,
+            probed_at: "2026-11-15".into(),
+            note: None,
+            witnesses: Vec::new(),
+            product: None,
+            search: None,
+            tried: Vec::new(),
+            book_sitemap: None,
+            sitemap: None,
+        };
+        let report = ProbeReport {
+            sites: BTreeMap::from([
+                ("b.example".into(), probe("https://b.example/")),
+                ("a.example".into(), probe("https://a.example/")),
+            ]),
+            checks: BTreeMap::new(),
+        };
+        let text = report.to_json_by_site().unwrap();
+        assert_eq!(serde_json::from_str::<ProbeReport>(&text).unwrap(), report);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[2].starts_with("\"a.example\": {"), "{text}");
+        assert!(lines[3].starts_with("\"b.example\": {"), "{text}");
+        assert_eq!(lines.len(), 9, "{text}");
+        // The committed file is in the form the tool writes: the next probe
+        // rewrites only the sites it looks at.
+        let committed = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/data/publisher_sites/probe.json"
+        ));
+        let read: ProbeReport = serde_json::from_str(committed).unwrap();
+        assert!(read.to_json_by_site().unwrap() == committed);
+        // Nothing yet: still valid JSON.
+        let empty = ProbeReport::default().to_json_by_site().unwrap();
+        assert_eq!(
+            serde_json::from_str::<ProbeReport>(&empty).unwrap(),
+            ProbeReport::default()
+        );
     }
 }

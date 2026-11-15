@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use url::Url;
 
-use super::page::bare_host;
+use super::page::{bare_host, sent_token};
 use super::table::{
     MAX_UNREACHABLE_CHECKS, Overrides, PrefixEntry, PrefixPublisher, ProbeReport, ProbeStatus,
     PublisherTable, RecipeKind, SITEMAP_RECIPES, SiteOverride, SiteRecipes, TABLE_FORMAT,
@@ -309,6 +309,11 @@ fn assemble(
                 probed
                     .and_then(|p| p.search.as_ref())
                     .map(|c| c.recipe.clone())
+                    // Probed before the probe left such tokens out: the
+                    // recipe breaks once the token expires.
+                    .filter(|r| {
+                        sent_token(&r.url, r.post_fields.as_deref().unwrap_or_default()).is_none()
+                    })
             });
         let sitemap = probed
             .and_then(|p| p.sitemap.as_ref())
@@ -605,6 +610,53 @@ mod tests {
         assert_eq!(
             table.site_for("9782220000000", None).unwrap().0,
             "albin-michel.fr"
+        );
+    }
+
+    #[test]
+    fn a_probed_search_that_sends_a_one_time_token_is_not_shipped() {
+        use crate::modules::integrations::publisher_sites::table::{SearchCheck, SearchRecipe};
+        let wikidata = vec![publisher(
+            "Q1",
+            "Parent",
+            &["97820"],
+            Some("https://parent.example/"),
+        )];
+        let searching = |url: &str| SiteProbe {
+            product: None,
+            search: Some(SearchCheck {
+                recipe: SearchRecipe {
+                    url: url.into(),
+                    post_fields: None,
+                    by_isbn: true,
+                },
+                found_by_isbn: 1,
+                found_by_title: 0,
+                js_results: false,
+                broken: false,
+                note: None,
+            }),
+            ..ok_probe("https://parent.example/", "")
+        };
+        let built = |probe: SiteProbe| {
+            let probe = ProbeReport {
+                sites: BTreeMap::from([("parent.example".into(), probe)]),
+                checks: BTreeMap::new(),
+            };
+            build_table(&wikidata, &probe, &Overrides::default(), "d")
+        };
+        assert!(
+            built(searching(
+                "https://parent.example/livres/?_wpnonce=3fb3f73e44&q={q}"
+            ))
+            .sites
+            .is_empty()
+        );
+        assert_eq!(
+            built(searching("https://parent.example/livres/?q={q}"))
+                .sites
+                .len(),
+            1
         );
     }
 

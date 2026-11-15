@@ -15,9 +15,8 @@ use url::Url;
 use super::fetch::{FetchError, Page, SiteFetcher};
 use super::lookup::{MAX_PRODUCT_TRIES, MAX_RESULT_LINKS, shows_isbn};
 use super::page::{page_matches, result_links, sitemap_book_links, sitemap_locs};
-use super::probe::{
-    CONTROL_QUERY, MAX_SITEMAP_CANDIDATES, product_urls, redirected_to_book, run_search,
-};
+use super::probe::CONTROL_QUERY;
+use super::recipes::{MAX_SITEMAP_CANDIDATES, product_urls, redirected_to_book, run_search};
 use super::table::{
     CheckStatus, ProbeStatus, ProductRecipe, RecipeCheck, RecipeKind, SearchRecipe, SiteOverride,
     SiteProbe, SiteRecipes, SitemapRecipe, Witness,

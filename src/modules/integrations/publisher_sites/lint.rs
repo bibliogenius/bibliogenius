@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use url::Url;
 
-use super::page::names_the_site;
+use super::page::{names_the_site, sent_token};
 use super::table::{
     CheckStatus, ProbeReport, ProbeStatus, PublisherTable, RecipeKind, SiteRecipes,
 };
@@ -40,12 +40,15 @@ pub enum Rule {
     /// No conclusive success for a long time: neither a probe that found the
     /// recipe nor a check that passed.
     Stale,
+    /// A recipe that sends a token the site issued for one visit
+    /// (`_wpnonce`, a CSRF token): it breaks once the token expires.
+    OneTimeToken,
 }
 
 impl Rule {
     pub fn severity(self) -> Severity {
         match self {
-            Rule::FrozenNumber | Rule::SiteNameTitle => Severity::Error,
+            Rule::FrozenNumber | Rule::SiteNameTitle | Rule::OneTimeToken => Severity::Error,
             Rule::FixedSection | Rule::SitemapTruncated | Rule::Stale => Severity::Warning,
         }
     }
@@ -57,6 +60,7 @@ impl Rule {
             Rule::FixedSection => "fixed-section",
             Rule::SitemapTruncated => "sitemap-truncated",
             Rule::Stale => "stale",
+            Rule::OneTimeToken => "one-time-token",
         }
     }
 }
@@ -90,6 +94,7 @@ pub fn lint(table: &PublisherTable, probe: &ProbeReport, today: &str) -> Vec<Fin
     let mut out = Vec::new();
     for (key, recipes) in &table.sites {
         lint_recipes(key, recipes, &mut out);
+        lint_tokens(key, recipes, &mut out);
         if let Some(p) = probe.sites.get(key) {
             if let (Some(map), Some(check)) = (&recipes.sitemap, &p.sitemap)
                 && check.truncated
@@ -166,6 +171,29 @@ fn lint_recipes(key: &str, recipes: &SiteRecipes, out: &mut Vec<Finding>) {
             });
             return;
         }
+    }
+}
+
+/// A recipe that sends a token the site issued for one visit
+/// ([`is_one_time_token`]): a search's query parameters or POST fields, a
+/// product template's query.
+fn lint_tokens(key: &str, recipes: &SiteRecipes, out: &mut Vec<Finding>) {
+    let token = recipes
+        .search
+        .as_ref()
+        .and_then(|s| sent_token(&s.url, s.post_fields.as_deref().unwrap_or_default()))
+        .or_else(|| {
+            recipes
+                .product
+                .as_ref()
+                .and_then(|p| sent_token(&p.template, &[]))
+        });
+    if let Some(name) = token {
+        out.push(Finding {
+            site: key.to_owned(),
+            rule: Rule::OneTimeToken,
+            detail: format!("the recipe sends {name}, a token issued for one visit"),
+        });
     }
 }
 
@@ -407,6 +435,60 @@ mod tests {
 
     fn rules(findings: &[Finding]) -> Vec<(&str, Rule)> {
         findings.iter().map(|f| (f.site.as_str(), f.rule)).collect()
+    }
+
+    #[test]
+    fn flags_a_recipe_that_sends_a_one_time_token() {
+        let searching = |url: &str, post: Option<Vec<(String, String)>>| SiteRecipes {
+            search: Some(SearchRecipe {
+                url: url.into(),
+                post_fields: post,
+                by_isbn: true,
+            }),
+            ..site(None)
+        };
+        // The two the first probe shipped, a POST with a CSRF field, and a
+        // plain search.
+        let t = table(&[
+            (
+                "mortagne.example",
+                searching(
+                    "https://e.example/livres/?_wpnonce=3fb3f73e44&_wp_http_referer=%2F&_search_catalog={q}",
+                    None,
+                ),
+            ),
+            (
+                "montagne.example",
+                searching(
+                    "https://e.example/?swpmfe=652ea0d21b1427a1bfa685e40d9bc1de&s={q}",
+                    None,
+                ),
+            ),
+            (
+                "post.example",
+                searching(
+                    "https://e.example/recherche",
+                    Some(vec![
+                        ("csrf_token".into(), "x".into()),
+                        ("q".into(), "{q}".into()),
+                    ]),
+                ),
+            ),
+            (
+                "plain.example",
+                searching("https://e.example/recherche?lang=fr&year=2024&q={q}", None),
+            ),
+        ]);
+        let found = lint(&t, &ProbeReport::default(), "2026-11-15");
+        assert_eq!(
+            rules(&found),
+            [
+                ("montagne.example", Rule::OneTimeToken),
+                ("mortagne.example", Rule::OneTimeToken),
+                ("post.example", Rule::OneTimeToken),
+            ]
+        );
+        assert_eq!(Rule::OneTimeToken.severity(), Severity::Error);
     }
 
     #[test]

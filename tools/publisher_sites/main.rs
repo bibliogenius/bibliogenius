@@ -37,12 +37,13 @@ use rust_lib_app::modules::integrations::publisher_sites::build::{
 use rust_lib_app::modules::integrations::publisher_sites::check::{
     CheckResult, after_reprobe, check_recipes, keeps_previous, next_record,
 };
+use rust_lib_app::modules::integrations::publisher_sites::cover::{PageCoverError, page_cover};
 use rust_lib_app::modules::integrations::publisher_sites::fetch::{
     FetchError, PoliteFetcher, SiteFetcher,
 };
 use rust_lib_app::modules::integrations::publisher_sites::lint::{Severity, diff, lint};
 use rust_lib_app::modules::integrations::publisher_sites::lookup::{
-    BookQuery, Lookup, SitemapCache, cover_images, find_book_page,
+    BookQuery, Lookup, SitemapCache, find_book_page_within,
 };
 use rust_lib_app::modules::integrations::publisher_sites::probe::{find_witnesses, probe_site};
 use rust_lib_app::modules::integrations::publisher_sites::table::{
@@ -217,6 +218,15 @@ fn read_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T, String> {
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     let mut text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     text.push('\n');
+    write_text(path, text)
+}
+
+/// `probe.json`, one site per line: see [`ProbeReport::to_json_by_site`].
+fn write_probe(path: &Path, report: &ProbeReport) -> Result<(), String> {
+    write_text(path, report.to_json_by_site().map_err(|e| e.to_string())?)
+}
+
+fn write_text(path: &Path, text: String) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
@@ -408,7 +418,7 @@ async fn cmd_probe(paths: &Paths, flags: &Flags) -> Result<(), String> {
                     report.sites.insert(key, result);
                 }
                 // Saved after every site: a long run can be stopped and resumed with --new.
-                write_json(&paths.probe(), &*report)
+                write_probe(&paths.probe(), &report)
             }
         })
         .buffer_unordered(workers)
@@ -714,7 +724,7 @@ async fn run_checks(
                     probe.witnesses = fresh;
                 }
                 report.checks.insert(key, record);
-                write_json(&paths.probe(), &*report)
+                write_probe(&paths.probe(), &report)
             }
         })
         .buffer_unordered(workers)
@@ -1043,6 +1053,10 @@ async fn cmd_measure(paths: &Paths, flags: &Flags) -> Result<(), String> {
     Ok(())
 }
 
+/// Longest one book's lookup runs in a measure, its wait for its turn on a
+/// host shared with other books included.
+const MEASURE_BUDGET: Duration = Duration::from_secs(15 * 60);
+
 async fn measure_one(
     fetcher: &PoliteFetcher,
     table: &PublisherTable,
@@ -1070,7 +1084,11 @@ async fn measure_one(
         authors: book.authors,
         publisher: book.publisher,
     };
-    match find_book_page(fetcher, table, &query, maps).await {
+    // The books of one host wait for each other's turn there (Gallmeister
+    // asks 10 s between two requests): the app's deadline would measure the
+    // queue, not the recipes.
+    match find_book_page_within(fetcher, table, &query, maps, MEASURE_BUDGET).await {
+        Lookup::InvalidIsbn => m.outcome = "bad_isbn",
         Lookup::NoSite => m.outcome = "no_site",
         Lookup::NotFound {
             sites,
@@ -1097,61 +1115,21 @@ async fn measure_one(
             }
             .into();
             m.page = page.url.to_string();
-            let (mut forbidden, mut broken) = (false, false);
-            for image in cover_images(&page, &isbn) {
-                match load_image(fetcher, &image).await {
-                    ImageLoad::Loads => {
-                        m.image = image.to_string();
-                        break;
-                    }
-                    // The site does not want us to have its cover: no other
-                    // image of the page stands in for it.
-                    ImageLoad::Forbidden => {
-                        forbidden = true;
-                        break;
-                    }
-                    ImageLoad::Broken => broken = true,
+            // The image as the app takes it: robots.txt, the pause, and an
+            // image the app's pipeline can decode.
+            m.outcome = match page_cover(fetcher, &page, &isbn).await {
+                Ok(cover) => {
+                    m.image = cover.image_url;
+                    "found"
                 }
-            }
-            m.outcome = if !m.image.is_empty() {
-                "found"
-            } else if forbidden {
-                "image_forbidden"
-            } else if broken {
-                "image_broken"
-            } else {
-                "no_image"
+                Err(PageCoverError::Forbidden) => "image_forbidden",
+                Err(PageCoverError::Broken) => "image_broken",
+                Err(PageCoverError::Unreachable) => "unreachable",
+                Err(PageCoverError::NoImage) => "no_image",
             };
         }
     }
     m
-}
-
-#[derive(PartialEq, Eq)]
-enum ImageLoad {
-    Loads,
-    /// robots.txt forbids it, the server refuses us, or its robots.txt
-    /// cannot be read.
-    Forbidden,
-    /// Gone, or an error.
-    Broken,
-}
-
-/// Load an image as the app would: through the polite fetcher, so that
-/// robots.txt and the pause apply.
-async fn load_image(fetcher: &PoliteFetcher, image: &Url) -> ImageLoad {
-    match fetcher.get(image).await {
-        Ok(_) => ImageLoad::Loads,
-        // Forbidden by robots.txt, or refused (403, 429): either way the
-        // site does not want us to have it.
-        Err(FetchError::Disallowed | FetchError::Blocked(_)) => ImageLoad::Forbidden,
-        Err(FetchError::Network) => match fetcher.robots_for(image).await {
-            Ok(robots) if robots.is_unreachable() => ImageLoad::Forbidden,
-            Err(FetchError::Blocked(_)) => ImageLoad::Forbidden,
-            _ => ImageLoad::Broken,
-        },
-        Err(_) => ImageLoad::Broken,
-    }
 }
 
 fn escape_html(s: &str) -> String {

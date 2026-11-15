@@ -15,11 +15,13 @@
 
 pub mod build;
 pub mod check;
+pub mod cover;
 pub mod fetch;
 pub mod lint;
 pub mod lookup;
 pub mod page;
 pub mod probe;
+pub mod recipes;
 pub mod robots;
 pub mod table;
 pub mod text;

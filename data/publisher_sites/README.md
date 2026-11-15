@@ -23,7 +23,17 @@ recipe that leads from an ISBN to the book's page. Code:
 - A publisher that asks to be left out gets `"excluded": true` in `overrides.json`.
 - Only public https addresses are fetched; an http link is tried over https.
   Redirects are followed one hop at a time, robots.txt and the pause applying
-  to each.
+  to each. robots.txt paths and patterns are compared normalized (RFC 9309):
+  `Disallow: /recherche-avancée` matches `/recherche-avanc%C3%A9e`.
+- A host that turned us away once (429, a firewall's rejection page) is
+  not asked again in the same run: asking again over many books is what gets
+  an address banned.
+- One lookup lasts 60 s at most in the app (`LOOKUP_DEADLINE`); the sites not
+  done with by then are `unreachable`. The app also leaves alone a site whose
+  Crawl-delay is longer than it can wait behind a click. `measure` gives each
+  book 15 minutes: its books of one host wait for each other's turn there
+  (Gallmeister asks 10 s between two requests), and the app's deadline would
+  measure that queue rather than the recipes.
 
 ## Refreshing the table (before a release)
 
@@ -41,8 +51,12 @@ cargo build --release --bin publisher_sites
 
 `lint` reads the table and `probe.json` only, and fails on an error: a
 product template with one book's number frozen in it (`/2043-{slug}-{isbn}.html`,
-five digits or more, or three glued to a placeholder), or a witness titled
-after the site (its page's title was not read). Its warnings are templates
+five digits or more, or three glued to a placeholder), a witness titled
+after the site (its page's title was not read), or a recipe that sends a
+token issued for one visit (`_wpnonce`, a CSRF field, a long hex value),
+which breaks once the token expires: the probe leaves such fields out of the
+recipes it writes, and `build` does not ship an older probe's recipe that
+has one. Its warnings are templates
 with a fixed section of three words or more, which serve that section only,
 site maps cut at the 2 MB page cap when probed (the books listed after the
 cut are out of reach), and sites without a conclusive success for 120 days. Fix an error with a
@@ -54,7 +68,9 @@ before committing a new table rather than the JSON diff.
 sites whose last probe ended so), `--limit N`, `--workers N` (sites probed at
 once, default 12), `--pause SECS` (between two requests to one host, default
 1.5, more when the site's Crawl-delay asks). `probe.json` is saved after every
-site, so a run can be stopped and resumed with `--new`. A whole run takes a
+site, so a run can be stopped and resumed with `--new`. It is written one site
+per line, in key order, so its history shows which sites a probe or a check
+changed; a test keeps the committed file in that form. A whole run takes a
 few hours: about 100 requests per site. A probe that finds a site blocked or
 offline keeps the site's last successful probe: a bad day says nothing about
 its recipes, and the checks take a site that stays out of reach out of the
@@ -179,9 +195,22 @@ the caller to try in turn.
 
 `FILE` is a JSON list of books (`isbn`, `title`, `authors`, `publisher`, and
 `cover_url`, the cover the library has). Each book is looked for as the app
-will (`publisher_sites::lookup`): the sites of its ISBN prefix, each recipe in
-turn, a page taken only when it shows the ISBN, then the cover image, loaded
-through the same polite client. The contact sheet (`index.html`, served like
+will (`publisher_sites::lookup`, then `publisher_sites::cover`): the sites of
+its ISBN prefix, each recipe in turn, a page taken only when it shows the
+ISBN as its book's, then the cover image, loaded through the same polite
+client and checked as the app checks it.
+
+A page shows the ISBN as its book's when its JSON-LD or ISBN metadata give
+it, among six ISBNs at most; a page whose JSON-LD gives other ISBNs only is
+another edition's, whatever its text says. Without such metadata, the visible
+text must print it other than as a search's echo ("Aucun résultat pour
+« 978... »": search words just before it, no `ISBN`/`EAN`/`GTIN` label),
+among six ISBNs at most, counted as numbers of their own (a list of years
+loses its spaces into a fake ISBN otherwise). A series page prints every
+volume's; a book's page prints its other editions too (Actes Sud four,
+Minuit three), and some print it with no label at all (Le Tripode, Picquier):
+an earlier rule asking for the label, or for three ISBNs at most, lost 25 of
+137 covers on the reference measure. The contact sheet (`index.html`, served like
 the report) shows each cover found beside the library's: a wrong cover is the
 failure that counts, and only an eye finds it. The results stay in `target/`:
 they hold the titles of someone's library.

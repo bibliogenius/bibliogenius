@@ -294,7 +294,7 @@ fn check_usable_image(bytes: &[u8]) -> Result<(), WebCoverError> {
 /// [`check_usable_image`] off the async runtime's worker threads: walking
 /// the chunks of a PNG up to the input cap is CPU work, like parsing the
 /// page. The bytes come back for the caller to keep.
-async fn check_usable_image_blocking(bytes: Vec<u8>) -> Result<Vec<u8>, WebCoverError> {
+pub(crate) async fn check_usable_image_blocking(bytes: Vec<u8>) -> Result<Vec<u8>, WebCoverError> {
     tokio::task::spawn_blocking(move || check_usable_image(&bytes).map(|()| bytes))
         .await
         .map_err(|_| WebCoverError::UnsupportedImage)?
@@ -565,12 +565,18 @@ const BOOK_WORDS: [&str; 5] = ["book", "livre", "ouvrage", "product", "produit"]
 /// ones describe it, the farther ones the whole page.
 const NAMED_CONTAINERS: usize = 3;
 
-/// The id and class words of an element, lowercase, plurals made singular.
+/// Bytes of an id or a class read for its words. Real ones are a few dozen;
+/// a page with one huge class around hundreds of images would otherwise cost
+/// seconds of CPU.
+const MAX_NAME_BYTES: usize = 256;
+
+/// The id and class words of an element, lowercase, plurals made singular,
+/// from the first [`MAX_NAME_BYTES`] of each.
 fn name_words(e: &scraper::node::Element) -> Vec<String> {
     [e.attr("id"), e.attr("class")]
         .into_iter()
         .flatten()
-        .flat_map(|text| text.split(|c: char| !c.is_alphanumeric()))
+        .flat_map(|text| capped(text, MAX_NAME_BYTES).split(|c: char| !c.is_alphanumeric()))
         .filter(|t| !t.is_empty())
         .map(|t| {
             let t = t.to_lowercase();
@@ -579,8 +585,17 @@ fn name_words(e: &scraper::node::Element) -> Vec<String> {
         .collect()
 }
 
-fn names_one_of(e: &scraper::node::Element, words: &[&str]) -> bool {
-    name_words(e).iter().any(|w| words.contains(&w.as_str()))
+/// The first `max` bytes of `s`, cut on a character boundary.
+fn capped(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn has_one_of(names: &[String], words: &[&str]) -> bool {
+    names.iter().any(|w| words.contains(&w.as_str()))
 }
 
 /// `img` and its [`NAMED_CONTAINERS`] closest containers.
@@ -604,19 +619,21 @@ enum ImgMark {
 }
 
 fn img_mark(img: &scraper::ElementRef) -> ImgMark {
-    let names_book =
-        |e: &scraper::node::Element| names_one_of(e, &COVER_WORDS) || names_one_of(e, &BOOK_WORDS);
+    // The words of the image, then of its containers, read once.
+    let names: Vec<Vec<String>> = img_and_containers(img).map(name_words).collect();
+    let own = names.first().map(Vec::as_slice).unwrap_or_default();
+    let names_book = |w: &[String]| has_one_of(w, &COVER_WORDS) || has_one_of(w, &BOOK_WORDS);
     // Its own id or class saying "logo" settles it, whatever its container.
-    if names_one_of(img.value(), &CHROME_WORDS) && !names_book(img.value()) {
+    if has_one_of(own, &CHROME_WORDS) && !names_book(own) {
         return ImgMark::Site;
     }
-    if img_and_containers(img).any(|e| names_one_of(e, &COVER_WORDS)) {
+    if names.iter().any(|w| has_one_of(w, &COVER_WORDS)) {
         return ImgMark::Cover;
     }
-    if is_site_chrome(img) {
+    if is_site_chrome(img, &names) {
         return ImgMark::Site;
     }
-    if img_and_containers(img).any(|e| names_one_of(e, &BOOK_WORDS)) {
+    if names.iter().any(|w| has_one_of(w, &BOOK_WORDS)) {
         return ImgMark::Book;
     }
     ImgMark::None
@@ -627,14 +644,15 @@ fn img_mark(img: &scraper::ElementRef) -> ImgMark {
 /// or `<footer>` (an `<article>` or `<main>` has headers of its own, which
 /// hold content), or in a close container named so (`<div class="logo">`,
 /// `<div class="header-image">`) and not also after the book
-/// (`<div class="book-header">` holds the book).
-fn is_site_chrome(img: &scraper::ElementRef) -> bool {
-    let names: Vec<&str> = img
+/// (`<div class="book-header">` holds the book). `names` are the words of
+/// `img` and of its containers, as [`img_mark`] read them.
+fn is_site_chrome(img: &scraper::ElementRef, names: &[Vec<String>]) -> bool {
+    let tags: Vec<&str> = img
         .ancestors()
         .filter_map(|node| node.value().as_element().map(|e| e.name()))
         .collect();
-    let in_content = names.iter().any(|n| matches!(*n, "article" | "main"));
-    let in_chrome = names
+    let in_content = tags.iter().any(|n| matches!(*n, "article" | "main"));
+    let in_chrome = tags
         .iter()
         .any(|n| matches!(*n, "header" | "nav" | "footer"));
     if in_chrome && !in_content {
@@ -642,10 +660,8 @@ fn is_site_chrome(img: &scraper::ElementRef) -> bool {
     }
     // Inside an article, a container named "header" is the article's.
     let containers = if in_content { 1 } else { 1 + NAMED_CONTAINERS };
-    img_and_containers(img).take(containers).any(|e| {
-        names_one_of(e, &CHROME_WORDS)
-            && !names_one_of(e, &COVER_WORDS)
-            && !names_one_of(e, &BOOK_WORDS)
+    names.iter().take(containers).any(|w| {
+        has_one_of(w, &CHROME_WORDS) && !has_one_of(w, &COVER_WORDS) && !has_one_of(w, &BOOK_WORDS)
     })
 }
 
@@ -1682,5 +1698,38 @@ mod tests {
             first(html).as_deref(),
             Some("https://example.org/media/le-livre.jpg")
         );
+    }
+
+    #[test]
+    fn a_huge_class_around_many_images_is_read_in_bounded_time() {
+        // One class of 200 KB around 200 images: every image reads its three
+        // containers, and unbounded that was seconds of CPU.
+        let class = "x ".repeat(100_000);
+        let imgs: String = (0..200)
+            .map(|i| format!(r#"<img src="/i/{i}.jpg" width="400">"#))
+            .collect();
+        let html = format!(r#"<div class="{class}"><div><div>{imgs}</div></div></div>"#);
+        let started = std::time::Instant::now();
+        let all = extract_cover_candidates(&html, &page());
+        assert_eq!(all.len(), 200);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_word_past_the_name_cap_is_not_read() {
+        let padding = "x".repeat(MAX_NAME_BYTES);
+        let html = format!(
+            r#"<img src="/a.jpg" width="400"><img class="{padding} cover" src="/b.jpg" width="400">"#
+        );
+        // "cover" sits past the cap: the second image is not promoted.
+        assert_eq!(
+            first(&html).as_deref(),
+            Some("https://www.editions-exemple.fr/a.jpg")
+        );
+        assert_eq!(capped("é", 1), "");
     }
 }
