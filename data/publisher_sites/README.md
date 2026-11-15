@@ -218,6 +218,14 @@ Of the rest: 61 not found on the sites (old ISBNs, mostly), 13 covers
 forbidden by robots.txt, 12 books without a site in the table, 3 pages
 without a usable image.
 
+The whole library, 2026-11-15: 596 books, no cap per publisher, **326
+covers found, none wrong**. 94 of them are for books that neither Inventaire
+nor Open Library has a cover for. Of the rest: 159 not found on the sites,
+59 books without a site in the table, 21 covers forbidden by robots.txt,
+14 refused (J'ai lu and Flammarion rate-limiting a third pass), 10 invalid
+ISBNs, 7 pages without a usable image. A cover that looks like another
+edition was, each time, the right cover for a wrong ISBN in the library.
+
 ## What the first full probe taught (November 2026)
 
 - A site reported `offline` is rarely a passing failure: probed again a day
