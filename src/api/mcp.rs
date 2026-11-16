@@ -99,7 +99,10 @@ enum ProxyError {
     /// The app is up and accepted the token, but the user turned MCP off in the
     /// settings. Not a connectivity failure: the cached address stays valid.
     ModuleDisabled,
-    /// Unreachable app, rejected token, or unexpected reply.
+    /// The app is up but refused the token (missing or stale configuration). Not
+    /// a connectivity failure either: the cached address stays valid.
+    TokenRejected,
+    /// Unreachable app or unexpected reply.
     Failed(String),
 }
 
@@ -130,10 +133,7 @@ async fn proxy_to_app(
         .map_err(|e| ProxyError::Failed(e.to_string()))?;
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(ProxyError::Failed(
-            "the app rejected the MCP token: re-copy the configuration from BiblioGenius settings"
-                .to_string(),
-        ));
+        return Err(ProxyError::TokenRejected);
     }
 
     if resp.status() == reqwest::StatusCode::FORBIDDEN {
@@ -163,19 +163,29 @@ async fn proxy_to_app(
 }
 
 /// What the assistant receives while MCP is turned off in the app.
+#[cfg(feature = "mcp")]
+const MODULE_DISABLED_GUIDANCE: &str = "MCP access is turned off in BiblioGenius. \
+    Ask the user to turn on \"AI Assistants (MCP)\" in the app settings; \
+    the existing configuration will work again without being re-copied.";
+
+/// What the assistant receives when the running app refuses the token. It must
+/// not mention reachability: the app is open, only the configuration is stale.
+#[cfg(feature = "mcp")]
+const TOKEN_REJECTED_GUIDANCE: &str = "BiblioGenius is open but rejected the MCP token. \
+    Ask the user to re-copy the configuration from BiblioGenius settings \
+    (AI Assistants (MCP)) into the assistant, then restart the assistant.";
+
+/// Relay a refusal from a running app so the model can act on it.
 ///
 /// For `tools/call` it is a tool error result rather than a JSON-RPC protocol
 /// error: most clients never surface the latter to the model, which would then
 /// see a silent failure instead of something it can relay to the user.
 #[cfg(feature = "mcp")]
-fn module_disabled_response(id: Option<Value>, method: &str) -> JsonRpcResponse {
-    const MESSAGE: &str = "MCP access is turned off in BiblioGenius. \
-        Ask the user to turn on \"AI Assistants (MCP)\" in the app settings; \
-        the existing configuration will work again without being re-copied.";
+fn app_refusal_response(id: Option<Value>, method: &str, message: &str) -> JsonRpcResponse {
     if method == "tools/call" {
-        success_response(id, mcp_tool_service::error_envelope(MESSAGE))
+        success_response(id, mcp_tool_service::error_envelope(message))
     } else {
-        error_response(id, MESSAGE)
+        error_response(id, message)
     }
 }
 
@@ -435,8 +445,20 @@ async fn dispatch(
 
     match proxy_to_app(client, &base, token, raw_line).await {
         Ok(result) => result,
-        // The app answered: keep the cached address, only report the switch.
-        Err(ProxyError::ModuleDisabled) => Some(module_disabled_response(id, &req.method)),
+        // The app answered: keep the cached address, only report the refusal.
+        Err(ProxyError::ModuleDisabled) => Some(app_refusal_response(
+            id,
+            &req.method,
+            MODULE_DISABLED_GUIDANCE,
+        )),
+        Err(ProxyError::TokenRejected) => {
+            tracing::warn!("MCP: the app rejected the token");
+            Some(app_refusal_response(
+                id,
+                &req.method,
+                TOKEN_REJECTED_GUIDANCE,
+            ))
+        }
         Err(ProxyError::Failed(e)) => {
             // Drop the stale base so the next call rediscovers a restarted (or
             // port-drifted) app instead of retrying a dead address forever.
@@ -672,6 +694,68 @@ mod tests {
         assert!(
             !text.contains("not reachable"),
             "a disabled module is not a connectivity failure: {text}"
+        );
+        assert_eq!(
+            upstream,
+            Some(base),
+            "the app answered, so its address stays cached"
+        );
+    }
+
+    /// Serve a token refusal shaped like `McpAuth`'s on a loopback port.
+    async fn app_rejecting_the_token() -> String {
+        let router = axum::Router::new().route(
+            "/api/mcp/rpc",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({ "error": "Invalid MCP token" })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_tells_the_model_to_recopy_the_configuration() {
+        // The app answered, so the assistant must not be told it is closed: an
+        // assistant keeping only the start of a "not reachable" message sends the
+        // user to open an app that is already running.
+        let base = app_rejecting_the_token().await;
+        let mut upstream = Some(base.clone());
+        let http = Some(reqwest::Client::new());
+        let line =
+            r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_statistics"},"id":1}"#;
+
+        let response = dispatch(
+            serde_json::from_str(line).expect("request"),
+            line,
+            false,
+            &mut upstream,
+            &http,
+            Some("stale-token"),
+        )
+        .await
+        .expect("a response, not silence");
+
+        assert!(response.error.is_none(), "not a protocol error");
+        let result = response.result.expect("tool result");
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().expect("text");
+        assert!(
+            text.contains("re-copy the configuration"),
+            "the model must learn what to do: {text}"
+        );
+        assert!(
+            !text.contains("not reachable"),
+            "a rejected token is not a connectivity failure: {text}"
         );
         assert_eq!(
             upstream,
