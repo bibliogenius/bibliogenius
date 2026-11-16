@@ -1,6 +1,12 @@
 use crate::infrastructure::auth::McpAuth;
+use crate::models::installation_profile::ProfileConfig;
 use crate::services::mcp_tool_service::{self, ToolError};
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -81,16 +87,34 @@ async fn discover_running_app() -> Option<String> {
     None
 }
 
+/// Why a proxied call did not produce a JSON-RPC response.
+#[cfg(feature = "mcp")]
+#[derive(Debug, PartialEq)]
+enum ProxyError {
+    /// The app is up and accepted the token, but the user turned MCP off in the
+    /// settings. Not a connectivity failure: the cached address stays valid.
+    ModuleDisabled,
+    /// Unreachable app, rejected token, or unexpected reply.
+    Failed(String),
+}
+
+/// True when a `403` body is the app's "module disabled" refusal, as opposed to
+/// the loopback or `Origin` refusals that share the status code.
+#[cfg(feature = "mcp")]
+fn is_module_disabled_refusal(body: &Value) -> bool {
+    body.get("error").and_then(|v| v.as_str()) == Some(MCP_DISABLED_MESSAGE)
+}
+
 /// Forward a raw JSON-RPC line to the running app's internal MCP endpoint.
 /// Returns `Ok(None)` for notifications (the app replies 204 No Content), or an
-/// `Err` when the app is unreachable or rejects the token.
+/// `Err` when the app is unreachable, rejects the token, or has MCP turned off.
 #[cfg(feature = "mcp")]
 async fn proxy_to_app(
     client: &reqwest::Client,
     base: &str,
     token: &str,
     raw_line: &str,
-) -> Result<Option<JsonRpcResponse>, String> {
+) -> Result<Option<JsonRpcResponse>, ProxyError> {
     let resp = client
         .post(format!("{}/api/mcp/rpc", base))
         .header("content-type", "application/json")
@@ -98,25 +122,56 @@ async fn proxy_to_app(
         .body(raw_line.to_string())
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ProxyError::Failed(e.to_string()))?;
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(
+        return Err(ProxyError::Failed(
             "the app rejected the MCP token: re-copy the configuration from BiblioGenius settings"
                 .to_string(),
-        );
+        ));
+    }
+
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
+        let status = resp.status();
+        let body = resp.json::<Value>().await.unwrap_or(Value::Null);
+        if is_module_disabled_refusal(&body) {
+            return Err(ProxyError::ModuleDisabled);
+        }
+        return Err(ProxyError::Failed(format!(
+            "upstream returned status {status}"
+        )));
     }
 
     if resp.status() == reqwest::StatusCode::NO_CONTENT {
         return Ok(None);
     }
     if !resp.status().is_success() {
-        return Err(format!("upstream returned status {}", resp.status()));
+        return Err(ProxyError::Failed(format!(
+            "upstream returned status {}",
+            resp.status()
+        )));
     }
     resp.json::<JsonRpcResponse>()
         .await
         .map(Some)
-        .map_err(|e| e.to_string())
+        .map_err(|e| ProxyError::Failed(e.to_string()))
+}
+
+/// What the assistant receives while MCP is turned off in the app.
+///
+/// For `tools/call` it is a tool error result rather than a JSON-RPC protocol
+/// error: most clients never surface the latter to the model, which would then
+/// see a silent failure instead of something it can relay to the user.
+#[cfg(feature = "mcp")]
+fn module_disabled_response(id: Option<Value>, method: &str) -> JsonRpcResponse {
+    const MESSAGE: &str = "MCP access is turned off in BiblioGenius. \
+        Ask the user to turn on \"AI Assistants (MCP)\" in the app settings; \
+        the existing configuration will work again without being re-copied.";
+    if method == "tools/call" {
+        success_response(id, mcp_tool_service::error_envelope(MESSAGE))
+    } else {
+        error_response(id, MESSAGE)
+    }
 }
 
 #[cfg(feature = "mcp")]
@@ -172,17 +227,56 @@ fn tools_list_result() -> Value {
     mcp_tool_service::tools_list()
 }
 
+/// Name of the module the app pushes into `installation_profile.enabled_modules`
+/// when the user turns on the "AI assistants (MCP)" switch.
+const MCP_MODULE: &str = "mcp";
+
+/// Refusal message when the switch is off. The helper recognises it to tell the
+/// assistant why, so the app and the helper must share this exact string.
+pub(crate) const MCP_DISABLED_MESSAGE: &str = "MCP is disabled in BiblioGenius settings";
+
+/// True when the user has turned the MCP module on (ADR-047, fourth condition).
+///
+/// Fail-closed: a missing or unreadable profile counts as disabled.
+pub(crate) async fn mcp_module_enabled(db: &DatabaseConnection) -> bool {
+    match ProfileConfig::load(db).await {
+        Ok(profile) => profile.is_module_enabled(MCP_MODULE),
+        Err(e) => {
+            tracing::warn!("MCP: profile unreadable, treating the module as disabled ({e})");
+            false
+        }
+    }
+}
+
+/// `403` for an authenticated caller while the module is disabled: allowed to
+/// authenticate, not allowed to read. Never `401`, which would send the user to
+/// re-copy a configuration that is still valid.
+pub(crate) fn mcp_disabled_response() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({ "error": MCP_DISABLED_MESSAGE })),
+    )
+        .into_response()
+}
+
 /// Internal HTTP endpoint that lets the standalone `--mcp` helper proxy JSON-RPC
 /// to this running app, which already holds the correctly-initialized database.
 ///
 /// Guarded by [`McpAuth`]: loopback source, no browser `Origin`, and a valid token.
 /// The private library must never be queryable by LAN peers that reach this shared
 /// (0.0.0.0-bound) router, nor by a web page running in the user's own browser.
+///
+/// The module switch is checked here, after `McpAuth` has run, so a caller without
+/// the token cannot learn whether the switch is on.
 pub async fn rpc_endpoint(
     _guard: McpAuth,
     State(db): State<DatabaseConnection>,
     Json(req): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
+    if !mcp_module_enabled(&db).await {
+        return mcp_disabled_response();
+    }
+
     let is_notification = req.id.is_none();
     match handle_request(req, &db, is_notification).await {
         Some(resp) => (StatusCode::OK, Json(resp)).into_response(),
@@ -336,7 +430,9 @@ async fn dispatch(
 
     match proxy_to_app(client, &base, token, raw_line).await {
         Ok(result) => result,
-        Err(e) => {
+        // The app answered: keep the cached address, only report the switch.
+        Err(ProxyError::ModuleDisabled) => Some(module_disabled_response(id, &req.method)),
+        Err(ProxyError::Failed(e)) => {
             // Drop the stale base so the next call rediscovers a restarted (or
             // port-drifted) app instead of retrying a dead address forever.
             *upstream = None;
@@ -504,6 +600,76 @@ mod tests {
         assert!(
             message.contains("re-copy the configuration"),
             "the message must tell the user what to do: {message}"
+        );
+    }
+
+    #[test]
+    fn only_the_module_refusal_is_read_as_module_disabled() {
+        // The loopback and Origin guards also answer 403: those must not be
+        // reported as "turned off in the settings".
+        assert!(is_module_disabled_refusal(
+            &json!({ "error": MCP_DISABLED_MESSAGE })
+        ));
+        assert!(!is_module_disabled_refusal(
+            &json!({ "error": "This endpoint is local-only" })
+        ));
+        assert!(!is_module_disabled_refusal(
+            &json!({ "error": "This endpoint is not callable from a browser" })
+        ));
+        assert!(!is_module_disabled_refusal(&Value::Null));
+    }
+
+    /// Serve the app's real refusal on a loopback port and return its base URL.
+    async fn app_with_mcp_disabled() -> String {
+        let router = axum::Router::new().route(
+            "/api/mcp/rpc",
+            axum::routing::post(|| async { mcp_disabled_response() }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn a_disabled_module_reaches_the_model_as_a_readable_tool_error() {
+        let base = app_with_mcp_disabled().await;
+        let mut upstream = Some(base.clone());
+        let http = Some(reqwest::Client::new());
+        let line =
+            r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_statistics"},"id":1}"#;
+
+        let response = dispatch(
+            serde_json::from_str(line).expect("request"),
+            line,
+            false,
+            &mut upstream,
+            &http,
+            Some("valid-token"),
+        )
+        .await
+        .expect("a response, not silence");
+
+        assert!(response.error.is_none(), "not a protocol error");
+        let result = response.result.expect("tool result");
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().expect("text");
+        assert!(
+            text.contains("turned off in BiblioGenius") && text.contains("settings"),
+            "the model must learn why and what to do: {text}"
+        );
+        assert!(
+            !text.contains("not reachable"),
+            "a disabled module is not a connectivity failure: {text}"
+        );
+        assert_eq!(
+            upstream,
+            Some(base),
+            "the app answered, so its address stays cached"
         );
     }
 

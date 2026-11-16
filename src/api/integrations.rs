@@ -1665,7 +1665,17 @@ fn resolve_backend_binary_path() -> String {
 ///
 /// The helper no longer opens the database, so no `DATABASE_URL` is emitted: the
 /// only environment it needs is the token used to authenticate to the running app.
-pub async fn mcp_config(_guard: LoopbackNoBrowser) -> impl IntoResponse {
+///
+/// No token is handed out while the "AI assistants (MCP)" switch is off (ADR-047,
+/// fourth condition), checked before the token is read.
+pub async fn mcp_config(
+    _guard: LoopbackNoBrowser,
+    State(db): State<DatabaseConnection>,
+) -> impl IntoResponse {
+    if !crate::api::mcp::mcp_module_enabled(&db).await {
+        return crate::api::mcp::mcp_disabled_response();
+    }
+
     let binary_path = resolve_backend_binary_path();
 
     // The running FFI app sets DATABASE_URL to the exact path it uses, which is where
