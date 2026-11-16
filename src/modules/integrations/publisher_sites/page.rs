@@ -11,7 +11,7 @@ use serde_json::Value;
 use url::Url;
 
 use super::text::{find_isbns, fold, strip_isbn_separators, title_words};
-use crate::utils::isbn::to_isbn10;
+use crate::utils::isbn::{to_isbn10, to_isbn13};
 
 /// Deepest JSON-LD nesting walked; deeper values are ignored.
 const MAX_JSON_LD_DEPTH: usize = 8;
@@ -375,10 +375,12 @@ fn split_title_parts(t: &str) -> Vec<String> {
 /// echo the address asked (canonical, og:url, hreflang, a search box's
 /// value): a "not found" page would then pass for the book's.
 struct IsbnEvidence {
-    /// Its JSON-LD and its ISBN, GTIN or EAN metadata: what the page says
-    /// it is about.
-    declared: String,
-    /// Its visible text, which also prints related titles and searches.
+    /// The ISBNs, as ISBN-13, of its main `Book` or `Product` in JSON-LD
+    /// (see [`main_ld_items`]) and of its ISBN, GTIN or EAN metadata: what
+    /// the page says it is about.
+    declared: HashSet<String>,
+    /// Its visible text, lowercased, which also prints related titles and
+    /// searches.
     shown: String,
 }
 
@@ -388,53 +390,81 @@ struct IsbnEvidence {
 /// audio), Minuit three (paper, PDF, ePub).
 const MAX_PAGE_ISBNS: usize = 6;
 
-/// Characters before an ISBN, in the visible text without spaces, where its
-/// label, or the words of a search echoing it, are looked for.
-const ISBN_CONTEXT_REACH: usize = 32;
+/// Bytes on each side of a printed ISBN, in the lowercased visible text,
+/// where the words of a search echoing it are looked for.
+const ISBN_CONTEXT_REACH: usize = 40;
 
-/// Labels an ISBN is printed after on a book's page.
-const ISBN_LABELS: [&str; 3] = ["isbn", "ean", "gtin"];
-
-/// Words before an ISBN that a search answer echoing the query prints
-/// ("Aucun résultat pour « 978... »", "Results for 978..."), lowercase,
-/// accents left out ("sultat" for "résultat").
-const ECHO_WORDS: [&str; 7] = [
+/// Words around an ISBN that a search answer echoing the query prints
+/// ("Aucun résultat pour « 978... »", "Vous avez cherché : 978...",
+/// "978... est introuvable"), lowercase, read with everything but letters
+/// and digits left out. "sultat" stands for "résultat" with or without its
+/// accent. Not "aucun" alone: a book's page prints "Aucun avis" next to its
+/// details.
+const ECHO_WORDS: [&str; 19] = [
     "sultat",
-    "recherch",
+    "cherch",
     "search",
     "result",
-    "aucun",
+    "aucunlivre",
+    "aucunproduit",
+    "aucunouvrage",
+    "aucunarticle",
+    "aucunélément",
+    "aucuneréponse",
+    "aucunecorrespondance",
     "introuvable",
     "notfound",
+    "nothingfound",
+    "nomatch",
+    "0produit",
+    "0livre",
+    "existepas",
+    "pasététrouv",
 ];
 
+/// Elements whose text a reader does not see.
+const UNSEEN: [&str; 5] = ["script", "style", "noscript", "template", "title"];
+
+/// JSON-LD types of a book's page.
+const BOOK_TYPES: [&str; 2] = ["Book", "Product"];
+
+/// JSON-LD keys that hold a book's ISBN.
+const ISBN_KEYS: [&str; 4] = ["isbn", "gtin13", "gtin", "productID"];
+
 fn isbn_evidence(doc: &Html) -> IsbnEvidence {
+    // One walk down the tree carrying whether an unseen element is above:
+    // asking each text node for its ancestors is quadratic in the depth (a
+    // page of unclosed tags nests 250,000 deep).
     let mut shown = String::new();
-    for node in doc.root_element().descendants() {
-        let Some(text) = node.value().as_text() else {
+    let mut stack = vec![(doc.tree.root(), false)];
+    while let Some((node, hidden)) = stack.pop() {
+        if let Some(text) = node.value().as_text() {
+            if !hidden {
+                shown.push_str(text);
+                shown.push(' ');
+            }
             continue;
-        };
-        let hidden = node.ancestors().any(|a| {
-            a.value().as_element().is_some_and(|e| {
-                matches!(
-                    e.name(),
-                    "script" | "style" | "noscript" | "template" | "title"
-                )
-            })
-        });
-        if !hidden {
-            shown.push_str(text);
-            shown.push(' ');
         }
+        let hidden = hidden
+            || node
+                .value()
+                .as_element()
+                .is_some_and(|e| UNSEEN.contains(&e.name()));
+        let first = stack.len();
+        stack.extend(node.children().map(|c| (c, hidden)));
+        stack[first..].reverse();
     }
-    let mut declared = String::new();
-    for script in doc.select(&JSON_LD).filter(|s| {
-        s.value()
-            .attr("type")
-            .is_some_and(|t| t.to_ascii_lowercase().contains("ld+json"))
-    }) {
-        declared.extend(script.text());
-        declared.push(' ');
+    let mut declared = HashSet::new();
+    for item in main_ld_items(doc) {
+        for key in ISBN_KEYS {
+            match item.get(key) {
+                Some(Value::Array(values)) => {
+                    values.iter().for_each(|v| add_declared(&mut declared, v))
+                }
+                Some(v) => add_declared(&mut declared, v),
+                None => {}
+            }
+        }
     }
     for meta in doc.select(&META_CONTENT) {
         let e = meta.value();
@@ -444,70 +474,249 @@ fn isbn_evidence(doc: &Html) -> IsbnEvidence {
             ["isbn", "gtin", "ean"].iter().any(|k| n.contains(k))
         });
         if about_isbn {
-            declared.push_str(e.attr("content").unwrap_or(""));
-            declared.push(' ');
+            add_declared(
+                &mut declared,
+                &Value::String(e.attr("content").unwrap_or("").to_owned()),
+            );
         }
     }
-    IsbnEvidence { declared, shown }
+    IsbnEvidence {
+        declared,
+        shown: shown.to_lowercase(),
+    }
 }
 
-/// Whether the page states `isbn` (13 or 10 digits, printed with or without
-/// separators) as the book it is about:
-/// - when its JSON-LD and ISBN metadata give ISBNs, they decide alone: they
-///   must give `isbn`, among at most [`MAX_PAGE_ISBNS`]. Another edition's
-///   page declares its own, and may print ours under "also available".
-/// - otherwise its visible text must print `isbn` other than as the echo of a
-///   search (a "no result for 978..." page: [`ECHO_WORDS`] just before it,
-///   no [`ISBN_LABELS`]), and print at most [`MAX_PAGE_ISBNS`]: a series
-///   page prints every volume's.
-fn states_isbn(evidence: &IsbnEvidence, isbn: &str) -> bool {
-    let isbn10 = to_isbn10(isbn);
-    let forms: Vec<&str> = std::iter::once(isbn).chain(isbn10.as_deref()).collect();
-    let declared = strip_isbn_separators(&evidence.declared);
-    let declared_isbns = printed_isbns(&evidence.declared);
-    let declares_ours = forms.iter().any(|f| declared.contains(f));
-    if declares_ours || declared_isbns > 0 {
-        return declares_ours && declared_isbns <= MAX_PAGE_ISBNS;
+/// The ISBNs a JSON-LD or metadata value gives (`"978-2-07-…"`,
+/// `"isbn:978…"`, a number), as ISBN-13.
+fn add_declared(declared: &mut HashSet<String>, value: &Value) {
+    let raw = match value {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => return,
+    };
+    // A GTIN-14 pads the EAN-13 with a zero: `09782070123452`.
+    let raw = raw.trim();
+    let raw = if raw.len() > 13 && raw.bytes().all(|b| b.is_ascii_digit()) {
+        raw.trim_start_matches('0')
+    } else {
+        raw
+    };
+    declared.extend(printed_isbns(raw).into_iter().map(|p| p.isbn));
+}
+
+/// The page's main `Book` or `Product` objects in its JSON-LD: those at the
+/// top of a script, in its `@graph`, or the `mainEntity` of one of them.
+/// Not the ones nested deeper: an `ItemList` of related titles, a work's
+/// `workExample` editions, a search page's results.
+fn main_ld_items(doc: &Html) -> Vec<serde_json::Map<String, Value>> {
+    fn objects(v: &Value) -> Vec<&serde_json::Map<String, Value>> {
+        match v {
+            Value::Array(items) => items.iter().filter_map(Value::as_object).collect(),
+            Value::Object(map) => vec![map],
+            _ => Vec::new(),
+        }
     }
-    if printed_isbns(&evidence.shown) > MAX_PAGE_ISBNS {
+    let mut out = Vec::new();
+    let scripts = doc.select(&JSON_LD).filter(|s| {
+        s.value()
+            .attr("type")
+            .is_some_and(|t| t.to_ascii_lowercase().contains("ld+json"))
+    });
+    for script in scripts {
+        let Ok(v) = serde_json::from_str::<Value>(&script.text().collect::<String>()) else {
+            continue;
+        };
+        let mut top = objects(&v);
+        let graphs: Vec<&serde_json::Map<String, Value>> = top
+            .iter()
+            .filter_map(|o| o.get("@graph"))
+            .flat_map(objects)
+            .collect();
+        top.extend(graphs);
+        for o in top {
+            if has_type(o, &BOOK_TYPES) {
+                out.push(o.clone());
+            }
+            if let Some(main) = o.get("mainEntity") {
+                out.extend(
+                    objects(main)
+                        .into_iter()
+                        .filter(|m| has_type(m, &BOOK_TYPES))
+                        .cloned(),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Whether the page states `isbn` (13 or 10 digits) as the book it is about:
+/// - when its main JSON-LD item or its ISBN metadata give ISBNs, they decide
+///   alone: they must give `isbn`, among at most [`MAX_PAGE_ISBNS`]. Another
+///   edition's page declares its own, and may print ours under "also
+///   available".
+/// - otherwise its visible text must print `isbn`, never as the echo of a
+///   search ([`ECHO_WORDS`] just before or after it, whatever label it
+///   has), and print at most [`MAX_PAGE_ISBNS`]: a series page prints every
+///   volume's.
+fn states_isbn(evidence: &IsbnEvidence, isbn: &str) -> bool {
+    let Some(isbn) = isbn13_form(&strip_isbn_separators(isbn)) else {
+        return false;
+    };
+    if !evidence.declared.is_empty() {
+        return evidence.declared.len() <= MAX_PAGE_ISBNS && evidence.declared.contains(&isbn);
+    }
+    let printed = printed_isbns(&evidence.shown);
+    let distinct: HashSet<&str> = printed.iter().map(|p| p.isbn.as_str()).collect();
+    if distinct.len() > MAX_PAGE_ISBNS {
         return false;
     }
-    let shown = strip_isbn_separators(&evidence.shown).to_ascii_lowercase();
-    forms.iter().any(|f| {
-        shown.match_indices(f).any(|(at, _)| {
-            let before = context_before(&shown, at);
-            ISBN_LABELS.iter().any(|l| before.contains(l))
-                || !ECHO_WORDS.iter().any(|w| before.contains(w))
-        })
-    })
+    let mut ours = printed.iter().filter(|p| p.isbn == isbn).peekable();
+    ours.peek().is_some() && ours.all(|p| !echoes_search(&evidence.shown, p))
 }
 
-/// How many distinct ISBN-13 `text` prints as numbers of their own (hyphens
-/// allowed): not a run cut out of a longer one, as a list of years written
-/// one after the other ("1968 1969 1970...") would give once its spaces are
-/// gone.
-fn printed_isbns(text: &str) -> usize {
-    let digits: String = text
-        .chars()
-        .filter(|c| !matches!(c, '-' | '\u{2010}' | '\u{2011}'))
-        .collect();
-    let mut found: Vec<&str> = digits
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|run| run.len() == 13 && (run.starts_with("978") || run.starts_with("979")))
-        .collect();
-    found.sort_unstable();
-    found.dedup();
-    found.len()
+/// An ISBN printed in a text: its ISBN-13 form, and the bytes it spans.
+struct Printed {
+    isbn: String,
+    start: usize,
+    end: usize,
 }
 
-/// The [`ISBN_CONTEXT_REACH`] bytes before byte `at` of `lower`, cut on a
-/// character boundary.
-fn context_before(lower: &str, at: usize) -> &str {
-    let mut start = at.saturating_sub(ISBN_CONTEXT_REACH);
-    while !lower.is_char_boundary(start) {
+/// Characters an ISBN's digit groups are printed apart with.
+fn isbn_separator(c: char) -> bool {
+    matches!(
+        c,
+        ' ' | '-' | '\u{a0}' | '\u{202f}' | '\u{2009}' | '\u{2010}' | '\u{2011}'
+    )
+}
+
+/// At most this many separators between two groups of one ISBN
+/// (`978 - 2 - 07…`).
+const MAX_ISBN_GAP: usize = 3;
+
+/// `digits` (no separators) as an ISBN-13: 13 digits starting with 978 or
+/// 979, as the rest of the module reads them, or an ISBN-10 with a valid
+/// check digit, which ten digits taken at random (a phone number) are not.
+fn isbn13_form(digits: &str) -> Option<String> {
+    match digits.len() {
+        13 if (digits.starts_with("978") || digits.starts_with("979"))
+            && digits.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            Some(digits.to_owned())
+        }
+        10 => to_isbn13(&digits.to_ascii_uppercase()),
+        _ => None,
+    }
+}
+
+/// The ISBNs `text` prints, with or without separators: 13 digits, or an
+/// ISBN-10 (see [`isbn13_form`]), each as a number of its own. A list of
+/// years ("1968 1969 1970...") or a price next to an ISBN is not one.
+fn printed_isbns(text: &str) -> Vec<Printed> {
+    struct Group {
+        start: usize,
+        end: usize,
+        digits: String,
+        joined: bool,
+    }
+    let mut groups: Vec<Group> = Vec::new();
+    // Separators since the last group; `None` once anything else came.
+    let mut gap: Option<usize> = None;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c.is_ascii_digit() {
+            let mut digits = String::from(c);
+            let mut end = i + 1;
+            while let Some(&(j, d)) = chars.peek() {
+                if d.is_ascii_digit() {
+                    digits.push(d);
+                } else if matches!(d, 'x' | 'X') {
+                    digits.push('X');
+                    end = j + 1;
+                    chars.next();
+                    break;
+                } else {
+                    break;
+                }
+                end = j + 1;
+                chars.next();
+            }
+            groups.push(Group {
+                start: i,
+                end,
+                digits,
+                joined: gap.is_some_and(|g| (1..=MAX_ISBN_GAP).contains(&g)),
+            });
+            gap = Some(0);
+        } else if matches!(c, 'x' | 'X')
+            && gap.is_some_and(|g| (1..=MAX_ISBN_GAP).contains(&g))
+            && chars.peek().is_none_or(|&(_, n)| !n.is_alphanumeric())
+        {
+            // The check digit of an ISBN-10 printed apart: `0-8044-2957-X`.
+            groups.push(Group {
+                start: i,
+                end: i + 1,
+                digits: "X".to_owned(),
+                joined: true,
+            });
+            gap = Some(0);
+        } else if isbn_separator(c) {
+            gap = gap.map(|g| g + 1);
+        } else {
+            gap = None;
+        }
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < groups.len() {
+        let mut digits = String::new();
+        // The longest ISBN starting at group `i`: a 13-digit one may begin
+        // with ten digits that read as an ISBN-10.
+        let mut found: Option<(usize, String)> = None;
+        for (j, g) in groups.iter().enumerate().skip(i) {
+            if (j > i && !g.joined) || digits.ends_with('X') {
+                break;
+            }
+            digits.push_str(&g.digits);
+            if digits.len() > 13 {
+                break;
+            }
+            if let Some(isbn) = isbn13_form(&digits) {
+                found = Some((j, isbn));
+            }
+        }
+        match found {
+            Some((j, isbn)) => {
+                out.push(Printed {
+                    isbn,
+                    start: groups[i].start,
+                    end: groups[j].end,
+                });
+                i = j + 1;
+            }
+            None => i += 1,
+        }
+    }
+    out
+}
+
+/// Whether [`ECHO_WORDS`] stand within [`ISBN_CONTEXT_REACH`] bytes of the
+/// ISBN `p` printed in `shown` (lowercase), on either side.
+fn echoes_search(shown: &str, p: &Printed) -> bool {
+    let mut start = p.start.saturating_sub(ISBN_CONTEXT_REACH);
+    while !shown.is_char_boundary(start) {
         start -= 1;
     }
-    &lower[start..at]
+    let mut end = (p.end + ISBN_CONTEXT_REACH).min(shown.len());
+    while !shown.is_char_boundary(end) {
+        end += 1;
+    }
+    [&shown[start..p.start], &shown[p.end..end]]
+        .iter()
+        .any(|side| {
+            let words: String = side.chars().filter(|c| c.is_alphanumeric()).collect();
+            ECHO_WORDS.iter().any(|w| words.contains(w))
+        })
 }
 
 /// Whether the page is the book's: it states the ISBN as its book's (see
@@ -1181,9 +1390,14 @@ mod tests {
         assert_eq!(page_matches(&none, isbn, ""), None);
         // A series page printing every volume's ISBN.
         let series: String = (0..7)
-            .map(|i| format!("<li>Tome {i} · ISBN 978207012345{i}</li>"))
+            .map(|i| {
+                format!(
+                    "<li>Tome {i} · ISBN {}</li>",
+                    with_check(&format!("97820701234{i}"))
+                )
+            })
             .collect();
-        assert_eq!(page_matches(&series, "9782070123452", ""), None);
+        assert_eq!(page_matches(&series, &with_check("978207012340"), ""), None);
         // Another edition's page, which declares its own ISBN and prints
         // ours among the other formats.
         let other = format!(
@@ -1213,6 +1427,132 @@ mod tests {
             <p>Aussi disponible en poche : ISBN 9782070999999</p>"#
         );
         assert_eq!(page_matches(&own, isbn, ""), Some(PageMatch::Isbn));
+    }
+
+    /// `body` (12 digits) followed by its ISBN-13 check digit.
+    fn with_check(body: &str) -> String {
+        let sum: u32 = body
+            .bytes()
+            .enumerate()
+            .map(|(i, b)| u32::from(b - b'0') * if i % 2 == 0 { 1 } else { 3 })
+            .sum();
+        format!("{body}{}", (10 - sum % 10) % 10)
+    }
+
+    #[test]
+    fn a_search_echo_is_never_the_book() {
+        let isbn = "9782070123452";
+        let echoes = [
+            // A label does not outweigh the echo.
+            format!("<p>Aucun résultat pour l'ISBN {isbn}</p>"),
+            format!("<label>Titre, auteur, ISBN</label><p>Aucun résultat pour {isbn}</p>"),
+            format!("<p>Nothing found for {isbn}</p>"),
+            format!("<p>Vous avez cherché : {isbn}</p>"),
+            format!("<p>0 produit pour {isbn}</p>"),
+            // The words after the ISBN.
+            format!("<p>Le livre {isbn} est introuvable.</p>"),
+            format!("<h1>{isbn}</h1><p>Aucun livre ne correspond.</p>"),
+            // An echo anywhere on the page, even if it prints it elsewhere.
+            format!("<p>Vous avez cherché : {isbn}</p><nav>Accueil › {isbn}</nav>"),
+        ];
+        for html in &echoes {
+            assert_eq!(page_matches(html, isbn, ""), None, "{html}");
+        }
+        // A book's page printing its ISBN among its details still counts,
+        // next to its empty reviews too.
+        let book = format!(
+            "<h1>Le Tombeau</h1><ul><li>144 pages</li><li>ISBN : {isbn}</li><li>Parution : mars 2024</li></ul>"
+        );
+        assert_eq!(page_matches(&book, isbn, ""), Some(PageMatch::Isbn));
+        let reviewed = format!("<p>EAN {isbn}</p><h2>Avis</h2><p>Aucun avis.</p>");
+        assert_eq!(page_matches(&reviewed, isbn, ""), Some(PageMatch::Isbn));
+    }
+
+    #[test]
+    fn only_the_main_json_ld_item_declares_the_book() {
+        let isbn = "9782070123452";
+        let ld = |json: &str| format!(r#"<script type="application/ld+json">{json}</script>"#);
+        // The address asked, repeated in the JSON-LD.
+        let echoed = ld(&format!(
+            r#"{{"@type":"SearchResultsPage","url":"https://e.example/isbn/{isbn}","potentialAction":{{"target":"https://e.example/?q={isbn}"}}}}"#
+        ));
+        assert_eq!(page_matches(&echoed, isbn, ""), None);
+        // A list of titles, or a work's editions, ours among them.
+        let list = ld(&format!(
+            r#"{{"@type":"ItemList","itemListElement":[{{"@type":"Book","isbn":"{isbn}"}},{{"@type":"Book","isbn":"9782070999999"}}]}}"#
+        ));
+        assert_eq!(page_matches(&list, isbn, ""), None);
+        let work = ld(&format!(
+            r#"{{"@type":"Book","name":"Le Livre","workExample":[{{"@type":"Book","isbn":"{isbn}"}}]}}"#
+        ));
+        assert_eq!(page_matches(&work, isbn, ""), None);
+        // The page's main item, at the top, in a graph or as its main entity.
+        for json in [
+            format!(r#"[{{"@type":"Organization"}},{{"@type":"Product","gtin13":{isbn}}}]"#),
+            format!(r#"{{"@type":"Product","gtin":"0{isbn}"}}"#),
+            r#"{"@graph":[{"@type":"WebSite"},{"@type":"Book","isbn":"978-2-07-012345-2"}]}"#
+                .to_owned(),
+            format!(
+                r#"{{"@type":"ItemPage","mainEntity":{{"@type":"Book","productID":"isbn:{isbn}"}}}}"#
+            ),
+        ] {
+            assert_eq!(
+                page_matches(&ld(&json), isbn, ""),
+                Some(PageMatch::Isbn),
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn isbns_are_read_however_they_are_printed() {
+        // An ISBN-10 ending in X, found from its ISBN-13.
+        assert_eq!(
+            page_matches("<p>ISBN 0-8044-2957-X</p>", "9780804429573", ""),
+            Some(PageMatch::Isbn)
+        );
+        assert_eq!(
+            page_matches("<p>ISBN 080442957x</p>", "080442957X", ""),
+            Some(PageMatch::Isbn)
+        );
+        // Spaced out, or across a no-break space.
+        assert_eq!(
+            page_matches("<p>EAN 978 2 07 012345 2</p>", "9782070123452", ""),
+            Some(PageMatch::Isbn)
+        );
+        assert_eq!(
+            page_matches("<p>EAN 978-2\u{a0}07-012345-2</p>", "9782070123452", ""),
+            Some(PageMatch::Isbn)
+        );
+        // A series page printing its volumes spaced out, or as ISBN-10s,
+        // is still a list.
+        let bodies: Vec<String> = (0..7)
+            .map(|i| with_check(&format!("97820701234{i}")))
+            .collect();
+        let spaced: String = bodies
+            .iter()
+            .map(|b| format!("<li>{} {} {} {}</li>", &b[..3], &b[3..4], &b[4..6], &b[6..]))
+            .collect();
+        assert_eq!(page_matches(&spaced, &bodies[0], ""), None);
+        let tens: String = bodies
+            .iter()
+            .map(|b| format!("<li>ISBN {}</li>", to_isbn10(b).unwrap()))
+            .collect();
+        assert_eq!(page_matches(&tens, &bodies[0], ""), None);
+        // A price or a year next to an ISBN does not hide it.
+        assert_eq!(
+            page_matches("<p>12 9782070123452 2024</p>", "9782070123452", ""),
+            Some(PageMatch::Isbn)
+        );
+    }
+
+    #[test]
+    fn a_deeply_nested_page_is_read_in_linear_time() {
+        let html = format!("{}<p>ISBN 9782070123452</p>", "<b>".repeat(100_000));
+        let doc = Html::parse_document(&html);
+        let started = std::time::Instant::now();
+        assert!(states_isbn(&isbn_evidence(&doc), "9782070123452"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

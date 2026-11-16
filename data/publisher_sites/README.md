@@ -200,13 +200,19 @@ its ISBN prefix, each recipe in turn, a page taken only when it shows the
 ISBN as its book's, then the cover image, loaded through the same polite
 client and checked as the app checks it.
 
-A page shows the ISBN as its book's when its JSON-LD or ISBN metadata give
-it, among six ISBNs at most; a page whose JSON-LD gives other ISBNs only is
-another edition's, whatever its text says. Without such metadata, the visible
-text must print it other than as a search's echo ("Aucun résultat pour
-« 978... »": search words just before it, no `ISBN`/`EAN`/`GTIN` label),
-among six ISBNs at most, counted as numbers of their own (a list of years
-loses its spaces into a fake ISBN otherwise). A series page prints every
+A page shows the ISBN as its book's when its main JSON-LD item (a `Book` or
+`Product` at the top of a script, in its `@graph`, or as a page's
+`mainEntity`, read from its ISBN fields only) or its ISBN metadata give it,
+among six ISBNs at most; a page whose main item gives other ISBNs only is
+another edition's, whatever its text says. An `ItemList`, a work's
+`workExample` editions, or an address that holds the ISBN prove nothing.
+Without such metadata, the visible text must print it, and never as a
+search's echo: search words ("résultat", "cherché", "aucun", "nothing
+found", "0 produit", "introuvable"...) within 40 bytes before or after any
+of its occurrences reject the page, whatever label it has. The page must
+also print six ISBNs at most, read as numbers of their own whether spaced
+out, hyphenated or ISBN-10 (a list of years loses its spaces into a fake
+ISBN otherwise, and an ISBN-10 needs its check digit). A series page prints every
 volume's; a book's page prints its other editions too (Actes Sud four,
 Minuit three), and some print it with no label at all (Le Tripode, Picquier):
 an earlier rule asking for the label, or for three ISBNs at most, lost 25 of
