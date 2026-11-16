@@ -15,12 +15,17 @@ use std::time::Duration;
 #[cfg(feature = "mcp")]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-/// Loopback ports probed to find a running BiblioGenius app, mirroring the app's
-/// own bind range (`start_server` in api/frb/server_control.rs tries `port..port + 10`).
+/// Loopback ports probed to find a running BiblioGenius app: 8000-8010.
+///
+/// Covers the app's own bind range from the default port (`start_server` in
+/// api/frb/server_control.rs tries `port..port + 10`) and the preferred ports a
+/// build may set with `--dart-define=BIBLIOGENIUS_PORT`, kept within 8000-8010 so
+/// a development build can run next to an installed one. Without 8010, such a
+/// development build was invisible to the helper.
 #[cfg(feature = "mcp")]
 const MCP_PORT_SCAN_START: u16 = 8000;
 #[cfg(feature = "mcp")]
-const MCP_PORT_SCAN_COUNT: u16 = 10;
+const MCP_PORT_SCAN_COUNT: u16 = 11;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct JsonRpcRequest {
@@ -549,10 +554,12 @@ mod tests {
     #[test]
     fn port_scan_range_matches_apps_bind_window() {
         // The helper must probe the same window the app can bind to, otherwise a
-        // port-drifted app (8000 taken) would be missed.
+        // port-drifted app (8000 taken) would be missed. The window ends at 8010,
+        // the highest preferred port a build may set with `BIBLIOGENIUS_PORT`
+        // (a development build living next to an installed one).
         let last = MCP_PORT_SCAN_START + MCP_PORT_SCAN_COUNT - 1;
         assert_eq!(MCP_PORT_SCAN_START, 8000);
-        assert_eq!(last, 8009);
+        assert_eq!(last, 8010);
     }
 
     fn request(method: &str) -> JsonRpcRequest {
