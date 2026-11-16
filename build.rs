@@ -8,12 +8,46 @@
 //! local dev/test path only.
 //!
 //! The default build enables neither feature and links no native dependency,
-//! so this script is a no-op unless `crsqlite-static` is on.
+//! so the cr-sqlite step is a no-op unless `crsqlite-static` is on.
+//!
+//! On macOS it also embeds an Info.plist into the standalone binary, which the
+//! app sandbox needs to start it (see `embed_macos_helper_info_plist`).
 
 use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    embed_macos_helper_info_plist();
+    link_crsqlite_static();
+}
+
+/// Embed an Info.plist into the standalone macOS binary (`__TEXT,__info_plist`).
+///
+/// The Mac App Store build signs this binary with the app sandbox entitlement, and
+/// a sandboxed executable that is not a bundle takes its identity, hence its
+/// container, from this section. Without it, `libsecinit` traps before `main` and
+/// the MCP helper an assistant spawns from the installed app dies silently.
+/// `codesign` also picks up the bundle identifier from it. The library targets
+/// (FFI dylib, staticlib) are untouched: the link arg is scoped to the binary.
+fn embed_macos_helper_info_plist() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let plist = manifest
+        .join("resources")
+        .join("macos")
+        .join("mcp-helper-Info.plist");
+    assert!(plist.exists(), "missing {}", plist.display());
+
+    println!("cargo:rerun-if-changed={}", plist.display());
+    println!(
+        "cargo:rustc-link-arg-bin=bibliogenius=-Wl,-sectcreate,__TEXT,__info_plist,{}",
+        plist.display()
+    );
+}
+
+fn link_crsqlite_static() {
     // Only act for the shipping static-link feature. Cargo sets
     // CARGO_FEATURE_<NAME> for every enabled feature (uppercased, `-` -> `_`).
     if env::var_os("CARGO_FEATURE_CRSQLITE_STATIC").is_none() {
