@@ -4,7 +4,7 @@
 //! pause between two requests to the same host, and tells a site that turns
 //! scripts away from one that fails.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,6 +27,10 @@ pub const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Longest robots.txt read (Google stops at 500 KiB).
 const MAX_ROBOTS_BYTES: usize = 512 * 1024;
+
+/// How long a robots.txt read is used: a day, the longest RFC 9309 (2.4)
+/// allows. A fetcher kept for the life of the app reads it again after that.
+const ROBOTS_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// What a plain 403 is reported as: [`FetchError::Blocked`], but not a
 /// reason to leave the whole host alone (see `PoliteFetcher::noted`).
@@ -92,16 +96,22 @@ pub trait SiteFetcher: Send + Sync {
 /// `min_interval` (or the site's Crawl-delay) between two.
 ///
 /// A host that turned us away once (429, a firewall's rejection page, a
-/// Crawl-delay over the cap) is not asked again by this fetcher: over a run
-/// of many books, asking again is what gets an address banned.
+/// Crawl-delay over the cap) is not asked again by this fetcher, for as long
+/// as it lives or for [`Self::with_refusal_memory`]: over a run of many
+/// books, asking again is what gets an address banned.
 pub struct PoliteFetcher {
     min_interval: Duration,
     /// Longest Crawl-delay we wait for; a site asking more is left alone.
     max_crawl_delay: Option<Duration>,
-    robots: Mutex<HashMap<String, Arc<Robots>>>,
+    /// How long a refusal is remembered; `None`, as long as the fetcher.
+    refusal_memory: Option<Duration>,
+    /// How long a robots.txt read is used: [`ROBOTS_MAX_AGE`] but in tests.
+    robots_max_age: Duration,
+    /// Each site's rules, with when they were read.
+    robots: Mutex<HashMap<String, (Instant, Arc<Robots>)>>,
     hosts: Mutex<HashMap<String, Arc<Mutex<Option<Instant>>>>>,
-    /// Hosts (as [`pace_key`] names them) that turned us away.
-    refused: std::sync::Mutex<HashSet<String>>,
+    /// Hosts (as [`pace_key`] names them) that turned us away, and when.
+    refused: std::sync::Mutex<HashMap<String, Instant>>,
 }
 
 impl PoliteFetcher {
@@ -109,10 +119,20 @@ impl PoliteFetcher {
         Self {
             min_interval,
             max_crawl_delay: None,
+            refusal_memory: None,
+            robots_max_age: ROBOTS_MAX_AGE,
             robots: Mutex::new(HashMap::new()),
             hosts: Mutex::new(HashMap::new()),
-            refused: std::sync::Mutex::new(HashSet::new()),
+            refused: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Ask a host that turned us away again once `memory` has passed: for a
+    /// fetcher kept for the life of the app, where a rate limit lifted an
+    /// hour later should not leave the site out until the next start.
+    pub fn with_refusal_memory(mut self, memory: Duration) -> Self {
+        self.refusal_memory = Some(memory);
+        self
     }
 
     /// Leave alone the sites whose Crawl-delay is longer than `max`, instead
@@ -124,9 +144,18 @@ impl PoliteFetcher {
     }
 
     fn refused_before(&self, url: &Url) -> bool {
-        self.refused
-            .lock()
-            .is_ok_and(|hosts| hosts.contains(&pace_key(url)))
+        let Ok(mut hosts) = self.refused.lock() else {
+            return false;
+        };
+        let key = pace_key(url);
+        match hosts.get(&key) {
+            None => false,
+            Some(at) if self.refusal_memory.is_none_or(|m| at.elapsed() < m) => true,
+            Some(_) => {
+                hosts.remove(&key);
+                false
+            }
+        }
     }
 
     /// `result`, after remembering that `url`'s host turned us away if it
@@ -139,15 +168,18 @@ impl PoliteFetcher {
             && why != FORBIDDEN
             && let Ok(mut hosts) = self.refused.lock()
         {
-            hosts.insert(pace_key(url));
+            hosts.insert(pace_key(url), Instant::now());
         }
         result
     }
 
-    /// The robots.txt rules of `url`'s site, read once per run.
+    /// The robots.txt rules of `url`'s site, read once per run, and again
+    /// once [`ROBOTS_MAX_AGE`] old.
     pub async fn robots_for(&self, url: &Url) -> Result<Arc<Robots>, FetchError> {
         let origin = url.origin().ascii_serialization();
-        if let Some(r) = self.robots.lock().await.get(&origin) {
+        if let Some((read, r)) = self.robots.lock().await.get(&origin)
+            && read.elapsed() < self.robots_max_age
+        {
             return Ok(r.clone());
         }
         let robots_url = url.join("/robots.txt").map_err(|_| FetchError::Refused)?;
@@ -173,7 +205,10 @@ impl PoliteFetcher {
             Err(e) => return Err(map_error(e)),
         };
         let robots = Arc::new(robots);
-        self.robots.lock().await.insert(origin, robots.clone());
+        self.robots
+            .lock()
+            .await
+            .insert(origin, (Instant::now(), robots.clone()));
         Ok(robots)
     }
 
@@ -203,7 +238,7 @@ impl PoliteFetcher {
     async fn prepare(&self, url: &Url) -> Result<(Url, Turn), FetchError> {
         let url = upgrade_to_https(url.clone()).ok_or(FetchError::Refused)?;
         if self.refused_before(&url) {
-            return Err(FetchError::Blocked("refused us earlier in this run".into()));
+            return Err(FetchError::Blocked("refused us earlier".into()));
         }
         let robots = self.noted(&url, self.robots_for(&url).await)?;
         if robots.is_unreachable() {
@@ -283,7 +318,7 @@ impl SiteFetcher for PoliteFetcher {
     async fn may_fetch(&self, url: &Url) -> Result<bool, FetchError> {
         let url = upgrade_to_https(url.clone()).ok_or(FetchError::Refused)?;
         if self.refused_before(&url) {
-            return Err(FetchError::Blocked("refused us earlier in this run".into()));
+            return Err(FetchError::Blocked("refused us earlier".into()));
         }
         let robots = self.noted(&url, self.robots_for(&url).await)?;
         // A robots.txt the server fails to serve forbids everything
@@ -501,9 +536,44 @@ mod tests {
         let fetcher = PoliteFetcher::new(Duration::from_millis(10));
         fetcher.robots.lock().await.insert(
             "https://editions.example".into(),
-            Arc::new(Robots::parse(robots)),
+            (Instant::now(), Arc::new(Robots::parse(robots))),
         );
         fetcher
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_forgotten_after_the_memory_given() {
+        let page = Url::parse("https://editions.example/livre/1").unwrap();
+        let refused = Err::<(), _>(FetchError::Blocked("HTTP 429".into()));
+        // By default, for as long as the fetcher lives: a probe run.
+        let run = with_robots("User-agent: *\n").await;
+        let _ = run.noted(&page, refused.clone());
+        assert!(run.refused_before(&page));
+        let short = with_robots("User-agent: *\n")
+            .await
+            .with_refusal_memory(Duration::from_millis(500));
+        let _ = short.noted(&page, refused);
+        assert!(short.refused_before(&page));
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(!short.refused_before(&page));
+        // Asked again, the host is reached (and found missing).
+        assert_eq!(short.get(&page).await.unwrap_err(), FetchError::Network);
+    }
+
+    #[tokio::test]
+    async fn robots_txt_is_read_again_after_a_day() {
+        let page = Url::parse("https://editions.example/livre/1").unwrap();
+        let fresh = with_robots("User-agent: *\nDisallow: /livre\n").await;
+        assert_eq!(fresh.get(&page).await.unwrap_err(), FetchError::Disallowed);
+        // A day shortened to 500 ms: the clock cannot be moved back a day
+        // on a machine started less than a day ago.
+        let mut stale = with_robots("User-agent: *\nDisallow: /livre\n").await;
+        stale.robots_max_age = Duration::from_millis(500);
+        assert_eq!(stale.get(&page).await.unwrap_err(), FetchError::Disallowed);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        // The old rules are not used: robots.txt is asked for again (and
+        // the host is not found).
+        assert_eq!(stale.get(&page).await.unwrap_err(), FetchError::Network);
     }
 
     #[tokio::test]
@@ -548,7 +618,7 @@ mod tests {
         let fetcher = PoliteFetcher::new(Duration::from_millis(10));
         fetcher.robots.lock().await.insert(
             "https://editions.example".into(),
-            Arc::new(Robots::unreachable()),
+            (Instant::now(), Arc::new(Robots::unreachable())),
         );
         let image = Url::parse("https://editions.example/couv/1.jpg").unwrap();
         assert_eq!(fetcher.may_fetch(&image).await, Ok(false));

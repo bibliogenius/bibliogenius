@@ -1,7 +1,9 @@
 //! A book's cover from its publisher's site, as the app asks for it: the
 //! table shipped in the binary, the book's page found with its recipes
-//! ([`find_book_page`]), then the page's cover ([`page_cover`]). Nothing is
-//! kept between two calls: one click, one lookup.
+//! ([`find_book_page`]), then the page's cover ([`page_cover`]). One click,
+//! one lookup; what keeps the sites' rules (pauses, Crawl-delays, robots.txt,
+//! refusals) is shared by every call, so two clicks in a row are paced as
+//! one run would be.
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -25,6 +27,21 @@ const PAUSE: Duration = Duration::from_secs(1);
 /// Longest Crawl-delay waited for behind a click; a site asking more is left
 /// alone, as refusing us. Gallimard's 10 s stays under it.
 const MAX_CRAWL_DELAY: Duration = Duration::from_secs(10);
+
+/// How long a site that turned us away (429, firewall) is left alone before
+/// a click asks it again.
+const REFUSAL_MEMORY: Duration = Duration::from_secs(60 * 60);
+
+static FETCHER: LazyLock<PoliteFetcher> = LazyLock::new(|| {
+    PoliteFetcher::new(PAUSE)
+        .with_max_crawl_delay(MAX_CRAWL_DELAY)
+        .with_refusal_memory(REFUSAL_MEMORY)
+});
+
+/// The one fetcher every lookup goes through, for the life of the app.
+fn shared_fetcher() -> &'static PoliteFetcher {
+    &FETCHER
+}
 
 static TABLE: LazyLock<Option<PublisherTable>> = LazyLock::new(|| parse_table(SHIPPED_TABLE));
 
@@ -121,10 +138,12 @@ pub async fn find_publisher_cover(book: &BookQuery) -> Result<PublisherCover, Pu
         .await
         .flatten()
         .ok_or(PublisherCoverError::NoSite)?;
-    let fetcher = PoliteFetcher::new(PAUSE).with_max_crawl_delay(MAX_CRAWL_DELAY);
-    tokio::time::timeout(PICK_DEADLINE, find_cover_with(&fetcher, table, book))
-        .await
-        .unwrap_or(Err(PublisherCoverError::Unreachable))
+    tokio::time::timeout(
+        PICK_DEADLINE,
+        find_cover_with(shared_fetcher(), table, book),
+    )
+    .await
+    .unwrap_or(Err(PublisherCoverError::Unreachable))
 }
 
 /// [`find_publisher_cover`] through any fetcher and table, for tests.
@@ -301,6 +320,13 @@ mod tests {
             .offline
             .store(true, std::sync::atomic::Ordering::SeqCst);
         check(offline, ISBN, PublisherCoverError::Unreachable).await;
+    }
+
+    #[test]
+    fn every_lookup_shares_one_fetcher() {
+        // Pauses, Crawl-delays, robots.txt and refusals then hold from one
+        // click to the next, not only within one.
+        assert!(std::ptr::eq(shared_fetcher(), shared_fetcher()));
     }
 
     #[test]
