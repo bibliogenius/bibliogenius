@@ -205,8 +205,9 @@ pub async fn record_web_cover_origin(book_id: String, image_url: String) -> Resu
 ///
 /// `candidates` are the page's images robots.txt lets us fetch, best first,
 /// `image_url` included: "next image" fetches them with
-/// [`fetch_web_cover_image`]. `page_url` is the book's page, for the user to
-/// open; `site` the publisher's site, as the table names it.
+/// [`fetch_publisher_cover_image`], under the lookup's rules. `page_url` is
+/// the book's page, for the user to open; `site` the publisher's site, as the
+/// table names it. For a next image, only `bytes` and `image_url` are set.
 pub struct FrbPublisherCover {
     pub bytes: Vec<u8>,
     pub image_url: String,
@@ -236,8 +237,8 @@ impl From<crate::modules::integrations::publisher_sites::app::PublisherCover>
 /// book's page at an address built from its ISBN: `attempt` of at most `of`),
 /// `search` (the site's own search), `search_result` (opening a result:
 /// `attempt` of at most `of`), `site_map`, `waiting` (the site asks for a
-/// pause: `seconds` left) and `cover` (the page is found, its cover is being
-/// fetched). `site` is the host without `www.`. Flattened to a string, like
+/// pause: `seconds` left), `queued` (waiting for another request of ours to
+/// the site to end) and `cover` (fetching a cover image). `site` is the host without `www.`. Flattened to a string, like
 /// [`FrbCoverSourceStatus`].
 pub struct FrbPublisherLookupStep {
     pub kind: String,
@@ -259,6 +260,7 @@ impl From<crate::modules::integrations::publisher_sites::progress::LookupStep>
             S::SearchResult { site, attempt, of } => ("search_result", site, attempt, of, 0),
             S::SiteMap { site } => ("site_map", site, 0, 0, 0),
             S::Waiting { site, seconds } => ("waiting", site, 0, 0, seconds),
+            S::Queued { site } => ("queued", site, 0, 0, 0),
             S::Cover { site } => ("cover", site, 0, 0, 0),
         };
         FrbPublisherLookupStep {
@@ -306,30 +308,82 @@ pub async fn find_cover_on_publisher_site(
     publisher: Option<String>,
     sink: crate::frb_generated::StreamSink<FrbPublisherLookupEvent>,
 ) -> Result<(), String> {
-    use crate::modules::integrations::publisher_sites::{app, lookup::BookQuery, progress};
+    use crate::modules::integrations::publisher_sites::{app, lookup::BookQuery};
     let book = BookQuery {
         isbn,
         title,
         authors,
         publisher,
     };
+    stream_publisher_lookup(sink, async {
+        app::find_publisher_cover(&book).await.map(Into::into)
+    })
+    .await;
+    Ok(())
+}
+
+/// Fetch one of the `candidates` [`find_cover_on_publisher_site`] listed,
+/// when the user steps to the next image. Unlike [`fetch_web_cover_image`],
+/// it goes through the lookup's fetcher: robots.txt, the pause between two
+/// requests to a host and the site's Crawl-delay hold for it too, which can
+/// take as long, so it is a stream of steps as well. Same events and error
+/// codes as the lookup; the cover carries `bytes` and `image_url` only. FFI
+/// only, for the same reason.
+pub async fn fetch_publisher_cover_image(
+    image_url: String,
+    sink: crate::frb_generated::StreamSink<FrbPublisherLookupEvent>,
+) -> Result<(), String> {
+    use crate::modules::integrations::publisher_sites::app;
+    stream_publisher_lookup(sink, async {
+        app::publisher_cover_image(&image_url)
+            .await
+            .map(|cover| FrbPublisherCover {
+                bytes: cover.bytes,
+                image_url: cover.image_url,
+                candidates: Vec::new(),
+                page_url: String::new(),
+                site: String::new(),
+            })
+    })
+    .await;
+    Ok(())
+}
+
+/// Send `lookup`'s steps to `sink`, then its outcome as the last event. The
+/// outcome is an event rather than the FFI function's result, which the
+/// generated Dart side does not await. Once the app stops listening (the
+/// dialog closed), the lookup stops at its next step instead of holding its
+/// turn on the host for nobody.
+async fn stream_publisher_lookup(
+    sink: crate::frb_generated::StreamSink<FrbPublisherLookupEvent>,
+    lookup: impl std::future::Future<
+        Output = Result<
+            FrbPublisherCover,
+            crate::modules::integrations::publisher_sites::app::PublisherCoverError,
+        >,
+    >,
+) {
+    use crate::modules::integrations::publisher_sites::progress;
     // Shared rather than cloned: a clone of the sink needs its events to be
     // Clone, and a cover carries the image's bytes.
     let sink = std::sync::Arc::new(sink);
     let steps = sink.clone();
     let reporter: progress::Reporter = std::sync::Arc::new(move |step| {
-        // The dialog may be gone: nobody to tell, the lookup goes on.
-        let _ = steps.add(FrbPublisherLookupEvent {
-            step: Some(step.into()),
-            cover: None,
-            error: None,
-        });
+        steps
+            .add(FrbPublisherLookupEvent {
+                step: Some(step.into()),
+                cover: None,
+                error: None,
+            })
+            .is_ok()
     });
-    let outcome = progress::reporting_to(reporter, app::find_publisher_cover(&book)).await;
-    let last = match outcome {
+    let Some(outcome) = progress::until_abandoned(reporter, lookup).await else {
+        return;
+    };
+    let _ = sink.add(match outcome {
         Ok(cover) => FrbPublisherLookupEvent {
             step: None,
-            cover: Some(cover.into()),
+            cover: Some(cover),
             error: None,
         },
         Err(e) => FrbPublisherLookupEvent {
@@ -337,19 +391,5 @@ pub async fn find_cover_on_publisher_site(
             cover: None,
             error: Some(e.code().to_string()),
         },
-    };
-    let _ = sink.add(last);
-    Ok(())
-}
-
-/// Fetch one of the `candidates` [`find_cover_on_publisher_site`] listed,
-/// when the user steps to the next image. Unlike [`fetch_web_cover_image`],
-/// it goes through the lookup's fetcher: robots.txt, the pause between two
-/// requests to a host and the site's Crawl-delay hold for it too. Same error
-/// codes as the lookup. FFI only, for the same reason.
-pub async fn fetch_publisher_cover_image(image_url: String) -> Result<FrbWebCover, String> {
-    crate::modules::integrations::publisher_sites::app::publisher_cover_image(&image_url)
-        .await
-        .map(Into::into)
-        .map_err(|e| e.code().to_string())
+    });
 }

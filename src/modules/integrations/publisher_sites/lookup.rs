@@ -159,7 +159,10 @@ pub async fn find_book_page(
 
 /// [`find_book_page`] within `budget`. A bulk run that looks for many books
 /// of one host at once gives a longer one: their lookups wait for each
-/// other's turn on the host, which the app, one book at a time, does not.
+/// other's turn on the host. In the app a lookup may wait behind another
+/// one too (the dialog closed on one book, opened on the next), but the
+/// one the user left stops at its next step (`progress::until_abandoned`),
+/// so the wait is a request and a pause, not a whole lookup.
 pub async fn find_book_page_within(
     fetcher: &dyn SiteFetcher,
     table: &PublisherTable,

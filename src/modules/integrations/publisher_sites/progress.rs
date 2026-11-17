@@ -2,14 +2,15 @@
 //! publisher's site asking 10 s between two requests makes a lookup last
 //! half a minute, most of it spent waiting.
 //!
-//! Steps are reported to whoever runs the lookup inside [`reporting_to`]; a
-//! lookup run outside it (the maintenance tool, tests) reports to no one.
-//! The reporter is task-local rather than a parameter: the steps come from
-//! every layer (recipes, robots.txt, the pause between two requests) and the
-//! fetcher is shared by every lookup, which each have their own reporter.
+//! Steps are reported to whoever runs the lookup inside [`reporting_to`] or
+//! [`until_abandoned`]; a lookup run outside them (the maintenance tool)
+//! reports to no one. The reporter is task-local rather than a parameter:
+//! the steps come from every layer (recipes, robots.txt, the pause between
+//! two requests) and the fetcher is shared by every lookup, which each have
+//! their own reporter.
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// One step of a lookup. `site` is the host as the table names it, `www.`
@@ -29,28 +30,97 @@ pub enum LookupStep {
     SiteMap { site: String },
     /// Waiting before the next request, as the site asks: `seconds` left.
     Waiting { site: String, seconds: u32 },
-    /// The book's page is found: fetching its cover.
+    /// Waiting for another request of ours to the site to end, for as long
+    /// as it takes: one request at a time per host.
+    Queued { site: String },
+    /// Fetching a cover image: the book's page is found, or the user
+    /// stepped to the page's next image.
     Cover { site: String },
 }
 
-/// Where a lookup's steps go.
-pub type Reporter = Arc<dyn Fn(LookupStep) + Send + Sync>;
+impl LookupStep {
+    /// A wait, as opposed to work: once it is over, the work it held up is
+    /// said again (see [`resume`]).
+    fn is_wait(&self) -> bool {
+        matches!(self, Self::Waiting { .. } | Self::Queued { .. })
+    }
+}
+
+/// Where a lookup's steps go. Returns whether anyone still listens: `false`
+/// once the user has left, which ends a lookup run by [`until_abandoned`].
+pub type Reporter = Arc<dyn Fn(LookupStep) -> bool + Send + Sync>;
 
 /// A wait shorter than this is not worth saying.
 pub const WAIT_WORTH_SAYING: Duration = Duration::from_secs(1);
 
+/// The lookup's reporter, and the last piece of work it was told about.
+struct Listener {
+    reporter: Reporter,
+    work: Mutex<Option<LookupStep>>,
+}
+
 tokio::task_local! {
-    static REPORTER: Reporter;
+    static LISTENER: Listener;
+}
+
+fn listening(reporter: Reporter) -> Listener {
+    Listener {
+        reporter,
+        work: Mutex::new(None),
+    }
 }
 
 /// Run `lookup`, its steps reported to `reporter`.
 pub async fn reporting_to<F: Future>(reporter: Reporter, lookup: F) -> F::Output {
-    REPORTER.scope(reporter, lookup).await
+    LISTENER.scope(listening(reporter), lookup).await
 }
 
-/// Say `step` to the lookup's reporter, if it has one.
+/// Run `lookup`, its steps reported to `reporter`, until the reporter says
+/// nobody listens any more: `None` then, and the lookup stops at that step
+/// rather than keep its turn on a host another lookup may be waiting for.
+pub async fn until_abandoned<F: Future>(reporter: Reporter, lookup: F) -> Option<F::Output> {
+    let (gone, mut left) = tokio::sync::watch::channel(false);
+    let watched: Reporter = Arc::new(move |step| {
+        let heard = reporter(step);
+        if !heard {
+            let _ = gone.send(true);
+        }
+        heard
+    });
+    let abandoned = async move {
+        // The sender lives as long as the lookup: an error cannot come
+        // first, but would not mean the user left.
+        if left.wait_for(|gone| *gone).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        out = LISTENER.scope(listening(watched), lookup) => Some(out),
+        () = abandoned => None,
+    }
+}
+
+/// Say `step` to the lookup's listener, if it has one.
 pub fn report(step: LookupStep) {
-    let _ = REPORTER.try_with(|reporter| reporter(step));
+    let _ = LISTENER.try_with(|listener| {
+        if !step.is_wait()
+            && let Ok(mut work) = listener.work.lock()
+        {
+            *work = Some(step.clone());
+        }
+        (listener.reporter)(step);
+    });
+}
+
+/// Say again the work a wait held up, once the wait is over: without it,
+/// the app would show "1 s left" for as long as the request then takes.
+pub fn resume() {
+    let _ = LISTENER.try_with(|listener| {
+        let work = listener.work.lock().ok().and_then(|work| work.clone());
+        if let Some(work) = work {
+            (listener.reporter)(work);
+        }
+    });
 }
 
 /// The seconds a wait of `wait` is announced as: rounded up, so the count
@@ -62,13 +132,15 @@ pub fn seconds_of(wait: Duration) -> u32 {
 #[cfg(test)]
 pub mod testing {
     use super::*;
-    use std::sync::Mutex;
 
     /// A reporter that keeps the steps, and what it kept.
     pub fn recorder() -> (Reporter, Arc<Mutex<Vec<LookupStep>>>) {
         let steps = Arc::new(Mutex::new(Vec::new()));
         let kept = steps.clone();
-        let reporter: Reporter = Arc::new(move |step| kept.lock().unwrap().push(step));
+        let reporter: Reporter = Arc::new(move |step| {
+            kept.lock().unwrap().push(step);
+            true
+        });
         (reporter, steps)
     }
 }
@@ -77,10 +149,13 @@ pub mod testing {
 mod tests {
     use super::*;
 
+    fn site() -> String {
+        "gallimard.fr".to_owned()
+    }
+
     #[tokio::test]
     async fn steps_go_to_the_lookup_s_own_reporter_only() {
         let (reporter, steps) = testing::recorder();
-        let site = || "gallimard.fr".to_owned();
         reporting_to(reporter, async {
             report(LookupStep::Search { site: site() });
         })
@@ -91,6 +166,44 @@ mod tests {
             *steps.lock().unwrap(),
             [LookupStep::Search { site: site() }]
         );
+    }
+
+    #[tokio::test]
+    async fn the_work_a_wait_held_up_is_said_again() {
+        let (reporter, steps) = testing::recorder();
+        reporting_to(reporter, async {
+            report(LookupStep::Search { site: site() });
+            report(LookupStep::Waiting {
+                site: site(),
+                seconds: 10,
+            });
+            resume();
+        })
+        .await;
+        assert_eq!(
+            steps.lock().unwrap().last(),
+            Some(&LookupStep::Search { site: site() })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lookup_nobody_listens_to_stops_at_its_next_step() {
+        let left: Reporter = Arc::new(|_| false);
+        let reached_after = Arc::new(Mutex::new(false));
+        let after = reached_after.clone();
+        let out = until_abandoned(left, async move {
+            report(LookupStep::Search { site: site() });
+            // Gives the abandonment its chance, as any request would.
+            tokio::task::yield_now().await;
+            *after.lock().unwrap() = true;
+            42
+        })
+        .await;
+        assert_eq!(out, None);
+        assert!(!*reached_after.lock().unwrap());
+
+        let (heard, _) = testing::recorder();
+        assert_eq!(until_abandoned(heard, async { 42 }).await, Some(42));
     }
 
     #[test]

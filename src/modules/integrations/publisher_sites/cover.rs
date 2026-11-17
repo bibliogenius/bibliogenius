@@ -66,24 +66,43 @@ pub async fn page_cover(
     }
     let listed: Vec<String> = candidates.iter().map(Url::to_string).collect();
     for image in &candidates {
-        match fetcher.get_image(image).await {
+        match usable_image(fetcher, image).await {
             Ok(bytes) => {
-                if let Ok(bytes) = check_usable_image_blocking(bytes).await {
-                    return Ok(WebCover {
-                        bytes,
-                        image_url: image.to_string(),
-                        candidates: listed,
-                    });
-                }
+                return Ok(WebCover {
+                    bytes,
+                    image_url: image.to_string(),
+                    candidates: listed,
+                });
             }
-            // Refused on the way: a redirect to a forbidden address, a 403.
-            Err(FetchError::Disallowed | FetchError::Blocked(_)) => {
-                return Err(PageCoverError::Forbidden);
-            }
-            Err(_) => {}
+            Err(ImageError::Forbidden) => return Err(PageCoverError::Forbidden),
+            Err(ImageError::Failed) => {}
         }
     }
     Err(PageCoverError::Broken)
+}
+
+/// Why an image of a book's page could not be had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageError {
+    /// The site does not let us have it: robots.txt, on the way through a
+    /// redirect too, a 403, or the site refusing us.
+    Forbidden,
+    /// Gone, unreachable, or not an image the app can use: another image of
+    /// the page may do.
+    Failed,
+}
+
+/// The image at `url`, under the fetcher's rules, if it is one the app can
+/// use. The lookup and the "next image" of the app both take an image
+/// through here, so they tell the same failures apart the same way.
+pub async fn usable_image(fetcher: &dyn SiteFetcher, url: &Url) -> Result<Vec<u8>, ImageError> {
+    match fetcher.get_image(url).await {
+        Ok(bytes) => check_usable_image_blocking(bytes)
+            .await
+            .map_err(|_| ImageError::Failed),
+        Err(FetchError::Disallowed | FetchError::Blocked(_)) => Err(ImageError::Forbidden),
+        Err(_) => Err(ImageError::Failed),
+    }
 }
 
 #[cfg(test)]
