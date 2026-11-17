@@ -11,6 +11,7 @@ use std::time::Duration;
 use super::cover::{PageCoverError, page_cover};
 use super::fetch::{FetchError, PoliteFetcher, SiteFetcher};
 use super::lookup::{BookQuery, Lookup, SitemapCache, find_book_page, off_runtime};
+use super::progress::{LookupStep, report};
 use super::table::{PublisherTable, TABLE_FORMAT};
 use crate::modules::integrations::web_cover::{
     PICK_DEADLINE, WebCover, check_usable_image_blocking,
@@ -199,6 +200,7 @@ pub async fn find_cover_with(
             unreachable,
         } => Err(not_found(&sites, &refused, &unreachable)),
         Lookup::Found { site, page, .. } => {
+            report(LookupStep::Cover { site: site.clone() });
             // `find_book_page` matched the page against the ISBN-13 form.
             let isbn = crate::utils::isbn::to_isbn13(&book.isbn).unwrap_or_default();
             let cover = page_cover(fetcher, &page, &isbn).await?;
@@ -358,6 +360,34 @@ mod tests {
             .offline
             .store(true, std::sync::atomic::Ordering::SeqCst);
         check(offline, ISBN, PublisherCoverError::Unreachable).await;
+    }
+
+    #[tokio::test]
+    async fn a_lookup_says_what_it_is_doing() {
+        use crate::modules::integrations::publisher_sites::progress::{
+            LookupStep, reporting_to, testing::recorder,
+        };
+        let site = FakeSite::default()
+            .page(BOOK, &page_with(&[IMAGE]))
+            .image(IMAGE, JPEG);
+        let (reporter, steps) = recorder();
+        reporting_to(reporter, find_cover_with(&site, &table(), &query(ISBN)))
+            .await
+            .unwrap();
+        let steps = steps.lock().unwrap();
+        assert!(
+            matches!(
+                &steps[0],
+                LookupStep::ProductPage { site, attempt: 1, of } if site == "editions.example" && *of >= 1
+            ),
+            "{steps:?}"
+        );
+        assert_eq!(
+            steps.last(),
+            Some(&LookupStep::Cover {
+                site: "editions.example".into()
+            })
+        );
     }
 
     #[tokio::test]

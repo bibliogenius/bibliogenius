@@ -14,6 +14,7 @@ use url::Url;
 
 use super::fetch::{FetchError, Page, SiteFetcher};
 use super::page::{PageMatch, page_matches, result_links, sitemap_book_links, sitemap_locs};
+use super::progress::{LookupStep, report};
 use super::recipes::{MAX_SITEMAP_CANDIDATES, product_urls, redirected_to_book, run_search};
 use super::table::{PublisherTable, RecipeKind, SiteRecipes};
 use super::text::find_isbns;
@@ -181,7 +182,7 @@ pub async fn find_book_page_within(
     let (mut refused, mut unreachable) = (Vec::new(), Vec::new());
     for (i, (key, recipes)) in sites.iter().enumerate() {
         let Ok(answer) =
-            tokio::time::timeout_at(deadline, on_site(fetcher, recipes, book, maps)).await
+            tokio::time::timeout_at(deadline, on_site(fetcher, key, recipes, book, maps)).await
         else {
             unreachable.extend(sites[i..].iter().map(|(k, _)| (*k).to_owned()));
             break;
@@ -210,6 +211,7 @@ pub async fn find_book_page_within(
 /// (its other recipes are not tried then).
 async fn on_site(
     fetcher: &dyn SiteFetcher,
+    site: &str,
     recipes: &SiteRecipes,
     book: &BookQuery,
     maps: &SitemapCache,
@@ -219,10 +221,17 @@ async fn on_site(
         answered: false,
     };
     if let Some(recipe) = &recipes.product {
-        for raw in product_urls(recipe, &book.isbn, &book.title, &book.authors)
+        let urls: Vec<String> = product_urls(recipe, &book.isbn, &book.title, &book.authors)
             .into_iter()
             .take(MAX_PRODUCT_TRIES)
-        {
+            .collect();
+        let of = count(urls.len());
+        for (i, raw) in urls.into_iter().enumerate() {
+            report(LookupStep::ProductPage {
+                site: site.to_owned(),
+                attempt: count(i + 1),
+                of,
+            });
             let Ok(url) = Url::parse(&raw) else { continue };
             if let Some(page) = book_page(fetcher, &mut state, &url, &book.isbn).await? {
                 return Ok(Some((RecipeKind::Product, page)));
@@ -235,6 +244,9 @@ async fn on_site(
         } else {
             &book.title
         };
+        report(LookupStep::Search {
+            site: site.to_owned(),
+        });
         match run_search(fetcher, recipe, query).await {
             Ok((page, asked)) => {
                 state.answered = true;
@@ -259,7 +271,14 @@ async fn on_site(
                 if let Some(page) = found {
                     return Ok(Some((RecipeKind::Search, page)));
                 }
-                for link in links.into_iter().take(MAX_RESULT_LINKS) {
+                let links: Vec<Url> = links.into_iter().take(MAX_RESULT_LINKS).collect();
+                let of = count(links.len());
+                for (i, link) in links.into_iter().enumerate() {
+                    report(LookupStep::SearchResult {
+                        site: site.to_owned(),
+                        attempt: count(i + 1),
+                        of,
+                    });
                     if let Some(found) = book_page(fetcher, &mut state, &link, &book.isbn).await? {
                         return Ok(Some((RecipeKind::Search, found)));
                     }
@@ -269,6 +288,9 @@ async fn on_site(
         }
     }
     if let Some(recipe) = &recipes.sitemap {
+        report(LookupStep::SiteMap {
+            site: site.to_owned(),
+        });
         let pages = match maps.pages(fetcher, &recipe.url).await {
             Ok(pages) => pages,
             Err(e) => {
@@ -289,6 +311,11 @@ async fn on_site(
         }
     }
     Ok(None)
+}
+
+/// A count of tries, as steps report it.
+fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 /// The page at `url` when it shows `isbn`. A missing page, an address

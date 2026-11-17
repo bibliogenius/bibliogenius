@@ -14,6 +14,7 @@ use tokio::time::Instant;
 use url::Url;
 
 use super::page::bare_host;
+use super::progress::{LookupStep, WAIT_WORTH_SAYING, report, seconds_of};
 use super::robots::Robots;
 use crate::utils::cover_image::COVER_MAX_INPUT_BYTES;
 use crate::utils::public_fetch::{
@@ -183,6 +184,9 @@ impl PoliteFetcher {
             return Ok(r.clone());
         }
         let robots_url = url.join("/robots.txt").map_err(|_| FetchError::Refused)?;
+        report(LookupStep::Rules {
+            site: pace_key(url),
+        });
         let turn = self.wait_turn(&robots_url, None).await;
         let fetched = public_fetch::fetch_with_policy(
             robots_url,
@@ -227,6 +231,13 @@ impl PoliteFetcher {
         let last = slot.lock_owned().await;
         let pause = crawl_delay.unwrap_or_default().max(self.min_interval);
         if let Some(at) = *last {
+            let left = (at + pause).saturating_duration_since(Instant::now());
+            if left >= WAIT_WORTH_SAYING {
+                report(LookupStep::Waiting {
+                    site: pace_key(url),
+                    seconds: seconds_of(left),
+                });
+            }
             tokio::time::sleep_until(at + pause).await;
         }
         Turn(last)
@@ -622,6 +633,41 @@ mod tests {
         );
         let image = Url::parse("https://editions.example/couv/1.jpg").unwrap();
         assert_eq!(fetcher.may_fetch(&image).await, Ok(false));
+    }
+
+    #[tokio::test]
+    async fn a_wait_the_site_asks_for_is_said() {
+        use super::super::progress::{LookupStep, reporting_to, testing::recorder};
+        let fetcher = PoliteFetcher::new(Duration::from_millis(1500));
+        let page = Url::parse("https://www.editions.example/livre/1").unwrap();
+        let (reporter, steps) = recorder();
+        reporting_to(reporter, async {
+            drop(fetcher.wait_turn(&page, None).await);
+            drop(fetcher.wait_turn(&page, None).await);
+        })
+        .await;
+        // The first request goes at once; the second waits 1.5 s, said as 2.
+        assert_eq!(
+            *steps.lock().unwrap(),
+            [LookupStep::Waiting {
+                site: "editions.example".into(),
+                seconds: 2
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_short_pause_is_not_said() {
+        use super::super::progress::{reporting_to, testing::recorder};
+        let fetcher = PoliteFetcher::new(Duration::from_millis(10));
+        let page = Url::parse("https://editions.example/livre/1").unwrap();
+        let (reporter, steps) = recorder();
+        reporting_to(reporter, async {
+            drop(fetcher.wait_turn(&page, None).await);
+            drop(fetcher.wait_turn(&page, None).await);
+        })
+        .await;
+        assert!(steps.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -229,6 +229,56 @@ impl From<crate::modules::integrations::publisher_sites::app::PublisherCover>
     }
 }
 
+/// One step of a publisher site lookup, for the app to say what is being
+/// done while the user waits.
+///
+/// `kind` is one of `rules` (reading robots.txt), `product_page` (trying the
+/// book's page at an address built from its ISBN: `attempt` of at most `of`),
+/// `search` (the site's own search), `search_result` (opening a result:
+/// `attempt` of at most `of`), `site_map`, `waiting` (the site asks for a
+/// pause: `seconds` left) and `cover` (the page is found, its cover is being
+/// fetched). `site` is the host without `www.`. Flattened to a string, like
+/// [`FrbCoverSourceStatus`].
+pub struct FrbPublisherLookupStep {
+    pub kind: String,
+    pub site: String,
+    pub attempt: u32,
+    pub of: u32,
+    pub seconds: u32,
+}
+
+impl From<crate::modules::integrations::publisher_sites::progress::LookupStep>
+    for FrbPublisherLookupStep
+{
+    fn from(step: crate::modules::integrations::publisher_sites::progress::LookupStep) -> Self {
+        use crate::modules::integrations::publisher_sites::progress::LookupStep as S;
+        let (kind, site, attempt, of, seconds) = match step {
+            S::Rules { site } => ("rules", site, 0, 0, 0),
+            S::ProductPage { site, attempt, of } => ("product_page", site, attempt, of, 0),
+            S::Search { site } => ("search", site, 0, 0, 0),
+            S::SearchResult { site, attempt, of } => ("search_result", site, attempt, of, 0),
+            S::SiteMap { site } => ("site_map", site, 0, 0, 0),
+            S::Waiting { site, seconds } => ("waiting", site, 0, 0, seconds),
+            S::Cover { site } => ("cover", site, 0, 0, 0),
+        };
+        FrbPublisherLookupStep {
+            kind: kind.to_owned(),
+            site,
+            attempt,
+            of,
+            seconds,
+        }
+    }
+}
+
+/// What [`find_cover_on_publisher_site`] sends: steps while it works, then
+/// exactly one `cover` or one `error`, the last event of the stream.
+pub struct FrbPublisherLookupEvent {
+    pub step: Option<FrbPublisherLookupStep>,
+    pub cover: Option<FrbPublisherCover>,
+    pub error: Option<String>,
+}
+
 /// Look for the book's cover on its publisher's own site, with the publisher
 /// site table shipped in the engine: the ISBN prefix gives the site, the
 /// site's recipe its page for the book, which must state the ISBN. robots.txt
@@ -238,11 +288,14 @@ impl From<crate::modules::integrations::publisher_sites::app::PublisherCover>
 /// `publisher` is the book's publisher field, to pick among the publishers of
 /// a shared prefix; `authors` helps the recipes that need the author's name.
 ///
-/// On failure the error is a stable code: `invalid_isbn`, `no_site` (no site
-/// known for this publisher), `not_found` (the site answered, without the
-/// book), `blocked_by_site`, `network` (a site did not answer: worth trying
-/// later), `image_forbidden` (the site does not let us have the cover),
-/// `no_image_found`.
+/// A stream: the lookup's steps (a site asking 10 s between two requests
+/// makes it last half a minute), then the cover, or an error with a stable
+/// code: `invalid_isbn`, `no_site` (no site known for this publisher),
+/// `not_found` (the site answered, without the book), `blocked_by_site`,
+/// `network` (a site did not answer: worth trying later), `image_forbidden`
+/// (the site does not let us have the cover), `no_image_found`. The outcome
+/// is an event rather than this function's result, which the generated Dart
+/// side does not await.
 ///
 /// FFI only, with no Axum route on purpose: a route would let any peer make
 /// this device send requests to publisher sites.
@@ -251,18 +304,42 @@ pub async fn find_cover_on_publisher_site(
     title: String,
     authors: String,
     publisher: Option<String>,
-) -> Result<FrbPublisherCover, String> {
-    use crate::modules::integrations::publisher_sites::{app, lookup::BookQuery};
+    sink: crate::frb_generated::StreamSink<FrbPublisherLookupEvent>,
+) -> Result<(), String> {
+    use crate::modules::integrations::publisher_sites::{app, lookup::BookQuery, progress};
     let book = BookQuery {
         isbn,
         title,
         authors,
         publisher,
     };
-    app::find_publisher_cover(&book)
-        .await
-        .map(Into::into)
-        .map_err(|e| e.code().to_string())
+    // Shared rather than cloned: a clone of the sink needs its events to be
+    // Clone, and a cover carries the image's bytes.
+    let sink = std::sync::Arc::new(sink);
+    let steps = sink.clone();
+    let reporter: progress::Reporter = std::sync::Arc::new(move |step| {
+        // The dialog may be gone: nobody to tell, the lookup goes on.
+        let _ = steps.add(FrbPublisherLookupEvent {
+            step: Some(step.into()),
+            cover: None,
+            error: None,
+        });
+    });
+    let outcome = progress::reporting_to(reporter, app::find_publisher_cover(&book)).await;
+    let last = match outcome {
+        Ok(cover) => FrbPublisherLookupEvent {
+            step: None,
+            cover: Some(cover.into()),
+            error: None,
+        },
+        Err(e) => FrbPublisherLookupEvent {
+            step: None,
+            cover: None,
+            error: Some(e.code().to_string()),
+        },
+    };
+    let _ = sink.add(last);
+    Ok(())
 }
 
 /// Fetch one of the `candidates` [`find_cover_on_publisher_site`] listed,

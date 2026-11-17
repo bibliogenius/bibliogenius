@@ -22,6 +22,7 @@ pub mod lint;
 pub mod lookup;
 pub mod page;
 pub mod probe;
+pub mod progress;
 pub mod recipes;
 pub mod robots;
 pub mod table;

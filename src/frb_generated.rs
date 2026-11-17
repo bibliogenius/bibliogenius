@@ -2045,6 +2045,10 @@ fn wire__crate__api__frb__find_cover_on_publisher_site_impl(
             let api_title = <String>::sse_decode(&mut deserializer);
             let api_authors = <String>::sse_decode(&mut deserializer);
             let api_publisher = <Option<String>>::sse_decode(&mut deserializer);
+            let api_sink = <StreamSink<
+                crate::api::frb::FrbPublisherLookupEvent,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -2054,6 +2058,7 @@ fn wire__crate__api__frb__find_cover_on_publisher_site_impl(
                             api_title,
                             api_authors,
                             api_publisher,
+                            api_sink,
                         )
                         .await?;
                         Ok(output_ok)
@@ -9157,6 +9162,19 @@ impl SseDecode
     }
 }
 
+impl SseDecode
+    for StreamSink<
+        crate::api::frb::FrbPublisherLookupEvent,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
+    }
+}
+
 impl SseDecode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -10440,6 +10458,39 @@ impl SseDecode for crate::api::frb::FrbPublisherCover {
     }
 }
 
+impl SseDecode for crate::api::frb::FrbPublisherLookupEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_step =
+            <Option<crate::api::frb::FrbPublisherLookupStep>>::sse_decode(deserializer);
+        let mut var_cover = <Option<crate::api::frb::FrbPublisherCover>>::sse_decode(deserializer);
+        let mut var_error = <Option<String>>::sse_decode(deserializer);
+        return crate::api::frb::FrbPublisherLookupEvent {
+            step: var_step,
+            cover: var_cover,
+            error: var_error,
+        };
+    }
+}
+
+impl SseDecode for crate::api::frb::FrbPublisherLookupStep {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_kind = <String>::sse_decode(deserializer);
+        let mut var_site = <String>::sse_decode(deserializer);
+        let mut var_attempt = <u32>::sse_decode(deserializer);
+        let mut var_of = <u32>::sse_decode(deserializer);
+        let mut var_seconds = <u32>::sse_decode(deserializer);
+        return crate::api::frb::FrbPublisherLookupStep {
+            kind: var_kind,
+            site: var_site,
+            attempt: var_attempt,
+            of: var_of,
+            seconds: var_seconds,
+        };
+    }
+}
+
 impl SseDecode for crate::api::frb::FrbPuzzleBoard {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -11555,6 +11606,32 @@ impl SseDecode for Option<crate::api::frb::FrbNoIsbnCluster> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::frb::FrbNoIsbnCluster>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::frb::FrbPublisherCover> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::frb::FrbPublisherCover>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::frb::FrbPublisherLookupStep> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::frb::FrbPublisherLookupStep>::sse_decode(
                 deserializer,
             ));
         } else {
@@ -13934,6 +14011,52 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbPublisherCover>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbPublisherLookupEvent {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.step.into_into_dart().into_dart(),
+            self.cover.into_into_dart().into_dart(),
+            self.error.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbPublisherLookupEvent
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbPublisherLookupEvent>
+    for crate::api::frb::FrbPublisherLookupEvent
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbPublisherLookupEvent {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbPublisherLookupStep {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.kind.into_into_dart().into_dart(),
+            self.site.into_into_dart().into_dart(),
+            self.attempt.into_into_dart().into_dart(),
+            self.of.into_into_dart().into_dart(),
+            self.seconds.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::frb::FrbPublisherLookupStep
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::frb::FrbPublisherLookupStep>
+    for crate::api::frb::FrbPublisherLookupStep
+{
+    fn into_into_dart(self) -> crate::api::frb::FrbPublisherLookupStep {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::frb::FrbPuzzleBoard {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -14490,6 +14613,18 @@ impl SseEncode
 impl SseEncode
     for StreamSink<
         crate::api::frb::FrbProfileChangedEvent,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
+    }
+}
+
+impl SseEncode
+    for StreamSink<
+        crate::api::frb::FrbPublisherLookupEvent,
         flutter_rust_bridge::for_generated::SseCodec,
     >
 {
@@ -15266,6 +15401,26 @@ impl SseEncode for crate::api::frb::FrbPublisherCover {
         <Vec<String>>::sse_encode(self.candidates, serializer);
         <String>::sse_encode(self.page_url, serializer);
         <String>::sse_encode(self.site, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbPublisherLookupEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Option<crate::api::frb::FrbPublisherLookupStep>>::sse_encode(self.step, serializer);
+        <Option<crate::api::frb::FrbPublisherCover>>::sse_encode(self.cover, serializer);
+        <Option<String>>::sse_encode(self.error, serializer);
+    }
+}
+
+impl SseEncode for crate::api::frb::FrbPublisherLookupStep {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.kind, serializer);
+        <String>::sse_encode(self.site, serializer);
+        <u32>::sse_encode(self.attempt, serializer);
+        <u32>::sse_encode(self.of, serializer);
+        <u32>::sse_encode(self.seconds, serializer);
     }
 }
 
@@ -16081,6 +16236,26 @@ impl SseEncode for Option<crate::api::frb::FrbNoIsbnCluster> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::frb::FrbNoIsbnCluster>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::frb::FrbPublisherCover> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::frb::FrbPublisherCover>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::frb::FrbPublisherLookupStep> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::frb::FrbPublisherLookupStep>::sse_encode(value, serializer);
         }
     }
 }
