@@ -9,10 +9,13 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use super::cover::{PageCoverError, page_cover};
-use super::fetch::{PoliteFetcher, SiteFetcher};
+use super::fetch::{FetchError, PoliteFetcher, SiteFetcher};
 use super::lookup::{BookQuery, Lookup, SitemapCache, find_book_page, off_runtime};
 use super::table::{PublisherTable, TABLE_FORMAT};
-use crate::modules::integrations::web_cover::{PICK_DEADLINE, WebCover};
+use crate::modules::integrations::web_cover::{
+    PICK_DEADLINE, WebCover, check_usable_image_blocking,
+};
+use crate::utils::public_fetch::parse_public_https_url;
 
 /// The table the maintenance tool wrote, as this build ships it.
 const SHIPPED_TABLE: &str = include_str!(concat!(
@@ -144,6 +147,41 @@ pub async fn find_publisher_cover(book: &BookQuery) -> Result<PublisherCover, Pu
     )
     .await
     .unwrap_or(Err(PublisherCoverError::Unreachable))
+}
+
+/// One of the candidates [`find_publisher_cover`] listed, when the user steps
+/// to the next image: through the same fetcher as the lookup, so robots.txt,
+/// the pause and the site's Crawl-delay hold for it as for the lookup.
+pub async fn publisher_cover_image(image_url: &str) -> Result<WebCover, PublisherCoverError> {
+    tokio::time::timeout(PICK_DEADLINE, cover_image_with(shared_fetcher(), image_url))
+        .await
+        .unwrap_or(Err(PublisherCoverError::Unreachable))
+}
+
+/// [`publisher_cover_image`] through any fetcher, for tests.
+pub async fn cover_image_with(
+    fetcher: &dyn SiteFetcher,
+    image_url: &str,
+) -> Result<WebCover, PublisherCoverError> {
+    let url = parse_public_https_url(image_url).map_err(|_| PublisherCoverError::ImageBroken)?;
+    let bytes = match fetcher.get_image(&url).await {
+        Ok(bytes) => bytes,
+        Err(FetchError::Disallowed | FetchError::Blocked(_)) => {
+            return Err(PublisherCoverError::ImageForbidden);
+        }
+        Err(FetchError::Network) => return Err(PublisherCoverError::Unreachable),
+        Err(FetchError::Status(_) | FetchError::Refused) => {
+            return Err(PublisherCoverError::ImageBroken);
+        }
+    };
+    let bytes = check_usable_image_blocking(bytes)
+        .await
+        .map_err(|_| PublisherCoverError::ImageBroken)?;
+    Ok(WebCover {
+        bytes,
+        image_url: url.to_string(),
+        candidates: Vec::new(),
+    })
 }
 
 /// [`find_publisher_cover`] through any fetcher and table, for tests.
@@ -320,6 +358,43 @@ mod tests {
             .offline
             .store(true, std::sync::atomic::Ordering::SeqCst);
         check(offline, ISBN, PublisherCoverError::Unreachable).await;
+    }
+
+    #[tokio::test]
+    async fn a_next_image_comes_through_the_same_rules() {
+        let site = FakeSite {
+            forbidden: vec!["/prive/".into()],
+            ..FakeSite::default()
+        }
+        .image(IMAGE, JPEG)
+        .image("https://editions.example/couv/page.jpg", b"<html></html>");
+
+        let cover = cover_image_with(&site, IMAGE).await.unwrap();
+        assert_eq!(cover.image_url, IMAGE);
+        assert_eq!(cover.bytes, JPEG);
+        assert!(cover.candidates.is_empty());
+
+        let err = |url: &'static str| {
+            let site = &site;
+            async move { cover_image_with(site, url).await.unwrap_err() }
+        };
+        assert_eq!(
+            err("https://editions.example/prive/1.jpg").await,
+            PublisherCoverError::ImageForbidden,
+            "robots.txt holds for a next image too"
+        );
+        assert_eq!(
+            err("https://editions.example/couv/page.jpg").await,
+            PublisherCoverError::ImageBroken
+        );
+        assert_eq!(
+            err("http://127.0.0.1/couv.jpg").await,
+            PublisherCoverError::ImageBroken,
+            "only public https addresses"
+        );
+        site.offline
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(err(IMAGE).await, PublisherCoverError::Unreachable);
     }
 
     #[test]

@@ -264,3 +264,15 @@ pub async fn find_cover_on_publisher_site(
         .map(Into::into)
         .map_err(|e| e.code().to_string())
 }
+
+/// Fetch one of the `candidates` [`find_cover_on_publisher_site`] listed,
+/// when the user steps to the next image. Unlike [`fetch_web_cover_image`],
+/// it goes through the lookup's fetcher: robots.txt, the pause between two
+/// requests to a host and the site's Crawl-delay hold for it too. Same error
+/// codes as the lookup. FFI only, for the same reason.
+pub async fn fetch_publisher_cover_image(image_url: String) -> Result<FrbWebCover, String> {
+    crate::modules::integrations::publisher_sites::app::publisher_cover_image(&image_url)
+        .await
+        .map(Into::into)
+        .map_err(|e| e.code().to_string())
+}
