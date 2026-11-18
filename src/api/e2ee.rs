@@ -961,7 +961,13 @@ pub async fn handle_search_request(
         .await
         .unwrap_or_default();
 
+    // Same privacy pipeline as `handle_book_sync_request`: private books are
+    // filtered in the query, personal annotations are stripped here. Redact
+    // after `populate_authors`, which overlays `reading_status = "borrowed"`.
     let mut book_dtos = crate::models::Book::populate_authors(db, books).await;
+    for b in &mut book_dtos {
+        b.redact_for_peer();
+    }
     let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
     crate::models::Book::rewrite_cover_urls_for_relay(
         &mut book_dtos,
@@ -1727,7 +1733,12 @@ pub async fn handle_library_browse_request(
     let total = paginator.num_items().await.unwrap_or(0);
     let books = paginator.fetch_page(page).await.unwrap_or_default();
 
+    // Same privacy pipeline as `handle_book_sync_request`: private books are
+    // filtered in the query, personal annotations are stripped here.
     let mut book_dtos = crate::models::Book::populate_authors(db, books).await;
+    for b in &mut book_dtos {
+        b.redact_for_peer();
+    }
     let hub_prefix = crate::models::Book::hub_cover_prefix(db).await;
     crate::models::Book::rewrite_cover_urls_for_relay(
         &mut book_dtos,
@@ -2130,6 +2141,139 @@ mod tests {
                 "field {leaked} must be redacted from the relay catalog"
             );
         }
+    }
+
+    /// Insert a book carrying every kind of personal annotation a peer must
+    /// never see, alongside the bibliographic fields it should keep.
+    async fn insert_annotated_book(db: &DatabaseConnection, title: &str, private: bool) -> String {
+        use sea_orm::Set;
+        let now = chrono::Utc::now().to_rfc3339();
+        let id = uuid::Uuid::new_v4().to_string();
+        crate::models::book::Entity::insert(crate::models::book::ActiveModel {
+            id: Set(id.clone()),
+            title: Set(title.to_owned()),
+            isbn: Set(Some("9782070360024".to_owned())),
+            reading_status: Set("read".to_owned()),
+            started_reading_at: Set(Some(now.clone())),
+            finished_reading_at: Set(Some(now.clone())),
+            user_rating: Set(Some(9)),
+            price: Set(Some(12.5)),
+            cataloguing_notes: Set(Some("signed by the author".to_owned())),
+            source_data: Set(Some("{\"origin\":\"test\"}".to_owned())),
+            shelf_position: Set(Some(3)),
+            owned: Set(true),
+            private: Set(private),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    fn request(message_type: &str, payload: serde_json::Value) -> ClearMessage {
+        ClearMessage {
+            message_type: message_type.to_string(),
+            payload,
+            timestamp: 0,
+            message_id: "test-message".to_string(),
+            correlation_id: None,
+            reply_to_mailbox: None,
+            reply_to_write_token: None,
+        }
+    }
+
+    const PERSONAL_FIELDS: [&str; 13] = [
+        "reading_status",
+        "is_borrowed",
+        "is_lent",
+        "hub_cover_upload_failed_at",
+        "user_rating",
+        "price",
+        "cataloguing_notes",
+        "source_data",
+        "shelf_position",
+        "started_reading_at",
+        "finished_reading_at",
+        "private",
+        "wished_by",
+    ];
+
+    fn assert_redacted(books: &[serde_json::Value], lane: &str) {
+        assert_eq!(books.len(), 1, "{lane}: the private book must be absent");
+        let book = &books[0];
+        assert_eq!(book["title"].as_str(), Some("Public annotated"));
+        assert_eq!(book["isbn"].as_str(), Some("9782070360024"));
+        for leaked in PERSONAL_FIELDS {
+            assert!(
+                book.get(leaked).is_none_or(|v| v.is_null()),
+                "{lane}: field {leaked} must be redacted, got {:?}",
+                book.get(leaked)
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_request_filters_private_and_redacts_annotations() {
+        let db = setup_test_db().await;
+        insert_annotated_book(&db, "Public annotated", false).await;
+        insert_annotated_book(&db, "Private annotated", true).await;
+
+        let msg = request("search_request", json!({ "query": "annotated" }));
+        let response = handle_search_request(&db, &msg).await;
+        let books = response["results"].as_array().expect("results array");
+
+        assert_redacted(books, "search_request");
+    }
+
+    /// `populate_authors` overlays `reading_status = "borrowed"` on a book
+    /// with a borrowed copy; that overlay must not reach the peer either.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_request_redacts_the_borrowed_overlay() {
+        use sea_orm::{ActiveModelTrait, Set};
+        let db = setup_test_db().await;
+        let book_id = insert_annotated_book(&db, "Public annotated", false).await;
+        let lib_id = crate::utils::library_helpers::resolve_library_id(&db)
+            .await
+            .expect("library");
+        let now = chrono::Utc::now().to_rfc3339();
+        crate::models::copy::ActiveModel {
+            book_id: Set(book_id),
+            library_id: Set(lib_id),
+            status: Set("borrowed".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert borrowed copy");
+
+        let msg = request("search_request", json!({ "query": "annotated" }));
+        let response = handle_search_request(&db, &msg).await;
+        let books = response["results"].as_array().expect("results array");
+
+        assert_redacted(books, "search_request (borrowed)");
+        assert_eq!(
+            books[0]["available_copies"].as_i64(),
+            Some(0),
+            "a borrowed copy must not be offered as available"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn library_browse_request_filters_private_and_redacts_annotations() {
+        let db = setup_test_db().await;
+        insert_annotated_book(&db, "Public annotated", false).await;
+        insert_annotated_book(&db, "Private annotated", true).await;
+
+        let msg = request("library_browse_request", json!({ "page": 0, "limit": 20 }));
+        let response = handle_library_browse_request(&db, &msg).await;
+        let books = response["books"].as_array().expect("books array");
+
+        assert_redacted(books, "library_browse_request");
     }
 
     async fn insert_book_with_cover(
