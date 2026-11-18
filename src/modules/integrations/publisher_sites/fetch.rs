@@ -33,9 +33,11 @@ const MAX_ROBOTS_BYTES: usize = 512 * 1024;
 /// allows. A fetcher kept for the life of the app reads it again after that.
 const ROBOTS_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Most sites a fetcher keeps rules, refusals or pacing for. A lookup
-/// touches a handful; a fetcher kept for the life of the app forgets the
-/// oldest past this.
+/// Most sites a fetcher kept for the life of the app (one given a
+/// [`PoliteFetcher::with_refusal_memory`]) keeps rules or refusals for; it
+/// forgets the oldest past this. A lookup touches a handful. A run's fetcher
+/// (the maintenance tool's) is not bounded: a refusal must hold for the whole
+/// run, and 413 sites with their redirect and image hosts can pass 512.
 const MAX_SITES_KEPT: usize = 512;
 
 /// A host idle this long loses its pacing state when the fetcher is full:
@@ -131,8 +133,8 @@ pub trait SiteFetcher: Send + Sync {
 /// as it lives or for [`Self::with_refusal_memory`]: over a run of many
 /// books, asking again is what gets an address banned.
 ///
-/// What it keeps per site is bounded ([`MAX_SITES_KEPT`]): it may live as
-/// long as the app.
+/// Given a refusal memory, what it keeps per site is bounded too
+/// ([`MAX_SITES_KEPT`]): it may live as long as the app.
 pub struct PoliteFetcher {
     min_interval: Duration,
     /// Longest Crawl-delay we wait for; a site asking more is left alone.
@@ -174,6 +176,14 @@ impl PoliteFetcher {
         self
     }
 
+    /// Keep [`MAX_SITES_KEPT`] entries of `map` at most, for a fetcher kept
+    /// for the life of the app only: a run's fetcher keeps everything.
+    fn bound<V>(&self, map: &mut HashMap<String, V>, when: impl Fn(&V) -> SystemTime) {
+        if self.refusal_memory.is_some() {
+            keep_newest(map, MAX_SITES_KEPT, when);
+        }
+    }
+
     fn refused_before(&self, url: &Url) -> bool {
         let Ok(mut hosts) = self.refused.lock() else {
             return false;
@@ -206,7 +216,7 @@ impl PoliteFetcher {
             && let Ok(mut hosts) = self.refused.lock()
         {
             hosts.insert(pace_key(url), SystemTime::now());
-            keep_newest(&mut hosts, MAX_SITES_KEPT, |at| *at);
+            self.bound(&mut hosts, |at| *at);
         }
         result
     }
@@ -255,7 +265,7 @@ impl PoliteFetcher {
         };
         let mut cache = self.robots.lock().await;
         cache.insert(origin, (SystemTime::now(), robots.clone()));
-        keep_newest(&mut cache, MAX_SITES_KEPT, |(read, _)| *read);
+        self.bound(&mut cache, |(read, _)| *read);
         Ok(robots)
     }
 
@@ -776,6 +786,31 @@ mod tests {
         // No request (editions.example resolves nowhere: one would fail).
         let robots = waiting.await.unwrap().unwrap();
         assert!(!robots.allows(&Url::parse("https://editions.example/panier").unwrap()));
+    }
+
+    #[test]
+    fn a_run_s_fetcher_keeps_every_refusal() {
+        let refused = || Err::<(), _>(FetchError::Blocked("HTTP 429".into()));
+        let first = Url::parse("https://site0.example/livre").unwrap();
+        let run = PoliteFetcher::new(Duration::from_millis(10));
+        for i in 0..=MAX_SITES_KEPT {
+            let url = Url::parse(&format!("https://site{i}.example/livre")).unwrap();
+            let _ = run.noted(&url, refused());
+        }
+        assert!(run.refused_before(&first), "noted at the start of the run");
+
+        let app = PoliteFetcher::new(Duration::from_millis(10))
+            .with_refusal_memory(Duration::from_secs(60 * 60));
+        let _ = app.noted(&first, refused());
+        app.refused.lock().unwrap().insert(
+            "site0.example".into(),
+            SystemTime::now() - Duration::from_secs(30 * 60),
+        );
+        for i in 1..=MAX_SITES_KEPT {
+            let url = Url::parse(&format!("https://site{i}.example/livre")).unwrap();
+            let _ = app.noted(&url, refused());
+        }
+        assert!(!app.refused_before(&first), "the oldest is forgotten");
     }
 
     #[test]

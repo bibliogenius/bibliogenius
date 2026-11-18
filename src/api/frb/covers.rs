@@ -281,6 +281,16 @@ pub struct FrbPublisherLookupEvent {
     pub error: Option<String>,
 }
 
+/// The publisher's site [`find_cover_on_publisher_site`] would look on first
+/// for this book (`gallimard.fr`), read from the table shipped in the engine,
+/// with no request: for the app to name the site on the button that starts
+/// the lookup. `None` when the ISBN is invalid or the table knows no site for
+/// its publisher; `publisher` is the book's publisher field, as for the
+/// lookup.
+pub async fn publisher_site_for(isbn: String, publisher: Option<String>) -> Option<String> {
+    crate::modules::integrations::publisher_sites::app::publisher_site(isbn, publisher).await
+}
+
 /// Look for the book's cover on its publisher's own site, with the publisher
 /// site table shipped in the engine: the ISBN prefix gives the site, the
 /// site's recipe its page for the book, which must state the ISBN. robots.txt

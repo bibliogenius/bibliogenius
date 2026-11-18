@@ -71,6 +71,23 @@ pub fn shipped_table() -> Option<&'static PublisherTable> {
     TABLE.as_ref()
 }
 
+/// The site a lookup for the book would look on first, from the shipped
+/// table alone, with no request: for the app to name it on the button that
+/// starts the lookup, before the user asks. `None` for an invalid ISBN, or
+/// one whose publisher the table knows no site for.
+pub async fn publisher_site(isbn: String, publisher: Option<String>) -> Option<String> {
+    let table = off_runtime(shipped_table).await.flatten()?;
+    site_in(table, &isbn, publisher.as_deref())
+}
+
+/// [`publisher_site`] in any table, for tests.
+fn site_in(table: &PublisherTable, isbn: &str, publisher: Option<&str>) -> Option<String> {
+    let isbn = crate::utils::isbn::to_isbn13(isbn)?;
+    table
+        .site_for(&isbn, publisher)
+        .map(|(site, _)| site.to_owned())
+}
+
 /// A cover found on the book's page on its publisher's site.
 #[derive(Debug)]
 pub struct PublisherCover {
@@ -433,6 +450,22 @@ mod tests {
             publisher_cover_image(image).await.unwrap_err(),
             PublisherCoverError::ImageForbidden
         );
+    }
+
+    #[test]
+    fn the_site_is_named_from_the_table_alone() {
+        let table = table();
+        assert_eq!(
+            site_in(&table, "978-2-00-000001-3", None).as_deref(),
+            Some("editions.example")
+        );
+        // Its ISBN-10 is the same book.
+        assert_eq!(
+            site_in(&table, "2000000010", Some("Éditions Exemple")).as_deref(),
+            Some("editions.example")
+        );
+        assert_eq!(site_in(&table, "9791000000000", None), None, "no site");
+        assert_eq!(site_in(&table, "not an isbn", None), None);
     }
 
     #[test]

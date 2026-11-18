@@ -94,9 +94,12 @@ pub async fn until_abandoned<F: Future>(reporter: Reporter, lookup: F) -> Option
             std::future::pending::<()>().await;
         }
     };
+    // Abandonment first: polled in a random order, the lookup could run on
+    // past the step where nobody listened, to its end.
     tokio::select! {
-        out = LISTENER.scope(listening(watched), lookup) => Some(out),
+        biased;
         () = abandoned => None,
+        out = LISTENER.scope(listening(watched), lookup) => Some(out),
     }
 }
 
