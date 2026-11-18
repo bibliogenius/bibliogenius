@@ -229,11 +229,27 @@ pub(crate) async fn sync_peer_internal(
 
     // First, check peer's config for privacy consent flags
     let config_url = format!("{}/api/config", peer_url);
-    let peer_config = match client.get(&config_url).send().await {
+    let fetched = match client.get(&config_url).send().await {
         Ok(res) if res.status().is_success() => {
             res.json::<crate::api::setup::ConfigResponse>().await.ok()
         }
         _ => None,
+    };
+
+    // Another library may answer at this address (ADR-072 rule g): nothing
+    // it says is written on the peer row, and no catalog is pulled from the
+    // address unless this very sync got a config that concords with the row.
+    let Ok(Some(stored_peer)) = peer::Entity::find_by_id(peer_id).one(db).await else {
+        return Err("Peer not found".to_string());
+    };
+    let peer_config = match gate_peer_config(&stored_peer, fetched, ConfigSource::StoredAddress) {
+        GatedConfig::Peer(config) => Some(*config),
+        GatedConfig::Silent => {
+            return Err("Peer did not answer as itself, no plaintext fallback".to_string());
+        }
+        GatedConfig::OtherLibrary { .. } => {
+            return Err("Another library answers at the peer address".to_string());
+        }
     };
 
     // Distinguish "peer explicitly disallows caching" from "peer unreachable"
@@ -250,7 +266,7 @@ pub(crate) async fn sync_peer_internal(
         .as_ref()
         .map(|c| c.enabled_modules.contains(&"sliding_puzzle".to_string()));
 
-    // Extract updated name and avatar from peer config (single DB read)
+    // Extract updated name and avatar from peer config
     let peer_library_name = peer_config.as_ref().map(|c| c.library_name.clone());
     let (updated_name, updated_avatar) = if let Some(config) = &peer_config {
         if let Ok(Some(p)) = peer::Entity::find_by_id(peer_id).one(db).await {
@@ -608,11 +624,31 @@ pub async fn sync_peer(
 
     // Check peer config for gamification sharing
     let config_url = format!("{}/api/config", peer.url);
-    let peer_config = match client.get(&config_url).send().await {
+    let fetched = match client.get(&config_url).send().await {
         Ok(res) if res.status().is_success() => {
             res.json::<crate::api::setup::ConfigResponse>().await.ok()
         }
         _ => None,
+    };
+    // Another library may answer at this address (ADR-072 rule g): nothing
+    // it says is written on the peer row, and no catalog is pulled from the
+    // address unless this very sync got a config that concords with the row.
+    let peer_config = match gate_peer_config(&peer, fetched, ConfigSource::StoredAddress) {
+        GatedConfig::Peer(config) => Some(*config),
+        GatedConfig::Silent => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "Peer did not answer as itself, no plaintext fallback" })),
+            )
+                .into_response();
+        }
+        GatedConfig::OtherLibrary { .. } => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "Another library answers at the peer address" })),
+            )
+                .into_response();
+        }
     };
     let shares_gamification = peer_config.as_ref().map(|c| c.share_gamification_stats);
     let peer_has_memory_game = peer_config
@@ -626,31 +662,41 @@ pub async fn sync_peer(
         .map(|c| c.library_name.clone())
         .unwrap_or_else(|| peer.name.clone());
 
-    // Update library_uuid: backfill if missing, or detect changes (peer reset).
-    // Validates UUID format to prevent a malicious peer from injecting arbitrary strings.
-    if let Some(remote_uuid) = peer_config.as_ref().and_then(|c| c.library_uuid.clone()) {
+    // Backfill a missing library_uuid, only from an answer declaring the
+    // row's own ed25519 key. The uuid is what the identity check falls back
+    // on for a row without a key, so a plain HTTP answer must not be able to
+    // set it there. A uuid the row already has never changes from this
+    // answer: a new one arrives through the signed manifest (ADR-030).
+    // Validates UUID format to prevent a peer from injecting arbitrary strings.
+    let key_concords = peer_config.as_ref().is_some_and(|c| {
+        matches!(
+            (peer.public_key.as_deref(), c.ed25519_public_key.as_deref()),
+            (Some(stored), Some(answered)) if stored.eq_ignore_ascii_case(answered)
+        )
+    });
+    if peer.library_uuid.is_none()
+        && key_concords
+        && let Some(remote_uuid) = peer_config.as_ref().and_then(|c| c.library_uuid.clone())
+    {
         if uuid::Uuid::parse_str(&remote_uuid).is_ok() {
-            let uuid_changed = peer
-                .library_uuid
-                .as_ref()
-                .is_some_and(|old| old != &remote_uuid);
-            let uuid_missing = peer.library_uuid.is_none();
-
-            if uuid_changed || uuid_missing {
-                let mut active: peer::ActiveModel = peer.clone().into();
-                active.library_uuid = Set(Some(remote_uuid.clone()));
-                if let Err(e) = active.update(&db).await {
-                    tracing::warn!("Failed to update library_uuid for peer {}: {}", peer_id, e);
-                } else if uuid_changed {
-                    // Peer was reset/reinstalled - upsert_peer_books_cache will
-                    // handle the transition atomically (insert new, update
-                    // existing, delete absent). No premature cache wipe needed.
-                    tracing::info!(
-                        "Peer {} library_uuid changed during sync, will refresh via upsert",
-                        peer_id
-                    );
-                } else {
-                    tracing::info!("Backfilled library_uuid for peer {}", peer_id);
+            // Only while still missing: the row was read before the network
+            // call, and a uuid set meanwhile by the signed manifest wins.
+            let backfill = peer::Entity::update_many()
+                .col_expr(
+                    peer::Column::LibraryUuid,
+                    sea_orm::sea_query::Expr::value(remote_uuid),
+                )
+                .filter(peer::Column::Id.eq(peer_id))
+                .filter(peer::Column::LibraryUuid.is_null())
+                .exec(&db)
+                .await;
+            match backfill {
+                Ok(res) if res.rows_affected > 0 => {
+                    tracing::info!("Backfilled library_uuid for peer {}", peer_id)
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to update library_uuid for peer {}: {}", peer_id, e)
                 }
             }
         } else {
@@ -2162,5 +2208,492 @@ mod config_identity_gate_tests {
             &config,
             ConfigSource::PortDiscovery
         ));
+    }
+}
+
+#[cfg(all(test, feature = "it-loopback"))]
+mod plain_http_identity_gate_tests {
+    //! Rule: the background sync after a pairing and the sync by peer id
+    //! read `/api/config` over plain HTTP at the stored address, where
+    //! another library may answer (two apps on one phone, an address
+    //! reassigned by DHCP: ADR-072 rule g). Nothing such an answer says may
+    //! reach the peer row or its cached catalog.
+    //!
+    //! These tests need a local mock server, which the SSRF guard only lets
+    //! through under the `it-loopback` feature:
+    //! `cargo test --features it-loopback --lib plain_http_identity_gate`.
+    use super::*;
+    use crate::db;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const PEER_KEY: &str = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11";
+    const OTHER_KEY: &str = "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22";
+    const PEER_UUID: &str = "3f0c1c52-6c6e-4d0f-9a55-0d2f4f3f7a10";
+    const OTHER_UUID: &str = "9b7e2a41-1d3c-4e8a-8f60-5c4b3a2d1e0f";
+
+    async fn setup() -> DatabaseConnection {
+        db::init_db("sqlite::memory:").await.expect("init db")
+    }
+
+    async fn insert_peer(
+        db: &DatabaseConnection,
+        url: &str,
+        public_key: Option<&str>,
+        library_uuid: Option<&str>,
+    ) -> peer::Model {
+        let now = chrono::Utc::now().to_rfc3339();
+        peer::ActiveModel {
+            name: Set("Trusted Peer".to_string()),
+            url: Set(url.to_string()),
+            public_key: Set(public_key.map(str::to_string)),
+            library_uuid: Set(library_uuid.map(str::to_string)),
+            connection_status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert peer")
+    }
+
+    async fn cache_book(db: &DatabaseConnection, peer_id: i32, title: &str) {
+        peer_book::ActiveModel {
+            peer_id: Set(peer_id),
+            remote_book_id: Set(format!("cached-{title}")),
+            title: Set(title.to_string()),
+            synced_at: Set(chrono::Utc::now().to_rfc3339()),
+            owned: Set(true),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("cache book");
+    }
+
+    async fn cached_titles(db: &DatabaseConnection, peer_id: i32) -> Vec<String> {
+        let mut titles: Vec<String> = peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .all(db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|b| b.title)
+            .collect();
+        titles.sort();
+        titles
+    }
+
+    async fn reload(db: &DatabaseConnection, peer_id: i32) -> peer::Model {
+        peer::Entity::find_by_id(peer_id)
+            .one(db)
+            .await
+            .unwrap()
+            .expect("peer row")
+    }
+
+    fn config_answer(
+        library_name: &str,
+        ed25519_key: Option<&str>,
+        library_uuid: Option<&str>,
+        allow_library_caching: bool,
+    ) -> serde_json::Value {
+        json!({
+            "id": 1,
+            "library_name": library_name,
+            "library_description": null,
+            "profile_type": "individual",
+            "enabled_modules": [],
+            "theme": "default",
+            "latitude": null,
+            "longitude": null,
+            "share_location": false,
+            "show_borrowed_books": false,
+            "allow_library_caching": allow_library_caching,
+            "share_gamification_stats": false,
+            "ed25519_public_key": ed25519_key,
+            "x25519_public_key": null,
+            "library_uuid": library_uuid,
+            "relay_url": null,
+            "mailbox_id": null,
+            "relay_write_token": null,
+            "avatar_config": { "style": "answered" },
+        })
+    }
+
+    async fn mount(server: &MockServer, route: &str, body: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_books(server: &MockServer, title: &str) {
+        mount(
+            server,
+            "/api/books",
+            json!({ "books": [{ "id": "remote-1", "title": title, "owned": true }] }),
+        )
+        .await;
+    }
+
+    async fn requested_paths(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|r| r.url.path().to_string())
+            .collect()
+    }
+
+    async fn sync_by_id(db: &DatabaseConnection, peer_id: i32) -> StatusCode {
+        sync_peer(State(db.clone()), Path(peer_id))
+            .await
+            .into_response()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn background_sync_ignores_another_library_that_forbids_caching() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/api/config",
+            config_answer("Other Library", Some(OTHER_KEY), Some(OTHER_UUID), false),
+        )
+        .await;
+        let peer = insert_peer(&db, &server.uri(), Some(PEER_KEY), Some(PEER_UUID)).await;
+        cache_book(&db, peer.id, "Kept").await;
+
+        let result = sync_peer_internal(&db, peer.id, &server.uri()).await;
+
+        assert!(result.is_err(), "another library is not a successful sync");
+        let row = reload(&db, peer.id).await;
+        assert_eq!(row.name, "Trusted Peer");
+        assert_eq!(row.avatar_config, None);
+        assert_eq!(row.last_seen, None, "the peer itself was not seen");
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Kept"]);
+        assert_eq!(requested_paths(&server).await, vec!["/api/config"]);
+    }
+
+    #[tokio::test]
+    async fn background_sync_pulls_no_catalog_from_another_library() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/api/config",
+            config_answer("Other Library", Some(OTHER_KEY), Some(OTHER_UUID), true),
+        )
+        .await;
+        mount_books(&server, "Foreign Book").await;
+        let peer = insert_peer(&db, &server.uri(), Some(PEER_KEY), Some(PEER_UUID)).await;
+        cache_book(&db, peer.id, "Kept").await;
+
+        let result = sync_peer_internal(&db, peer.id, &server.uri()).await;
+
+        assert!(result.is_err(), "another library is not a successful sync");
+        let row = reload(&db, peer.id).await;
+        assert_eq!(row.name, "Trusted Peer");
+        assert_eq!(row.avatar_config, None);
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Kept"]);
+        assert_eq!(requested_paths(&server).await, vec!["/api/config"]);
+    }
+
+    #[tokio::test]
+    async fn background_sync_follows_the_peer_itself() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/api/config",
+            config_answer("Renamed Peer", Some(PEER_KEY), Some(PEER_UUID), true),
+        )
+        .await;
+        mount_books(&server, "Peer Book").await;
+        let peer = insert_peer(&db, &server.uri(), Some(PEER_KEY), Some(PEER_UUID)).await;
+        cache_book(&db, peer.id, "Gone From The Peer").await;
+
+        let result = sync_peer_internal(&db, peer.id, &server.uri()).await;
+
+        assert_eq!(result, Ok(1));
+        let row = reload(&db, peer.id).await;
+        assert_eq!(row.name, "Renamed Peer");
+        assert_eq!(
+            row.avatar_config.as_deref(),
+            Some(r#"{"style":"answered"}"#)
+        );
+        assert!(row.last_seen.is_some());
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Peer Book"]);
+    }
+
+    #[tokio::test]
+    async fn sync_by_id_ignores_another_library() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/api/config",
+            config_answer("Other Library", Some(OTHER_KEY), Some(OTHER_UUID), true),
+        )
+        .await;
+        mount_books(&server, "Foreign Book").await;
+        let peer = insert_peer(&db, &server.uri(), Some(PEER_KEY), Some(PEER_UUID)).await;
+        cache_book(&db, peer.id, "Kept").await;
+
+        let status = sync_by_id(&db, peer.id).await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        let row = reload(&db, peer.id).await;
+        assert_eq!(row.library_uuid.as_deref(), Some(PEER_UUID));
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Kept"]);
+        assert_eq!(requested_paths(&server).await, vec!["/api/config"]);
+    }
+
+    /// The uuid decides when the row has no key: an answer under another
+    /// uuid must not replace it, or that library would pass the identity
+    /// check from then on.
+    #[tokio::test]
+    async fn sync_by_id_keeps_the_uuid_of_a_keyless_row() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        let other_library = config_answer("Other Library", Some(OTHER_KEY), Some(OTHER_UUID), true);
+        mount(&server, "/api/config", other_library.clone()).await;
+        mount_books(&server, "Foreign Book").await;
+        let peer = insert_peer(&db, &server.uri(), None, Some(PEER_UUID)).await;
+        cache_book(&db, peer.id, "Kept").await;
+
+        let status = sync_by_id(&db, peer.id).await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        let row = reload(&db, peer.id).await;
+        assert_eq!(row.library_uuid.as_deref(), Some(PEER_UUID));
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Kept"]);
+        let answer: crate::api::setup::ConfigResponse =
+            serde_json::from_value(other_library).unwrap();
+        assert!(
+            !config_may_refresh_peer(&row, &answer, ConfigSource::StoredAddress),
+            "the other library is still refused after the sync"
+        );
+    }
+
+    /// A reset that kept its keys shows a new uuid: it reaches the row only
+    /// through the signed manifest (ADR-030), never from this answer.
+    #[tokio::test]
+    async fn sync_by_id_keeps_the_uuid_when_the_key_matches_under_another_uuid() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/api/config",
+            config_answer("Trusted Peer", Some(PEER_KEY), Some(OTHER_UUID), true),
+        )
+        .await;
+        mount_books(&server, "Peer Book").await;
+        let peer = insert_peer(&db, &server.uri(), Some(PEER_KEY), Some(PEER_UUID)).await;
+
+        let status = sync_by_id(&db, peer.id).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let row = reload(&db, peer.id).await;
+        assert_eq!(row.library_uuid.as_deref(), Some(PEER_UUID));
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Peer Book"]);
+    }
+
+    /// A pairing older than the key exchange has nothing to compare: its
+    /// stored address keeps working, but the answer there cannot give the
+    /// row an identity.
+    #[tokio::test]
+    async fn sync_by_id_syncs_a_row_without_identity_but_gives_it_no_uuid() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/api/config",
+            config_answer("Whoever", Some(OTHER_KEY), Some(OTHER_UUID), true),
+        )
+        .await;
+        mount_books(&server, "Peer Book").await;
+        let peer = insert_peer(&db, &server.uri(), None, None).await;
+
+        let status = sync_by_id(&db, peer.id).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let row = reload(&db, peer.id).await;
+        assert_eq!(row.library_uuid, None);
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Peer Book"]);
+    }
+
+    #[tokio::test]
+    async fn background_sync_follows_a_row_without_identity() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/api/config",
+            config_answer("Renamed Peer", Some(OTHER_KEY), Some(OTHER_UUID), true),
+        )
+        .await;
+        mount_books(&server, "Peer Book").await;
+        let peer = insert_peer(&db, &server.uri(), None, None).await;
+
+        let result = sync_peer_internal(&db, peer.id, &server.uri()).await;
+
+        assert_eq!(result, Ok(1));
+        assert_eq!(reload(&db, peer.id).await.name, "Renamed Peer");
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Peer Book"]);
+    }
+
+    /// An address that serves neither a config nor a catalog is not another
+    /// library: the sync fails and the cache is kept.
+    #[tokio::test]
+    async fn background_sync_keeps_the_cache_when_the_address_serves_nothing() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        let peer = insert_peer(&db, &server.uri(), Some(PEER_KEY), Some(PEER_UUID)).await;
+        cache_book(&db, peer.id, "Kept").await;
+
+        let result = sync_peer_internal(&db, peer.id, &server.uri()).await;
+
+        assert!(result.is_err());
+        let row = reload(&db, peer.id).await;
+        assert_eq!(row.name, "Trusted Peer");
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Kept"]);
+    }
+
+    async fn mount_broken_config(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/api/config"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(server)
+            .await;
+    }
+
+    /// Without a config that concords with the row, nothing tells whose
+    /// catalog the address serves: it is not pulled.
+    #[tokio::test]
+    async fn background_sync_pulls_no_catalog_without_a_config() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        mount_broken_config(&server).await;
+        mount_books(&server, "Foreign Book").await;
+        let peer = insert_peer(&db, &server.uri(), Some(PEER_KEY), Some(PEER_UUID)).await;
+        cache_book(&db, peer.id, "Kept").await;
+
+        let result = sync_peer_internal(&db, peer.id, &server.uri()).await;
+
+        assert!(result.is_err());
+        assert_eq!(reload(&db, peer.id).await.last_seen, None);
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Kept"]);
+        assert_eq!(requested_paths(&server).await, vec!["/api/config"]);
+    }
+
+    #[tokio::test]
+    async fn sync_by_id_pulls_no_catalog_without_a_config() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        mount_broken_config(&server).await;
+        mount_books(&server, "Foreign Book").await;
+        let peer = insert_peer(&db, &server.uri(), Some(PEER_KEY), Some(PEER_UUID)).await;
+        cache_book(&db, peer.id, "Kept").await;
+
+        let status = sync_by_id(&db, peer.id).await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Kept"]);
+        assert_eq!(requested_paths(&server).await, vec!["/api/config"]);
+    }
+
+    /// A reinstall that lost its keys answers under the peer's uuid with
+    /// another key: the key decides, and the owner pairs it again.
+    #[tokio::test]
+    async fn background_sync_ignores_the_peer_uuid_under_another_key() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/api/config",
+            config_answer("Renamed", Some(OTHER_KEY), Some(PEER_UUID), true),
+        )
+        .await;
+        mount_books(&server, "Foreign Book").await;
+        let peer = insert_peer(&db, &server.uri(), Some(PEER_KEY), Some(PEER_UUID)).await;
+        cache_book(&db, peer.id, "Kept").await;
+
+        let result = sync_peer_internal(&db, peer.id, &server.uri()).await;
+
+        assert!(result.is_err());
+        assert_eq!(reload(&db, peer.id).await.name, "Trusted Peer");
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Kept"]);
+        assert_eq!(requested_paths(&server).await, vec!["/api/config"]);
+    }
+
+    #[tokio::test]
+    async fn sync_by_id_ignores_the_peer_uuid_under_another_key() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/api/config",
+            config_answer("Renamed", Some(OTHER_KEY), Some(PEER_UUID), true),
+        )
+        .await;
+        mount_books(&server, "Foreign Book").await;
+        let peer = insert_peer(&db, &server.uri(), Some(PEER_KEY), Some(PEER_UUID)).await;
+        cache_book(&db, peer.id, "Kept").await;
+
+        let status = sync_by_id(&db, peer.id).await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Kept"]);
+        assert_eq!(requested_paths(&server).await, vec!["/api/config"]);
+    }
+
+    /// A row that knows the library uuid but no key is matched on the uuid.
+    #[tokio::test]
+    async fn sync_by_id_follows_a_keyless_row_under_its_own_uuid() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/api/config",
+            config_answer("Trusted Peer", Some(OTHER_KEY), Some(PEER_UUID), true),
+        )
+        .await;
+        mount_books(&server, "Peer Book").await;
+        let peer = insert_peer(&db, &server.uri(), None, Some(PEER_UUID)).await;
+
+        let status = sync_by_id(&db, peer.id).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let row = reload(&db, peer.id).await;
+        assert_eq!(row.library_uuid.as_deref(), Some(PEER_UUID));
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Peer Book"]);
+    }
+
+    #[tokio::test]
+    async fn sync_by_id_follows_the_peer_itself_and_completes_its_uuid() {
+        let db = setup().await;
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/api/config",
+            config_answer("Trusted Peer", Some(PEER_KEY), Some(PEER_UUID), true),
+        )
+        .await;
+        mount_books(&server, "Peer Book").await;
+        let peer = insert_peer(&db, &server.uri(), Some(PEER_KEY), None).await;
+        cache_book(&db, peer.id, "Gone From The Peer").await;
+
+        let status = sync_by_id(&db, peer.id).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let row = reload(&db, peer.id).await;
+        assert_eq!(row.library_uuid.as_deref(), Some(PEER_UUID));
+        assert_eq!(cached_titles(&db, peer.id).await, vec!["Peer Book"]);
     }
 }

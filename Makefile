@@ -1,4 +1,4 @@
-.PHONY: start dev test test-two-instances clean help
+.PHONY: start dev test test-loopback test-two-instances clean help
 
 # Default port
 PORT ?= 8000
@@ -20,11 +20,17 @@ test:
 	@echo "🧪 Running API Regression Tests..."
 	@./tests/verify_filters.sh
 
+# Unit tests that need a local mock server behind `validate_url` (see
+# TESTING.md). Not part of `make test`: needs the it-loopback feature, no
+# Docker. Runs first in `test-two-instances`.
+test-loopback:
+	@cargo test --features it-loopback --lib plain_http_identity_gate
+
 # Two backends against the throwaway dev hub (see TESTING.md). Not part of
 # `make test`: needs Docker and the it-loopback feature. The hub is stopped
 # and its database wiped whatever the outcome. ARGS scopes the run, e.g.
 # ARGS="an_ended_pairing -- --nocapture".
-test-two-instances:
+test-two-instances: test-loopback
 	@$(MAKE) -C ../bibliogenius-hub it-up
 	@cargo test --features it-loopback --test two_instances_hub $(ARGS); \
 	  status=$$?; $(MAKE) -C ../bibliogenius-hub it-down; exit $$status

@@ -188,7 +188,12 @@ to the peer, catalog or relay code).
 
 It is not part of `cargo test`: the target needs the `it-loopback` feature
 (loopback addresses accepted by `validate_url`, test-only, never shipped)
-and a hub started from `bibliogenius-hub`:
+and a hub started from `bibliogenius-hub`.
+
+`make test-two-instances` first runs `make test-loopback`: the unit tests of
+`src/api/peer/sync.rs` that put a mock server at a peer's address (which
+answers may change a peer row or its cached catalog). They need the same
+feature but no Docker, so `make test-loopback` also runs on its own.
 
 ```bash
 make test-two-instances                      # the three steps below
