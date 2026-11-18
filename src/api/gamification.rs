@@ -60,8 +60,8 @@ pub async fn get_leaderboard(State(state): State<AppState>) -> impl IntoResponse
 /// POST /api/gamification/refresh-leaderboard
 ///
 /// Syncs gamification stats from all connected peers, then returns the leaderboard.
-/// NOTE: The peer sync logic in `peer::sync_peer_gamification_stats` is intentionally
-/// kept unchanged (TNR-safe) — it still uses direct SeaORM via DatabaseConnection.
+/// NOTE: The peer sync logic in `peer::sync_peer_gamification_stats` still
+/// uses direct SeaORM via DatabaseConnection.
 pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResponse {
     use crate::models::{contact, peer};
     use sea_orm::{
@@ -111,6 +111,7 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
             let peer_url = p.url.clone();
             let peer_name = p.name.clone();
             let peer_id = p.id;
+            let peer_model = p.clone();
             async move {
                 let config_url = format!("{}/api/config", peer_url);
                 match client.get(&config_url).send().await {
@@ -119,6 +120,21 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
                             Ok(c) => c,
                             Err(_) => return (peer_id, peer_url, peer_name, None),
                         };
+                        // Another library may answer at the stored address
+                        // (ADR-072 rule g): nothing it says is the peer's,
+                        // so it is handled like a silent peer and the relay
+                        // is tried instead.
+                        if !crate::api::peer::config_may_refresh_peer(
+                            &peer_model,
+                            &config,
+                            crate::api::peer::ConfigSource::StoredAddress,
+                        ) {
+                            tracing::warn!(
+                                "Leaderboard refresh: another library answered for peer {}, ignoring its config",
+                                peer_id
+                            );
+                            return (peer_id, peer_url, peer_name, None);
+                        }
                         (peer_id, peer_url, peer_name, Some(config))
                     }
                     _ => {
@@ -141,7 +157,8 @@ pub async fn refresh_leaderboard(State(state): State<AppState>) -> impl IntoResp
     for (peer_id, peer_url, peer_name, config) in results {
         if let Some(config) = config {
             // Update peer name and corresponding contact if it changed
-            if config.library_name != peer_name
+            if !config.library_name.is_empty()
+                && config.library_name != peer_name
                 && let Ok(Some(peer_model)) = peer::Entity::find_by_id(peer_id).one(db).await
             {
                 let old_name = peer_model.name.clone();

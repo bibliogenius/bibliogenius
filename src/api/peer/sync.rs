@@ -485,6 +485,15 @@ pub(crate) async fn sync_peer_gamification_stats(
         }
     };
 
+    // The leaderboard shows the stored peer name, never the one in this
+    // plain HTTP answer: any library answering at the peer's address could
+    // announce another (ADR-072 rule g). The row name itself is refreshed
+    // only by answers that pass the identity gate, or by the relay.
+    let peer_name = match peer::Entity::find_by_id(peer_id).one(db).await {
+        Ok(Some(p)) => p.name,
+        _ => return,
+    };
+
     // Upsert: delete old + insert new (same pattern as peer_books)
     let _ = peer_gamification_stats::Entity::delete_many()
         .filter(peer_gamification_stats::Column::PeerId.eq(peer_id))
@@ -493,7 +502,7 @@ pub(crate) async fn sync_peer_gamification_stats(
 
     let entry = peer_gamification_stats::ActiveModel {
         peer_id: Set(peer_id),
-        library_name: Set(stats.library_name),
+        library_name: Set(peer_name),
         collector_level: Set(stats.collector.level),
         collector_current: Set(stats.collector.current as i32),
         reader_level: Set(stats.reader.level),

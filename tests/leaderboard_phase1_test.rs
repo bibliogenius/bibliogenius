@@ -4,7 +4,8 @@
 //! the preferred LAN entry point:
 //!
 //! 1. New endpoint returns 200 → bundle is applied in a single round-trip,
-//!    `peers.name` is refreshed, per-game score caches are populated.
+//!    per-game score caches are populated; `peers.name` is kept, a plain
+//!    HTTP bundle does not prove who answered (ADR-072 rule g).
 //! 2. New endpoint returns 404 → legacy fallback path (`/api/config` +
 //!    `/api/game/memory/public-best` + ...) is used so peers on an older
 //!    backend still appear on the leaderboard.
@@ -70,15 +71,15 @@ async fn phase1_uses_new_bundle_endpoint() {
     let state = AppState::new(db.clone());
     rust_lib_app::utils::leaderboard_relay::sync_all_leaderboards(&state, false).await;
 
-    // Peer name should have been updated from the bundle.
+    // A plain HTTP bundle does not rename the peer (ADR-072 rule g).
     let refreshed = peer::Entity::find_by_id(peer.id)
         .one(&db)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(
-        refreshed.name, "Fresh Library Name",
-        "peer.name should be refreshed from the bundle's library_name"
+        refreshed.name, "Old Library Name",
+        "peer.name is not taken from a plain HTTP bundle"
     );
 
     // Memory game score should have been cached.
@@ -91,8 +92,8 @@ async fn phase1_uses_new_bundle_endpoint() {
     assert_eq!(scores[0].best_score, 1337.0);
     assert_eq!(scores[0].difficulty, "medium");
     assert_eq!(
-        scores[0].library_name, "Fresh Library Name",
-        "cached library_name should match the bundle"
+        scores[0].library_name, "Old Library Name",
+        "cached library_name is the stored peer name"
     );
 }
 

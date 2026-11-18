@@ -364,7 +364,12 @@ pub async fn apply_stats_bundle_to_caches(
 ) {
     // The name cached next to the scores follows the same rule as the row.
     let display_name = match source {
-        BundleSource::Relay => bundle.library_name.as_deref().unwrap_or(peer_name),
+        // An empty name is refused here as it is for the row below.
+        BundleSource::Relay => bundle
+            .library_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(peer_name),
         BundleSource::DirectHttp => peer_name,
     };
 
@@ -531,7 +536,7 @@ pub async fn apply_stats_bundle_to_caches(
 
             let entry = peer_gamification_stats::ActiveModel {
                 peer_id: sea_orm::Set(peer_id),
-                library_name: sea_orm::Set(stats.library_name.clone()),
+                library_name: sea_orm::Set(display_name.to_string()),
                 collector_level: sea_orm::Set(stats.collector.level),
                 collector_current: sea_orm::Set(stats.collector.current as i32),
                 reader_level: sea_orm::Set(stats.reader.level),
@@ -1038,6 +1043,89 @@ mod tests {
             .await;
 
         assert_eq!(peer_name(db, peer_id).await, "New Name");
+    }
+
+    fn bundle_with_gamification(library_name: &str) -> PublicStatsBundle {
+        let track = || crate::api::gamification::PublicTrackStats {
+            level: 1,
+            current: 1,
+        };
+        PublicStatsBundle {
+            share_gamification_stats: true,
+            gamification: Some(crate::api::gamification::PublicGamificationStats {
+                library_name: library_name.to_string(),
+                collector: track(),
+                reader: track(),
+                lender: track(),
+                cataloguer: track(),
+            }),
+            ..name_only_bundle(Some(library_name))
+        }
+    }
+
+    async fn leaderboard_line_name(db: &sea_orm::DatabaseConnection, peer_id: i32) -> String {
+        use crate::models::peer_gamification_stats;
+        peer_gamification_stats::Entity::find()
+            .filter(peer_gamification_stats::Column::PeerId.eq(peer_id))
+            .one(db)
+            .await
+            .expect("query stats")
+            .expect("stats cached")
+            .library_name
+    }
+
+    /// The leaderboard line follows the row: the relay's name is shown, a
+    /// plain HTTP answer's name is not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_stats_bundle_leaderboard_line_name_follows_source() {
+        let state = test_state().await;
+        let db = state.db();
+        let relayed = insert_peer(db, "Old Name").await;
+        let direct = insert_peer(db, "Trusted Name").await;
+
+        apply_stats_bundle_to_caches(
+            db,
+            relayed,
+            "Old Name",
+            &bundle_with_gamification("New Name"),
+            true,
+            BundleSource::Relay,
+        )
+        .await;
+        apply_stats_bundle_to_caches(
+            db,
+            direct,
+            "Trusted Name",
+            &bundle_with_gamification("Impostor Name"),
+            true,
+            BundleSource::DirectHttp,
+        )
+        .await;
+
+        assert_eq!(leaderboard_line_name(db, relayed).await, "New Name");
+        assert_eq!(leaderboard_line_name(db, direct).await, "Trusted Name");
+    }
+
+    /// A relayed bundle announcing an empty name renames nothing: the row
+    /// and the leaderboard line both keep the stored name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_stats_bundle_relay_empty_name_keeps_stored_name() {
+        let state = test_state().await;
+        let db = state.db();
+        let peer_id = insert_peer(db, "Stored Name").await;
+
+        apply_stats_bundle_to_caches(
+            db,
+            peer_id,
+            "Stored Name",
+            &bundle_with_gamification(""),
+            true,
+            BundleSource::Relay,
+        )
+        .await;
+
+        assert_eq!(peer_name(db, peer_id).await, "Stored Name");
+        assert_eq!(leaderboard_line_name(db, peer_id).await, "Stored Name");
     }
 
     /// A bundle fetched in plain HTTP at the stored address proves nothing
