@@ -7,6 +7,8 @@
 
 **Autonomous library server with REST API, P2P synchronization, and local storage.**
 
+Official website of the BiblioGenius project: **[bibliogenius.org](https://bibliogenius.org)**
+
 This is the core backend of the BiblioGenius ecosystem, written in Rust. It owns the library database, the synchronization logic, and external metadata lookups. It runs in two modes from the same codebase:
 
 - **Embedded (FFI)**: compiled into the [Flutter app](https://codeberg.org/bibliogenius/bibliogenius-app) for offline-first performance on iOS, Android, and macOS (and the Windows/Linux desktop builds). This is how most users run it, without ever knowing it is there.
