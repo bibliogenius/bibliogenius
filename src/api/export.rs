@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::{
     author, book, book_authors, book_tags, collection, collection_book, contact, copy,
     gamification_achievements, gamification_config, gamification_progress, gamification_streaks,
-    installation_profile, library_config, loan, sale, tag,
+    installation_profile, library_config, loan, peer, sale, tag,
 };
 
 // --- Export ---
@@ -606,6 +606,23 @@ async fn wipe_catalog<C: ConnectionTrait>(conn: &C) -> Result<(), DbErr> {
     Ok(())
 }
 
+/// Local peer ids keyed by library uuid, for the uuids that name exactly one
+/// peer: a uuid shared by several rows cannot tell them apart.
+async fn peer_ids_by_library_uuid<C: ConnectionTrait>(
+    conn: &C,
+) -> Result<HashMap<String, i32>, DbErr> {
+    let mut ids = HashMap::new();
+    let mut shared = HashSet::new();
+    for p in peer::Entity::find().all(conn).await? {
+        let Some(uuid) = p.library_uuid else { continue };
+        if ids.insert(uuid.clone(), p.id).is_some() {
+            shared.insert(uuid);
+        }
+    }
+    ids.retain(|uuid, _| !shared.contains(uuid));
+    Ok(ids)
+}
+
 fn import_error(message: String) -> (StatusCode, Json<ImportResult>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -772,7 +789,21 @@ pub async fn import_data(
 
     // 7. Import copies (FK to books, libraries)
     if let Some(copies) = backup.copies {
-        for c in copies {
+        let peer_ids = match peer_ids_by_library_uuid(&txn).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                let _ = txn.rollback().await;
+                return import_error(format!("Failed to read peers: {}", e));
+            }
+        };
+        for mut c in copies {
+            // `lender_peer_id` is a row number of the install that wrote the
+            // file. Here it may name nobody, or another peer, and a return
+            // would then notify a library that never lent the book.
+            c.lender_peer_id = c
+                .lender_library_uuid
+                .as_deref()
+                .and_then(|uuid| peer_ids.get(uuid).copied());
             let active = c.into_active_model();
             if active.insert(&txn).await.is_ok() {
                 copies_count += 1;
@@ -1546,8 +1577,6 @@ mod tests {
     /// The `peers` array of an older export is ignored.
     #[tokio::test(flavor = "multi_thread")]
     async fn import_data_keeps_local_peers_and_ignores_exported_ones() {
-        use crate::models::peer;
-
         let db = setup().await;
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -1562,6 +1591,20 @@ mod tests {
             relay_write_token: Set(Some("write-token".to_string())),
             auto_approve: Set(false),
             connection_status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let local_peer_id = peer::Entity::find().one(&db).await.unwrap().unwrap().id;
+        crate::models::p2p_request::ActiveModel {
+            id: Set("request-1".to_string()),
+            from_peer_id: Set(local_peer_id),
+            book_isbn: Set(String::new()),
+            book_title: Set("Requested".to_string()),
+            status: Set("pending".to_string()),
             created_at: Set(now.clone()),
             updated_at: Set(now.clone()),
             ..Default::default()
@@ -1598,14 +1641,88 @@ mod tests {
         assert_eq!(peers[0].public_key.as_deref(), Some("ed25519-hex"));
         assert_eq!(peers[0].x25519_public_key.as_deref(), Some("x25519-hex"));
         assert_eq!(peers[0].relay_write_token.as_deref(), Some("write-token"));
+
+        let requests = crate::models::p2p_request::Entity::find()
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(requests.len(), 1, "a peer's requests stay with the peer");
+    }
+
+    /// A borrowed copy names its lender by a row number of the install that
+    /// wrote the file. The restore re-reads it from the lender's library uuid,
+    /// so it never points at a local peer that merely holds the same number.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_data_resolves_the_lender_from_its_library_uuid() {
+        let db = setup().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let local_peer_id = peer::ActiveModel {
+            name: Set("Lender".to_string()),
+            url: Set("relay://lender".to_string()),
+            library_uuid: Set(Some("uuid-lender".to_string())),
+            key_exchange_done: Set(true),
+            auto_approve: Set(false),
+            connection_status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap()
+        .id;
+
+        let borrowed = |id: &str, lender_peer_id: i32, lender_library_uuid: &str| {
+            serde_json::json!({
+                "id": id,
+                "book_id": "book-1",
+                "library_id": 1,
+                "status": "borrowed",
+                "is_temporary": true,
+                "created_at": now,
+                "updated_at": now,
+                "lender_peer_id": lender_peer_id,
+                "lender_library_uuid": lender_library_uuid,
+            })
+        };
+        let backup = ImportBackupData {
+            books: Some(vec![make_import_book(Some("book-1".to_string()), "Lent")]),
+            copies: Some(
+                serde_json::from_value(serde_json::json!([
+                    // Same lender, another number in the file.
+                    borrowed("copy-known", local_peer_id + 41, "uuid-lender"),
+                    // Another lender, who holds the local peer's number.
+                    borrowed("copy-unknown", local_peer_id, "uuid-elsewhere"),
+                ]))
+                .unwrap(),
+            ),
+            ..empty_backup()
+        };
+
+        let (status, Json(result)) = import_data(State(db.clone()), Json(backup)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result.copies_imported, 2);
+
+        let lender_of = |id: &'static str| {
+            let db = db.clone();
+            async move {
+                copy::Entity::find_by_id(id)
+                    .one(&db)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .lender_peer_id
+            }
+        };
+        assert_eq!(lender_of("copy-known").await, Some(local_peer_id));
+        assert_eq!(lender_of("copy-unknown").await, None);
     }
 
     /// The export is a file the user may hand to someone else: it carries no
-    /// peer, hence no contact list, location or relay write token.
+    /// peer row, hence none of their addresses, keys or relay write tokens.
     #[tokio::test(flavor = "multi_thread")]
     async fn export_data_leaves_peers_out() {
-        use crate::models::peer;
-
         let db = setup().await;
         let now = chrono::Utc::now().to_rfc3339();
         peer::ActiveModel {
