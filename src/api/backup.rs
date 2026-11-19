@@ -1382,9 +1382,6 @@ async fn load_merge_payload(
         book_tags: Some(book_tags),
         collections: Some(collections),
         collection_books: Some(collection_books),
-        // Peers excluded by the merge whitelist; sending None makes the
-        // existing skip in `run_import_upsert` step 12 trivially apply.
-        peers: None,
         gamification_config: gamification_config_row,
         gamification_progress: Some(gamification_progress),
         gamification_achievements: Some(gamification_achievements),

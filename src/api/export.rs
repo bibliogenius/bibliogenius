@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::{
     author, book, book_authors, book_tags, collection, collection_book, contact, copy,
     gamification_achievements, gamification_config, gamification_progress, gamification_streaks,
-    installation_profile, library_config, loan, peer, sale, tag,
+    installation_profile, library_config, loan, sale, tag,
 };
 
 // --- Export ---
@@ -37,7 +37,6 @@ pub struct BackupData {
     pub book_tags: Vec<book_tags::Model>,
     pub collections: Vec<collection::Model>,
     pub collection_books: Vec<collection_book::Model>,
-    pub peers: Vec<peer::Model>,
     pub gamification_config: Option<gamification_config::Model>,
     pub gamification_progress: Vec<gamification_progress::Model>,
     pub gamification_achievements: Vec<gamification_achievements::Model>,
@@ -69,7 +68,6 @@ pub async fn export_data(State(db): State<DatabaseConnection>) -> impl IntoRespo
         .all(&db)
         .await
         .unwrap_or_default();
-    let peers = peer::Entity::find().all(&db).await.unwrap_or_default();
     let gam_config = gamification_config::Entity::find()
         .one(&db)
         .await
@@ -102,7 +100,6 @@ pub async fn export_data(State(db): State<DatabaseConnection>) -> impl IntoRespo
         book_tags,
         collections,
         collection_books,
-        peers,
         gamification_config: gam_config,
         gamification_progress: gam_progress,
         gamification_achievements: gam_achievements,
@@ -526,6 +523,10 @@ pub struct ImportTag {
     pub updated_at: Option<String>,
 }
 
+/// A backup file as the restore reads it.
+///
+/// There is no `peers` field: exports written before peers left the catalog
+/// export still carry one, and serde drops it as an unknown key.
 #[derive(Deserialize)]
 pub struct ImportBackupData {
     pub version: Option<String>,
@@ -543,7 +544,6 @@ pub struct ImportBackupData {
     pub book_tags: Option<Vec<book_tags::Model>>,
     pub collections: Option<Vec<collection::Model>>,
     pub collection_books: Option<Vec<collection_book::Model>>,
-    pub peers: Option<Vec<peer::Model>>,
     pub gamification_config: Option<gamification_config::Model>,
     pub gamification_progress: Option<Vec<gamification_progress::Model>>,
     pub gamification_achievements: Option<Vec<gamification_achievements::Model>>,
@@ -560,17 +560,16 @@ pub struct ImportResult {
     pub tags_imported: usize,
     pub authors_imported: usize,
     pub collections_imported: usize,
-    pub peers_imported: usize,
     pub sales_imported: usize,
     pub gamification_imported: usize,
     pub message: String,
 }
 
 /// Wipe all catalog tables (books, authors, tags, copies, contacts, loans,
-/// sales, collections, peers, gamification, library_config) in a FK-safe order.
+/// sales, collections, gamification, library_config) in a FK-safe order.
 ///
 /// Out of scope: install-/identity-/transient-state tables that are NOT in the
-/// export, e.g. `users`, `libraries`, `crypto_keys`, `operation_log`,
+/// export, e.g. `users`, `libraries`, `crypto_keys`, `peers`, `operation_log`,
 /// `installation_profile`, `linked_devices`, `relay_*`, `notifications`,
 /// `loan_settings`, `hub_directory_config`, `library_view_stats`. These belong
 /// to the install, not the catalog content the user backed up.
@@ -588,9 +587,9 @@ async fn wipe_catalog<C: ConnectionTrait>(conn: &C) -> Result<(), DbErr> {
     // so a single delete_many is safe regardless of internal order.
     tag::Entity::delete_many().exec(conn).await?;
     contact::Entity::delete_many().exec(conn).await?;
-    // peer cascades to peer_books, p2p_requests, p2p_outgoing_requests,
-    // peer_gamification_stats (all ON DELETE CASCADE).
-    peer::Entity::delete_many().exec(conn).await?;
+    // Peers stay: the install keeps its identity and its relay mailbox, so
+    // its contacts keep writing to it with the keys they hold. Dropping the
+    // rows, or their keys, would leave those messages unreadable.
     gamification_streaks::Entity::delete_many()
         .exec(conn)
         .await?;
@@ -619,7 +618,6 @@ fn import_error(message: String) -> (StatusCode, Json<ImportResult>) {
             tags_imported: 0,
             authors_imported: 0,
             collections_imported: 0,
-            peers_imported: 0,
             sales_imported: 0,
             gamification_imported: 0,
             message,
@@ -654,7 +652,6 @@ pub async fn import_data(
     let mut tags_count = 0;
     let mut authors_count = 0;
     let mut collections_count = 0;
-    let mut peers_count = 0;
     let mut sales_count = 0;
     let mut gamification_count = 0;
 
@@ -823,48 +820,6 @@ pub async fn import_data(
         }
     }
 
-    // 12. Import peers
-    //
-    // E2EE state is reset because the install identity may differ from the
-    // backup's: peers will re-handshake on next contact, and `try_send_e2ee`
-    // already falls back to plaintext while `key_exchange_done = false`.
-    //
-    // `connection_status` is preserved from the backup: hard-coding "pending"
-    // would resurrect old, already-accepted peers as new connection requests
-    // every time the user restores on the same install (observed 2026-04-29).
-    if let Some(peers) = backup.peers {
-        for p in peers {
-            let active = peer::ActiveModel {
-                id: sea_orm::ActiveValue::NotSet,
-                name: Set(p.name),
-                display_name: Set(p.display_name),
-                url: Set(p.url),
-                library_uuid: Set(p.library_uuid),
-                public_key: Set(None),
-                x25519_public_key: Set(None),
-                key_exchange_done: Set(false),
-                mailbox_id: Set(p.mailbox_id),
-                relay_url: Set(p.relay_url),
-                relay_write_token: Set(None),
-                relay_write_token_invalid_at: Set(None),
-                latitude: Set(p.latitude),
-                longitude: Set(p.longitude),
-                auto_approve: Set(p.auto_approve),
-                connection_status: Set(p.connection_status),
-                last_seen: Set(None),
-                avatar_config: Set(None),
-                catalog_hash: Set(None),
-                last_catalog_sync: Set(None),
-                last_delta_cursor: Set(None),
-                created_at: Set(p.created_at),
-                updated_at: Set(now.clone()),
-            };
-            if active.insert(&txn).await.is_ok() {
-                peers_count += 1;
-            }
-        }
-    }
-
     // 13. Import gamification
     if let Some(gc) = backup.gamification_config {
         let active = gc.into_active_model();
@@ -917,7 +872,6 @@ pub async fn import_data(
         + tags_count
         + authors_count
         + collections_count
-        + peers_count
         + sales_count
         + gamification_count;
 
@@ -930,7 +884,6 @@ pub async fn import_data(
         tags_imported: tags_count,
         authors_imported: authors_count,
         collections_imported: collections_count,
-        peers_imported: peers_count,
         sales_imported: sales_count,
         gamification_imported: gamification_count,
         message: format!("Successfully imported {} items", total),
@@ -1294,8 +1247,6 @@ pub async fn run_import_upsert(db: &DatabaseConnection, backup: ImportBackupData
         }
     }
 
-    // 12. Skip peers (local network config, not relevant for backup)
-
     // 13. Upsert gamification
     if let Some(gc) = backup.gamification_config {
         let res = gamification_config::Entity::insert(gc.into_active_model())
@@ -1425,7 +1376,6 @@ pub async fn run_import_upsert(db: &DatabaseConnection, backup: ImportBackupData
         tags_imported: tags_count,
         authors_imported: authors_count,
         collections_imported: collections_count,
-        peers_imported: 0,
         sales_imported: sales_count,
         gamification_imported: gamification_count,
         message: format!("Successfully upserted {} items", total),
@@ -1500,7 +1450,6 @@ mod tests {
             book_tags: None,
             collections: None,
             collection_books: None,
-            peers: None,
             gamification_config: None,
             gamification_progress: None,
             gamification_achievements: None,
@@ -1591,54 +1540,98 @@ mod tests {
         assert!(tags.is_empty(), "old tag should have been wiped");
     }
 
-    /// `connection_status` from the backup must round-trip. Hard-coding
-    /// "pending" here would resurrect already-accepted peers as new connection
-    /// requests on every same-install restore (observed 2026-04-29 with a
-    /// stale iPhone -> Mac demande appearing post-restore).
+    /// A restore replaces the catalog and leaves the peers alone: the install
+    /// keeps its identity and its relay mailbox, so a peer whose keys were
+    /// dropped could still deposit messages that nobody could read any more.
+    /// The `peers` array of an older export is ignored.
     #[tokio::test(flavor = "multi_thread")]
-    async fn import_data_preserves_peer_connection_status() {
+    async fn import_data_keeps_local_peers_and_ignores_exported_ones() {
+        use crate::models::peer;
+
         let db = setup().await;
         let now = chrono::Utc::now().to_rfc3339();
 
-        let backup = ImportBackupData {
-            peers: Some(vec![peer::Model {
-                id: 1,
-                name: "iPhone".to_string(),
-                display_name: None,
-                url: "http://192.168.1.42:3000".to_string(),
-                library_uuid: Some("uuid-1".to_string()),
-                public_key: None,
-                x25519_public_key: None,
-                key_exchange_done: true,
-                mailbox_id: None,
-                relay_url: None,
-                relay_write_token: None,
-                relay_write_token_invalid_at: None,
-                latitude: None,
-                longitude: None,
-                auto_approve: false,
-                connection_status: "accepted".to_string(),
-                last_seen: None,
-                catalog_hash: None,
-                last_catalog_sync: None,
-                avatar_config: None,
-                last_delta_cursor: None,
-                created_at: now.clone(),
-                updated_at: now.clone(),
-            }]),
-            ..empty_backup()
-        };
+        peer::ActiveModel {
+            name: Set("Remote library".to_string()),
+            url: Set("relay://remote".to_string()),
+            library_uuid: Set(Some("uuid-remote".to_string())),
+            public_key: Set(Some("ed25519-hex".to_string())),
+            x25519_public_key: Set(Some("x25519-hex".to_string())),
+            key_exchange_done: Set(true),
+            mailbox_id: Set(Some("mailbox-remote".to_string())),
+            relay_write_token: Set(Some("write-token".to_string())),
+            auto_approve: Set(false),
+            connection_status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        // An export written when peers were still part of the file.
+        let backup: ImportBackupData = serde_json::from_value(serde_json::json!({
+            "version": "2.0",
+            "peers": [{
+                "id": 7,
+                "name": "Stale library",
+                "url": "http://192.168.1.42:3000",
+                "library_uuid": "uuid-stale",
+                "key_exchange_done": true,
+                "auto_approve": false,
+                "connection_status": "accepted",
+                "created_at": now,
+                "updated_at": now,
+            }],
+        }))
+        .unwrap();
 
         let (status, Json(result)) = import_data(State(db.clone()), Json(backup)).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(result.peers_imported, 1);
+        assert!(result.success);
 
         let peers = peer::Entity::find().all(&db).await.unwrap();
-        assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].connection_status, "accepted");
-        // E2EE state should still be reset (cross-install safe default).
-        assert!(!peers[0].key_exchange_done);
-        assert!(peers[0].x25519_public_key.is_none());
+        assert_eq!(peers.len(), 1, "the exported peer must not be imported");
+        assert_eq!(peers[0].library_uuid.as_deref(), Some("uuid-remote"));
+        assert!(peers[0].key_exchange_done);
+        assert_eq!(peers[0].public_key.as_deref(), Some("ed25519-hex"));
+        assert_eq!(peers[0].x25519_public_key.as_deref(), Some("x25519-hex"));
+        assert_eq!(peers[0].relay_write_token.as_deref(), Some("write-token"));
+    }
+
+    /// The export is a file the user may hand to someone else: it carries no
+    /// peer, hence no contact list, location or relay write token.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_data_leaves_peers_out() {
+        use crate::models::peer;
+
+        let db = setup().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        peer::ActiveModel {
+            name: Set("Remote library".to_string()),
+            url: Set("relay://remote".to_string()),
+            relay_write_token: Set(Some("write-token".to_string())),
+            key_exchange_done: Set(true),
+            auto_approve: Set(false),
+            connection_status: Set("accepted".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        let response = export_data(State(db)).await.into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let backup: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(backup.get("books").is_some());
+        assert!(backup.get("peers").is_none());
+        assert!(!String::from_utf8_lossy(&body).contains("write-token"));
     }
 
     /// An empty backup is destructive too: the user explicitly chose to
