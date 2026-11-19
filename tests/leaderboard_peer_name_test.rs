@@ -377,11 +377,249 @@ async fn profile_refresh_ignores_another_library_uuid_when_the_row_has_no_key() 
     );
 }
 
+/// A bundle that would overwrite the cached leaderboard line (higher levels)
+/// and erase the cached game scores (modules absent, applied with
+/// `clear_disabled`).
+fn overwriting_bundle() -> serde_json::Value {
+    serde_json::json!({
+        "share_gamification_stats": true,
+        "enabled_modules": [],
+        "gamification": public_stats("Other Library"),
+        "memory_game": null,
+        "sliding_puzzle": null,
+        "hangman": null,
+        "library_name": "Other Library",
+    })
+}
+
+/// Mounted with `expect(1)`: the peer was really asked, not skipped.
+async fn mount_overwriting_bundle(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/api/public-stats-bundle"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(overwriting_bundle()))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+async fn cache_memory_score(db: &DatabaseConnection, peer_id: i32, name: &str) {
+    use rust_lib_app::modules::memory_game::domain::MemoryGameRepository;
+    use rust_lib_app::modules::memory_game::repository::SeaOrmGameRepository;
+    SeaOrmGameRepository::new(db.clone())
+        .upsert_peer_score(peer_id, name, 100.0, "easy", "2026-11-01T10:00:00Z")
+        .await
+        .expect("cache memory score");
+}
+
+async fn memory_scores(db: &DatabaseConnection) -> Vec<(i32, f64)> {
+    use rust_lib_app::modules::memory_game::domain::MemoryGameRepository;
+    use rust_lib_app::modules::memory_game::repository::SeaOrmGameRepository;
+    SeaOrmGameRepository::new(db.clone())
+        .get_peer_scores()
+        .await
+        .expect("memory scores")
+        .into_iter()
+        .map(|s| (s.peer_id, s.best_score))
+        .collect()
+}
+
+async fn cache_puzzle_and_hangman_scores(db: &DatabaseConnection, peer_id: i32, name: &str) {
+    use rust_lib_app::modules::hangman::domain::HangmanRepository;
+    use rust_lib_app::modules::hangman::repository::SeaOrmHangmanRepository;
+    use rust_lib_app::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
+    use rust_lib_app::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository;
+    SeaOrmPuzzleRepository::new(db.clone())
+        .upsert_peer_score(peer_id, name, 200.0, "easy", "2026-11-01T10:00:00Z")
+        .await
+        .expect("cache puzzle score");
+    SeaOrmHangmanRepository::new(db.clone())
+        .upsert_peer_score(peer_id, name, 300.0, "easy", "2026-11-01T10:00:00Z")
+        .await
+        .expect("cache hangman score");
+}
+
+async fn puzzle_and_hangman_scores(db: &DatabaseConnection) -> (Vec<(i32, f64)>, Vec<(i32, f64)>) {
+    use rust_lib_app::modules::hangman::domain::HangmanRepository;
+    use rust_lib_app::modules::hangman::repository::SeaOrmHangmanRepository;
+    use rust_lib_app::modules::sliding_puzzle::domain::SlidingPuzzleRepository;
+    use rust_lib_app::modules::sliding_puzzle::repository::SeaOrmPuzzleRepository;
+    let puzzle = SeaOrmPuzzleRepository::new(db.clone())
+        .get_peer_scores()
+        .await
+        .expect("puzzle scores")
+        .into_iter()
+        .map(|s| (s.peer_id, s.best_score))
+        .collect();
+    let hangman = SeaOrmHangmanRepository::new(db.clone())
+        .get_peer_scores()
+        .await
+        .expect("hangman scores")
+        .into_iter()
+        .map(|s| (s.peer_id, s.best_score))
+        .collect();
+    (puzzle, hangman)
+}
+
+async fn sync_leaderboards(db: &DatabaseConnection) {
+    rust_lib_app::utils::leaderboard_relay::sync_all_leaderboards(
+        &AppState::new(db.clone()),
+        false,
+    )
+    .await;
+}
+
+/// The peer's cached line and game scores are exactly as cached before.
+async fn assert_caches_untouched(db: &DatabaseConnection, peer_id: i32) {
+    assert_eq!(peer_name(db, peer_id).await, "Trusted Peer");
+    let lines = peer_gamification_stats::Entity::find()
+        .all(db)
+        .await
+        .unwrap();
+    assert_eq!(lines.len(), 1, "the cached line is kept");
+    assert_eq!(lines[0].library_name, "Trusted Peer");
+    assert_eq!(lines[0].collector_level, 1, "no stats are written");
+    assert_eq!(
+        memory_scores(db).await,
+        vec![(peer_id, 100.0)],
+        "the cached Memory score is not erased"
+    );
+    assert_eq!(
+        puzzle_and_hangman_scores(db).await,
+        (vec![(peer_id, 200.0)], vec![(peer_id, 300.0)]),
+        "the cached puzzle and hangman scores are not erased"
+    );
+}
+
+async fn insert_trusted_peer_with_caches(db: &DatabaseConnection, url: &str) -> peer::Model {
+    let peer = insert_peer(db, "Trusted Peer", url).await;
+    cache_leaderboard_line(db, peer.id, "Trusted Peer").await;
+    cache_memory_score(db, peer.id, "Trusted Peer").await;
+    cache_puzzle_and_hangman_scores(db, peer.id, "Trusted Peer").await;
+    peer
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn leaderboard_sync_ignores_a_bundle_from_another_library() {
+    let db = setup_db().await;
+    let server = MockServer::start().await;
+    mount_overwriting_bundle(&server).await;
+    mount(
+        &server,
+        "/api/config",
+        config_answer("Other Library", OTHER_KEY),
+    )
+    .await;
+    let peer = insert_trusted_peer_with_caches(&db, &server.uri()).await;
+
+    sync_leaderboards(&db).await;
+
+    assert_caches_untouched(&db, peer.id).await;
+}
+
+/// The legacy branch (no bundle endpoint) reads `/api/config` for the
+/// modules: another library's answer must not drive the per-game reads.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn leaderboard_sync_legacy_branch_ignores_another_library() {
+    let db = setup_db().await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/public-stats-bundle"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // No module enabled: applied, it would erase the cached Memory score.
+    mount(
+        &server,
+        "/api/config",
+        config_answer("Other Library", OTHER_KEY),
+    )
+    .await;
+    mount(
+        &server,
+        "/api/gamification/public-stats",
+        public_stats("Other Library"),
+    )
+    .await;
+    let peer = insert_trusted_peer_with_caches(&db, &server.uri()).await;
+
+    sync_leaderboards(&db).await;
+
+    assert_caches_untouched(&db, peer.id).await;
+}
+
+/// Without a readable `/api/config` nothing tells who served the bundle:
+/// the peer is handled as silent.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn leaderboard_sync_ignores_a_bundle_when_the_config_is_silent() {
+    for config_response in [
+        ResponseTemplate::new(500),
+        ResponseTemplate::new(200).set_body_string("not json"),
+    ] {
+        let db = setup_db().await;
+        let server = MockServer::start().await;
+        mount_overwriting_bundle(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/config"))
+            .respond_with(config_response)
+            .mount(&server)
+            .await;
+        let peer = insert_trusted_peer_with_caches(&db, &server.uri()).await;
+
+        sync_leaderboards(&db).await;
+
+        assert_caches_untouched(&db, peer.id).await;
+    }
+}
+
+/// A pairing older than the key exchange has nothing to compare: the
+/// answer at its stored address is still followed.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn leaderboard_sync_follows_a_peer_paired_before_the_key_exchange() {
+    let db = setup_db().await;
+    let server = MockServer::start().await;
+    mount(&server, "/api/public-stats-bundle", overwriting_bundle()).await;
+    mount(
+        &server,
+        "/api/config",
+        config_answer_with_uuid("Other Library", OTHER_KEY, OTHER_UUID),
+    )
+    .await;
+    let peer = insert_peer_with_identity(&db, "Old Peer", &server.uri(), None, None).await;
+    cache_leaderboard_line(&db, peer.id, "Old Peer").await;
+    cache_memory_score(&db, peer.id, "Old Peer").await;
+
+    sync_leaderboards(&db).await;
+
+    let lines = peer_gamification_stats::Entity::find()
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].library_name, "Old Peer");
+    assert_eq!(lines[0].collector_level, 2, "the bundle is applied");
+    assert!(
+        memory_scores(&db).await.is_empty(),
+        "the disabled module is cleared as before"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn leaderboard_sync_shows_the_stored_name_for_a_plain_http_bundle() {
     let db = setup_db().await;
     let server = MockServer::start().await;
+    // The peer itself answers (same key) but announces another name.
+    mount(
+        &server,
+        "/api/config",
+        config_answer("Other Library", PEER_KEY),
+    )
+    .await;
     mount(
         &server,
         "/api/public-stats-bundle",
@@ -418,10 +656,11 @@ async fn leaderboard_sync_legacy_peer_shows_the_stored_name() {
         .respond_with(ResponseTemplate::new(404))
         .mount(&server)
         .await;
+    // The peer itself answers (same key) but announces another name.
     mount(
         &server,
         "/api/config",
-        config_answer("Other Library", OTHER_KEY),
+        config_answer("Other Library", PEER_KEY),
     )
     .await;
     mount(

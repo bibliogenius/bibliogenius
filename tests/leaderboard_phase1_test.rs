@@ -39,6 +39,40 @@ async fn insert_peer(db: &DatabaseConnection, name: &str, url: &str) -> peer::Mo
     .expect("insert peer")
 }
 
+/// `/api/config` of a peer without keys: the row has no identity either, so
+/// the answer at its stored address is accepted (ADR-072 rule g).
+fn config_answer(enabled_modules: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "id": 1,
+        "library_name": "Legacy Library",
+        "library_description": null,
+        "profile_type": "individual",
+        "enabled_modules": enabled_modules,
+        "theme": "default",
+        "latitude": null,
+        "longitude": null,
+        "share_location": false,
+        "show_borrowed_books": false,
+        "allow_library_caching": false,
+        "share_gamification_stats": false,
+        "ed25519_public_key": null,
+        "x25519_public_key": null,
+        "library_uuid": null,
+        "relay_url": null,
+        "mailbox_id": null,
+        "relay_write_token": null,
+    })
+}
+
+async fn mount_config(server: &MockServer, enabled_modules: serde_json::Value) {
+    Mock::given(method("GET"))
+        .and(path("/api/config"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(config_answer(enabled_modules)))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn phase1_uses_new_bundle_endpoint() {
@@ -65,6 +99,8 @@ async fn phase1_uses_new_bundle_endpoint() {
         .expect(1)
         .mount(&server)
         .await;
+
+    mount_config(&server, serde_json::json!(["memory_game"])).await;
 
     let peer = insert_peer(&db, "Old Library Name", &server.uri()).await;
 
@@ -132,6 +168,8 @@ async fn phase1_applies_per_difficulty_hangman_scores() {
         .mount(&server)
         .await;
 
+    mount_config(&server, serde_json::json!(["hangman"])).await;
+
     let peer = insert_peer(&db, "Per-Difficulty Peer", &server.uri()).await;
 
     let state = AppState::new(db.clone());
@@ -167,32 +205,7 @@ async fn phase1_falls_back_to_legacy_on_404() {
 
     // Legacy path: /api/config exposes enabled_modules so the caller knows
     // which per-game endpoints to hit.
-    let config = serde_json::json!({
-        "id": 1,
-        "library_name": "Legacy Library",
-        "library_description": null,
-        "profile_type": "individual",
-        "enabled_modules": ["memory_game"],
-        "theme": "default",
-        "latitude": null,
-        "longitude": null,
-        "share_location": false,
-        "show_borrowed_books": false,
-        "allow_library_caching": false,
-        "share_gamification_stats": false,
-        "ed25519_public_key": null,
-        "x25519_public_key": null,
-        "library_uuid": null,
-        "relay_url": null,
-        "mailbox_id": null,
-        "relay_write_token": null,
-    });
-    Mock::given(method("GET"))
-        .and(path("/api/config"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&config))
-        .expect(1)
-        .mount(&server)
-        .await;
+    mount_config(&server, serde_json::json!(["memory_game"])).await;
 
     let legacy_score = serde_json::json!({
         "best_score": 4242.0,

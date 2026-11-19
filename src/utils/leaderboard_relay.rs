@@ -562,6 +562,39 @@ pub async fn apply_stats_bundle_to_caches(
     }
 }
 
+/// The `/api/config` at the peer's stored address, only when it declares the
+/// identity the row describes ([`config_may_refresh_peer`]).
+///
+/// Two libraries can answer at one address (ADR-072 rule g). Without a
+/// concordant config, nothing read there in plain HTTP is the peer's, so the
+/// caller handles the peer as silent: no score is written or cleared.
+///
+/// [`config_may_refresh_peer`]: crate::api::peer::config_may_refresh_peer
+async fn fetch_config_of_peer(
+    client: &reqwest::Client,
+    peer: &crate::models::peer::Model,
+) -> Option<crate::api::setup::ConfigResponse> {
+    let config_url = format!("{}/api/config", peer.url);
+    let config = match client.get(&config_url).send().await {
+        Ok(res) if res.status().is_success() => {
+            res.json::<crate::api::setup::ConfigResponse>().await.ok()?
+        }
+        _ => return None,
+    };
+    if !crate::api::peer::config_may_refresh_peer(
+        peer,
+        &config,
+        crate::api::peer::ConfigSource::StoredAddress,
+    ) {
+        tracing::warn!(
+            "Leaderboard sync: another library answered for peer {}, ignoring its scores",
+            peer.id
+        );
+        return None;
+    }
+    Some(config)
+}
+
 /// Sync leaderboard scores from all accepted peers for ALL games at once.
 ///
 /// This is the single entry point for leaderboard refresh. Instead of each game
@@ -644,8 +677,23 @@ pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
                         }
 
                         let bundle_url = format!("{}/api/public-stats-bundle", peer.url);
-                        match client.get(&bundle_url).send().await {
+                        // The config tells who answered; fetched alongside
+                        // the bundle so the check adds no latency.
+                        let (bundle_res, config) = tokio::join!(
+                            client.get(&bundle_url).send(),
+                            fetch_config_of_peer(&client, &peer),
+                        );
+                        match bundle_res {
                             Ok(res) if res.status().is_success() => {
+                                if config.is_none() {
+                                    if state.is_peer_relay_unreachable(peer.id) {
+                                        return Phase1Outcome::Dead;
+                                    }
+                                    return match ensure_relay_credentials(db, &peer).await {
+                                        Some(ready) => Phase1Outcome::NeedsRelay(ready),
+                                        None => Phase1Outcome::Dead,
+                                    };
+                                }
                                 match res.json::<PublicStatsBundle>().await {
                                     Ok(bundle) => Phase1Outcome::Bundle(bundle),
                                     Err(_) => Phase1Outcome::Dead,
@@ -655,13 +703,6 @@ pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
                                 // Legacy peer: /api/config + 4 per-game endpoints.
                                 // Runs inside this future so multiple legacy peers
                                 // don't serialize behind each other.
-                                let config_url = format!("{}/api/config", peer.url);
-                                let config = match client.get(&config_url).send().await {
-                                    Ok(res) if res.status().is_success() => {
-                                        res.json::<crate::api::setup::ConfigResponse>().await.ok()
-                                    }
-                                    _ => None,
-                                };
                                 let Some(config) = config else {
                                     if state.is_peer_relay_unreachable(peer.id) {
                                         return Phase1Outcome::Dead;
