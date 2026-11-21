@@ -21,10 +21,11 @@ use super::text::find_isbns;
 use crate::modules::integrations::web_cover::{CoverCandidates, cover_candidates};
 use crate::utils::isbn::{to_isbn10, to_isbn13};
 
-/// Addresses a product template may give for one book that are tried.
-/// The check uses the same bounds: a recipe it passes is one the app finds
-/// books with.
-pub const MAX_PRODUCT_TRIES: usize = 3;
+/// Addresses a product template may give for one book that are tried: a
+/// title cut in two (`"Title : Subtitle"`) gives four, the whole title in
+/// both orders and each part alone. The check uses the same bounds: a
+/// recipe it passes is one the app finds books with.
+pub const MAX_PRODUCT_TRIES: usize = 4;
 /// Search results opened for one book.
 pub const MAX_RESULT_LINKS: usize = 3;
 

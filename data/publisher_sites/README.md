@@ -236,6 +236,17 @@ How the cover is chosen on the book's page, each rule from a real case:
   named as a stand-in (`nocover.jpg`, `couverture-manquante.png`); a page
   that declares only a stand-in has no cover.
 
+A product recipe tries four addresses at most, built from the forms of the
+title (`text::title_variants`): the whole title, then, when a colon or a
+spaced dash cuts it, its two parts swapped and each part alone. Which part
+is the book's own title cannot be told from the text: "Donner à manger :
+Politique d'un geste ordinaire" is found by its first part, "Une enquête du
+commissaire Brunetti : L'Épreuve du feu" by its second. Before changing
+these forms or their order, replay them offline on the reference books: a
+rule that guessed the title from a volume number pushed the book's own
+title out of the tries for eleven of them (series without a number), and
+no request was needed to see it.
+
 A book is `not_found` only when its sites answered. A site that did not
 answer at all (its home page neither) makes it `unreachable`, and one that
 turned us away (403, 429, a firewall's "Request Rejected" page, robots.txt

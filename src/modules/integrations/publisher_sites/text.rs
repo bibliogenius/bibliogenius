@@ -67,11 +67,16 @@ pub fn slugify(s: &str, apostrophe: Apostrophe) -> String {
 
 /// The orders a site may put a title in: as given, then, for
 /// `"Series, tome N : Title"`, the title before the series, the title alone
-/// and the series alone.
+/// and the series alone. A title without a colon that a spaced dash cuts
+/// (`"Title - Subtitle"`) is read the same way: which part is the book's own
+/// title cannot be told from the text, so both are tried alone.
 pub fn title_variants(title: &str) -> Vec<String> {
     let mut out = vec![title.to_owned()];
-    if let Some((series, own)) = title.rsplit_once(':') {
-        let (series, own) = (series.trim(), own.trim());
+    let parts = title
+        .rsplit_once(':')
+        .map(|(series, own)| (series.trim(), own.trim()))
+        .or_else(|| split_at_spaced_dash(title));
+    if let Some((series, own)) = parts {
         out.push(format!("{own} {series}"));
         out.push(own.to_owned());
         out.push(series.to_owned());
@@ -79,6 +84,19 @@ pub fn title_variants(title: &str) -> Vec<String> {
     out.retain(|t| !t.is_empty());
     out.dedup();
     out
+}
+
+/// A title cut at its first dash standing between two spaces (hyphen, en or
+/// em dash): what catalogues put between a title and its subtitle. A hyphen
+/// inside a word (`"A-t-on"`) cuts nothing.
+fn split_at_spaced_dash(title: &str) -> Option<(&str, &str)> {
+    let (at, dash) = title.char_indices().find(|&(i, c)| {
+        matches!(c, '-' | '\u{2013}' | '\u{2014}')
+            && title[..i].ends_with(char::is_whitespace)
+            && title[i + c.len_utf8()..].starts_with(char::is_whitespace)
+    })?;
+    let (main, subtitle) = (title[..at].trim(), title[at + dash.len_utf8()..].trim());
+    (!main.is_empty() && !subtitle.is_empty()).then_some((main, subtitle))
 }
 
 /// The first author's name as given, then with the first or the last word
@@ -261,6 +279,31 @@ mod tests {
             ]
         );
         assert_eq!(title_variants("Martin Eden"), ["Martin Eden"]);
+    }
+
+    #[test]
+    fn title_variants_cut_a_title_at_a_spaced_dash() {
+        assert_eq!(
+            title_variants("Donner à manger - Politique d'un geste ordinaire"),
+            [
+                "Donner à manger - Politique d'un geste ordinaire",
+                "Politique d'un geste ordinaire Donner à manger",
+                "Politique d'un geste ordinaire",
+                "Donner à manger",
+            ]
+        );
+        // The first dash cuts, whichever dash the catalogue used.
+        assert_eq!(
+            title_variants("Le Grand Cahier \u{2013} La Preuve \u{2013} Le Troisième Mensonge")[3],
+            "Le Grand Cahier"
+        );
+        // A hyphen inside a word is no separator.
+        assert_eq!(title_variants("A-t-on besoin d'un chef ?").len(), 1);
+        // A colon is read first, the dash staying in its part.
+        assert_eq!(
+            title_variants("Saga : L'Aube - Le Soir")[2],
+            "L'Aube - Le Soir"
+        );
     }
 
     #[test]

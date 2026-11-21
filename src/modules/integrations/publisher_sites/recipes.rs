@@ -109,6 +109,7 @@ const SEARCH_SEGMENTS: [&str; 4] = ["search", "recherche", "resultat", "result"]
 
 #[cfg(test)]
 mod tests {
+    use super::super::lookup::MAX_PRODUCT_TRIES;
     use super::super::text::Apostrophe;
     use super::*;
 
@@ -172,6 +173,34 @@ mod tests {
             truncated: false,
         };
         assert!(!redirected_to_book(&results, &wp, "9782000000011"));
+    }
+
+    #[test]
+    fn a_lookup_tries_each_part_of_a_cut_title_alone() {
+        let recipe = ProductRecipe {
+            template: "https://e.example/livre/{slug}".into(),
+            apostrophe: Apostrophe::Drop,
+            slug_ignored: false,
+        };
+        let tried = |title: &str| {
+            let urls = product_urls(&recipe, "9782000000011", title, "Joëlle Zask");
+            urls.into_iter().take(MAX_PRODUCT_TRIES).collect::<Vec<_>>()
+        };
+        let main = "https://e.example/livre/donner-a-manger".to_owned();
+        let subtitle = "https://e.example/livre/politique-dun-geste-ordinaire".to_owned();
+        for title in [
+            "Donner à manger - Politique d'un geste ordinaire",
+            "Donner à manger : Politique d'un geste ordinaire",
+        ] {
+            let urls = tried(title);
+            assert!(urls.contains(&main) && urls.contains(&subtitle), "{title}");
+        }
+        // A series named first, without a volume number, still has the
+        // book's own title tried.
+        assert!(
+            tried("Une enquête du commissaire Brunetti : L'Épreuve du feu")
+                .contains(&"https://e.example/livre/lepreuve-du-feu".to_owned())
+        );
     }
 
     #[test]
