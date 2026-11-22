@@ -1084,7 +1084,7 @@ async fn measure_one(
         authors: book.authors,
         publisher: book.publisher,
     };
-    // The books of one host wait for each other's turn there (Gallmeister
+    // The books of one host wait for each other's turn there (Gallimard
     // asks 10 s between two requests): the app's deadline would measure the
     // queue, not the recipes.
     match find_book_page_within(fetcher, table, &query, maps, MEASURE_BUDGET).await {
