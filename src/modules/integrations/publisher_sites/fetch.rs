@@ -33,8 +33,8 @@ const MAX_ROBOTS_BYTES: usize = 512 * 1024;
 /// allows. A fetcher kept for the life of the app reads it again after that.
 const ROBOTS_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Most sites a fetcher kept for the life of the app (one given a
-/// [`PoliteFetcher::with_refusal_memory`]) keeps rules or refusals for; it
+/// Most sites a fetcher kept for the life of the app (one given
+/// [`PoliteFetcher::with_bounded_memory`]) keeps rules or refusals for; it
 /// forgets the oldest past this. A lookup touches a handful. A run's fetcher
 /// (the maintenance tool's) is not bounded: a refusal must hold for the whole
 /// run, and 413 sites with their redirect and image hosts can pass 512.
@@ -133,14 +133,17 @@ pub trait SiteFetcher: Send + Sync {
 /// as it lives or for [`Self::with_refusal_memory`]: over a run of many
 /// books, asking again is what gets an address banned.
 ///
-/// Given a refusal memory, what it keeps per site is bounded too
-/// ([`MAX_SITES_KEPT`]): it may live as long as the app.
+/// What it keeps per site grows with the sites it meets, unless
+/// [`Self::with_bounded_memory`] caps it: a fetcher that lives as long as
+/// the app must be given it.
 pub struct PoliteFetcher {
     min_interval: Duration,
     /// Longest Crawl-delay we wait for; a site asking more is left alone.
     max_crawl_delay: Option<Duration>,
     /// How long a refusal is remembered; `None`, as long as the fetcher.
     refusal_memory: Option<Duration>,
+    /// Whether what it keeps per site is capped at [`MAX_SITES_KEPT`].
+    bounded: bool,
     /// Each site's rules, with when they were read.
     robots: Mutex<HashMap<String, (SystemTime, Arc<Robots>)>>,
     hosts: Mutex<HashMap<String, Arc<Mutex<Option<Instant>>>>>,
@@ -154,6 +157,7 @@ impl PoliteFetcher {
             min_interval,
             max_crawl_delay: None,
             refusal_memory: None,
+            bounded: false,
             robots: Mutex::new(HashMap::new()),
             hosts: Mutex::new(HashMap::new()),
             refused: std::sync::Mutex::new(HashMap::new()),
@@ -168,6 +172,21 @@ impl PoliteFetcher {
         self
     }
 
+    /// Keep rules and refusals for [`MAX_SITES_KEPT`] sites at most,
+    /// forgetting the oldest: for a fetcher kept for the life of the app. A
+    /// run's fetcher keeps everything, so that a refusal holds for the whole
+    /// run.
+    pub fn with_bounded_memory(mut self) -> Self {
+        self.bounded = true;
+        self
+    }
+
+    /// Whether [`Self::with_bounded_memory`] was given.
+    #[cfg(test)]
+    pub(crate) fn bounds_memory(&self) -> bool {
+        self.bounded
+    }
+
     /// Leave alone the sites whose Crawl-delay is longer than `max`, instead
     /// of waiting for them: behind a click, nobody waits a minute between
     /// two requests. The site is reported as refusing us.
@@ -176,10 +195,10 @@ impl PoliteFetcher {
         self
     }
 
-    /// Keep [`MAX_SITES_KEPT`] entries of `map` at most, for a fetcher kept
-    /// for the life of the app only: a run's fetcher keeps everything.
+    /// Keep [`MAX_SITES_KEPT`] entries of `map` at most, given
+    /// [`Self::with_bounded_memory`].
     fn bound<V>(&self, map: &mut HashMap<String, V>, when: impl Fn(&V) -> SystemTime) {
-        if self.refusal_memory.is_some() {
+        if self.bounded {
             keep_newest(map, MAX_SITES_KEPT, when);
         }
     }
@@ -799,8 +818,22 @@ mod tests {
         }
         assert!(run.refused_before(&first), "noted at the start of the run");
 
-        let app = PoliteFetcher::new(Duration::from_millis(10))
+        // A refusal memory says how long a refusal holds, not how many are
+        // kept: alone, it bounds nothing.
+        let remembering = PoliteFetcher::new(Duration::from_millis(10))
             .with_refusal_memory(Duration::from_secs(60 * 60));
+        for i in 0..=MAX_SITES_KEPT {
+            let url = Url::parse(&format!("https://site{i}.example/livre")).unwrap();
+            let _ = remembering.noted(&url, refused());
+        }
+        assert!(
+            remembering.refused_before(&first),
+            "not bounded unless asked"
+        );
+
+        let app = PoliteFetcher::new(Duration::from_millis(10))
+            .with_refusal_memory(Duration::from_secs(60 * 60))
+            .with_bounded_memory();
         let _ = app.noted(&first, refused());
         app.refused.lock().unwrap().insert(
             "site0.example".into(),

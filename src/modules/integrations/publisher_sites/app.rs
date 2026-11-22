@@ -39,6 +39,7 @@ static FETCHER: LazyLock<PoliteFetcher> = LazyLock::new(|| {
     PoliteFetcher::new(PAUSE)
         .with_max_crawl_delay(MAX_CRAWL_DELAY)
         .with_refusal_memory(REFUSAL_MEMORY)
+        .with_bounded_memory()
 });
 
 /// The one fetcher every lookup goes through, for the life of the app.
@@ -450,6 +451,13 @@ mod tests {
             publisher_cover_image(image).await.unwrap_err(),
             PublisherCoverError::ImageForbidden
         );
+    }
+
+    #[test]
+    fn the_app_s_fetcher_keeps_a_bounded_memory() {
+        // It lives as long as the app: what it keeps per site must not grow
+        // without limit.
+        assert!(shared_fetcher().bounds_memory());
     }
 
     #[test]
