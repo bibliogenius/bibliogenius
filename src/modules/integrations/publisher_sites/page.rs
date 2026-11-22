@@ -816,9 +816,10 @@ fn site_links<'a>(
 /// The links of a search result page that lead to the wanted book, best
 /// first. A link with the ISBN in its path comes first; the ISBN in a query
 /// string does not count (the result page's own filters carry it). Without
-/// it, at least 60 % of the title's words must be in the link's path, text or
-/// title, the author's last name adding to the score and a listing page
-/// (author, collection) taking from it.
+/// it, at least 60 % of the title's words must be in the link's path, text,
+/// title or aria-label (an empty link laid over a result card, as at
+/// Gallmeister, is named by it alone), the author's last name adding to the
+/// score and a listing page (author, collection) taking from it.
 pub fn result_links(
     html: &str,
     page_url: &Url,
@@ -850,10 +851,11 @@ pub fn result_links(
             100
         } else if !words.is_empty() {
             let hay = fold(&format!(
-                "{} {} {}",
+                "{} {} {} {}",
                 decoded_path(&url),
                 element_text(&a),
-                a.value().attr("title").unwrap_or("")
+                a.value().attr("title").unwrap_or(""),
+                a.value().attr("aria-label").unwrap_or("")
             ));
             let hay: Vec<&str> = hay.split(' ').collect();
             let found = words.iter().filter(|w| hay.contains(&w.as_str())).count();
@@ -1591,6 +1593,24 @@ mod tests {
                 "/auteur/andrea"
             ]
         );
+    }
+
+    #[test]
+    fn a_result_link_named_by_its_aria_label_is_kept() {
+        // Gallmeister's result cards: an empty link over the card, the title
+        // in its aria-label, an address without it.
+        let html = r#"<a href="/livres/friedrich-durrenmatt-livre-3" class="absolute inset-0"
+            aria-label="Le juge et son bourreau / Le soupçon - voir la fiche"></a>"#;
+        let page = url("https://gallmeister.fr/recherche?q=Le%20juge");
+        let links = result_links(
+            html,
+            &page,
+            "9782351788721",
+            "Le juge et son bourreau : le soupçon",
+            "Friedrich Dürrenmatt",
+        );
+        let paths: Vec<&str> = links.iter().map(Url::path).collect();
+        assert_eq!(paths, ["/livres/friedrich-durrenmatt-livre-3"]);
     }
 
     #[test]

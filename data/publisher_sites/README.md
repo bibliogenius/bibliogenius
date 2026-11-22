@@ -247,6 +247,14 @@ rule that guessed the title from a volume number pushed the book's own
 title out of the tries for eleven of them (series without a number), and
 no request was needed to see it.
 
+A search by title is sent the whole title without its colons
+(`recipes::search_terms`): some engines read `word:value` as a field
+filter. Gallmeister's (Shopify) finds nothing for "Le juge et son
+bourreau : le soupçon", and the book for "Le juge et son bourreau le
+soupçon" or its first part alone. Its result is an empty link laid over
+the card, named by its `aria-label` only, which `page::result_links` reads
+along with the link's path, text and `title`.
+
 A book is `not_found` only when its sites answered. A site that did not
 answer at all (its home page neither) makes it `unreachable`, and one that
 turned us away (403, 429, a firewall's "Request Rejected" page, robots.txt

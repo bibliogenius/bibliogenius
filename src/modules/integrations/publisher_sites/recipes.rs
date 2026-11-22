@@ -60,13 +60,15 @@ pub fn product_urls(recipe: &ProductRecipe, isbn: &str, title: &str, authors: &s
     out
 }
 
-/// Run a search. Returns the answer and the address asked, against which a
-/// redirect is judged.
+/// Run a search for `query`, its colons left out ([`search_terms`]).
+/// Returns the answer and the address asked, against which a redirect is
+/// judged.
 pub async fn run_search(
     fetcher: &dyn SiteFetcher,
     recipe: &SearchRecipe,
     query: &str,
 ) -> Result<(Page, Url), FetchError> {
+    let query = &search_terms(query);
     match &recipe.post_fields {
         None => {
             let encoded = urlencoding::encode(query);
@@ -90,6 +92,18 @@ pub async fn run_search(
             }
         }
     }
+}
+
+/// `query` as a search box is given it: without its colons, which some
+/// engines read as a field filter (a Shopify search takes `bourreau : le`
+/// for one and finds nothing for "Title : Subtitle"), and with its spaces,
+/// non-breaking ones included, made single.
+fn search_terms(query: &str) -> String {
+    query
+        .split(|c: char| c == ':' || c.is_whitespace())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The server sent us to the book itself: the final path is not the one
@@ -147,6 +161,31 @@ mod tests {
             )
             .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_search_asks_without_the_colons() {
+        use super::super::test_site::FakeSite;
+        // A Shopify search (Gallmeister) reads `word:value` as a field filter
+        // and finds nothing for "Title : Subtitle"; without it, the book.
+        let site = FakeSite::default();
+        let recipe = SearchRecipe {
+            url: "https://e.example/recherche?q={q}".into(),
+            post_fields: None,
+            by_isbn: false,
+        };
+        for title in [
+            "Le juge et son bourreau : le soupçon",
+            "Le juge et son bourreau: le soupçon",
+        ] {
+            let _ = run_search(&site, &recipe, title).await;
+        }
+        let asked = site.asked.lock().unwrap();
+        assert_eq!(
+            *asked,
+            ["https://e.example/recherche?q=Le%20juge%20et%20son%20bourreau%20le%20soup%C3%A7on";
+                2]
         );
     }
 
