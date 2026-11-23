@@ -25,11 +25,11 @@ const SHIPPED_TABLE: &str = include_str!(concat!(
 
 /// Pause between two requests to one host: one person looking for one book,
 /// a handful of requests. A longer Crawl-delay of the site wins.
-const PAUSE: Duration = Duration::from_secs(1);
+pub const PAUSE: Duration = Duration::from_secs(1);
 
 /// Longest Crawl-delay waited for behind a click; a site asking more is left
 /// alone, as refusing us. Gallimard's 10 s stays under it.
-const MAX_CRAWL_DELAY: Duration = Duration::from_secs(10);
+pub const MAX_CRAWL_DELAY: Duration = Duration::from_secs(10);
 
 /// How long a site that turned us away (429, firewall) is left alone before
 /// a click asks it again.

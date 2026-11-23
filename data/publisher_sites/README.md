@@ -32,8 +32,10 @@ recipe that leads from an ISBN to the book's page. Code:
   done with by then are `unreachable`. The app also leaves alone a site whose
   Crawl-delay is longer than it can wait behind a click. `measure` gives each
   book 15 minutes: its books of one host wait for each other's turn there
-  (Gallmeister asks 10 s between two requests), and the app's deadline would
-  measure that queue rather than the recipes.
+  (Gallimard asks 10 s between two requests), and the app's deadline would
+  measure that queue rather than the recipes. `measure --like-the-app` looks
+  for one book at a time with the app's pause, Crawl-delay cap and deadline,
+  to see what a click costs.
 
 ## Refreshing the table (before a release)
 
@@ -191,6 +193,7 @@ the caller to try in turn.
 
 ```sh
 ./target/release/publisher_sites measure --books FILE   # -> target/publisher_sites/measure/
+./target/release/publisher_sites measure --books FILE --like-the-app   # as a click would
 ```
 
 `FILE` is a JSON list of books (`isbn`, `title`, `authors`, `publisher`, and
@@ -199,6 +202,15 @@ will (`publisher_sites::lookup`, then `publisher_sites::cover`): the sites of
 its ISBN prefix, each recipe in turn, a page taken only when it shows the
 ISBN as its book's, then the cover image, loaded through the same polite
 client and checked as the app checks it.
+
+By default twelve books are looked for at a time, 15 minutes each at most,
+which measures the recipes. `--like-the-app` measures the time instead: one
+book at a time, the app's 1 s pause, its 10 s Crawl-delay cap (a site asking
+more is left alone) and its 60 s deadline (`LOOKUP_DEADLINE`). Each book's
+`seconds` in `results.json` is how long its lookup and cover took. On the 49
+reference books whose title is cut (November 2026), 45 took under 16 s; the
+slowest were Gallimard's, 43 to 54 s, its 10 s Crawl-delay times four product
+tries.
 
 A page shows the ISBN as its book's when its main JSON-LD item (a `Book` or
 `Product` at the top of a script, in its `@graph`, or as a page's

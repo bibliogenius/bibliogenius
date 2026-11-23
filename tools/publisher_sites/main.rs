@@ -13,6 +13,7 @@
 //! cargo run --release --bin publisher_sites -- diff [--base GIT_REF|FILE]
 //! cargo run --release --bin publisher_sites -- measure --books FILE [--out DIR]
 //!                                                      [--workers N] [--pause SECS]
+//!                                                      [--like-the-app]
 //! ```
 //!
 //! See `data/publisher_sites/README.md` for what each step does and when to
@@ -30,6 +31,7 @@ use tokio::sync::Mutex;
 use url::Url;
 
 use rust_lib_app::modules::integrations::API_USER_AGENT;
+use rust_lib_app::modules::integrations::publisher_sites::app;
 use rust_lib_app::modules::integrations::publisher_sites::build::{
     CorrectionState, SiteSource, build_table, candidate_table, normalize_prefix,
     pending_corrections, site_sources,
@@ -43,7 +45,7 @@ use rust_lib_app::modules::integrations::publisher_sites::fetch::{
 };
 use rust_lib_app::modules::integrations::publisher_sites::lint::{Severity, diff, lint};
 use rust_lib_app::modules::integrations::publisher_sites::lookup::{
-    BookQuery, Lookup, SitemapCache, find_book_page_within,
+    BookQuery, LOOKUP_DEADLINE, Lookup, SitemapCache, find_book_page_within,
 };
 use rust_lib_app::modules::integrations::publisher_sites::probe::{find_witnesses, probe_site};
 use rust_lib_app::modules::integrations::publisher_sites::table::{
@@ -171,7 +173,7 @@ async fn main() {
                 "build" => std::iter::once(("offline", false)).chain(PACING).collect(),
                 "report" => vec![("out", true)],
                 "diff" => vec![("base", true)],
-                "measure" => [("books", true), ("out", true)]
+                "measure" => [("books", true), ("out", true), ("like-the-app", false)]
                     .into_iter()
                     .chain(PACING)
                     .collect(),
@@ -992,6 +994,9 @@ struct Measured {
     recipe: String,
     page: String,
     image: String,
+    /// How long the lookup and its cover took, the waits for a host's turn
+    /// included.
+    seconds: f64,
 }
 
 /// Look for each book of `--books` with the table, as the app will, and
@@ -1004,13 +1009,16 @@ async fn cmd_measure(paths: &Paths, flags: &Flags) -> Result<(), String> {
     )
     .map_err(|e| format!("{books_path}: {e}"))?;
     let table = Arc::new(read_table(paths)?);
-    let workers = flags.number("workers", 12usize)?.max(1);
-    let pause = flags.number("pause", 1.5f64)?.max(0.5);
-    let fetcher = Arc::new(PoliteFetcher::new(Duration::from_secs_f64(pause)));
+    let pacing = MeasurePacing::from_flags(flags)?;
+    let (workers, pause, budget) = (pacing.workers, pacing.pause, pacing.budget);
+    let fetcher = Arc::new(pacing.fetcher());
     let maps = Arc::new(SitemapCache::default());
     let total = books.len();
     println!(
-        "measuring {total} books, {workers} at a time, {pause} s between two requests to a host"
+        "measuring {total} books, {workers} at a time, {} s between two requests to a host, \
+         {} s per book at most",
+        pause.as_secs_f64(),
+        budget.as_secs()
     );
     let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut results: Vec<(usize, Measured)> = stream::iter(books.into_iter().enumerate())
@@ -1018,7 +1026,7 @@ async fn cmd_measure(paths: &Paths, flags: &Flags) -> Result<(), String> {
             let (fetcher, table, maps, done) =
                 (fetcher.clone(), table.clone(), maps.clone(), done.clone());
             async move {
-                let m = measure_one(fetcher.as_ref(), &table, &maps, book).await;
+                let m = measure_one(fetcher.as_ref(), &table, &maps, book, budget).await;
                 let n = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 println!(
                     "[{n}/{total}] {} {}: {} {}",
@@ -1057,11 +1065,67 @@ async fn cmd_measure(paths: &Paths, flags: &Flags) -> Result<(), String> {
 /// host shared with other books included.
 const MEASURE_BUDGET: Duration = Duration::from_secs(15 * 60);
 
+/// How a measure paces its lookups. By default, several books at a time
+/// with a budget that absorbs their queue on a shared host: it measures the
+/// recipes. With `--like-the-app`, one book at a time with the app's pause,
+/// Crawl-delay cap and deadline: it measures what a click costs, and the
+/// default would hide a lookup the app gives up on.
+struct MeasurePacing {
+    workers: usize,
+    pause: Duration,
+    max_crawl_delay: Option<Duration>,
+    budget: Duration,
+}
+
+impl MeasurePacing {
+    fn from_flags(flags: &Flags) -> Result<Self, String> {
+        if !flags.has("like-the-app") {
+            return Ok(Self {
+                workers: flags.number("workers", 12usize)?.max(1),
+                pause: Duration::from_secs_f64(flags.number("pause", 1.5f64)?.max(0.5)),
+                max_crawl_delay: None,
+                budget: MEASURE_BUDGET,
+            });
+        }
+        if flags.has("workers") || flags.has("pause") {
+            return Err("--like-the-app sets --workers and --pause itself".into());
+        }
+        Ok(Self {
+            workers: 1,
+            pause: app::PAUSE,
+            max_crawl_delay: Some(app::MAX_CRAWL_DELAY),
+            budget: LOOKUP_DEADLINE,
+        })
+    }
+
+    fn fetcher(&self) -> PoliteFetcher {
+        let fetcher = PoliteFetcher::new(self.pause);
+        match self.max_crawl_delay {
+            Some(max) => fetcher.with_max_crawl_delay(max),
+            None => fetcher,
+        }
+    }
+}
+
 async fn measure_one(
     fetcher: &PoliteFetcher,
     table: &PublisherTable,
     maps: &SitemapCache,
     book: MeasureBook,
+    budget: Duration,
+) -> Measured {
+    let started = std::time::Instant::now();
+    let mut m = measure_lookup(fetcher, table, maps, book, budget).await;
+    m.seconds = started.elapsed().as_secs_f64();
+    m
+}
+
+async fn measure_lookup(
+    fetcher: &PoliteFetcher,
+    table: &PublisherTable,
+    maps: &SitemapCache,
+    book: MeasureBook,
+    budget: Duration,
 ) -> Measured {
     let mut m = Measured {
         isbn: book.isbn.clone(),
@@ -1073,6 +1137,7 @@ async fn measure_one(
         recipe: String::new(),
         page: String::new(),
         image: String::new(),
+        seconds: 0.0,
     };
     let Some(isbn) = rust_lib_app::utils::isbn::to_isbn13(&book.isbn) else {
         return m;
@@ -1084,10 +1149,10 @@ async fn measure_one(
         authors: book.authors,
         publisher: book.publisher,
     };
-    // The books of one host wait for each other's turn there (Gallimard
-    // asks 10 s between two requests): the app's deadline would measure the
-    // queue, not the recipes.
-    match find_book_page_within(fetcher, table, &query, maps, MEASURE_BUDGET).await {
+    // By default the books of one host wait for each other's turn there
+    // (Gallimard asks 10 s between two requests): the app's deadline, which
+    // `--like-the-app` takes, would measure the queue, not the recipes.
+    match find_book_page_within(fetcher, table, &query, maps, budget).await {
         Lookup::InvalidIsbn => m.outcome = "bad_isbn",
         Lookup::NoSite => m.outcome = "no_site",
         Lookup::NotFound {
@@ -1215,4 +1280,40 @@ td {{ border-top: 1px solid var(--line); padding: 4px; overflow-wrap: anywhere; 
 "#,
         total = results.len(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MEASURE_FLAGS: [(&str, bool); 3] =
+        [("like-the-app", false), ("workers", true), ("pause", true)];
+
+    fn flags(args: &[&str]) -> Flags {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        Flags::parse(&args, &MEASURE_FLAGS).unwrap()
+    }
+
+    #[test]
+    fn like_the_app_takes_the_app_settings() {
+        let pacing = MeasurePacing::from_flags(&flags(&["--like-the-app"])).unwrap();
+        assert_eq!(pacing.workers, 1);
+        assert_eq!(pacing.pause, app::PAUSE);
+        assert_eq!(pacing.max_crawl_delay, Some(app::MAX_CRAWL_DELAY));
+        assert_eq!(pacing.budget, LOOKUP_DEADLINE);
+    }
+
+    #[test]
+    fn like_the_app_refuses_its_own_settings_given_again() {
+        let given = flags(&["--like-the-app", "--workers", "4"]);
+        assert!(MeasurePacing::from_flags(&given).is_err());
+    }
+
+    #[test]
+    fn the_default_pacing_absorbs_the_queue() {
+        let pacing = MeasurePacing::from_flags(&flags(&[])).unwrap();
+        assert_eq!(pacing.workers, 12);
+        assert_eq!(pacing.max_crawl_delay, None);
+        assert_eq!(pacing.budget, MEASURE_BUDGET);
+    }
 }
