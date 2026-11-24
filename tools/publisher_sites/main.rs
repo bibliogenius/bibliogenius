@@ -1023,8 +1023,12 @@ async fn cmd_measure(paths: &Paths, flags: &Flags) -> Result<(), String> {
     let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut results: Vec<(usize, Measured)> = stream::iter(books.into_iter().enumerate())
         .map(|(i, book)| {
-            let (fetcher, table, maps, done) =
-                (fetcher.clone(), table.clone(), maps.clone(), done.clone());
+            let (fetcher, table, maps, done) = (
+                fetcher.clone(),
+                table.clone(),
+                pacing.maps_for(&maps),
+                done.clone(),
+            );
             async move {
                 let m = measure_one(fetcher.as_ref(), &table, &maps, book, budget).await;
                 let n = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
@@ -1075,6 +1079,10 @@ struct MeasurePacing {
     pause: Duration,
     max_crawl_delay: Option<Duration>,
     budget: Duration,
+    /// Whether the books share the site maps already read. The app reads
+    /// them again on each click, so a shared map would make every book of a
+    /// site but the first cheaper than a click.
+    share_maps: bool,
 }
 
 impl MeasurePacing {
@@ -1085,6 +1093,7 @@ impl MeasurePacing {
                 pause: Duration::from_secs_f64(flags.number("pause", 1.5f64)?.max(0.5)),
                 max_crawl_delay: None,
                 budget: MEASURE_BUDGET,
+                share_maps: true,
             });
         }
         if flags.has("workers") || flags.has("pause") {
@@ -1095,7 +1104,17 @@ impl MeasurePacing {
             pause: app::PAUSE,
             max_crawl_delay: Some(app::MAX_CRAWL_DELAY),
             budget: LOOKUP_DEADLINE,
+            share_maps: false,
         })
+    }
+
+    /// The site map cache one book's lookup reads from.
+    fn maps_for(&self, shared: &Arc<SitemapCache>) -> Arc<SitemapCache> {
+        if self.share_maps {
+            shared.clone()
+        } else {
+            Arc::new(SitemapCache::default())
+        }
     }
 
     fn fetcher(&self) -> PoliteFetcher {
@@ -1301,6 +1320,21 @@ mod tests {
         assert_eq!(pacing.pause, app::PAUSE);
         assert_eq!(pacing.max_crawl_delay, Some(app::MAX_CRAWL_DELAY));
         assert_eq!(pacing.budget, LOOKUP_DEADLINE);
+        assert!(!pacing.share_maps);
+    }
+
+    #[test]
+    fn like_the_app_reads_the_site_maps_again_for_each_book() {
+        let pacing = MeasurePacing::from_flags(&flags(&["--like-the-app"])).unwrap();
+        let shared = Arc::new(SitemapCache::default());
+        assert!(!Arc::ptr_eq(&pacing.maps_for(&shared), &shared));
+    }
+
+    #[test]
+    fn the_default_pacing_reads_each_site_map_once() {
+        let pacing = MeasurePacing::from_flags(&flags(&[])).unwrap();
+        let shared = Arc::new(SitemapCache::default());
+        assert!(Arc::ptr_eq(&pacing.maps_for(&shared), &shared));
     }
 
     #[test]
@@ -1315,5 +1349,6 @@ mod tests {
         assert_eq!(pacing.workers, 12);
         assert_eq!(pacing.max_crawl_delay, None);
         assert_eq!(pacing.budget, MEASURE_BUDGET);
+        assert!(pacing.share_maps);
     }
 }

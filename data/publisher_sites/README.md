@@ -206,7 +206,8 @@ client and checked as the app checks it.
 By default twelve books are looked for at a time, 15 minutes each at most,
 which measures the recipes. `--like-the-app` measures the time instead: one
 book at a time, the app's 1 s pause, its 10 s Crawl-delay cap (a site asking
-more is left alone) and its 60 s deadline (`LOOKUP_DEADLINE`). Each book's
+more is left alone), its 60 s deadline (`LOOKUP_DEADLINE`) and its site maps
+read again for each book, as each click does. Each book's
 `seconds` in `results.json` is how long its lookup and cover took. On the 49
 reference books whose title is cut (November 2026), 45 took under 16 s; the
 slowest were Gallimard's, 43 to 54 s, its 10 s Crawl-delay times four product
