@@ -236,6 +236,184 @@ async fn register_without_flags_mirrors_the_hub_profile_locally() {
     assert!(!stored.allow_borrowing);
 }
 
+/// Mark the seeded row as one that lived through a confirmed catalog push,
+/// which is what tells the owner's settings from the default row a
+/// Keychain import writes.
+async fn mark_catalog_pushed(db: &DatabaseConnection) {
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        "UPDATE hub_directory_config
+            SET last_catalog_hash = 'abc', last_catalog_pushed_at = '2026-10-01T00:00:00Z'
+          WHERE id = 1"
+            .to_owned(),
+    ))
+    .await
+    .expect("mark catalog pushed");
+}
+
+/// What the hub answers when it creates a profile: its own defaults
+/// (approval required, borrowing off, unlisted) and a fresh write token.
+fn created_profile_json(node_id: &str) -> serde_json::Value {
+    let mut created = profile_json(node_id, Some("fresh-token"));
+    created["is_listed"] = serde_json::json!(false);
+    created["requires_approval"] = serde_json::json!(true);
+    created["allow_borrowing"] = serde_json::json!(false);
+    created["recovery_code"] = serde_json::json!("RC-NEW");
+    created
+}
+
+fn flagless_params(node_id: &str) -> RegisterParams {
+    RegisterParams {
+        is_listed: None,
+        requires_approval: None,
+        allow_borrowing: None,
+        ..base_params(node_id)
+    }
+}
+
+/// ADR-073: the hub removes a profile nobody may read after 30 days of
+/// silence. The installation still holds its local copy, so its next
+/// flag-less upsert is answered "created", with the hub's defaults. The
+/// owner's borrowing and approval settings are sent back right away, so
+/// nothing changes for them; the directory listing never is.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn register_restores_the_owner_settings_when_the_hub_recreated_the_profile() {
+    let db = setup_test_db().await;
+    let node_id = "26e4b4d9-acff-42cb-8b25-0bf32457a232";
+    // Seeded: unlisted, approval required, borrowing ON.
+    seed_directory_config(&db, node_id, "stale-token", Some("RC-OLD")).await;
+    mark_catalog_pushed(&db).await;
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+
+    // 1. The stale Bearer names no profile any more: the hub registers anew.
+    Mock::given(method("POST"))
+        .and(path("/api/directory/profile"))
+        .and(header("authorization", "Bearer stale-token"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(created_profile_json(node_id)))
+        .expect(1)
+        .mount(&hub)
+        .await;
+    // 2. The settings go back under the fresh token.
+    let mut restored = profile_json(node_id, None);
+    restored["is_listed"] = serde_json::json!(false);
+    restored["requires_approval"] = serde_json::json!(true);
+    restored["allow_borrowing"] = serde_json::json!(true);
+    Mock::given(method("POST"))
+        .and(path("/api/directory/profile"))
+        .and(header("authorization", "Bearer fresh-token"))
+        .and(body_partial_json(serde_json::json!({
+            "node_id": node_id,
+            "requires_approval": true,
+            "allow_borrowing": true,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(restored))
+        .expect(1)
+        .mount(&hub)
+        .await;
+
+    let result = HubDirectoryService::new()
+        .register_or_update(&db, flagless_params(node_id))
+        .await
+        .expect("register_or_update");
+
+    assert!(
+        result.allow_borrowing,
+        "the owner's borrowing choice survives"
+    );
+    assert!(result.requires_approval);
+    assert!(!result.is_listed);
+    assert_eq!(
+        stored_write_token(&db).await.as_deref(),
+        Some("fresh-token")
+    );
+    assert_eq!(stored_recovery_code(&db).await.as_deref(), Some("RC-NEW"));
+
+    let requests = hub.received_requests().await.unwrap();
+    let second: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert!(
+        second.get("is_listed").is_none(),
+        "a recreated profile never lists itself again on its own"
+    );
+
+    // The hub holds no catalog for a profile it just created: the next
+    // push must reach it, whatever the local skip remembers.
+    let stored = HubDirectoryService::get_config(&db).await.unwrap().unwrap();
+    assert!(stored.last_catalog_hash.is_none());
+    assert!(stored.last_catalog_pushed_at.is_none());
+}
+
+/// After a reinstall the local row is a default written by the Keychain
+/// import (borrowing on), not the owner's settings. Sending it back would
+/// turn borrowing on for someone who never asked: the hub's defaults stay.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn register_does_not_send_back_a_default_local_row() {
+    let db = setup_test_db().await;
+    let node_id = "26e4b4d9-acff-42cb-8b25-0bf32457a232";
+    // No confirmed push: the row never mirrored the hub.
+    seed_directory_config(&db, node_id, "stale-token", None).await;
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+    Mock::given(method("POST"))
+        .and(path("/api/directory/profile"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(created_profile_json(node_id)))
+        .expect(1)
+        .mount(&hub)
+        .await;
+
+    let result = HubDirectoryService::new()
+        .register_or_update(&db, flagless_params(node_id))
+        .await
+        .expect("register_or_update");
+
+    assert!(!result.allow_borrowing, "the hub default stands");
+    assert!(result.requires_approval);
+}
+
+/// A failed second request never undoes the registration: the local copy
+/// then mirrors what the hub holds, its defaults.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn register_keeps_the_new_registration_when_restoring_settings_fails() {
+    let db = setup_test_db().await;
+    let node_id = "26e4b4d9-acff-42cb-8b25-0bf32457a232";
+    seed_directory_config(&db, node_id, "stale-token", Some("RC-OLD")).await;
+    mark_catalog_pushed(&db).await;
+
+    let hub = MockServer::start().await;
+    unsafe { std::env::set_var("HUB_URL", hub.uri()) };
+    Mock::given(method("POST"))
+        .and(path("/api/directory/profile"))
+        .and(header("authorization", "Bearer stale-token"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(created_profile_json(node_id)))
+        .expect(1)
+        .mount(&hub)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/directory/profile"))
+        .and(header("authorization", "Bearer fresh-token"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&hub)
+        .await;
+
+    let result = HubDirectoryService::new()
+        .register_or_update(&db, flagless_params(node_id))
+        .await
+        .expect("the registration itself succeeded");
+
+    // The local copy says what the hub holds, not what was wished for.
+    assert!(!result.allow_borrowing);
+    assert_eq!(
+        stored_write_token(&db).await.as_deref(),
+        Some("fresh-token")
+    );
+}
+
 /// An older hub does not return `is_listed`. The local copy then falls
 /// back on what was sent, and on the previous local value when nothing
 /// was sent: never on a default that would flip a published library.

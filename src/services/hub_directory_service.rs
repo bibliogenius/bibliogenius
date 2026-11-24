@@ -407,6 +407,46 @@ pub struct RegisterParams {
     pub avatar_config: Option<String>,
 }
 
+/// The settings to send back to a hub that just recreated this profile.
+struct OwnerSettings {
+    requires_approval: bool,
+    allow_borrowing: bool,
+}
+
+/// What `register_or_update` sends back when the hub answered "created" to
+/// an installation that held a local copy, or `None` when nothing should be.
+///
+/// Never the directory listing: a recreated profile comes back unlisted, so
+/// a profile removed on the hub does not publish itself again on its own.
+///
+/// `None` when:
+/// - the caller set a flag itself (a settings change): its values were sent;
+/// - the local row never lived through a confirmed catalog push. That is the
+///   default row `import_write_token` writes after a reinstall (borrowing
+///   on), which states no choice of the owner; a row that mirrored the hub
+///   is followed by a push in the same launch;
+/// - the hub's defaults already say the same thing.
+fn owner_settings_to_restore(
+    previous: &DirectoryConfig,
+    params: &RegisterParams,
+    created: &HubProfile,
+) -> Option<OwnerSettings> {
+    if params.requires_approval.is_some() || params.allow_borrowing.is_some() {
+        return None;
+    }
+    previous.last_catalog_pushed_at.as_ref()?;
+    let hub_allows_borrowing = created.allow_borrowing.unwrap_or(false);
+    if created.requires_approval == previous.requires_approval
+        && hub_allows_borrowing == previous.allow_borrowing
+    {
+        return None;
+    }
+    Some(OwnerSettings {
+        requires_approval: previous.requires_approval,
+        allow_borrowing: previous.allow_borrowing,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public catalog scope
 // ---------------------------------------------------------------------------
@@ -1032,6 +1072,16 @@ impl HubDirectoryService {
             .await
             .map_err(|e| HubDirectoryError::Network(e.to_string()))?;
 
+        // "Created" for an installation that held a local copy: the hub no
+        // longer knew this node id (ADR-073 removes a profile nobody may
+        // read after 30 days of silence) and registered it anew, with its
+        // own defaults.
+        let recreated = status == 201 && existing.is_some();
+        let settings_to_restore = existing
+            .as_ref()
+            .filter(|_| recreated)
+            .and_then(|previous| owner_settings_to_restore(previous, &params, &profile));
+
         let write_token = profile
             .write_token
             .or_else(|| recovered.as_ref().map(|c| c.write_token.clone()))
@@ -1047,14 +1097,15 @@ impl HubDirectoryService {
             .recovery_code
             .or_else(|| recovered.as_ref().and_then(|c| c.recovery_code.clone()));
 
-        // recover() resets last_catalog_hash to force a fresh push (ADR-027).
-        // Outside the recovery path, keep whatever we had before.
-        let last_catalog_hash = if recovered.is_some() {
+        // recover() resets last_catalog_hash to force a fresh push (ADR-027),
+        // and a profile the hub just recreated has no catalog at all.
+        // Otherwise, keep whatever we had before.
+        let last_catalog_hash = if recovered.is_some() || recreated {
             None
         } else {
             existing.as_ref().and_then(|c| c.last_catalog_hash.clone())
         };
-        let last_catalog_pushed_at = if recovered.is_some() {
+        let last_catalog_pushed_at = if recovered.is_some() || recreated {
             None
         } else {
             existing
@@ -1090,7 +1141,59 @@ impl HubDirectoryService {
             catalog_version: existing.as_ref().map(|c| c.catalog_version).unwrap_or(0),
         };
 
+        // The fresh token first, before anything else is asked of the hub:
+        // it is handed out once, and an installation that loses it (the app
+        // killed during the next request) stays refused for good.
         Self::save_config(db, &config).await?;
+        if recreated {
+            // save_config leaves the push state alone: without this the
+            // local skip could hold back the catalog the new profile lacks.
+            // After the save: a failure here only costs a skipped push,
+            // which the next catalog change or keep-alive makes up for. It
+            // must not end the call: the settings below would never go back.
+            if let Err(e) = Self::record_catalog_push_state(db, None).await {
+                tracing::warn!("Hub: catalog push state not reset after re-creation: {e}");
+            }
+        }
+
+        // The owner's settings go back right away, so the purge changes
+        // nothing for them. Best effort: the registration itself succeeded,
+        // and on failure the local copy keeps mirroring what the hub holds,
+        // its defaults.
+        let mut config = config;
+        if let Some(settings) = settings_to_restore {
+            tracing::info!(
+                "Hub directory: profile recreated by the hub, sending the owner's settings back"
+            );
+            let mut restore_body = body.clone();
+            restore_body["requires_approval"] = serde_json::Value::Bool(settings.requires_approval);
+            restore_body["allow_borrowing"] = serde_json::Value::Bool(settings.allow_borrowing);
+            match self
+                .send_profile_upsert(&hub_url, &restore_body, Some(&config.write_token))
+                .await
+            {
+                Ok(restored) if restored.status().is_success() => {
+                    match restored.json::<HubProfile>().await {
+                        Ok(restored) => {
+                            config.requires_approval = restored.requires_approval;
+                            config.allow_borrowing =
+                                restored.allow_borrowing.unwrap_or(config.allow_borrowing);
+                            Self::save_config(db, &config).await?;
+                        }
+                        Err(e) => tracing::warn!(
+                            "Hub directory: unreadable answer while restoring settings: {e}"
+                        ),
+                    }
+                }
+                Ok(restored) => tracing::warn!(
+                    "Hub directory: restoring the owner's settings failed ({})",
+                    restored.status()
+                ),
+                Err(e) => {
+                    tracing::warn!("Hub directory: restoring the owner's settings failed: {e}")
+                }
+            }
+        }
         Ok(config)
     }
 
@@ -2850,5 +2953,19 @@ mod follow_revocation_tests {
             FollowRevocation::Skipped
         );
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod error_format_tests {
+    use super::HubDirectoryError;
+
+    /// The app tells a refused write token from any other failure by this
+    /// text, which reaches it as a plain string through the FFI: it then
+    /// registers again. Changing the wording silently turns that off.
+    #[test]
+    fn a_refused_token_reads_hub_error_401() {
+        let message = HubDirectoryError::Hub(401, "Unauthorized".to_string()).to_string();
+        assert!(message.starts_with("Hub error 401:"), "{message}");
     }
 }

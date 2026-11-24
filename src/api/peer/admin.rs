@@ -48,13 +48,37 @@ pub async fn auto_approve_all_peers(State(db): State<DatabaseConnection>) -> imp
         .into_response()
 }
 
-pub async fn list_peers(State(db): State<DatabaseConnection>) -> impl IntoResponse {
+#[derive(serde::Deserialize, Default)]
+pub struct ListPeersParams {
+    /// Answer 500 when the peers cannot be read, instead of an empty list.
+    /// For the one caller that must tell "no peer" from "could not read":
+    /// the online services consent (ADR-073) forgets the relay of an
+    /// installation without network use, and a busy database must never
+    /// pass for one.
+    #[serde(default)]
+    pub strict: bool,
+}
+
+pub async fn list_peers(
+    State(db): State<DatabaseConnection>,
+    axum::extract::Query(params): axum::extract::Query<ListPeersParams>,
+) -> impl IntoResponse {
     // Legacy hub peer sync removed: peers are managed locally via invite
     // links, QR codes, and mDNS discovery. The old GET /api/peers hub
     // endpoint was causing SQLite lock contention and timeouts on every
     // list_peers call, making peers appear to vanish from the UI.
 
-    let peers = peer::Entity::find().all(&db).await.unwrap_or(vec![]);
+    let peers = match peer::Entity::find().all(&db).await {
+        Ok(peers) => peers,
+        Err(e) if params.strict => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Failed to read peers: {e}") })),
+            )
+                .into_response();
+        }
+        Err(_) => vec![],
+    };
 
     // Convert to JSON with computed status field
     let peers_with_status: Vec<serde_json::Value> = peers
@@ -874,5 +898,63 @@ mod update_peer_url_tests {
                 .expect("readers"),
             "the reader stays on the list"
         );
+    }
+}
+
+#[cfg(test)]
+mod list_peers_strict_tests {
+    //! `GET /api/peers` answers an empty list when the peers cannot be
+    //! read, which keeps the UI quiet. The online services consent
+    //! (ADR-073) acts on "this installation has no peer" by forgetting its
+    //! relay: it reads the strict form, where a failed read is an error.
+
+    use super::*;
+    use axum::extract::Query;
+
+    async fn unreadable_db() -> DatabaseConnection {
+        let db = crate::db::init_db("sqlite::memory:")
+            .await
+            .expect("init db");
+        // A closed pool refuses every query, like a database that cannot
+        // be reached.
+        db.clone().close().await.expect("close");
+        db
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_is_an_error_in_strict_mode() {
+        let response = list_peers(
+            State(unreadable_db().await),
+            Query(ListPeersParams { strict: true }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_stays_an_empty_list_for_everyone_else() {
+        let response = list_peers(
+            State(unreadable_db().await),
+            Query(ListPeersParams::default()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn strict_mode_answers_normally_when_the_peers_can_be_read() {
+        let db = crate::db::init_db("sqlite::memory:")
+            .await
+            .expect("init db");
+
+        let response = list_peers(State(db), Query(ListPeersParams { strict: true }))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

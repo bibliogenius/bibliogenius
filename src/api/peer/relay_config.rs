@@ -263,12 +263,25 @@ pub async fn get_relay_config_endpoint(
     }
 }
 
+#[derive(Deserialize, Default)]
+pub struct DeleteRelayConfigParams {
+    /// Forget the relay on this device without telling the hub (ADR-073).
+    /// An installation whose user never chose the online services goes
+    /// silent: the poller stops with the row, and no deletion call is sent,
+    /// so a wrong "does not use the network" destroys nothing on the hub.
+    /// The mailbox left behind expires there on its own.
+    #[serde(default)]
+    pub local_only: bool,
+}
+
 /// DELETE /api/peers/relay/config - Remove relay config (disconnect from hub).
 ///
 /// Before deleting the local config, attempts to delete the mailbox on the hub
-/// so it does not linger as an orphan accepting stale deposits.
+/// so it does not linger as an orphan accepting stale deposits, unless
+/// `?local_only=true` asks to leave the hub alone.
 pub async fn delete_relay_config_endpoint(
     State(state): State<crate::infrastructure::AppState>,
+    axum::extract::Query(params): axum::extract::Query<DeleteRelayConfigParams>,
 ) -> impl IntoResponse {
     let db = state.db();
 
@@ -276,7 +289,9 @@ pub async fn delete_relay_config_endpoint(
     let config = crate::api::relay::get_my_relay_config(db).await;
 
     // 2. Best-effort: delete the mailbox on the hub
-    if let Some(ref cfg) = config {
+    if let Some(ref cfg) = config
+        && !params.local_only
+    {
         let url = format!("{}/api/relay/mailbox/{}", cfg.relay_url, cfg.mailbox_uuid);
         let client = get_safe_client();
         match client
@@ -692,6 +707,68 @@ mod relay_setup_tests {
             relay_session::mailbox_created_this_session(),
             "apply_relay_setup must mark the session flag",
         );
+    }
+
+    async fn relay_row_count(db: &DatabaseConnection) -> i64 {
+        db.query_one(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT COUNT(*) AS n FROM my_relay_config".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .and_then(|row| row.try_get::<i64>("", "n").ok())
+        .unwrap_or(-1)
+    }
+
+    async fn delete_relay_config(db: &DatabaseConnection, local_only: bool) {
+        use axum::response::IntoResponse;
+        let response = delete_relay_config_endpoint(
+            axum::extract::State(crate::infrastructure::AppState::new(db.clone())),
+            axum::extract::Query(DeleteRelayConfigParams { local_only }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    /// ADR-073: an installation that goes silent forgets its relay without
+    /// telling the hub. The row goes (the poller stops with it) and no
+    /// deletion call leaves the device.
+    #[tokio::test]
+    #[serial]
+    async fn local_only_delete_forgets_the_relay_without_calling_the_hub() {
+        relay_session::reset_for_tests();
+        let hub = wiremock::MockServer::start().await;
+        let db = setup_db().await;
+        apply_relay_setup(&db, &hub.uri(), "mbx-1", "rtok-1", "wtok-1", None)
+            .await
+            .expect("setup");
+
+        delete_relay_config(&db, true).await;
+
+        assert_eq!(relay_row_count(&db).await, 0);
+        assert!(hub.received_requests().await.unwrap().is_empty());
+    }
+
+    /// The counterpart that proves the test above can fail: a plain
+    /// disconnect does ask the hub to delete the mailbox.
+    #[tokio::test]
+    #[serial]
+    async fn plain_delete_asks_the_hub_to_delete_the_mailbox() {
+        relay_session::reset_for_tests();
+        let hub = wiremock::MockServer::start().await;
+        let db = setup_db().await;
+        apply_relay_setup(&db, &hub.uri(), "mbx-1", "rtok-1", "wtok-1", None)
+            .await
+            .expect("setup");
+
+        delete_relay_config(&db, false).await;
+
+        assert_eq!(relay_row_count(&db).await, 0);
+        let requests = hub.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method.as_str(), "DELETE");
+        assert_eq!(requests[0].url.path(), "/api/relay/mailbox/mbx-1");
     }
 
     async fn disconnect_relay(db: &DatabaseConnection) {
