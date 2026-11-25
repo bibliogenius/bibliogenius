@@ -357,8 +357,10 @@ async fn a_registration_the_hub_has_nothing_under_counts_as_deleted() {
 
 #[tokio::test]
 #[serial]
-async fn a_refused_token_with_no_recovery_code_leaves_nothing_to_try() {
-    // Nothing on this device can speak for a profile any more.
+async fn a_refused_token_with_no_recovery_code_is_not_a_deletion() {
+    // Nothing on this device can speak for a profile any more, and the
+    // refusal proves nothing either: the token may be out of date (a
+    // restored row) while the profile stands. Not confirmed, never done.
     let hub = fake_hub(401).await;
     let state = registered_library(&hub.uri()).await;
     state
@@ -373,8 +375,9 @@ async fn a_refused_token_with_no_recovery_code_leaves_nothing_to_try() {
 
     let outcome = run_withdrawal(&state, this_registration()).await;
 
-    assert_eq!(outcome, Ok(WithdrawalOutcome::Done));
+    assert_eq!(outcome, Ok(WithdrawalOutcome::Unconfirmed));
     assert_eq!(registration_rows(state.db()).await, 0);
+    assert_eq!(relay_rows(state.db()).await, 0, "nothing kept to ask again");
 }
 
 #[tokio::test]
@@ -444,6 +447,34 @@ async fn a_recovery_the_hub_fails_to_answer_is_tried_again_and_never_read_as_don
     let outcome = run_withdrawal(&state, this_registration()).await;
     assert_eq!(outcome, Ok(WithdrawalOutcome::Unconfirmed));
     assert_eq!(registration_rows(state.db()).await, 0);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_refused_recovery_stays_unconfirmed_when_the_mailbox_deletion_fails_too() {
+    // Reported as pending, the refusal would be lost with the registration
+    // row: the next try would find no profile to delete, finish the mailbox,
+    // and answer "done" for a profile that may still stand.
+    let hub = fake_hub(401).await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/api/relay/mailbox/{MAILBOX}")))
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(1)
+        .mount(&hub)
+        .await;
+    let state = registered_library(&hub.uri()).await;
+    hub_gate::set_open(true);
+
+    let outcome = run_withdrawal(&state, this_registration()).await;
+
+    assert_eq!(outcome, Ok(WithdrawalOutcome::Unconfirmed));
+    assert!(!hub_gate::is_open(), "silent all the same");
+    assert_eq!(registration_rows(state.db()).await, 0);
+    assert_eq!(
+        relay_rows(state.db()).await,
+        0,
+        "the refusal is final: the mailbox is left to the hub's expiry"
+    );
 }
 
 #[test]

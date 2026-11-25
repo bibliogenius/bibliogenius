@@ -8,10 +8,12 @@
 //! functions every other request uses, with the pass of
 //! [`hub_gate::with_withdrawal_pass`]; nothing else gets out.
 //!
-//! When the hub cannot be reached, or cannot confirm the deletion (a
-//! refused token whose recovery is refused too), the local rows that carry the tokens of
-//! the deletion are kept, unused behind the closed gate, and the same call
-//! is made again later. Everything else is removed from the device.
+//! When the hub cannot be reached or fails to answer, the local rows that
+//! carry the tokens of the deletion are kept, unused behind the closed gate,
+//! and the same call is made again later. Everything else is removed from
+//! the device. A refused token whose recovery is refused too, or that has
+//! no recovery code to try, is final: the rows go, nothing is asked again,
+//! and the outcome is "not confirmed".
 //!
 //! The caller names the registration it wants deleted. Rows that do not
 //! match are dropped without a request: a restored backup can bring back the
@@ -47,9 +49,9 @@ pub enum WithdrawalOutcome {
     /// everything: call again later with the same registration.
     Pending,
     /// The device is silent and holds nothing any more, but the hub refused
-    /// both the write token and the recovery code: whether it still holds
-    /// the profile cannot be told from here, and asking again would get the
-    /// same answer. Nothing is left to retry; the user is told.
+    /// the write token, and the recovery code too or there was none: whether
+    /// it still holds the profile cannot be told from here, and asking again
+    /// would get the same answer. Nothing is left to retry; the user is told.
     Unconfirmed,
 }
 
@@ -151,7 +153,12 @@ pub async fn withdraw(
             .await
             .map_err(|e| WithdrawalError::Database(e.to_string()))?;
     }
-    if mailbox != Deletion::Unanswered && relay.is_some() {
+    // A refused profile is final and leaves nothing to ask again, so a
+    // mailbox that did not answer in the same run is not retried either:
+    // it goes with the hub's own expiry. Kept for a retry, it would end the
+    // withdrawal as "done" and hide the refusal.
+    let refused = profile == Deletion::Refused;
+    if (mailbox != Deletion::Unanswered || refused) && relay.is_some() {
         db.execute(Statement::from_string(
             db.get_database_backend(),
             "DELETE FROM my_relay_config".to_owned(),
@@ -160,12 +167,12 @@ pub async fn withdraw(
         .map_err(|e| WithdrawalError::Database(e.to_string()))?;
     }
 
-    if profile == Deletion::Unanswered || mailbox == Deletion::Unanswered {
-        tracing::warn!("Hub registration withdrawn on this device, hub deletion pending");
-        Ok(WithdrawalOutcome::Pending)
-    } else if profile == Deletion::Refused {
+    if refused {
         tracing::warn!("Hub registration withdrawn on this device, hub deletion not confirmed");
         Ok(WithdrawalOutcome::Unconfirmed)
+    } else if profile == Deletion::Unanswered || mailbox == Deletion::Unanswered {
+        tracing::warn!("Hub registration withdrawn on this device, hub deletion pending");
+        Ok(WithdrawalOutcome::Pending)
     } else {
         tracing::info!("Hub registration withdrawn");
         Ok(WithdrawalOutcome::Done)
@@ -204,7 +211,8 @@ async fn delete_profile_on_hub(hub: &HubDirectoryService, db: &DatabaseConnectio
 /// the deletion is reported as not confirmed, never as done, and is not
 /// asked again. A hub that fails to answer is another matter, and is asked
 /// again later. Without any code, nothing on this device can speak for a
-/// profile: there is nothing left to try.
+/// profile: there is nothing left to try, and the refusal is reported the
+/// same way, as not confirmed.
 async fn renew_token_then_delete(hub: &HubDirectoryService, db: &DatabaseConnection) -> Deletion {
     let registration = match HubDirectoryService::get_config(db).await {
         Ok(Some(row)) => row,
@@ -215,7 +223,7 @@ async fn renew_token_then_delete(hub: &HubDirectoryService, db: &DatabaseConnect
         }
     };
     let Some(recovery_code) = registration.recovery_code.filter(|code| !code.is_empty()) else {
-        return Deletion::Gone;
+        return Deletion::Refused;
     };
     match hub.recover(db, &registration.node_id, &recovery_code).await {
         Ok(_) => {}
