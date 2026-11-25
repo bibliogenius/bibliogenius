@@ -32,13 +32,22 @@ pub async fn setup_relay(
 
     // 2. Call relay hub to create a mailbox
     let client = get_safe_client();
-    let url = format!(
-        "{}/api/relay/mailbox",
-        payload.relay_url.trim_end_matches('/')
-    );
-
-    let response = match client.post(&url).send().await {
+    let response = match crate::services::relay_transport::RelayTransport::create_mailbox(
+        &client,
+        &payload.relay_url,
+    )
+    .await
+    {
         Ok(r) => r,
+        Err(crate::services::e2ee_transport::E2eeTransportError::HubSilenced) => {
+            // ADR-073: no mailbox is created before the user agreed to
+            // register on the hub.
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": crate::services::hub_gate::HUB_SILENCED_MESSAGE })),
+            )
+                .into_response();
+        }
         Err(e) => {
             return (
                 StatusCode::BAD_GATEWAY,
@@ -292,13 +301,14 @@ pub async fn delete_relay_config_endpoint(
     if let Some(ref cfg) = config
         && !params.local_only
     {
-        let url = format!("{}/api/relay/mailbox/{}", cfg.relay_url, cfg.mailbox_uuid);
         let client = get_safe_client();
-        match client
-            .delete(&url)
-            .header("Authorization", format!("Bearer {}", cfg.read_token))
-            .send()
-            .await
+        match crate::services::relay_transport::RelayTransport::delete_mailbox(
+            &client,
+            &cfg.relay_url,
+            &cfg.mailbox_uuid,
+            &cfg.read_token,
+        )
+        .await
         {
             Ok(resp) if resp.status().is_success() => {
                 tracing::info!("Relay: Deleted mailbox on hub");

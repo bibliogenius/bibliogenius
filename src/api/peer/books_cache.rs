@@ -15,7 +15,20 @@ use serde_json::json;
 #[derive(Deserialize)]
 pub struct CoverProxyQuery {
     pub peer_url: String,
-    pub book_id: i32,
+    /// The book's id on the peer: a uuid (ADR-044), or the integer of a
+    /// peer on an older build.
+    pub book_id: String,
+}
+
+/// Whether `book_id` can be placed in the path of the request to the peer:
+/// letters, digits and dashes only (a uuid or an integer), so it can neither
+/// leave `/api/books/{id}/cover` nor carry a query.
+fn is_plain_book_id(book_id: &str) -> bool {
+    !book_id.is_empty()
+        && book_id.len() <= 64
+        && book_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// GET /api/peers/cover-proxy?peer_url={url}&book_id={id}
@@ -28,6 +41,9 @@ pub async fn cover_proxy(
     axum::extract::Query(params): axum::extract::Query<CoverProxyQuery>,
 ) -> Result<axum::response::Response, StatusCode> {
     let peer_url = validate_url(&params.peer_url).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if !is_plain_book_id(&params.book_id) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     ensure_registered_peer(&db, &peer_url).await?;
     let peer_url = peer_url.trim_end_matches('/');
     let url = format!("{}/api/books/{}/cover", peer_url, params.book_id);

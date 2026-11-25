@@ -123,3 +123,46 @@ async fn handler_returns_400_on_invalid_url() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn handler_accepts_a_uuid_book_id() {
+    // Books are keyed by a uuid (ADR-044). The id used to be parsed as an
+    // integer, so every cover of a peer was refused with 400 before any
+    // other check. An unregistered peer shows the id is now read: the
+    // answer is the 403 of the registration check, with no outbound call.
+    let db = setup_db_with_peer("http://192.168.1.100:8000").await;
+    let app = build_app(db);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/peers/cover-proxy?peer_url=http%3A%2F%2F192.168.1.1&book_id=3f2a1c9e-7b4d-4e2a-9c1f-0a1b2c3d4e5f")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn handler_refuses_a_book_id_that_is_not_a_plain_id() {
+    // The id is placed in the path of the request sent to the peer: it must
+    // not be able to leave `/api/books/{id}/cover` or carry a query. Refused
+    // for a registered peer too, before any outbound call.
+    for book_id in ["..%2F..%2Fconfig", "1%3Fx%3D1", "a%2Fb", ""] {
+        let db = setup_db_with_peer("http://192.168.1.100:8000").await;
+        let app = build_app(db);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/peers/cover-proxy?peer_url=http%3A%2F%2F192.168.1.100%3A8000&book_id={book_id}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "book_id={book_id}");
+    }
+}

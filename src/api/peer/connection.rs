@@ -748,7 +748,6 @@ fn declares_same_identity(existing: &peer::Model, payload: &IncomingConnectionRe
 
 /// Receive an incoming connection request from a remote peer.
 /// Always creates/updates the peer in local SQLite and returns our E2EE keys.
-/// Also forwards to the Hub (fire-and-forget) for the central directory.
 pub async fn receive_connection_request(
     State(db): State<DatabaseConnection>,
     Json(payload): Json<IncomingConnectionRequest>,
@@ -780,23 +779,8 @@ where
         payload.library_uuid
     );
 
-    // Try forwarding to Hub (fire-and-forget for central directory).
-    // Always continue to local handling regardless of hub result,
-    // so the peer is created in our local SQLite and we return our E2EE keys.
-    if let Ok(hub_url) = std::env::var("HUB_URL") {
-        let endpoint = format!("{}/api/peers/receive_connection", hub_url);
-        let client = get_safe_client();
-        let _ = client
-            .post(&endpoint)
-            .json(&serde_json::json!({
-                "name": payload.name,
-                "url": payload.url,
-            }))
-            .send()
-            .await;
-    }
-
-    // Always handle locally: create/update peer in SQLite + return our E2EE keys
+    // Handled locally only: create/update peer in SQLite + return our E2EE keys.
+    // Nothing about the requester is sent to the hub (ADR-073).
     let existing = find_peer_for_connection(&db, &payload).await;
 
     // Load our own public keys to include in the response

@@ -229,6 +229,11 @@ async fn main() {
     // [Delta sync] Hybrid retention pruner for operation_log (ADR-028 D5).
     rust_lib_app::services::oplog_pruner::spawn(db.clone());
 
+    // The hub gate (ADR-073) is opened by the app, which asks the user. This
+    // binary has no app in front of it: whoever runs it standalone chose its
+    // hub through the environment, so the gate is open from the start.
+    rust_lib_app::services::hub_gate::set_open(true);
+
     // Build API router with explicit AppState (needed for relay poller)
     let state = rust_lib_app::infrastructure::AppState::new(db);
     let api_router = api::api_router_with_state(state.clone());

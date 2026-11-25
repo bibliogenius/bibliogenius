@@ -35,6 +35,14 @@ static LAST_NOTIFY_SECS: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(0
 /// Returns immediately. Relay sends happen in a background task. Safe to
 /// call from Axum handlers after the DB write has committed.
 pub fn schedule_profile_changed_notification(state: AppState, changed: Vec<String>) {
+    // ADR-073: these notices only travel through the relay, which takes
+    // nothing while the hub gate is closed. Checked before the cooldown
+    // slot is claimed, so a notice dropped here does not silence the first
+    // one after the gate opens.
+    if !crate::services::hub_gate::is_open() {
+        tracing::debug!("Profile notify: skipped, hub gate closed");
+        return;
+    }
     let now_secs = chrono::Utc::now().timestamp() as u64;
     let last = LAST_NOTIFY_SECS.load(Ordering::Relaxed);
 

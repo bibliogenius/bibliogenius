@@ -34,6 +34,7 @@ pub mod hub_catalog_key_store;
 pub mod hub_catalog_readers;
 pub mod hub_catalog_sync;
 pub mod hub_directory_service;
+pub mod hub_gate;
 pub mod identity_service;
 pub mod import_completion_service;
 pub mod leaderboard_events;

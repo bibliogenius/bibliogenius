@@ -28,6 +28,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 // ── Helpers ──────────────────────────────────────────────────────────
 
 async fn setup_state() -> AppState {
+    // These tests play a library registered on the hub: the hub gate
+    // (ADR-073), closed by default, is open for them.
+    rust_lib_app::services::hub_gate::set_open(true);
     let db = db::init_db("sqlite::memory:")
         .await
         .expect("Failed to init DB");

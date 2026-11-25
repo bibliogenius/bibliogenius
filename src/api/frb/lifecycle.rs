@@ -169,6 +169,31 @@ pub fn hub_effective_url() -> Option<String> {
     HubDirectoryService::hub_base_url().ok()
 }
 
+// ============ Hub gate ============
+
+/// Tell the core whether it may contact the hub (ADR-073).
+///
+/// The consent to register on the hub is asked and stored by the app; the
+/// core has senders of its own (relay deposits, the relay poller, the nudge
+/// listener, the directory and account clients) and they all stay silent
+/// until this is called with `true`. The app calls it at startup, once it
+/// knows the user's choice, and again on every change; `false` takes effect
+/// at once, an open nudge connection included.
+///
+/// FFI only, on purpose: an HTTP route would let any device of the local
+/// network open the gate.
+#[frb(sync)]
+pub fn set_hub_contact_allowed(allowed: bool) {
+    crate::services::hub_gate::set_open(allowed);
+}
+
+/// Whether the core may contact the hub right now (see
+/// [`set_hub_contact_allowed`]).
+#[frb(sync)]
+pub fn hub_contact_allowed() -> bool {
+    crate::services::hub_gate::is_open()
+}
+
 // ============ Health Check ============
 
 /// Check if the FFI backend is healthy

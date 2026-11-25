@@ -460,6 +460,10 @@ impl Book {
         covers_dir: Option<&std::path::Path>,
     ) {
         Self::drop_absent_local_covers(books, covers_dir);
+        if Self::answer_stays_on_the_local_network(hub_cover_prefix) {
+            Self::rewrite_local_cover_urls(books, None);
+            return;
+        }
         if let Err(e) = Self::rewrite_cover_urls_strict(books, hub_cover_prefix) {
             tracing::error!(
                 "relay cover rewrite failed, stripping {} offender(s) to None: {e}",
@@ -598,6 +602,17 @@ impl Book {
         {
             return None;
         }
+        if Self::answer_stays_on_the_local_network(hub_cover_prefix) {
+            return cover_url::resolve_single(
+                cover_url,
+                book_id,
+                updated_at,
+                None,
+                ResolveScope::Lan,
+            )
+            .ok()
+            .flatten();
+        }
         match Self::safe_cover_url_strict(cover_url, book_id, updated_at, hub_cover_prefix) {
             Ok(v) => v,
             Err(e) => {
@@ -605,6 +620,17 @@ impl Book {
                 None
             }
         }
+    }
+
+    /// Whether a payload built for a peer can only reach it on the local
+    /// network: no hub address for the covers, and a hub gate that lets
+    /// nothing through the relay (ADR-073). The peer then resolves
+    /// `/api/books/{id}/cover` against this library's local address, as it
+    /// does for a plain LAN answer. Without this, two libraries that never
+    /// registered would lose every photographed cover of each other: the
+    /// relay-safe rewrite strips a local cover it cannot address on the hub.
+    fn answer_stays_on_the_local_network(hub_cover_prefix: Option<&str>) -> bool {
+        hub_cover_prefix.is_none() && !crate::services::hub_gate::is_open()
     }
 
     /// Computes a strong, order-independent hash of the local catalog state.
@@ -642,7 +668,18 @@ impl Book {
     /// Builds the hub cover URL prefix (`{hub_url}/api/directory/{node_id}/covers`)
     /// from the current hub configuration.  Returns `None` when the hub is not
     /// configured or the node is not registered.
+    ///
+    /// `None` too once the app said this installation does not use the hub
+    /// (ADR-073): it uploads no cover there, and must not send its peers to
+    /// the hub for an image it serves itself. A registration row can outlive
+    /// that "no" (an installation registered by an earlier build). Not on a
+    /// gate that is merely not open yet, at launch: a peer caches the
+    /// address it is given, and a consenting library must not hand out
+    /// local-network addresses for the first seconds of each session.
     pub async fn hub_cover_prefix(db: &sea_orm::DatabaseConnection) -> Option<String> {
+        if crate::services::hub_gate::refused() {
+            return None;
+        }
         let hub_url = std::env::var("HUB_URL").ok()?;
         let hub_url = hub_url.trim_end_matches('/');
         let cfg = crate::services::hub_directory_service::HubDirectoryService::get_config(db)

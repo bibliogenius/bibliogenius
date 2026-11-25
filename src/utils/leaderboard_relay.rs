@@ -321,7 +321,11 @@ pub async fn fetch_peer_public_stats_via_relay(
                 peer.id,
                 e
             );
-            state.mark_peer_relay_failed(peer.id);
+            // A closed hub gate (ADR-073) says nothing about the peer: it
+            // must not be skipped as unreachable once the gate opens.
+            if crate::services::hub_gate::is_open() {
+                state.mark_peer_relay_failed(peer.id);
+            }
             None
         }
     }

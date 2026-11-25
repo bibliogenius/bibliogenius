@@ -332,7 +332,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         #[derive(Deserialize)]
         struct SyncResult {

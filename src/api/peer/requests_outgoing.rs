@@ -1022,7 +1022,9 @@ pub async fn sync_outgoing_requests(
         // A lender marked unreachable waits for the mark to expire, as it did when its
         // mailbox could take the question. Without a usable mailbox, direct is the only
         // chance left and keeps being tried, as in `try_send_e2ee`.
-        let has_usable_mailbox = lender.relay_url.is_some()
+        // A closed hub gate (ADR-073) makes every mailbox unusable.
+        let has_usable_mailbox = crate::services::hub_gate::is_open()
+            && lender.relay_url.is_some()
             && lender.mailbox_id.is_some()
             && lender.relay_write_token.is_some()
             && lender.relay_gate_allows_send();

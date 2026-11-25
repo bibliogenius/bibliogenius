@@ -14,6 +14,10 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Qu
 use serde_json::{Value, json};
 
 async fn setup() -> AppState {
+    // These tests play a delta request answered through the relay: the hub
+    // gate (ADR-073), closed by default, is open for them. Closed, a cover
+    // is addressed on the local network instead (see hub_silence_test.rs).
+    rust_lib_app::services::hub_gate::set_open(true);
     let db = db::init_db("sqlite::memory:")
         .await
         .expect("init_db in memory");

@@ -100,7 +100,14 @@ pub async fn start_relay_polling(state: AppState, interval: Duration) {
 
     tracing::info!("Relay poller: started (interval: {}s)", interval.as_secs());
 
-    // First poll immediately at startup (auto-heal stale mailboxes without waiting 60s)
+    // ADR-073: the hub gate is closed until the app says the user agreed to
+    // register. Waiting for it here, rather than skipping a cycle, means a
+    // consenting installation reads its mailbox the moment the gate opens:
+    // nothing is delayed by a whole interval, nothing is lost.
+    let mut gate = crate::services::hub_gate::subscribe();
+    crate::services::hub_gate::opened(&mut gate).await;
+
+    // First poll immediately (auto-heal stale mailboxes without waiting 60s)
     if let Err(e) = poll_once(&state, NudgeSource::Polling).await {
         tracing::warn!("Relay poller: {e}");
     }
@@ -111,6 +118,9 @@ pub async fn start_relay_polling(state: AppState, interval: Duration) {
         // Jitter: 0-10 seconds (B10: prevent timing correlation)
         let jitter_ms = rand::thread_rng().gen_range(0..10_000);
         tokio::time::sleep(interval + Duration::from_millis(jitter_ms)).await;
+
+        // A gate closed meanwhile: sleep until it opens again, then poll.
+        crate::services::hub_gate::opened(&mut gate).await;
 
         if let Err(e) = poll_once(&state, NudgeSource::Polling).await {
             tracing::warn!("Relay poller: {e}");
@@ -165,6 +175,14 @@ pub(crate) async fn poll_once_wait(state: &AppState, source: NudgeSource) -> Res
 
 /// Inner poll logic, called with the relay poll lock already held.
 async fn poll_inner(state: &AppState, source: NudgeSource) -> Result<(), String> {
+    // ADR-073: nothing is read from the hub before the user agreed to
+    // register. The transport refuses anyway; returning here keeps a silent
+    // installation from logging a refusal every cycle.
+    if !crate::services::hub_gate::is_open() {
+        tracing::debug!("Relay poller: hub gate closed, skipping");
+        return Ok(());
+    }
+
     let db = state.db();
 
     // 1. Load my relay config
@@ -957,11 +975,7 @@ pub async fn recreate_mailbox(
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
-    let url = format!("{}/api/relay/mailbox", relay_url.trim_end_matches('/'));
-
-    let response = client
-        .post(&url)
-        .send()
+    let response = RelayTransport::create_mailbox(&client, relay_url)
         .await
         .map_err(|e| format!("Failed to reach relay hub: {e}"))?;
 

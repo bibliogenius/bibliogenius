@@ -34,6 +34,14 @@ pub enum HubDirectoryError {
     /// The encrypted catalog could not be opened or trusted: tampered,
     /// bound to another library, or older than a version already seen.
     CatalogInvalid(String),
+    /// The hub gate is closed (ADR-073): the request was not sent.
+    HubSilenced,
+}
+
+impl From<crate::services::hub_gate::HubSilenced> for HubDirectoryError {
+    fn from(_: crate::services::hub_gate::HubSilenced) -> Self {
+        Self::HubSilenced
+    }
 }
 
 impl std::fmt::Display for HubDirectoryError {
@@ -45,6 +53,7 @@ impl std::fmt::Display for HubDirectoryError {
             Self::Config(e) => write!(f, "Configuration error: {e}"),
             Self::CatalogKeyUnavailable(e) => write!(f, "Catalog key unavailable: {e}"),
             Self::CatalogInvalid(e) => write!(f, "Catalog invalid: {e}"),
+            Self::HubSilenced => f.write_str(crate::services::hub_gate::HUB_SILENCED_MESSAGE),
         }
     }
 }
@@ -677,6 +686,12 @@ impl HubDirectoryService {
     // Hub URL: reads HUB_URL env var, which is kept in sync with
     // my_relay_config.relay_url (set at startup and on relay setup).
     // The .env value is only used as initial default before relay is configured.
+    //
+    // Two readers. `hub_base_url` only names the hub (to compare addresses,
+    // to key a cache): it sends nothing and ignores the gate.
+    // `hub_base_url_for_request` is the one a request is built from: it
+    // refuses while the hub gate is closed (ADR-073), so no request to the
+    // hub can be written without going through the gate.
     // -----------------------------------------------------------------------
 
     pub(crate) fn hub_base_url() -> Result<String, HubDirectoryError> {
@@ -685,6 +700,13 @@ impl HubDirectoryService {
             .map_err(|_| {
                 HubDirectoryError::Config("HUB_URL environment variable not set".to_string())
             })
+    }
+
+    /// The hub address to send a request to, or `HubSilenced` while the hub
+    /// gate is closed.
+    pub(crate) fn hub_base_url_for_request() -> Result<String, HubDirectoryError> {
+        crate::services::hub_gate::ensure_open()?;
+        Self::hub_base_url()
     }
 
     // -----------------------------------------------------------------------
@@ -973,7 +995,7 @@ impl HubDirectoryService {
         db: &DatabaseConnection,
         params: RegisterParams,
     ) -> Result<DirectoryConfig, HubDirectoryError> {
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
         let existing = Self::get_config(db).await?;
 
         // The profile upsert and the catalog push both write `book_count` on
@@ -1241,7 +1263,7 @@ impl HubDirectoryService {
         node_id: &str,
         recovery_code: &str,
     ) -> Result<DirectoryConfig, HubDirectoryError> {
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let body = serde_json::json!({
             "node_id": node_id,
@@ -1343,7 +1365,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         // Sort entries for hash determinism. Cheap on typical library sizes
         // (<1000 books). Cloning Strings is avoided by sorting a Vec of refs.
@@ -1473,7 +1495,7 @@ impl HubDirectoryService {
         let Ok(Some(cfg)) = Self::get_config(db).await else {
             return;
         };
-        let Ok(hub_url) = Self::hub_base_url() else {
+        let Ok(hub_url) = Self::hub_base_url_for_request() else {
             return;
         };
         // Cap detail so the beacon and the stored row stay small.
@@ -1503,7 +1525,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let url = format!("{hub_url}/api/directory/{}/covers/{book_id}", cfg.node_id);
 
@@ -1545,7 +1567,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let url = format!("{hub_url}/api/directory/{}/covers/{book_id}", cfg.node_id);
 
@@ -1779,7 +1801,7 @@ impl HubDirectoryService {
         node_id: &str,
         reader_x25519_secret: Option<&x25519_dalek::StaticSecret>,
     ) -> Result<Vec<CatalogEntry>, HubDirectoryError> {
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
         let cfg = Self::get_config(db).await?;
 
         let mut req = self
@@ -1856,7 +1878,7 @@ impl HubDirectoryService {
         search: Option<&str>,
         city_id: Option<i64>,
     ) -> Result<Vec<HubProfile>, HubDirectoryError> {
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
         let mut url = format!("{hub_url}/api/directory?limit={limit}&offset={offset}");
         if let Some(c) = country {
             url.push_str(&format!("&country={c}"));
@@ -1897,7 +1919,7 @@ impl HubDirectoryService {
         db: &DatabaseConnection,
         node_id: &str,
     ) -> Result<HubProfile, HubDirectoryError> {
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
         let mut req = self
             .http_client
             .get(format!("{hub_url}/api/directory/{node_id}"));
@@ -1932,7 +1954,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let mut body = serde_json::Map::new();
         if let Some(key) = x25519_public_key {
@@ -1969,7 +1991,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let response = self
             .http_client
@@ -2010,7 +2032,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let mut body = serde_json::json!({ "resolution": resolution });
         if let Some(blob) = encrypted_contact {
@@ -2062,7 +2084,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let response = self
             .http_client
@@ -2119,7 +2141,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let payload: Vec<serde_json::Value> = contacts
             .iter()
@@ -2162,7 +2184,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let response = self
             .http_client
@@ -2194,7 +2216,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let response = self
             .http_client
@@ -2228,7 +2250,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let response = self
             .http_client
@@ -2262,7 +2284,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let response = self
             .http_client
@@ -2298,7 +2320,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let response = self
             .http_client
@@ -2329,7 +2351,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let response = self
             .http_client
@@ -2359,7 +2381,7 @@ impl HubDirectoryService {
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
-        let hub_url = Self::hub_base_url()?;
+        let hub_url = Self::hub_base_url_for_request()?;
 
         let response = self
             .http_client

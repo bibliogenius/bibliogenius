@@ -30,6 +30,24 @@ pub(crate) const MAX_RELAY_BLOB_SIZE: usize = 64 * 1024;
 /// HTTP status the hub answers to a blob above [`MAX_RELAY_BLOB_SIZE`].
 pub(crate) const BLOB_TOO_LARGE_STATUS: u16 = 413;
 
+/// The single exit to a relay hub: every request to `/api/relay/*` is sent
+/// here, behind the hub gate (ADR-073). With the gate closed the request
+/// never leaves and the caller gets [`E2eeTransportError::HubSilenced`].
+///
+/// Keep it the only `.send()` of this file, and keep relay requests in this
+/// file: a guard placed sender by sender was bypassed by a new caller at
+/// every review of this work.
+async fn dispatch(
+    request: reqwest::RequestBuilder,
+    what: &str,
+) -> Result<reqwest::Response, E2eeTransportError> {
+    crate::services::hub_gate::ensure_open()?;
+    request
+        .send()
+        .await
+        .map_err(|e| E2eeTransportError::Network(format!("{what}: {e}")))
+}
+
 /// Relay transport for sending/receiving messages via a hub mailbox.
 ///
 /// The crypto service is optional: `poll()`, `ack()` and `deposit_raw()` work
@@ -53,6 +71,33 @@ impl RelayTransport {
             crypto_service,
             http_client,
         }
+    }
+
+    /// Ask the relay hub for a new mailbox. The answer is returned as is:
+    /// the callers keep their own reading of it.
+    ///
+    /// `client` is the caller's: the setup route and the poller's recreation
+    /// do not share their timeouts.
+    pub async fn create_mailbox(
+        client: &reqwest::Client,
+        relay_url: &str,
+    ) -> Result<reqwest::Response, E2eeTransportError> {
+        let url = format!("{}/api/relay/mailbox", relay_url.trim_end_matches('/'));
+        dispatch(client.post(&url), "relay mailbox creation failed").await
+    }
+
+    /// Ask the relay hub to delete a mailbox, with its read token.
+    pub async fn delete_mailbox(
+        client: &reqwest::Client,
+        relay_url: &str,
+        mailbox_uuid: &str,
+        read_token: &str,
+    ) -> Result<reqwest::Response, E2eeTransportError> {
+        let url = format!("{relay_url}/api/relay/mailbox/{mailbox_uuid}");
+        let request = client
+            .delete(&url)
+            .header("Authorization", format!("Bearer {read_token}"));
+        dispatch(request, "relay mailbox deletion failed").await
     }
 
     /// Send an E2EE message via relay hub (fire-and-forget).
@@ -90,15 +135,13 @@ impl RelayTransport {
             mailbox_uuid
         );
 
-        let response = self
+        let request = self
             .http_client
             .post(&url)
             .header("Authorization", format!("Bearer {write_token}"))
             .header("Content-Type", "application/octet-stream")
-            .body(blob)
-            .send()
-            .await
-            .map_err(|e| E2eeTransportError::Network(format!("relay POST failed: {e}")))?;
+            .body(blob);
+        let response = dispatch(request, "relay POST failed").await?;
 
         let status = response.status().as_u16();
         if status >= 400 {
@@ -132,13 +175,11 @@ impl RelayTransport {
             mailbox_uuid
         );
 
-        let response = self
+        let request = self
             .http_client
             .get(&url)
-            .header("Authorization", format!("Bearer {read_token}"))
-            .send()
-            .await
-            .map_err(|e| E2eeTransportError::Network(format!("relay GET failed: {e}")))?;
+            .header("Authorization", format!("Bearer {read_token}"));
+        let response = dispatch(request, "relay GET failed").await?;
 
         let status = response.status().as_u16();
         if status >= 400 {
@@ -202,15 +243,13 @@ impl RelayTransport {
             mailbox_uuid
         );
 
-        let response = self
+        let request = self
             .http_client
             .post(&url)
             .header("Authorization", format!("Bearer {write_token}"))
             .header("Content-Type", "application/octet-stream")
-            .body(body.to_vec())
-            .send()
-            .await
-            .map_err(|e| E2eeTransportError::Network(format!("relay raw POST failed: {e}")))?;
+            .body(body.to_vec());
+        let response = dispatch(request, "relay raw POST failed").await?;
 
         let status = response.status().as_u16();
         if status >= 400 {
@@ -243,13 +282,11 @@ impl RelayTransport {
             message_id
         );
 
-        let response = self
+        let request = self
             .http_client
             .delete(&url)
-            .header("Authorization", format!("Bearer {read_token}"))
-            .send()
-            .await
-            .map_err(|e| E2eeTransportError::Network(format!("relay DELETE failed: {e}")))?;
+            .header("Authorization", format!("Bearer {read_token}"));
+        let response = dispatch(request, "relay DELETE failed").await?;
 
         let status = response.status().as_u16();
         // Require a 2xx response. Checking only >= 400 would silently treat
@@ -312,17 +349,13 @@ impl RelayTransport {
             reply_to_mailbox
         );
 
-        let response = self
+        let request = self
             .http_client
             .post(&url)
             .header("Authorization", format!("Bearer {reply_to_write_token}"))
             .header("Content-Type", "application/octet-stream")
-            .body(blob)
-            .send()
-            .await
-            .map_err(|e| {
-                E2eeTransportError::Network(format!("relay deposit_response POST failed: {e}"))
-            })?;
+            .body(blob);
+        let response = dispatch(request, "relay deposit_response POST failed").await?;
 
         let status = response.status().as_u16();
         if status >= 400 {

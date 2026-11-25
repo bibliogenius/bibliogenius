@@ -58,6 +58,14 @@ pub enum AccountSyncError {
     Config(String),
     /// Crypto failure building an auth response.
     Crypto(String),
+    /// The hub gate is closed (ADR-073): the request was not sent.
+    HubSilenced,
+}
+
+impl From<crate::services::hub_gate::HubSilenced> for AccountSyncError {
+    fn from(_: crate::services::hub_gate::HubSilenced) -> Self {
+        Self::HubSilenced
+    }
 }
 
 impl std::fmt::Display for AccountSyncError {
@@ -68,6 +76,7 @@ impl std::fmt::Display for AccountSyncError {
             Self::NotAuthenticated => write!(f, "Not authenticated with account hub"),
             Self::Config(e) => write!(f, "Configuration error: {e}"),
             Self::Crypto(e) => write!(f, "Crypto error: {e}"),
+            Self::HubSilenced => f.write_str(crate::services::hub_gate::HUB_SILENCED_MESSAGE),
         }
     }
 }
@@ -610,7 +619,10 @@ impl AccountSyncClient {
     }
 
     /// Send a request, map non-2xx to `Hub(status, body)`, and deserialize the body.
+    ///
+    /// The only place this client sends from, behind the hub gate (ADR-073).
     async fn send_json<T: DeserializeOwned>(&self, req: RequestBuilder) -> Result<T> {
+        crate::services::hub_gate::ensure_open()?;
         let resp = req.send().await?;
         let status = resp.status();
         if status.is_success() {

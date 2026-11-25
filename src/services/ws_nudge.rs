@@ -71,7 +71,13 @@ pub async fn start_ws_nudge(state: AppState) {
         });
     }
 
+    let mut gate = crate::services::hub_gate::subscribe();
+
     loop {
+        // ADR-073: no connection to the hub before the user agreed to
+        // register. Sleeps here until the app opens the gate.
+        crate::services::hub_gate::opened(&mut gate).await;
+
         // Load relay config (may not be set up yet).
         let config = match get_my_relay_config(state.db()).await {
             Some(c) => c,
@@ -98,7 +104,18 @@ pub async fn start_ws_nudge(state: AppState) {
 
         tracing::info!("WS nudge: connecting to {ws_url}");
 
-        match connect_and_listen(&ws_url, &config.read_token, &poll_notify).await {
+        // A gate closed during the session drops the connection at once: the
+        // future is cancelled, the socket goes with it.
+        let session = tokio::select! {
+            session = connect_and_listen(&ws_url, &config.read_token, &poll_notify) => session,
+            () = crate::services::hub_gate::closed(&mut gate) => {
+                tracing::info!("WS nudge: hub gate closed, connection dropped");
+                backoff = INITIAL_BACKOFF;
+                continue;
+            }
+        };
+
+        match session {
             Ok(()) => {
                 // Clean disconnect (server closed). Reconnect immediately.
                 tracing::info!("WS nudge: connection closed, reconnecting");

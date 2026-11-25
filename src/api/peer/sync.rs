@@ -933,69 +933,14 @@ pub async fn sync_peer_by_url(
     {
         Ok(Some(p)) => p,
         _ => {
-            // Peer not found locally, try to fetch from Hub
-            let mut found_peer = None;
-
-            if let Ok(hub_url) = std::env::var("HUB_URL") {
-                let client = get_safe_client();
-                let url = format!("{}/api/peers", hub_url);
-
-                if let Ok(res) = client.get(&url).send().await
-                    && res.status().is_success()
-                {
-                    #[derive(Deserialize)]
-                    struct HubPeer {
-                        name: String,
-                        url: String,
-                        #[serde(rename = "status")]
-                        _status: String,
-                    }
-                    #[derive(Deserialize)]
-                    struct HubResponse {
-                        data: Vec<HubPeer>,
-                    }
-
-                    if let Ok(hub_res) = res.json::<HubResponse>().await {
-                        for hub_peer in hub_res.data {
-                            let hub_docker_url = translate_url_for_docker(&hub_peer.url);
-
-                            // Match by URL
-                            if hub_docker_url == docker_url {
-                                // Insert new peer
-                                let new_peer = peer::ActiveModel {
-                                    name: Set(hub_peer.name),
-                                    url: Set(hub_docker_url.clone()),
-                                    created_at: Set(chrono::Utc::now().to_rfc3339()),
-                                    updated_at: Set(chrono::Utc::now().to_rfc3339()),
-                                    ..Default::default()
-                                };
-
-                                if let Ok(res) = peer::Entity::insert(new_peer).exec(&db).await {
-                                    // Fetch the inserted peer to return it
-                                    found_peer = peer::Entity::find_by_id(res.last_insert_id)
-                                        .one(&db)
-                                        .await
-                                        .unwrap_or(None);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            match found_peer {
-                Some(p) => p,
-                None => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(
-                            json!({ "error": format!("Peer not found with URL: {}", docker_url) }),
-                        ),
-                    )
-                        .into_response();
-                }
-            }
+            // Unknown here: nothing is looked up elsewhere. The hub once
+            // listed peers by URL; that route is gone and a local sync must
+            // not contact a server (ADR-073).
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("Peer not found with URL: {}", docker_url) })),
+            )
+                .into_response();
         }
     };
 

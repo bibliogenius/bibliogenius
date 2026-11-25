@@ -60,6 +60,8 @@ impl Hub {
         // The services read the hub from the environment, process-wide:
         // every test of this binary is serial for that reason.
         unsafe { std::env::set_var("HUB_URL", &url) };
+        // Both instances registered on purpose: the hub gate is open.
+        rust_lib_app::services::hub_gate::set_open(true);
         Self { url, compose }
     }
 

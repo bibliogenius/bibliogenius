@@ -39,6 +39,14 @@ static LAST_NOTIFY_SECS: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(0
 /// Calls within `NOTIFY_COOLDOWN_SECS` of the previous send are dropped to
 /// prevent flooding the relay during bulk book imports.
 pub fn schedule_catalog_changed_notification(state: AppState) {
+    // ADR-073: these notices only travel through the relay, which takes
+    // nothing while the hub gate is closed. Checked before the cooldown
+    // slot is claimed, so a notice dropped here does not silence the first
+    // one after the gate opens.
+    if !crate::services::hub_gate::is_open() {
+        tracing::debug!("Catalog notify: skipped, hub gate closed");
+        return;
+    }
     let now_secs = chrono::Utc::now().timestamp() as u64;
     let last = LAST_NOTIFY_SECS.load(Ordering::Relaxed);
 

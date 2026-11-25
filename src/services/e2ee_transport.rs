@@ -25,6 +25,16 @@ pub enum E2eeTransportError {
     /// caller must not attempt a deposit until a fresh invitation is
     /// imported. Short-circuits the retry flood at the source.
     PeerInviteStale,
+    /// The hub gate is closed (ADR-073): the request to the relay was not
+    /// sent. Not a network failure, and nothing a retry or a credential
+    /// refresh can fix.
+    HubSilenced,
+}
+
+impl From<crate::services::hub_gate::HubSilenced> for E2eeTransportError {
+    fn from(_: crate::services::hub_gate::HubSilenced) -> Self {
+        Self::HubSilenced
+    }
 }
 
 impl std::fmt::Display for E2eeTransportError {
@@ -34,6 +44,7 @@ impl std::fmt::Display for E2eeTransportError {
             Self::Network(msg) => write!(f, "network error: {msg}"),
             Self::PeerError(status, msg) => write!(f, "peer error ({status}): {msg}"),
             Self::PeerInviteStale => write!(f, "peer invitation is stale"),
+            Self::HubSilenced => f.write_str(crate::services::hub_gate::HUB_SILENCED_MESSAGE),
         }
     }
 }

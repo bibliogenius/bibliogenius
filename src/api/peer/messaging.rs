@@ -114,8 +114,12 @@ pub async fn try_send_e2ee_with_timeout(
 
     // Skip direct if peer recently failed and has usable relay credentials.
     // Don't skip when the write_token is gated by ADR-032, otherwise we'd
-    // waste the one chance direct still has to reach the peer on LAN.
+    // waste the one chance direct still has to reach the peer on LAN. Same
+    // while the hub gate is closed (ADR-073): the relay takes nothing then,
+    // and skipping direct would cut a peer of the local network off for the
+    // whole TTL after one miss.
     let skip_direct = state.is_peer_direct_unreachable(peer.id)
+        && crate::services::hub_gate::is_open()
         && peer.relay_url.is_some()
         && peer.mailbox_id.is_some()
         && peer.relay_write_token.is_some()
@@ -702,7 +706,8 @@ async fn fetch_hub_profile(
     peer_model: &peer::Model,
 ) -> Option<crate::services::hub_directory_service::HubProfile> {
     let hub_url =
-        crate::services::hub_directory_service::HubDirectoryService::hub_base_url().ok()?;
+        crate::services::hub_directory_service::HubDirectoryService::hub_base_url_for_request()
+            .ok()?;
     let peer_node_id = peer_model.library_uuid.as_deref()?;
 
     // Authenticate with our own write_token
