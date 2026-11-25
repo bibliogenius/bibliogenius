@@ -888,6 +888,24 @@ impl HubDirectoryService {
         Ok(())
     }
 
+    /// Forgets everything this process remembers of the hub registration:
+    /// the row and the catalog key ([`Self::purge_local_config`]), the
+    /// cover upload failures, and the covers this run already uploaded.
+    /// Once unregistered, the old warnings would never clear, and the
+    /// remembered uploads hand back addresses of blobs the hub no longer
+    /// holds: the next registration starts from nothing. Shared by the 401
+    /// recovery and by the withdrawal of the registration (ADR-073 D4).
+    pub async fn forget_registration(
+        &self,
+        db: &DatabaseConnection,
+        key_store: &crate::services::hub_catalog_key_store::CatalogKeyStore,
+    ) -> Result<(), HubDirectoryError> {
+        Self::purge_local_config(db, key_store).await?;
+        Self::reset_all_hub_cover_upload_failures(db).await;
+        self.forget_uploaded_covers();
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Profile
     // -----------------------------------------------------------------------
@@ -2645,6 +2663,36 @@ mod purge_local_config_tests {
         .await
         .unwrap();
         db
+    }
+
+    #[tokio::test]
+    async fn forgetting_the_registration_also_forgets_the_covers_already_uploaded() {
+        let db = db_with_config_and_keys().await;
+        let store = CatalogKeyStore::new();
+        let service = HubDirectoryService::new();
+        service.remember_uploaded_cover(
+            "book-1",
+            std::time::SystemTime::now(),
+            10,
+            "https://hub.example.org/api/directory/node/covers/book-1",
+        );
+
+        service
+            .forget_registration(&db, &store)
+            .await
+            .expect("forget");
+
+        assert!(
+            service.uploaded_covers.lock().unwrap().is_empty(),
+            "a later registration must upload the covers again"
+        );
+        assert!(
+            HubDirectoryService::get_config(&db)
+                .await
+                .unwrap()
+                .is_none(),
+            "the registration row goes with them"
+        );
     }
 
     async fn live_catalog_keys(db: &DatabaseConnection) -> i64 {

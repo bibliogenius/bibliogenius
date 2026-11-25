@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 175491797;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 706786606;
 
 // Section: executor
 
@@ -9140,6 +9140,47 @@ fn wire__crate__api__frb__update_tag_by_uuid_impl(
         },
     )
 }
+fn wire__crate__api__frb__withdraw_hub_registration_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "withdraw_hub_registration",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_node_id = <Option<String>>::sse_decode(&mut deserializer);
+            let api_mailbox_uuid = <Option<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::frb::withdraw_hub_registration(
+                            api_node_id,
+                            api_mailbox_uuid,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__frb__write_backup_ffi_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -12609,7 +12650,10 @@ fn pde_ffi_dispatcher_primary_impl(
         }
         243 => wire__crate__api__frb__update_tag_impl(port, ptr, rust_vec_len, data_len),
         244 => wire__crate__api__frb__update_tag_by_uuid_impl(port, ptr, rust_vec_len, data_len),
-        245 => wire__crate__api__frb__write_backup_ffi_impl(port, ptr, rust_vec_len, data_len),
+        245 => {
+            wire__crate__api__frb__withdraw_hub_registration_impl(port, ptr, rust_vec_len, data_len)
+        }
+        246 => wire__crate__api__frb__write_backup_ffi_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

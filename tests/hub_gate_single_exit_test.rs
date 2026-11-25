@@ -155,6 +155,20 @@ fn the_ungated_reader_of_the_hub_address_is_used_to_compare_only() {
 }
 
 #[test]
+fn the_pass_through_the_closed_gate_has_one_holder() {
+    expect(
+        "with_withdrawal_pass(",
+        &[("services/hub_withdrawal.rs", 1)],
+        "Only the withdrawal of the registration sends through a closed gate (ADR-073 D4).",
+    );
+    assert_eq!(
+        count_in("services/hub_gate.rs", "holds_withdrawal_pass()"),
+        2,
+        "the pass is read by `ensure_open` only (its definition and that one use)"
+    );
+}
+
+#[test]
 fn the_gate_is_closed_until_someone_opens_it() {
     // No test of this file touches the gate: this is its state at start.
     assert!(

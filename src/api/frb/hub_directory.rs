@@ -332,17 +332,12 @@ pub async fn hub_directory_purge_config() -> Result<(), String> {
     let db = hub_db()?;
     // The row and the catalog key leave together (ADR-072): the next
     // registration gets a fresh key id, hence a fresh version history.
-    HubDirectoryService::purge_local_config(db, catalog_key_store())
+    // With them go the cover upload failures and the covers this run
+    // already uploaded: the next registration starts from nothing.
+    hub_directory_svc()
+        .forget_registration(db, catalog_key_store())
         .await
         .map_err(|e| format!("Failed to purge hub_directory_config: {e}"))?;
-    // Clear any pending cover-upload failures: once unregistered, the old
-    // warnings become meaningless and would never auto-clear (no next sync
-    // with the old registration). Next registration starts fresh.
-    crate::services::hub_directory_service::HubDirectoryService::reset_all_hub_cover_upload_failures(db).await;
-    // Same reasoning for the in-memory "already uploaded" cache: it hands back
-    // URLs carrying the old node id, and the hub holds none of those blobs any
-    // more. Next registration re-uploads from scratch.
-    hub_directory_svc().forget_uploaded_covers();
     tracing::info!("hub_directory_config purged for 401 recovery");
     Ok(())
 }
@@ -381,4 +376,51 @@ pub async fn hub_directory_register(
         .await
         .map(FrbDirectoryConfig::from)
         .map_err(|e| e.to_string())
+}
+
+/// Withdraw this installation's registration on the hub (ADR-073 D4).
+///
+/// The core goes silent first, then asks the hub to delete the profile
+/// `node_id` and the relay mailbox `mailbox_uuid`, the two the app read on
+/// this device before calling. A registration found here under another id
+/// is dropped without a request. Returns `"done"` when the hub holds
+/// nothing any more, `"pending"` when it could not be asked (the device is
+/// silent all the same: call again later with the same ids), and
+/// `"unconfirmed"` when the hub refused every credential of this device
+/// (nothing is left here and nothing more can be tried: whether the hub
+/// still holds the profile cannot be told). Fails with
+/// `"account_signed_in"` while an encrypted account is on this device, and
+/// changes nothing then.
+///
+/// FFI only, on purpose: an HTTP route would let any device of the local
+/// network delete this library's registration.
+pub async fn withdraw_hub_registration(
+    node_id: Option<String>,
+    mailbox_uuid: Option<String>,
+) -> Result<String, String> {
+    use crate::services::hub_withdrawal::{
+        HubRegistration, WithdrawalError, WithdrawalOutcome, withdraw,
+    };
+
+    let db = hub_db()?;
+    let poll_lock = global_app_state().map(|state| state.relay_poll_lock().as_ref());
+    let named = HubRegistration {
+        node_id,
+        mailbox_uuid,
+    };
+    match withdraw(
+        db,
+        poll_lock,
+        hub_directory_svc(),
+        catalog_key_store(),
+        &named,
+    )
+    .await
+    {
+        Ok(WithdrawalOutcome::Done) => Ok("done".to_string()),
+        Ok(WithdrawalOutcome::Pending) => Ok("pending".to_string()),
+        Ok(WithdrawalOutcome::Unconfirmed) => Ok("unconfirmed".to_string()),
+        Err(WithdrawalError::AccountSignedIn) => Err("account_signed_in".to_string()),
+        Err(e @ WithdrawalError::Database(_)) => Err(e.to_string()),
+    }
 }

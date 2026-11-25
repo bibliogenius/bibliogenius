@@ -82,9 +82,38 @@ pub fn refused() -> bool {
     TOLD.load(Ordering::Relaxed) && !is_open()
 }
 
+tokio::task_local! {
+    /// Carried by the task that withdraws the registration, and by nobody
+    /// else (see [`with_withdrawal_pass`]).
+    static WITHDRAWAL_PASS: ();
+}
+
+/// Run `deletion` with a pass through the closed gate (ADR-073 D4).
+///
+/// Withdrawing the registration silences the device first, then asks the
+/// hub to delete what it holds. Those deletions go through the same gated
+/// functions as every other request: the gate lets them out because the
+/// task that sends them carries this pass. The gate itself stays closed, so
+/// every other sender of the core is still refused meanwhile, and a task
+/// spawned from `deletion` does not inherit the pass.
+///
+/// One caller only, the withdrawal (`hub_withdrawal.rs`); a source test
+/// fails when another appears.
+pub async fn with_withdrawal_pass<F: std::future::Future>(deletion: F) -> F::Output {
+    WITHDRAWAL_PASS.scope((), deletion).await
+}
+
+fn holds_withdrawal_pass() -> bool {
+    WITHDRAWAL_PASS.try_with(|()| ()).is_ok()
+}
+
 /// The check every hub request goes through before it is sent.
 pub fn ensure_open() -> Result<(), HubSilenced> {
-    if is_open() { Ok(()) } else { Err(HubSilenced) }
+    if is_open() || holds_withdrawal_pass() {
+        Ok(())
+    } else {
+        Err(HubSilenced)
+    }
 }
 
 /// A receiver that sees every change of the gate, for long-lived connections.
