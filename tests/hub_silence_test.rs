@@ -396,24 +396,67 @@ async fn covers_are_not_addressed_on_the_hub_while_the_gate_is_closed() {
 #[tokio::test]
 #[serial]
 async fn a_photographed_cover_is_served_on_the_local_network_when_the_hub_is_not_used() {
-    use rust_lib_app::models::book::Book;
-    let local_file = Some("/var/mobile/covers/book-1.jpg");
+    use rust_lib_app::models::book::{ActiveModel, Book};
+    use sea_orm::{ActiveModelTrait, Set};
+    let hub = fake_hub().await;
+    let state = library_with_a_peer(&hub).await;
+    let now = chrono::Utc::now().to_rfc3339();
+    let stored = ActiveModel {
+        title: Set("With a photographed cover".to_owned()),
+        owned: Set(true),
+        private: Set(false),
+        cover_url: Set(Some("/var/mobile/covers/book.jpg".to_owned())),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(state.db())
+    .await
+    .expect("insert book");
+    let catalogue = || vec![Book::from(stored.clone())];
 
     // Two libraries that never registered: nothing can leave by the relay,
-    // so the peer is given the address it resolves on the local network.
+    // so a catalogue gives the address the peer resolves on the local
+    // network, through its cover proxy.
     hub_gate::set_open(false);
-    assert_eq!(
-        Book::safe_cover_url_for_relay(local_file, "book-1", None, None, None).as_deref(),
-        Some("/api/books/book-1/cover")
+    let mut books = catalogue();
+    Book::rewrite_cover_urls_for_relay(&mut books, None, None);
+    let address = books[0].cover_url.clone().expect("a cover address");
+    assert!(
+        address.starts_with(&format!("/api/books/{}/cover", stored.id)),
+        "got {address}"
     );
 
-    // With the hub in use and no address there for the cover, the answer may
-    // travel by the relay to a peer with no route here: the cover is dropped
-    // rather than sent as an address that peer cannot reach.
+    // With the hub in use and no address there for the cover, the answer
+    // may travel by the relay to a peer with no route here: the cover is
+    // dropped rather than sent as an address that peer cannot reach.
     hub_gate::set_open(true);
-    assert_eq!(
-        Book::safe_cover_url_for_relay(local_file, "book-1", None, None, None),
-        None
-    );
+    let mut books = catalogue();
+    Book::rewrite_cover_urls_for_relay(&mut books, None, None);
+    assert_eq!(books[0].cover_url, None);
+    hub_gate::set_open(false);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_loan_never_carries_a_local_network_cover_address() {
+    use rust_lib_app::models::book::Book;
+    // The borrower stores this value in a book of its own library, where a
+    // relative address would point at its own server: gate closed or not,
+    // a photographed cover without a hub address is left out of a loan.
+    for open in [false, true] {
+        hub_gate::set_open(open);
+        assert_eq!(
+            Book::safe_cover_url_for_relay(
+                Some("/var/mobile/covers/book.jpg"),
+                "book-1",
+                None,
+                None,
+                None
+            ),
+            None,
+            "gate open: {open}"
+        );
+    }
     hub_gate::set_open(false);
 }

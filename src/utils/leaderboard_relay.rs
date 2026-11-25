@@ -669,8 +669,13 @@ pub async fn sync_all_leaderboards(state: &AppState, skip_direct: bool) {
                             return Phase1Outcome::Dead;
                         }
                         // Skip peers already known to be unreachable — go
-                        // straight to relay credential lookup.
-                        if state.is_peer_direct_unreachable(peer.id) {
+                        // straight to relay credential lookup. Not while
+                        // the hub gate is closed (ADR-073): there is no
+                        // relay then, and a peer of the local network must
+                        // not be dropped for the whole TTL after one miss.
+                        if state.is_peer_direct_unreachable(peer.id)
+                            && crate::services::hub_gate::is_open()
+                        {
                             if state.is_peer_relay_unreachable(peer.id) {
                                 return Phase1Outcome::Dead;
                             }

@@ -602,17 +602,12 @@ impl Book {
         {
             return None;
         }
-        if Self::answer_stays_on_the_local_network(hub_cover_prefix) {
-            return cover_url::resolve_single(
-                cover_url,
-                book_id,
-                updated_at,
-                None,
-                ResolveScope::Lan,
-            )
-            .ok()
-            .flatten();
-        }
+        // Strict whatever the hub gate says, unlike the catalogue rewrite
+        // above: this value goes into loan payloads, and the borrower
+        // stores it in a book row of its own library. A relative
+        // `/api/books/{id}/cover` would then be resolved against the
+        // borrower's own server, find nothing, and keep the cover lookup
+        // by ISBN from running.
         match Self::safe_cover_url_strict(cover_url, book_id, updated_at, hub_cover_prefix) {
             Ok(v) => v,
             Err(e) => {
@@ -622,8 +617,8 @@ impl Book {
         }
     }
 
-    /// Whether a payload built for a peer can only reach it on the local
-    /// network: no hub address for the covers, and a hub gate that lets
+    /// Whether a catalogue payload built for a peer can only reach it on the
+    /// local network: no hub address for the covers, and a hub gate that lets
     /// nothing through the relay (ADR-073). The peer then resolves
     /// `/api/books/{id}/cover` against this library's local address, as it
     /// does for a plain LAN answer. Without this, two libraries that never
