@@ -199,6 +199,14 @@ name = "two_instances_hub"
 path = "tests/two_instances_hub/main.rs"
 required-features = ["it-loopback"]
 
+# Two unregistered installations paired on the LAN, against a fake hub that
+# must see no request (ADR-073). No Docker:
+# `cargo test --features it-loopback --test lan_only_pairing`.
+[[test]]
+name = "lan_only_pairing"
+path = "tests/lan_only_pairing/main.rs"
+required-features = ["it-loopback"]
+
 [dev-dependencies]
 wiremock = "0.6"
 serial_test = "3"

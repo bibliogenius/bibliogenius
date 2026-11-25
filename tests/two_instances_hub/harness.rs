@@ -310,20 +310,12 @@ impl Instance {
             .crypto_service()
             .expect("crypto service built from the identity");
 
-        let router = Router::new().nest("/api", api::api_router_with_state(state.clone()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("loopback port");
         let port = listener.local_addr().expect("local address").port();
         state.set_server_port(port);
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                router.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .expect("backend server");
-        });
+        let server = Self::serve(&state, listener);
         tracing::info!("[{name}] backend listening on 127.0.0.1:{port}");
 
         Self {
@@ -336,6 +328,18 @@ impl Instance {
             port,
             server,
         }
+    }
+
+    fn serve(state: &AppState, listener: tokio::net::TcpListener) -> tokio::task::JoinHandle<()> {
+        let router = Router::new().nest("/api", api::api_router_with_state(state.clone()));
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("backend server");
+        })
     }
 
     pub fn url(&self) -> String {
@@ -500,6 +504,26 @@ impl Instance {
     /// mode; the database and the identity stay.
     pub fn go_offline(&self) {
         self.server.abort();
+    }
+
+    /// Answers again on the same address after [`Self::go_offline`], as a
+    /// device waking up on the same Wi-Fi. Used by `lan_only_pairing` only.
+    #[allow(dead_code)]
+    pub async fn come_back_online(&mut self) {
+        let address = format!("127.0.0.1:{}", self.port);
+        let mut attempts = 0;
+        let listener = loop {
+            match tokio::net::TcpListener::bind(&address).await {
+                Ok(listener) => break listener,
+                Err(e) if attempts < 50 => {
+                    attempts += 1;
+                    tracing::debug!("[{}] port not free yet: {e}", self.name);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(e) => panic!("[{}] cannot listen on {address} again: {e}", self.name),
+            }
+        };
+        self.server = Self::serve(&self.state, listener);
     }
 
     /// Our X25519 public key, hex, as the hub publishes it.
