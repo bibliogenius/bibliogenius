@@ -176,7 +176,12 @@ LAN with an E2EE exchange, the ended pairing (mark set on deletion, ex-peer
 refused on the LAN and dropped by the relay poller, restored by the owner's
 acceptance), and the encrypted catalog (wrap for an approved follower, the
 reader opening it, wraps sent again after a real 304, rotation when a
-reader unfollows and when the owner removes an offline reader). What needs
+reader unfollows and when the owner removes an offline reader), and the
+withdrawal of a registration (ADR-073 D4: profile, catalog, follows and
+mailbox gone from the hub, nothing more sent behind the closed gate, the
+LAN still answering, registering again, a hub that does not answer, and
+the "not confirmed" the hub's answer gives for a profile it already
+deleted). What needs
 a device stays in the manual recipe: sleep, Keychain, mDNS, the real hub
 switch, a reader reinstalled under new keys. The reader joins the readers
 list through the bootstrap of the first encrypted push, not through the

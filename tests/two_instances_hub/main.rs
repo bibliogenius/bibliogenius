@@ -4,7 +4,10 @@
 //! over the LAN, the ended-pairing mark and the ex-peer held back, the
 //! encrypted catalog with its wraps, the wraps sent again after a real
 //! 304, the rotation after a reader left and after the owner removed an
-//! offline reader.
+//! offline reader, and the withdrawal of a registration (ADR-073 D4): what
+//! the hub keeps, the silence that follows, the LAN that keeps working,
+//! registering again, a hub that does not answer, and the answer the hub
+//! gives for a profile it already deleted.
 //!
 //! Not part of `cargo test`: the target needs the `it-loopback` feature and
 //! a hub started with `make it-up` in bibliogenius-hub.
@@ -19,8 +22,13 @@ mod harness;
 use std::time::Duration;
 
 use harness::{Hub, Instance, Logs, entry, logs};
+use rust_lib_app::services::catalog_notification::schedule_catalog_changed_notification;
 use rust_lib_app::services::hub_catalog_readers::pairing_ended;
 use rust_lib_app::services::hub_directory_service::{HubDirectoryService, PushCatalogOutcome};
+use rust_lib_app::services::hub_gate;
+use rust_lib_app::services::hub_withdrawal::{HubRegistration, WithdrawalOutcome, withdraw};
+use rust_lib_app::services::profile_notification::schedule_profile_changed_notification;
+use sea_orm::{ConnectionTrait, Statement};
 use serial_test::serial;
 
 /// The relay answer wait of the tests: long enough for a deposit, short
@@ -538,5 +546,237 @@ async fn removing_an_offline_reader_withdraws_its_wrap_and_rotates_without_its_h
             .count(),
         1,
         "let in once, at the first push, never again"
+    );
+}
+
+// ── Withdrawing the registration (ADR-073 D4) ───────────────────────────
+
+/// What the app names when the user withdraws: the library id and the
+/// mailbox it reads on the device at that moment.
+async fn named_registration(instance: &Instance) -> HubRegistration {
+    HubRegistration {
+        node_id: HubDirectoryService::get_config(&instance.db)
+            .await
+            .expect("registration readable")
+            .map(|row| row.node_id),
+        mailbox_uuid: instance.relay_config().await.map(|row| row.mailbox_uuid),
+    }
+}
+
+/// The withdrawal the settings run through the FFI, on this instance.
+async fn withdraw_registration(instance: &Instance, named: &HubRegistration) -> WithdrawalOutcome {
+    withdraw(
+        &instance.db,
+        Some(instance.state.relay_poll_lock().as_ref()),
+        &instance.svc,
+        &instance.key_store,
+        named,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("[{}] withdrawal failed: {e:?}", instance.name))
+}
+
+/// What the hub holds of `node_id` and of `mailbox`: profile, catalog,
+/// follows in either direction, mailbox.
+async fn hub_holds(hub: &Hub, node_id: &str, mailbox: &str) -> String {
+    hub.psql(&format!(
+        "SELECT (SELECT count(*) FROM library_profiles WHERE node_id = '{node_id}'),
+                (SELECT count(*) FROM cached_catalogs WHERE node_id = '{node_id}'),
+                (SELECT count(*) FROM follows
+                  WHERE follower_node_id = '{node_id}' OR followed_node_id = '{node_id}'),
+                (SELECT count(*) FROM relay_mailboxes WHERE uuid = '{mailbox}')"
+    ))
+    .await
+}
+
+/// Everything the hub holds, in counts, its event log included: a new row
+/// anywhere shows. A read that writes nothing does not.
+async fn hub_totals(hub: &Hub) -> String {
+    hub.psql(
+        "SELECT (SELECT count(*) FROM library_profiles), (SELECT count(*) FROM cached_catalogs),
+                (SELECT count(*) FROM follows), (SELECT count(*) FROM relay_mailboxes),
+                (SELECT count(*) FROM relay_messages), (SELECT count(*) FROM hub_events)",
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_withdrawal_deletes_the_hub_side_then_the_device_is_silent_and_the_lan_still_works() {
+    let (hub, _logs, owner, reader) = paired_libraries().await;
+    owner.push(small_catalog(), false).await;
+    reader.follow(&owner).await;
+    owner.approve_follow_from(reader.node_id()).await;
+    let named = named_registration(&owner).await;
+    let mailbox = named.mailbox_uuid.clone().expect("a mailbox");
+    let reader_mailbox = reader.relay_config().await.expect("a mailbox").mailbox_uuid;
+    assert_eq!(
+        hub_holds(&hub, owner.node_id(), &mailbox).await,
+        "1|1|1|1",
+        "profile, catalog, the reader's follow and the mailbox, before"
+    );
+
+    // R1: the hub keeps nothing of the owner (of what this scenario made:
+    // no borrow request, no cover); the reader keeps its profile and
+    // mailbox.
+    let outcome = withdraw_registration(&owner, &named).await;
+    assert_eq!(outcome, WithdrawalOutcome::Done);
+    assert_eq!(hub_holds(&hub, owner.node_id(), &mailbox).await, "0|0|0|0");
+    assert_eq!(
+        hub_holds(&hub, reader.node_id(), &reader_mailbox).await,
+        "1|0|0|1",
+        "the reader's profile and mailbox stay"
+    );
+    assert!(!hub_gate::is_open(), "silent from the withdrawal on");
+    assert!(
+        HubDirectoryService::get_config(&owner.db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(owner.relay_config().await.is_none());
+
+    // R3: the change notices the core sends on its own to its peers (relay
+    // deposits, with the peer's credentials it still holds) do not leave.
+    // Opening the gate here makes two deposits appear.
+    let before = hub_totals(&hub).await;
+    schedule_catalog_changed_notification(owner.state.clone());
+    schedule_profile_changed_notification(owner.state.clone(), vec!["name".to_string()]);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(hub_totals(&hub).await, before, "the hub wrote nothing more");
+
+    // R2: the peer still reaches the owner on the LAN.
+    let owner_on_reader = reader.peer_row(owner.node_id()).await.expect("paired");
+    let reply = reader
+        .send_e2ee(
+            &owner_on_reader,
+            "book_sync_request",
+            serde_json::json!({}),
+            RELAY_WAIT,
+        )
+        .await
+        .expect("send")
+        .expect("E2EE path taken")
+        .expect("answered directly");
+    assert_eq!(reply.message_type, "book_sync_response");
+
+    // R7: a yes given later registers again, under the same id. The follow
+    // the hub held does not come back: the reader asks again, and waits
+    // for the owner's approval as a newcomer.
+    hub_gate::set_open(true);
+    let mailbox_again = owner.setup_relay(&hub).await;
+    owner.register("Owner library", true, true).await;
+    assert_eq!(
+        hub_holds(&hub, owner.node_id(), &mailbox_again).await,
+        "1|0|0|1",
+        "a profile and a mailbox again, no follow"
+    );
+    reader.follow(&owner).await;
+    assert_eq!(
+        hub.follow_state(reader.node_id(), owner.node_id())
+            .await
+            .expect("the new follow")
+            .0,
+        "pending"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_hub_that_does_not_answer_leaves_the_deletion_pending_then_the_retry_finishes_it() {
+    let (hub, _logs, owner, _reader) = two_libraries().await;
+    owner.setup_relay(&hub).await;
+    owner.register("Owner library", false, true).await;
+    let named = named_registration(&owner).await;
+    let mailbox = named.mailbox_uuid.clone().expect("a mailbox");
+
+    // R5: the directory address answers nothing (the mailbox is deleted
+    // through the relay address the device stored).
+    unsafe { std::env::set_var("HUB_URL", "http://127.0.0.1:1") };
+    let outcome = withdraw_registration(&owner, &named).await;
+    unsafe { std::env::set_var("HUB_URL", &hub.url) };
+    assert_eq!(outcome, WithdrawalOutcome::Pending);
+    assert_eq!(
+        hub_holds(&hub, owner.node_id(), &mailbox).await,
+        "1|0|0|0",
+        "the profile is left, the mailbox is gone"
+    );
+    assert!(
+        HubDirectoryService::get_config(&owner.db)
+            .await
+            .unwrap()
+            .is_some(),
+        "the token is kept for the retry"
+    );
+    assert!(!hub_gate::is_open(), "silent all the same");
+
+    // The hub is back: the retry at the next launch finishes it.
+    let outcome = withdraw_registration(&owner, &named).await;
+    assert_eq!(outcome, WithdrawalOutcome::Done);
+    assert_eq!(hub_holds(&hub, owner.node_id(), &mailbox).await, "0|0|0|0");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_profile_the_hub_already_deleted_reads_as_not_confirmed() {
+    // The accepted false alarm of ADR-073 D4, against the real hub: it
+    // answers a deletion for a profile it no longer holds as it answers a
+    // stale token, and refuses the recovery code of a profile that is gone.
+    // If the hub ever says "gone", this test tells the alarm can go.
+    let (hub, _logs, owner, _reader) = two_libraries().await;
+    owner.setup_relay(&hub).await;
+    owner.register("Owner library", false, true).await;
+    let row = HubDirectoryService::get_config(&owner.db)
+        .await
+        .unwrap()
+        .expect("registered");
+    let recovery_code = row.recovery_code.clone().expect("the hub handed a code");
+    let named = named_registration(&owner).await;
+    assert_eq!(
+        withdraw_registration(&owner, &named).await,
+        WithdrawalOutcome::Done
+    );
+
+    // The same registration comes back on the device (a restored backup),
+    // and the deletion is asked again.
+    let now = chrono::Utc::now().to_rfc3339();
+    owner
+        .db
+        .execute(Statement::from_string(
+            owner.db.get_database_backend(),
+            format!(
+                "INSERT INTO hub_directory_config
+                     (id, node_id, write_token, is_listed, requires_approval, accept_from,
+                      allow_borrowing, recovery_code, created_at, updated_at)
+                 VALUES (1, '{}', '{}', 0, 1, 'everyone', 0, '{recovery_code}', '{now}', '{now}')",
+                row.node_id, row.write_token
+            ),
+        ))
+        .await
+        .expect("restored registration row");
+    let again = HubRegistration {
+        node_id: Some(row.node_id.clone()),
+        mailbox_uuid: None,
+    };
+    assert_eq!(
+        withdraw_registration(&owner, &again).await,
+        WithdrawalOutcome::Unconfirmed
+    );
+    assert!(
+        HubDirectoryService::get_config(&owner.db)
+            .await
+            .unwrap()
+            .is_none(),
+        "nothing kept to ask again"
+    );
+    assert_eq!(
+        hub_holds(
+            &hub,
+            owner.node_id(),
+            named.mailbox_uuid.as_deref().unwrap_or("")
+        )
+        .await,
+        "0|0|0|0",
+        "and the recovery attempt recreated nothing on the hub"
     );
 }
