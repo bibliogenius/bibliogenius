@@ -89,6 +89,9 @@ pub async fn list_books(
         // HTTP route, which peers also call.
         owned: None,
         collection: None,
+        // Filtered in SQL, not after the fetch: the paginator's count would
+        // otherwise still include private books outside the current page.
+        exclude_private: !is_owner,
     };
 
     // Fetch via repository
@@ -104,7 +107,7 @@ pub async fn list_books(
     );
 
     let mut book_dtos = result.books;
-    let mut total = result.total;
+    let total = result.total;
 
     // Populate copy-derived availability BEFORE redact so peers see accurate
     // `available_copies` (not redacted — needed so the iPhone-side carousel
@@ -116,15 +119,9 @@ pub async fn list_books(
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    // Peer-facing privacy (E1): filter private books and redact personal
-    // annotations when no owner JWT is present. Post-query in-memory
-    // filtering is acceptable for the project's catalog sizes (<1k books);
-    // `total` is adjusted so paginated clients see the filtered count.
+    // Peer-facing privacy: private books were already left out by the
+    // query above; redact personal annotations when no owner JWT is present.
     if !is_owner {
-        let before = book_dtos.len() as u64;
-        book_dtos.retain(|b| !b.private.unwrap_or(false));
-        let removed = before - book_dtos.len() as u64;
-        total = total.saturating_sub(removed);
         for b in &mut book_dtos {
             b.redact_for_peer();
         }

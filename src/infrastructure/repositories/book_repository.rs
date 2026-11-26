@@ -132,6 +132,10 @@ impl BookRepository for SeaOrmBookRepository {
             query = query.filter(Column::Private.eq(false));
         }
 
+        if filter.exclude_private {
+            query = query.filter(Column::Private.eq(false));
+        }
+
         // Owner-facing ownership predicate: unlike `owned_only`, it must not
         // hide the owner's own private books from them.
         if let Some(owned) = filter.owned {

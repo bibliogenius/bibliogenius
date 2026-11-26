@@ -31,6 +31,10 @@ pub struct BookFilter {
     /// Restrict to books belonging to a collection, identified by its uuid or,
     /// failing that, by its exact name (case-insensitive).
     pub collection: Option<String>,
+    /// Leave `private` books out of the query, so the page, its `total` and
+    /// the pagination all describe only what a caller without the owner token
+    /// may see. Unlike [`Self::owned_only`], it keeps non-owned books.
+    pub exclude_private: bool,
 }
 
 /// Paginated result with total count

@@ -1665,7 +1665,12 @@ pub async fn handle_library_page_request(
 
     let books = query.all(db).await.unwrap_or_default();
 
-    let total = book::Entity::find().count(db).await.unwrap_or(0) as i64;
+    // Same rule as the manifest: private books stay out of the count.
+    let total = book::Entity::find()
+        .filter(book::Column::Private.eq(false))
+        .count(db)
+        .await
+        .unwrap_or(0) as i64;
 
     let page: Vec<_> = books.into_iter().take(limit).collect();
     let next_cursor = page.last().map(|b| b.id.clone());
@@ -2331,6 +2336,27 @@ mod tests {
             Some("Public"),
             "the public book with a cover must appear in the preview"
         );
+    }
+
+    /// The browse-profile page shares the manifest's rule: its `total` counts
+    /// only the books the page itself may list, never the private ones.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn library_page_total_ignores_private_books() {
+        let db = setup_test_db().await;
+        insert_book_with_cover(&db, "Public", false, "2026-08-18T10:00:00+00:00").await;
+        insert_book_with_cover(&db, "Hidden", true, "2026-08-18T12:00:00+00:00").await;
+
+        let msg = request("library_page_request", json!({ "limit": 50 }));
+        let response = handle_library_page_request(&db, &msg).await;
+
+        assert_eq!(
+            response["total"].as_i64(),
+            Some(1),
+            "total must count only public books"
+        );
+        let books = response["books"].as_array().expect("books array");
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0]["title"].as_str(), Some("Public"));
     }
 
     /// Wishlist entries keep circulating on this lane, now as the additive

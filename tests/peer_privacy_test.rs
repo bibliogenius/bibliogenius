@@ -253,3 +253,79 @@ async fn get_book_auth_private_returns_full() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json.get("user_rating").and_then(|v| v.as_i64()), Some(9));
 }
+
+// ── /api/books pagination: no field may depend on private books ───────
+
+#[tokio::test]
+async fn list_books_unauth_paginated_total_ignores_private_books() {
+    // A search that matches a private book must not let an anonymous caller
+    // learn, through `total`, that such a book exists, even when the private
+    // book lies outside the requested page.
+    let db = setup_db().await;
+    insert_rich_book(&db, "Secret", true).await;
+    let app = build_app(db);
+
+    for page in 0..2 {
+        let (status, json) = get_json(
+            &app,
+            &format!("/api/books?q=Secret&limit=1&page={page}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json.get("total").and_then(|v| v.as_u64()),
+            Some(0),
+            "page {page} leaked the private match"
+        );
+        let books = json.get("books").and_then(|v| v.as_array()).unwrap();
+        assert!(books.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn list_books_auth_paginated_total_counts_private_books() {
+    let db = setup_db().await;
+    insert_rich_book(&db, "Secret", true).await;
+    let app = build_app(db);
+
+    let token = create_jwt("owner", "admin").expect("jwt");
+    let (status, json) = get_json(&app, "/api/books?q=Secret&limit=1", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json.get("total").and_then(|v| v.as_u64()), Some(1));
+    let books = json.get("books").and_then(|v| v.as_array()).unwrap();
+    assert_eq!(books.len(), 1);
+}
+
+#[tokio::test]
+async fn list_books_unauth_pages_are_not_shortened_by_private_books() {
+    // Private books interleaved with public ones: every page an anonymous
+    // caller walks must be full, and the pages together must hold exactly
+    // the public books.
+    let db = setup_db().await;
+    for i in 0..6 {
+        insert_rich_book(&db, &format!("Book {i}"), i % 2 == 0).await;
+    }
+    let app = build_app(db);
+
+    let mut seen = Vec::new();
+    for page in 0..2 {
+        let (status, json) = get_json(
+            &app,
+            &format!("/api/books?sort=title_asc&limit=2&page={page}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json.get("total").and_then(|v| v.as_u64()), Some(3));
+        let books = json.get("books").and_then(|v| v.as_array()).unwrap();
+        let expected_len = if page == 0 { 2 } else { 1 };
+        assert_eq!(books.len(), expected_len, "page {page} was shortened");
+        seen.extend(
+            books
+                .iter()
+                .map(|b| b.get("title").and_then(|v| v.as_str()).unwrap().to_string()),
+        );
+    }
+    assert_eq!(seen, vec!["Book 1", "Book 3", "Book 5"]);
+}
