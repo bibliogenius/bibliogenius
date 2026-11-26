@@ -595,6 +595,7 @@ pub async fn update_book(
 
     let previous_reading_status = book_model.reading_status.clone();
     let private_before = book_model.private;
+    let cover_before = book_model.cover_url.clone();
     let owned_after = book_data.owned.unwrap_or(book_model.owned);
     let mut reading_change = crate::domain::ReadingChange::from_book(&book_data);
     let mut book: BookActiveModel = book_model.into();
@@ -659,6 +660,9 @@ pub async fn update_book(
         withdrawn.then(crate::services::delta_service::peer_withdrawal_payload),
     )
     .await;
+    if withdrawn {
+        withdraw_hub_cover(db, id, cover_before.as_deref(), model.cover_url.as_deref());
+    }
 
     // Reverse wishlist trigger, on the transition INTO 'wanting' only:
     // unrelated edits of an existing wish must not re-fire the scan (the
@@ -1114,6 +1118,45 @@ async fn remove_book_rows(db: &DatabaseConnection, id: &str) -> Result<bool, Ser
 
     let _ = crate::sync::log_operation(db, "book", id, "DELETE", None).await;
     Ok(removed)
+}
+
+/// Takes the hub cover of a book that just became private off the hub, in
+/// the background. Called by both edit paths (FFI and HTTP) on the transition
+/// into private only.
+///
+/// The hub serves covers without authentication, keyed by the book id, so a
+/// cover left there stays readable by anyone holding that id. The orphan
+/// cover GC the next catalog push runs on the hub (ADR-033) usually removes
+/// it, but that GC deletes nothing when the catalog is empty or when the
+/// orphans reach its delete ratio (two covers, one book made private), so it
+/// cannot be relied on here.
+///
+/// Best effort: the edit is already committed, and a library that is not
+/// registered never reaches the network. Nothing re-uploads here when the
+/// book comes back: the next catalog push sends the cover of every public
+/// book, and `delete_cover` keeps the upload cache from replaying the URL.
+///
+/// Only a book whose cover is, or just was, a local file has a blob on the
+/// hub. Any other id is left out: with an encrypted catalog (ADR-072) the hub
+/// knows in clear only the ids of books with an uploaded cover, and a
+/// deletion would hand it one more.
+///
+/// Returns at once. An upload of the same cover started next waits for the
+/// deletion, and one already in flight never re-sends it (see
+/// `HubDirectoryService::withdraw_cover_in_background`).
+pub fn withdraw_hub_cover(
+    db: &DatabaseConnection,
+    id: &str,
+    cover_before: Option<&str>,
+    cover_after: Option<&str>,
+) {
+    let hosted_on_hub = |cover: Option<&str>| {
+        cover.is_some_and(|c| !c.is_empty() && !crate::utils::cover_url::is_servable_remotely(c))
+    };
+    if !hosted_on_hub(cover_before) && !hosted_on_hub(cover_after) {
+        return;
+    }
+    HubDirectoryService::withdraw_cover_in_background(db, id);
 }
 
 /// Best-effort removal of the orphaned cover from the hub, so storage does
@@ -4338,5 +4381,217 @@ mod owned_copy_bootstrap_tests {
             .await
             .expect("count copies");
         assert_eq!(copies, 0);
+    }
+}
+
+#[cfg(test)]
+mod hub_cover_withdrawal_tests {
+    //! A book made private loses its hub cover, once, through the FFI edit
+    //! path, and an upload started next lands after the deletion. Serial
+    //! because `HUB_URL` is process-wide.
+
+    use sea_orm::{ConnectionTrait, DatabaseConnection};
+    use serial_test::serial;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    use super::*;
+
+    const LOCAL_COVER: &str = "/data/covers/local.jpg";
+
+    async fn hub_requests(server: &MockServer) -> Vec<(String, String)> {
+        let requests: Vec<Request> = server.received_requests().await.unwrap();
+        requests
+            .into_iter()
+            .map(|r| (r.method.to_string(), r.url.path().to_string()))
+            .collect()
+    }
+
+    async fn wait_for_requests(server: &MockServer, count: usize) -> Vec<(String, String)> {
+        let mut requests = Vec::new();
+        for _ in 0..100 {
+            requests = hub_requests(server).await;
+            if requests.len() >= count {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        requests
+    }
+
+    async fn registered_db_behind(server: &MockServer) -> DatabaseConnection {
+        // SAFETY: tests touching HUB_URL are serialised with #[serial].
+        unsafe { std::env::set_var("HUB_URL", server.uri()) };
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "INSERT INTO hub_directory_config (id, node_id, write_token, created_at, updated_at)
+             VALUES (1, 'owner-node', 'owner-token', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .await
+        .unwrap();
+        db
+    }
+
+    fn edit(title: &str, private: bool, cover: &str) -> Book {
+        Book {
+            title: title.to_string(),
+            private: Some(private),
+            cover_url: Some(cover.to_string()),
+            ..Default::default()
+        }
+    }
+
+    async fn new_book(db: &DatabaseConnection, cover: &str) -> String {
+        create_book(db, edit("Shown", false, cover))
+            .await
+            .unwrap()
+            .id
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn making_a_book_private_takes_its_cover_off_the_hub_once() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let db = registered_db_behind(&server).await;
+        let id = new_book(&db, LOCAL_COVER).await;
+
+        // An edit that keeps the book public leaves the hub alone.
+        update_book(&db, &id, edit("Shown, revised", false, LOCAL_COVER))
+            .await
+            .unwrap();
+        update_book(&db, &id, edit("Hidden", true, LOCAL_COVER))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            wait_for_requests(&server, 1).await,
+            vec![(
+                "DELETE".to_string(),
+                format!("/api/directory/owner-node/covers/{id}")
+            )],
+            "the transition into private deletes the cover by its book id"
+        );
+
+        // Still private, then public again: neither is a withdrawal.
+        update_book(&db, &id, edit("Hidden, revised", true, LOCAL_COVER))
+            .await
+            .unwrap();
+        update_book(&db, &id, edit("Shown again", false, LOCAL_COVER))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(hub_requests(&server).await.len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_book_with_no_cover_on_the_hub_is_not_named_to_it() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let db = registered_db_behind(&server).await;
+        let remote = new_book(&db, "https://covers.example.org/1.jpg").await;
+        let bare = new_book(&db, "").await;
+
+        update_book(
+            &db,
+            &remote,
+            edit("Hidden", true, "https://covers.example.org/1.jpg"),
+        )
+        .await
+        .unwrap();
+        update_book(&db, &bare, edit("Hidden", true, ""))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(hub_requests(&server).await.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_upload_started_after_the_withdrawal_lands_after_it() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .respond_with(
+                ResponseTemplate::new(204).set_delay(std::time::Duration::from_millis(300)),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let db = registered_db_behind(&server).await;
+        let id = new_book(&db, LOCAL_COVER).await;
+
+        // The edit returns without waiting on the hub.
+        let edit_started = std::time::Instant::now();
+        update_book(&db, &id, edit("Hidden", true, LOCAL_COVER))
+            .await
+            .unwrap();
+        assert!(
+            edit_started.elapsed() < std::time::Duration::from_millis(250),
+            "the edit waited for the deletion"
+        );
+        update_book(&db, &id, edit("Shown again", false, LOCAL_COVER))
+            .await
+            .unwrap();
+
+        // The push re-uploads the cover of the book public again. The hub
+        // records requests on arrival, so the order it saw proves nothing:
+        // what matters is that the upload waited out the deletion.
+        let started = std::time::Instant::now();
+        let uploaded = HubDirectoryService::new()
+            .upload_cover(&db, &id, vec![0xFF, 0xD8])
+            .await
+            .unwrap();
+        assert!(uploaded.is_some());
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(250),
+            "the upload went out while the deletion was still in flight"
+        );
+        assert_eq!(wait_for_requests(&server, 2).await.len(), 2);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_push_in_flight_does_not_upload_the_cover_of_a_book_made_private() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let db = registered_db_behind(&server).await;
+        let id = new_book(&db, LOCAL_COVER).await;
+
+        // The catalog builder selected the book while it was public; it
+        // becomes private before its cover's turn comes.
+        update_book(&db, &id, edit("Hidden", true, LOCAL_COVER))
+            .await
+            .unwrap();
+        let uploaded = HubDirectoryService::new()
+            .upload_cover(&db, &id, vec![0xFF, 0xD8])
+            .await
+            .unwrap();
+
+        assert_eq!(uploaded, None);
+        let methods: Vec<String> = wait_for_requests(&server, 1)
+            .await
+            .into_iter()
+            .map(|(m, _)| m)
+            .collect();
+        assert_eq!(methods, ["DELETE"]);
     }
 }

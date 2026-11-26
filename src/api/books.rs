@@ -704,6 +704,14 @@ pub async fn update_book(
                 withdrawn.then(crate::services::delta_service::peer_withdrawal_payload),
             )
             .await;
+            if withdrawn {
+                crate::services::book_service::withdraw_hub_cover(
+                    db,
+                    &id,
+                    current_book.cover_url.as_deref(),
+                    updated_book.cover_url.as_deref(),
+                );
+            }
 
             // Peers must drop or update their cached row when the book left
             // or entered what they may see; other edits wait for their next

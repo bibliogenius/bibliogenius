@@ -536,6 +536,88 @@ pub struct DirectoryConfig {
 // Service
 // ---------------------------------------------------------------------------
 
+/// Book ids whose hub cover was deleted after it was last uploaded, shared by
+/// every `HubDirectoryService` instance.
+///
+/// The upload cache lives on the process-wide instance the catalog sync uses,
+/// while a cover is deleted from whichever instance the caller holds (a book
+/// made private, through either edit path). Without this list, a book made
+/// private and then public again would hit that cache on the next sync: the
+/// catalog would announce a hub URL whose blob is gone, and nothing would
+/// re-upload it for the rest of the run.
+static DELETED_HUB_COVERS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Orders the cover writes of one book. A book made private and public again
+/// in quick succession runs a deletion in the background, then a catalog push
+/// that uploads the same cover: the upload must land after the deletion, or
+/// the deletion removes the cover of a public book. The other way round, a
+/// push already in flight when the book becomes private must not upload its
+/// cover once the deletion is done.
+///
+/// So a withdrawal is listed in `PENDING_COVER_WITHDRAWALS` before its caller
+/// returns, without waiting on anything, and its task deletes under
+/// `COVER_WRITES`. An upload first waits until no withdrawal of its book is
+/// pending, then takes `COVER_WRITES` and checks the book is still public.
+/// The list holds one entry per withdrawal, not per book: two overlapping
+/// withdrawals of the same book are both waited for.
+static COVER_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static PENDING_COVER_WITHDRAWALS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Longest an upload waits for pending withdrawals of its book. A deletion
+/// gives up after the client's 10 s timeout; this only guards against a
+/// withdrawal that never reports back, so a push is never held for good.
+const WITHDRAWAL_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn withdrawal_pending(book_id: &str) -> bool {
+    PENDING_COVER_WITHDRAWALS
+        .lock()
+        .map(|pending| pending.iter().any(|id| id == book_id))
+        .unwrap_or(false)
+}
+
+/// One pending withdrawal, listed for as long as this value lives. Dropped
+/// when its task ends, panics or is cancelled with its runtime, so an upload
+/// never waits on a withdrawal that is gone.
+struct PendingWithdrawal(String);
+
+impl PendingWithdrawal {
+    fn begin(book_id: &str) -> Self {
+        if let Ok(mut list) = PENDING_COVER_WITHDRAWALS.lock() {
+            list.push(book_id.to_string());
+        }
+        Self(book_id.to_string())
+    }
+}
+
+impl Drop for PendingWithdrawal {
+    fn drop(&mut self) {
+        if let Ok(mut list) = PENDING_COVER_WITHDRAWALS.lock()
+            && let Some(at) = list.iter().position(|id| *id == self.0)
+        {
+            list.swap_remove(at);
+        }
+    }
+}
+
+fn note_hub_cover_deleted(book_id: &str) {
+    if let Ok(mut deleted) = DELETED_HUB_COVERS.lock()
+        && !deleted.iter().any(|id| id == book_id)
+    {
+        deleted.push(book_id.to_string());
+    }
+}
+
+/// Whether the hub cover of `book_id` was deleted since its last upload,
+/// clearing the note: the caller is about to upload it again.
+fn take_hub_cover_deleted(book_id: &str) -> bool {
+    let Ok(mut deleted) = DELETED_HUB_COVERS.lock() else {
+        return false;
+    };
+    let before = deleted.len();
+    deleted.retain(|id| id != book_id);
+    deleted.len() != before
+}
+
 /// One cover this run already pushed to the hub, so the next catalog sync can
 /// skip the read, the re-encode and the POST.
 struct UploadedCover {
@@ -563,6 +645,9 @@ pub enum CoverUpload {
     /// The row names a local custom cover whose bytes are not on this device.
     /// Nothing was read, nothing was sent, and nothing failed.
     Missing,
+    /// The book became private (or left the library) after the catalog
+    /// builder selected it: nothing was sent, and the cover must not be.
+    NoLongerPublic,
 }
 
 /// Outcome of [`HubDirectoryService::revoke_follow_for_peer`].
@@ -655,6 +740,10 @@ impl HubDirectoryService {
         modified: std::time::SystemTime,
         len: u64,
     ) -> Option<String> {
+        if take_hub_cover_deleted(book_id) {
+            self.forget_uploaded_cover(book_id);
+            return None;
+        }
         let current_hub = Self::hub_base_url().ok()?;
         let prefix = format!("{current_hub}/api/directory/");
         let cache = self.uploaded_covers.lock().ok()?;
@@ -1539,7 +1628,16 @@ impl HubDirectoryService {
         db: &DatabaseConnection,
         book_id: &str,
         jpeg_bytes: Vec<u8>,
-    ) -> Result<String, HubDirectoryError> {
+    ) -> Result<Option<String>, HubDirectoryError> {
+        let waiting_since = std::time::Instant::now();
+        while withdrawal_pending(book_id) && waiting_since.elapsed() < WITHDRAWAL_WAIT_LIMIT {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let _ordered = COVER_WRITES.lock().await;
+        if !Self::still_public(db, book_id).await? {
+            return Ok(None);
+        }
+        // Read after the waits, so a gate closed meanwhile still holds.
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
@@ -1562,16 +1660,57 @@ impl HubDirectoryService {
             return Err(HubDirectoryError::Hub(status, msg));
         }
 
-        Ok(format!(
+        Ok(Some(format!(
             "{hub_url}/api/directory/{}/covers/{book_id}",
             cfg.node_id
-        ))
+        )))
+    }
+
+    /// Whether the book is still one the catalog exposes, read at upload
+    /// time: the catalog builder selected it earlier, and it may have become
+    /// private since.
+    async fn still_public(
+        db: &DatabaseConnection,
+        book_id: &str,
+    ) -> Result<bool, HubDirectoryError> {
+        use crate::models::book::Entity as BookEntity;
+        use sea_orm::{EntityTrait, PaginatorTrait, QueryFilter};
+        let count = BookEntity::find_by_id(book_id.to_owned())
+            .filter(public_catalog_condition())
+            .count(db)
+            .await?;
+        Ok(count > 0)
+    }
+
+    /// Deletes the hub cover of a book that just became private, in the
+    /// background. Returns at once: the caller is an edit, and must not wait
+    /// on the network. The ordering with uploads is described on
+    /// [`COVER_WRITES`].
+    pub fn withdraw_cover_in_background(db: &DatabaseConnection, book_id: &str) {
+        note_hub_cover_deleted(book_id);
+        let pending = PendingWithdrawal::begin(book_id);
+        let db = db.clone();
+        let book_id = book_id.to_owned();
+        tokio::spawn(async move {
+            let ordered = COVER_WRITES.lock().await;
+            if let Err(e) = Self::new().delete_cover(&db, &book_id).await {
+                tracing::debug!("hub cover withdrawal skipped for book {book_id}: {e}");
+            }
+            // Again, whatever the outcome: an upload that ran meanwhile took
+            // the first note, and a deletion the client gave up on may still
+            // land on the hub after it. One extra upload is the whole cost.
+            note_hub_cover_deleted(&book_id);
+            drop(pending);
+            drop(ordered);
+        });
     }
 
     /// Deletes a previously uploaded cover thumbnail from the hub.
     ///
     /// Called when a book is permanently removed from the local library
-    /// so the hub storage does not keep growing with orphaned covers.
+    /// so the hub storage does not keep growing with orphaned covers, and
+    /// when a book becomes private, since the hub serves covers without
+    /// authentication.
     /// Safe to call for books that never had a hub cover: the hub
     /// returns `204 No Content` for missing files.
     ///
@@ -1582,6 +1721,9 @@ impl HubDirectoryService {
         db: &DatabaseConnection,
         book_id: &str,
     ) -> Result<(), HubDirectoryError> {
+        // Noted before the request: a DELETE whose answer is lost may still
+        // have removed the blob, and the cost of a wrong note is one upload.
+        note_hub_cover_deleted(book_id);
         let cfg = Self::get_config(db)
             .await?
             .ok_or(HubDirectoryError::NotRegistered)?;
@@ -1741,10 +1883,13 @@ impl HubDirectoryService {
         .await
         .map_err(|e| format!("spawn: {e}"))??;
 
-        let hub_url = self
+        let Some(hub_url) = self
             .upload_cover(db, book_id, jpeg_bytes)
             .await
-            .map_err(|e| format!("upload: {e}"))?;
+            .map_err(|e| format!("upload: {e}"))?
+        else {
+            return Ok(CoverUpload::NoLongerPublic);
+        };
 
         if let Some((modified, len)) = identity {
             self.remember_uploaded_cover(book_id, modified, len, &hub_url);
@@ -1794,6 +1939,7 @@ impl HubDirectoryService {
                 Self::clear_hub_cover_upload_failure(db, book_id).await;
                 None
             }
+            Ok(CoverUpload::NoLongerPublic) => None,
             Err(e) => {
                 tracing::error!("cover upload failed for book {book_id}: {e}");
                 // Drop any entry for this book, so the retry really re-uploads
@@ -2977,6 +3123,169 @@ mod follow_revocation_tests {
             svc.revoke_follow_for_peer(&db, Some("peer-uuid-1")).await,
             FollowRevocation::Revoked
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_cover_deleted_from_the_hub_is_not_replayed_from_the_upload_cache() {
+        let server = MockServer::start().await;
+        point_hub_at(&server);
+        Mock::given(method("DELETE"))
+            .and(path("/api/directory/test-node/covers/book-gone"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let db = db_with_config().await;
+        // The sync's instance remembers the upload; the deletion comes from
+        // another one, as it does when a book is made private.
+        let sync = HubDirectoryService::new();
+        let when = std::time::SystemTime::now();
+        let url = format!("{}/api/directory/test-node/covers/book-gone", server.uri());
+        sync.remember_uploaded_cover("book-gone", when, 10, &url);
+        assert_eq!(sync.cached_cover_url("book-gone", when, 10), Some(url));
+
+        HubDirectoryService::new()
+            .delete_cover(&db, "book-gone")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sync.cached_cover_url("book-gone", when, 10),
+            None,
+            "the next sync must upload the cover again"
+        );
+    }
+
+    /// A registered library holding one public book, behind a hub that
+    /// accepts uploads.
+    async fn public_book_behind(server: &MockServer) -> (DatabaseConnection, String) {
+        point_hub_at(server);
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(server)
+            .await;
+        let db = crate::db::init_db("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "INSERT INTO hub_directory_config (id, node_id, write_token, created_at, updated_at)
+             VALUES (1, 'test-node', 'test-token', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .await
+        .unwrap();
+        let id = crate::services::book_service::create_book(
+            &db,
+            crate::models::Book {
+                title: "Shown".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .id
+        .unwrap();
+        (db, id)
+    }
+
+    fn spawn_upload(
+        db: &DatabaseConnection,
+        id: &str,
+    ) -> tokio::task::JoinHandle<Result<Option<String>, HubDirectoryError>> {
+        let db = db.clone();
+        let id = id.to_owned();
+        tokio::spawn(async move {
+            HubDirectoryService::new()
+                .upload_cover(&db, &id, vec![0xFF, 0xD8])
+                .await
+        })
+    }
+
+    async fn nothing_sent_for_a_while(server: &MockServer) -> bool {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        server.received_requests().await.unwrap().is_empty()
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_upload_waits_while_a_withdrawal_of_its_book_is_pending() {
+        let server = MockServer::start().await;
+        let (db, id) = public_book_behind(&server).await;
+
+        // A withdrawal listed but whose task has not taken the lock yet.
+        let pending = PendingWithdrawal::begin(&id);
+        let upload = spawn_upload(&db, &id);
+        assert!(
+            nothing_sent_for_a_while(&server).await,
+            "the upload went out ahead of the pending deletion"
+        );
+
+        drop(pending);
+        assert!(upload.await.unwrap().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_upload_waits_for_every_overlapping_withdrawal_of_its_book() {
+        let server = MockServer::start().await;
+        let (db, id) = public_book_behind(&server).await;
+
+        let first = PendingWithdrawal::begin(&id);
+        let second = PendingWithdrawal::begin(&id);
+        let upload = spawn_upload(&db, &id);
+        drop(first);
+        assert!(
+            nothing_sent_for_a_while(&server).await,
+            "the end of one withdrawal released the wait on the other"
+        );
+
+        drop(second);
+        assert!(upload.await.unwrap().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_withdrawal_whose_task_panics_does_not_hold_uploads() {
+        let server = MockServer::start().await;
+        let (db, id) = public_book_behind(&server).await;
+
+        let pending = PendingWithdrawal::begin(&id);
+        let task = tokio::spawn(async move {
+            let _pending = pending;
+            panic!("withdrawal task died");
+        });
+        assert!(task.await.is_err());
+
+        let upload =
+            tokio::time::timeout(std::time::Duration::from_secs(2), spawn_upload(&db, &id))
+                .await
+                .expect("the upload is still waiting on a dead withdrawal");
+        assert!(upload.unwrap().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_withdrawal_notes_the_deletion_again_once_it_is_done() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .respond_with(
+                ResponseTemplate::new(204).set_delay(std::time::Duration::from_millis(300)),
+            )
+            .mount(&server)
+            .await;
+        let (db, id) = public_book_behind(&server).await;
+
+        HubDirectoryService::withdraw_cover_in_background(&db, &id);
+        // An upload that runs while the DELETE is on the wire takes every
+        // note written so far...
+        while server.received_requests().await.unwrap().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(take_hub_cover_deleted(&id));
+        while withdrawal_pending(&id) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // ...and the deletion may land after it, so the next push must upload
+        // the cover again rather than replay its URL.
+        assert!(take_hub_cover_deleted(&id));
     }
 
     #[tokio::test]
