@@ -80,11 +80,15 @@ async fn log_delete(db: &DatabaseConnection, book_id: String) -> i32 {
 }
 
 async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
-    let resp = app
-        .clone()
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    send(
+        app,
+        Request::builder().uri(uri).body(Body::empty()).unwrap(),
+    )
+    .await
+}
+
+async fn send(app: &axum::Router, request: Request<Body>) -> (StatusCode, Value) {
+    let resp = app.clone().oneshot(request).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
@@ -170,7 +174,7 @@ async fn delta_too_old_cursor_returns_410_gone() {
 }
 
 #[tokio::test]
-async fn delta_omits_private_book_for_peer() {
+async fn delta_omits_always_private_book_for_peer() {
     let db = setup().await;
     let (_pub_id, _) = create_book_with_log(&db, "Public", false).await;
     let (priv_id, _) = create_book_with_log(&db, "Private", true).await;
@@ -179,24 +183,137 @@ async fn delta_omits_private_book_for_peer() {
     let (status, body) = get_json(&app, "/api/books?since=0").await;
     assert_eq!(status, StatusCode::OK);
     let ops = body["operations"].as_array().unwrap();
-    // Private book must be entirely omitted (no upsert, no delete tombstone).
+    // A book that was never visible sends nothing, not even a tombstone:
+    // this route answers any host of the local network.
     assert_eq!(ops.len(), 1);
-    assert_eq!(ops[0]["op"], "upsert");
     assert_eq!(ops[0]["book"]["title"], "Public");
     let serialized = serde_json::to_string(&body).unwrap();
     assert!(
         !serialized.contains(priv_id.as_str()),
-        "private book id must not leak in any form"
+        "the id of a book that was never visible must not leave"
     );
 }
 
+/// The cover route answers any host of the local network: a private book's
+/// cover must be refused there, as `GET /api/books/:id` refuses the book.
 #[tokio::test]
-async fn delta_omits_non_owned_book_for_peer() {
+async fn cover_of_private_book_is_refused_without_owner_token() {
+    let db = setup().await;
+    // Not a decodable image on purpose: a request that gets past the privacy
+    // check fails later, at decoding, with a different status.
+    let cover = std::env::temp_dir().join(format!("cover-{}.jpg", uuid::Uuid::new_v4()));
+    std::fs::write(&cover, b"not an image").unwrap();
+    let cover_path = cover.to_string_lossy().to_string();
+
+    let mut ids = Vec::new();
+    for private in [false, true] {
+        let now = chrono::Utc::now().to_rfc3339();
+        let book = rust_lib_app::models::book::ActiveModel {
+            title: Set("With a cover".to_owned()),
+            owned: Set(true),
+            private: Set(private),
+            cover_url: Set(Some(cover_path.clone())),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        ids.push(book.id);
+    }
+    let app = axum::Router::new()
+        .route(
+            "/api/books/:id/cover",
+            axum::routing::get(rust_lib_app::api::books::get_book_cover),
+        )
+        .with_state(AppState::new(db));
+
+    let (public_status, _) = get_json(&app, &format!("/api/books/{}/cover", ids[0])).await;
+    let (private_status, _) = get_json(&app, &format!("/api/books/{}/cover", ids[1])).await;
+
+    assert_eq!(
+        public_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the public book's cover is read (and fails at decoding)"
+    );
+    assert_eq!(private_status, StatusCode::NOT_FOUND);
+
+    // The owner still reads the cover of their own private book.
+    let token = rust_lib_app::auth::create_jwt("admin", "admin").expect("owner token");
+    let owner_status = send(
+        &app,
+        Request::builder()
+            .uri(format!("/api/books/{}/cover", ids[1]))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .0;
+    let _ = std::fs::remove_file(&cover);
+    assert_eq!(owner_status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// The HTTP update door marks the edit that makes a book private: the next
+/// peer delta answers with the bare tombstone, and a later edit of the
+/// private book sends nothing.
+#[tokio::test]
+async fn http_update_making_a_book_private_sends_one_tombstone() {
+    let db = setup().await;
+    let (id, log_id) = create_book_with_log(&db, "Soon private", false).await;
+    let app = axum::Router::new()
+        .route(
+            "/api/books",
+            axum::routing::get(rust_lib_app::api::books::list_books),
+        )
+        .route(
+            "/api/books/:id",
+            axum::routing::put(rust_lib_app::api::books::update_book),
+        )
+        .with_state(AppState::new(db));
+    let token = rust_lib_app::auth::create_jwt("admin", "admin").expect("owner token");
+    let put = |body: Value| {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/api/books/{id}"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    let (status, _) = send(
+        &app,
+        put(serde_json::json!({ "title": "Soon private", "owned": true, "private": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body) = get_json(&app, &format!("/api/books?since={log_id}")).await;
+    assert_eq!(
+        body["operations"],
+        serde_json::json!([{ "op": "delete", "book_id": id }])
+    );
+    let cursor = body["latest_cursor"].as_i64().unwrap();
+
+    let (status, _) = send(
+        &app,
+        put(serde_json::json!({ "title": "Renamed", "owned": true, "private": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = get_json(&app, &format!("/api/books?since={cursor}")).await;
+    assert_eq!(body["operations"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn delta_sends_wish_as_redacted_non_owned_upsert_for_peer() {
     let db = setup().await;
     let (_owned_id, _) = create_book_with_log(&db, "Owned", false).await;
-    // Wishlist entry: not private, but not owned either. The full-catalog
-    // path (owned_only=true) and the directory publication both hide
-    // non-owned books from peers; the delta path must do the same.
+    // Wishlist entry: not private, but not owned either. It travels like on
+    // the full-catalog peer lanes: redacted, `owned = false`, and the derived
+    // `wanted` flag in place of the reading status.
     let now = chrono::Utc::now().to_rfc3339();
     let wish = rust_lib_app::models::book::ActiveModel {
         title: Set("Wishlist only".to_owned()),
@@ -228,14 +345,24 @@ async fn delta_omits_non_owned_book_for_peer() {
     let (status, body) = get_json(&app, "/api/books?since=0").await;
     assert_eq!(status, StatusCode::OK);
     let ops = body["operations"].as_array().unwrap();
-    // Same omission rule as private books: no upsert, no delete tombstone.
-    assert_eq!(ops.len(), 1);
+    assert_eq!(ops.len(), 2);
     assert_eq!(ops[0]["op"], "upsert");
     assert_eq!(ops[0]["book"]["title"], "Owned");
+    assert_eq!(ops[1]["op"], "upsert");
+    let wish_book = &ops[1]["book"];
+    assert_eq!(wish_book["id"], wish.id.as_str());
+    assert_eq!(wish_book["title"], "Wishlist only");
+    assert_eq!(wish_book["owned"], false);
+    assert_eq!(wish_book["wanted"], true);
+    assert!(
+        wish_book["reading_status"].is_null(),
+        "reading_status must be stripped, got {}",
+        wish_book["reading_status"]
+    );
     let serialized = serde_json::to_string(&body).unwrap();
     assert!(
-        !serialized.contains(wish.id.as_str()),
-        "non-owned book id must not leak in any form"
+        !serialized.contains("\"wanting\""),
+        "the reading status value must not leak in any form"
     );
 }
 

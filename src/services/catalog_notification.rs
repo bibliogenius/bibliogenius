@@ -1,6 +1,7 @@
 //! Peer catalog-change notification service.
 //!
-//! When the local user adds or deletes a book, call
+//! When the local user adds or deletes a book, or changes what peers see of
+//! one (`private`, `owned`), call
 //! `schedule_catalog_changed_notification(state)` to notify all accepted
 //! peers that the catalog has changed. Peers receive a lightweight
 //! `catalog_changed` E2EE relay message and can trigger a re-sync.
@@ -69,6 +70,32 @@ pub fn schedule_catalog_changed_notification(state: AppState) {
     tokio::spawn(async move {
         notify_peers_catalog_changed(state).await;
     });
+}
+
+/// The two book fields that decide what a peer sees of a book: `private`
+/// removes it from the peer's cache, `owned` decides whether it shows as
+/// available there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerVisibility {
+    pub private: bool,
+    pub owned: bool,
+}
+
+/// Schedule a `catalog_changed` notification when an edit changed what peers
+/// see of the book, and only then: a title fix must not wake every peer.
+///
+/// Returns whether the notification was requested (the debounce and the hub
+/// gate of `schedule_catalog_changed_notification` still apply).
+pub fn schedule_if_peer_visibility_changed(
+    state: &AppState,
+    before: PeerVisibility,
+    after: PeerVisibility,
+) -> bool {
+    if before == after {
+        return false;
+    }
+    schedule_catalog_changed_notification(state.clone());
+    true
 }
 
 /// Send `catalog_changed` to every accepted E2EE peer that has relay
@@ -208,14 +235,66 @@ async fn notify_peers_catalog_changed(state: AppState) {
 mod tests {
     use super::*;
 
-    /// Reset the global debounce counter between tests.
-    fn reset_debounce() {
+    /// Serialises the tests that read or write the global debounce counter,
+    /// which the test harness would otherwise run in parallel.
+    static DEBOUNCE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Reset the global debounce counter and hold it until the guard drops.
+    fn reset_debounce() -> std::sync::MutexGuard<'static, ()> {
+        let guard = DEBOUNCE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         LAST_NOTIFY_SECS.store(0, Ordering::Relaxed);
+        guard
+    }
+
+    fn visibility(private: bool, owned: bool) -> PeerVisibility {
+        PeerVisibility { private, owned }
+    }
+
+    async fn test_state() -> AppState {
+        let db = crate::infrastructure::db::init_db("sqlite::memory:")
+            .await
+            .expect("init test DB");
+        AppState::new(db)
+    }
+
+    #[tokio::test]
+    async fn peer_visibility_change_on_private_schedules() {
+        let state = test_state().await;
+        let _guard = reset_debounce();
+        assert!(schedule_if_peer_visibility_changed(
+            &state,
+            visibility(false, true),
+            visibility(true, true),
+        ));
+    }
+
+    #[tokio::test]
+    async fn peer_visibility_change_on_owned_schedules() {
+        let state = test_state().await;
+        let _guard = reset_debounce();
+        assert!(schedule_if_peer_visibility_changed(
+            &state,
+            visibility(false, true),
+            visibility(false, false),
+        ));
+    }
+
+    #[tokio::test]
+    async fn unchanged_peer_visibility_does_not_schedule() {
+        let state = test_state().await;
+        let _guard = reset_debounce();
+        assert!(!schedule_if_peer_visibility_changed(
+            &state,
+            visibility(true, false),
+            visibility(true, false),
+        ));
     }
 
     #[test]
     fn debounce_allows_first_call() {
-        reset_debounce();
+        let _guard = reset_debounce();
         let now = chrono::Utc::now().timestamp() as u64;
         let last = LAST_NOTIFY_SECS.load(Ordering::Relaxed);
         assert!(
@@ -226,7 +305,7 @@ mod tests {
 
     #[test]
     fn debounce_suppresses_rapid_second_call() {
-        reset_debounce();
+        let _guard = reset_debounce();
         let now = chrono::Utc::now().timestamp() as u64;
         // Simulate: first notification was sent 1 second ago.
         LAST_NOTIFY_SECS.store(now - 1, Ordering::Relaxed);
@@ -240,7 +319,7 @@ mod tests {
 
     #[test]
     fn debounce_allows_call_after_cooldown() {
-        reset_debounce();
+        let _guard = reset_debounce();
         let now = chrono::Utc::now().timestamp() as u64;
         // Simulate: last notification was sent NOTIFY_COOLDOWN_SECS + 1 seconds ago.
         let past = now.saturating_sub(NOTIFY_COOLDOWN_SECS + 1);

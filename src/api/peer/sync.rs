@@ -1899,6 +1899,87 @@ mod added_at_tests {
             "wishlist_match must fire once the peer actually owns the book",
         );
     }
+
+    /// A wish cached from a full snapshot must survive the delta that
+    /// follows: both lanes describe a non-owned book the same way, so the
+    /// inverse wishlist marker does not depend on which lane synced last.
+    #[tokio::test]
+    async fn wish_from_full_snapshot_survives_the_next_delta() {
+        use crate::api::books::{BookDeltaOutcome, CoverRewriteMode, build_book_delta_response};
+        use crate::models::{book, operation_log};
+
+        // Owner side: a wish, logged as a local insert.
+        let state = crate::infrastructure::AppState::new(setup().await);
+        let now = chrono::Utc::now().to_rfc3339();
+        let wish = book::ActiveModel {
+            title: Set("Wished".to_string()),
+            isbn: Set(Some("9782070360024".to_string())),
+            owned: Set(false),
+            private: Set(false),
+            reading_status: Set("wanting".to_string()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            ..Default::default()
+        }
+        .insert(state.db())
+        .await
+        .unwrap();
+        operation_log::ActiveModel {
+            entity_type: Set("book".to_string()),
+            entity_id: Set(wish.id.clone()),
+            operation: Set("INSERT".to_string()),
+            payload: Set(None),
+            source: Set("local".to_string()),
+            status: Set("applied".to_string()),
+            created_at: Set(now),
+            ..Default::default()
+        }
+        .insert(state.db())
+        .await
+        .unwrap();
+
+        // Peer side: the full snapshot, as the full-catalog lanes send it.
+        let peer_db = setup().await;
+        let peer_id = insert_peer(&peer_db).await;
+        let mut snapshot_book = state
+            .book_repo
+            .find_by_id(&wish.id)
+            .await
+            .unwrap()
+            .expect("wish exists");
+        snapshot_book.redact_for_peer();
+        upsert_peer_books_cache(&peer_db, peer_id, None, vec![snapshot_book], true).await;
+
+        let cached = || async {
+            peer_book::Entity::find()
+                .filter(peer_book::Column::PeerId.eq(peer_id))
+                .filter(peer_book::Column::RemoteBookId.eq(wish.id.clone()))
+                .one(&peer_db)
+                .await
+                .unwrap()
+        };
+        assert_eq!(cached().await.expect("cached").wanted, Some(true));
+
+        // Then a delta covering the same book, as a peer caller.
+        let outcome = build_book_delta_response(&state, Some(0), 500, false, CoverRewriteMode::Lan)
+            .await
+            .unwrap();
+        let BookDeltaOutcome::Delta { operations, .. } = outcome else {
+            panic!("expected a delta window");
+        };
+        assert_eq!(operations.len(), 1, "the wish is part of the delta");
+        crate::services::peer_delta_sync::apply_peer_delta_operations(
+            &peer_db,
+            peer_id,
+            &operations,
+        )
+        .await
+        .unwrap();
+
+        let row = cached().await.expect("the delta must not erase the wish");
+        assert!(!row.owned);
+        assert_eq!(row.wanted, Some(true));
+    }
 }
 
 #[cfg(test)]

@@ -30,12 +30,44 @@ pub async fn get_book_by_uuid(uuid: String) -> Result<FrbBook, String> {
     }
 }
 
+/// The `private` and `owned` values of a book before an edit, `None` when the
+/// book does not exist (the edit then fails on its own).
+async fn peer_visibility_of(
+    db: &DatabaseConnection,
+    uuid: &str,
+) -> Option<crate::services::catalog_notification::PeerVisibility> {
+    use sea_orm::EntityTrait;
+    let model = crate::models::book::Entity::find_by_id(uuid.to_owned())
+        .one(db)
+        .await
+        .ok()??;
+    Some(crate::services::catalog_notification::PeerVisibility {
+        private: model.private,
+        owned: model.owned,
+    })
+}
+
 /// Update a book identified by its uuid.
 pub async fn update_book_by_uuid(uuid: String, book: FrbBook) -> Result<FrbBook, String> {
     let db = db().ok_or("Database not initialized")?;
     let book_dto = frb_book_into_update_payload(book);
+    let visibility_before = peer_visibility_of(db, &uuid).await;
     match crate::services::book_service::update_book(db, &uuid, book_dto).await {
-        Ok(b) => Ok(FrbBook::from(b)),
+        Ok(b) => {
+            // Same rule as the HTTP handler, which this door bypasses: notify
+            // peers only when the edit changed what they see of the book.
+            if let (Some(before), Some(state)) = (visibility_before, global_app_state()) {
+                crate::services::catalog_notification::schedule_if_peer_visibility_changed(
+                    state,
+                    before,
+                    crate::services::catalog_notification::PeerVisibility {
+                        private: b.private.unwrap_or(false),
+                        owned: b.owned.unwrap_or(true),
+                    },
+                );
+            }
+            Ok(FrbBook::from(b))
+        }
         Err(crate::services::book_service::ServiceError::InvalidInput(m)) => Err(m),
         Err(e) => Err(format!("{e:?}")),
     }

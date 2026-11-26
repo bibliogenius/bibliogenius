@@ -2,14 +2,18 @@
 //!
 //! The handler is the responder-side bridge between the E2EE relay envelope
 //! and the shared `build_book_delta_response` helper. These tests lock the
-//! contract: response shape, privacy pipeline (private-book omission and
-//! `redact_for_peer`), `reset_required` signalling, `has_more` cursor
-//! semantics, and tombstone shape.
+//! contract: response shape, privacy pipeline (a private book is omitted,
+//! except for one bare tombstone in the window where it was made private;
+//! every other book goes through `redact_for_peer`),
+//! `reset_required` signalling, `has_more` cursor semantics, and tombstone
+//! shape. The end-to-end tests at the bottom feed the response into the
+//! peer-side `apply_peer_delta_operations` and check the peer's cache.
 
 use rust_lib_app::crypto::envelope::ClearMessage;
 use rust_lib_app::db;
 use rust_lib_app::infrastructure::AppState;
-use rust_lib_app::models::operation_log;
+use rust_lib_app::models::{book, copy, operation_log, peer, peer_book};
+use rust_lib_app::services::peer_delta_sync::apply_peer_delta_operations;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde_json::{Value, json};
 
@@ -152,7 +156,7 @@ async fn delete_emits_tombstone() {
 }
 
 #[tokio::test]
-async fn private_book_is_omitted_for_peer() {
+async fn always_private_book_is_omitted_for_peer() {
     let state = setup().await;
     create_book_with_log(state.db(), "Public", false, None).await;
     let (priv_id, _) = create_book_with_log(state.db(), "Private", true, None).await;
@@ -161,12 +165,12 @@ async fn private_book_is_omitted_for_peer() {
     let resp = rust_lib_app::api::e2ee::handle_catalog_delta_request(&state, &msg).await;
 
     let ops = resp["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 1, "private book must be dropped, not tombstoned");
+    assert_eq!(ops.len(), 1, "a book that was never visible sends nothing");
     assert_eq!(ops[0]["book"]["title"], "Public");
     let payload = serde_json::to_string(&resp).unwrap();
     assert!(
-        !payload.contains(&format!("\"id\":{priv_id}")),
-        "private book id must not appear anywhere in the response"
+        !payload.contains(priv_id.as_str()),
+        "the id of a book that was never visible must not leave: {payload}"
     );
 }
 
@@ -368,4 +372,331 @@ async fn remote_source_rows_are_ignored() {
     let resp = rust_lib_app::api::e2ee::handle_catalog_delta_request(&state, &msg).await;
 
     assert!(resp["operations"].as_array().unwrap().is_empty());
+}
+
+// End-to-end: the responder's output applied to a peer's cache.
+
+/// A second, independent database standing for the reader who caches the
+/// owner's catalog, with the owner registered there as an accepted peer.
+async fn peer_side() -> (DatabaseConnection, i32) {
+    let db = db::init_db("sqlite::memory:")
+        .await
+        .expect("init peer db in memory");
+    let now = chrono::Utc::now().to_rfc3339();
+    let owner = peer::ActiveModel {
+        name: Set("Owner".to_owned()),
+        url: Set(format!("http://owner-{}.local", uuid::Uuid::new_v4())),
+        key_exchange_done: Set(true),
+        connection_status: Set("accepted".to_owned()),
+        auto_approve: Set(false),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .expect("insert owner peer");
+    (db, owner.id)
+}
+
+/// Apply `change` to the stored book and log the edit as a local UPDATE.
+async fn edit_book(
+    db: &DatabaseConnection,
+    book_id: &str,
+    change: impl FnOnce(&mut book::ActiveModel),
+) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut active: book::ActiveModel = book::Entity::find_by_id(book_id.to_owned())
+        .one(db)
+        .await
+        .unwrap()
+        .expect("book exists")
+        .into();
+    let private_before = *active.private.as_ref();
+    change(&mut active);
+    active.updated_at = Set(now.clone());
+    let updated = active.update(db).await.expect("update book");
+    // Same marker as the update doors log when a book is made private.
+    let payload = (!private_before && updated.private)
+        .then(|| rust_lib_app::services::delta_service::peer_withdrawal_payload().to_string());
+
+    operation_log::Entity::insert(operation_log::ActiveModel {
+        entity_type: Set("book".to_owned()),
+        entity_id: Set(book_id.to_owned()),
+        operation: Set("UPDATE".to_owned()),
+        payload: Set(payload),
+        source: Set("local".to_owned()),
+        status: Set("applied".to_owned()),
+        created_at: Set(now),
+        ..Default::default()
+    })
+    .exec(db)
+    .await
+    .unwrap();
+}
+
+/// Answer the peer's delta request from `since` and apply the operations to
+/// its cache. Returns the cursor the peer keeps for its next request.
+async fn sync_peer(
+    state: &AppState,
+    peer_db: &DatabaseConnection,
+    owner_id: i32,
+    since: i64,
+) -> i64 {
+    let msg = request_message(json!({ "since": since, "limit": 500 }));
+    let resp = rust_lib_app::api::e2ee::handle_catalog_delta_request(state, &msg).await;
+    assert_eq!(resp["reset_required"], false);
+    let ops = resp["operations"].as_array().expect("operations array");
+    apply_peer_delta_operations(peer_db, owner_id, ops)
+        .await
+        .expect("apply delta on peer side");
+    resp["latest_cursor"].as_i64().expect("latest_cursor")
+}
+
+async fn cached_row(
+    peer_db: &DatabaseConnection,
+    owner_id: i32,
+    book_id: &str,
+) -> Option<peer_book::Model> {
+    peer_book::Entity::find()
+        .filter(peer_book::Column::PeerId.eq(owner_id))
+        .filter(peer_book::Column::RemoteBookId.eq(book_id))
+        .one(peer_db)
+        .await
+        .unwrap()
+}
+
+const WISH_ISBN: &str = "9782070360024";
+
+/// Seed an owned, visible book carrying `WISH_ISBN`.
+async fn create_book_with_isbn(db: &DatabaseConnection, title: &str) -> String {
+    let (id, _) = create_book_with_log(db, title, false, None).await;
+    edit_book(db, &id, |b| b.isbn = Set(Some(WISH_ISBN.to_owned()))).await;
+    id
+}
+
+#[tokio::test]
+async fn book_set_private_leaves_peer_cache() {
+    let state = setup().await;
+    let (peer_db, owner_id) = peer_side().await;
+    let (kept, _) = create_book_with_log(state.db(), "Kept", false, None).await;
+    let (hidden, _) = create_book_with_log(state.db(), "Soon private", false, None).await;
+
+    let cursor = sync_peer(&state, &peer_db, owner_id, 0).await;
+    assert!(cached_row(&peer_db, owner_id, &hidden).await.is_some());
+
+    // Through the real update door, which logs the withdrawal itself.
+    let mut dto = rust_lib_app::services::book_service::get_book_by_uuid(state.db(), &hidden)
+        .await
+        .expect("book exists");
+    dto.private = Some(true);
+    rust_lib_app::services::book_service::update_book(state.db(), &hidden, dto)
+        .await
+        .expect("update book");
+    sync_peer(&state, &peer_db, owner_id, cursor).await;
+
+    assert!(
+        cached_row(&peer_db, owner_id, &hidden).await.is_none(),
+        "a book made private must leave the peer's cache"
+    );
+    assert!(cached_row(&peer_db, owner_id, &kept).await.is_some());
+}
+
+/// The tombstone is sent once, in the window of the change. Later edits of
+/// the private book must stay silent: a repeated tombstone would tell peers
+/// when a private book is touched.
+#[tokio::test]
+async fn private_book_edited_later_sends_nothing() {
+    let state = setup().await;
+    let (id, _) = create_book_with_log(state.db(), "Soon private", false, None).await;
+
+    edit_book(state.db(), &id, |b| b.private = Set(true)).await;
+    let msg = request_message(json!({ "since": 0, "limit": 500 }));
+    let first = rust_lib_app::api::e2ee::handle_catalog_delta_request(&state, &msg).await;
+    assert_eq!(
+        first["operations"],
+        json!([{ "op": "delete", "book_id": id }]),
+        "the window of the change carries the id and nothing else"
+    );
+    let cursor = first["latest_cursor"].as_i64().unwrap();
+
+    edit_book(state.db(), &id, |b| b.title = Set("Renamed".to_owned())).await;
+    let msg = request_message(json!({ "since": cursor, "limit": 500 }));
+    let second = rust_lib_app::api::e2ee::handle_catalog_delta_request(&state, &msg).await;
+    assert_eq!(second["operations"], json!([]));
+}
+
+/// A later edit in the same window must not hide the withdrawal: the
+/// collapse keeps the latest operation, the marker has to outlive it.
+#[tokio::test]
+async fn withdrawal_survives_a_later_edit_in_the_same_window() {
+    let state = setup().await;
+    let (peer_db, owner_id) = peer_side().await;
+    let (id, _) = create_book_with_log(state.db(), "Soon private", false, None).await;
+    let cursor = sync_peer(&state, &peer_db, owner_id, 0).await;
+
+    edit_book(state.db(), &id, |b| b.private = Set(true)).await;
+    edit_book(state.db(), &id, |b| b.title = Set("Renamed".to_owned())).await;
+    sync_peer(&state, &peer_db, owner_id, cursor).await;
+
+    assert!(cached_row(&peer_db, owner_id, &id).await.is_none());
+}
+
+/// Made private, then public again before the peer asks: the current state
+/// wins and the book travels as a normal upsert.
+#[tokio::test]
+async fn book_public_again_travels_as_upsert() {
+    let state = setup().await;
+    let (peer_db, owner_id) = peer_side().await;
+    let (id, _) = create_book_with_log(state.db(), "Back and forth", false, None).await;
+    let cursor = sync_peer(&state, &peer_db, owner_id, 0).await;
+
+    edit_book(state.db(), &id, |b| b.private = Set(true)).await;
+    edit_book(state.db(), &id, |b| b.private = Set(false)).await;
+    sync_peer(&state, &peer_db, owner_id, cursor).await;
+
+    assert!(cached_row(&peer_db, owner_id, &id).await.is_some());
+}
+
+#[tokio::test]
+async fn book_no_longer_owned_shows_as_non_owned_in_peer_cache() {
+    let state = setup().await;
+    let (peer_db, owner_id) = peer_side().await;
+    let (id, _) = create_book_with_log(state.db(), "Given away", false, None).await;
+
+    let cursor = sync_peer(&state, &peer_db, owner_id, 0).await;
+    assert!(cached_row(&peer_db, owner_id, &id).await.unwrap().owned);
+
+    edit_book(state.db(), &id, |b| b.owned = Set(false)).await;
+    sync_peer(&state, &peer_db, owner_id, cursor).await;
+
+    let row = cached_row(&peer_db, owner_id, &id)
+        .await
+        .expect("a non-owned book stays cached");
+    assert!(
+        !row.owned,
+        "the cached row must follow the owner's owned flag"
+    );
+    assert_eq!(row.wanted, None, "non-owned without a wish is not a wish");
+}
+
+#[tokio::test]
+async fn book_turned_into_wish_reaches_inverse_wishlist_marker() {
+    use rust_lib_app::services::wishlist_service::seekers_for_isbn;
+
+    let state = setup().await;
+    let (peer_db, owner_id) = peer_side().await;
+    let id = create_book_with_isbn(state.db(), "Wanted later").await;
+
+    let cursor = sync_peer(&state, &peer_db, owner_id, 0).await;
+    assert!(
+        seekers_for_isbn(&peer_db, WISH_ISBN)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    edit_book(state.db(), &id, |b| {
+        b.owned = Set(false);
+        b.reading_status = Set("wanting".to_owned());
+    })
+    .await;
+    sync_peer(&state, &peer_db, owner_id, cursor).await;
+
+    let row = cached_row(&peer_db, owner_id, &id)
+        .await
+        .expect("wish cached");
+    assert!(!row.owned);
+    assert_eq!(row.wanted, Some(true));
+    let seekers = seekers_for_isbn(&peer_db, WISH_ISBN).await.unwrap();
+    assert_eq!(seekers.len(), 1, "the peer sees who wants its copy");
+    assert_eq!(seekers[0].peer_id, owner_id);
+}
+
+#[tokio::test]
+async fn wish_set_private_leaves_peer_cache() {
+    use rust_lib_app::services::wishlist_service::seekers_for_isbn;
+
+    let state = setup().await;
+    let (peer_db, owner_id) = peer_side().await;
+    let id = create_book_with_isbn(state.db(), "Secret wish").await;
+    edit_book(state.db(), &id, |b| {
+        b.owned = Set(false);
+        b.reading_status = Set("wanting".to_owned());
+    })
+    .await;
+
+    let cursor = sync_peer(&state, &peer_db, owner_id, 0).await;
+    assert_eq!(
+        cached_row(&peer_db, owner_id, &id).await.unwrap().wanted,
+        Some(true)
+    );
+
+    edit_book(state.db(), &id, |b| b.private = Set(true)).await;
+    sync_peer(&state, &peer_db, owner_id, cursor).await;
+
+    assert!(cached_row(&peer_db, owner_id, &id).await.is_none());
+    assert!(
+        seekers_for_isbn(&peer_db, WISH_ISBN)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a private wish must no longer raise the marker"
+    );
+}
+
+#[tokio::test]
+async fn lent_book_stays_owned_in_peer_cache() {
+    let state = setup().await;
+    let (peer_db, owner_id) = peer_side().await;
+    let (id, _) = create_book_with_log(state.db(), "On loan", false, None).await;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let user = rust_lib_app::models::user::ActiveModel {
+        username: Set("admin".to_owned()),
+        password_hash: Set("hash".to_owned()),
+        role: Set("admin".to_owned()),
+        created_at: Set(now.clone()),
+        updated_at: Set(now.clone()),
+        ..Default::default()
+    }
+    .insert(state.db())
+    .await
+    .unwrap();
+    let library = rust_lib_app::models::library::ActiveModel {
+        name: Set("Library".to_owned()),
+        owner_id: Set(user.id),
+        created_at: Set(now.clone()),
+        updated_at: Set(now.clone()),
+        ..Default::default()
+    }
+    .insert(state.db())
+    .await
+    .unwrap();
+    copy::ActiveModel {
+        book_id: Set(id.clone()),
+        library_id: Set(library.id),
+        status: Set("loaned".to_owned()),
+        is_temporary: Set(false),
+        created_at: Set(now.clone()),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(state.db())
+    .await
+    .unwrap();
+
+    let msg = request_message(json!({ "since": 0, "limit": 500 }));
+    let resp = rust_lib_app::api::e2ee::handle_catalog_delta_request(&state, &msg).await;
+    let ops = resp["operations"].as_array().unwrap();
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0]["op"], "upsert");
+    assert_eq!(ops[0]["book"]["owned"], true);
+    assert_eq!(ops[0]["book"]["available_copies"], 0);
+
+    sync_peer(&state, &peer_db, owner_id, 0).await;
+    let row = cached_row(&peer_db, owner_id, &id).await.unwrap();
+    assert!(row.owned, "a loan does not make the book non-owned");
+    assert_eq!(row.available_copies, Some(0));
+    assert_eq!(row.wanted, None);
 }

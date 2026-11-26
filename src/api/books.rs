@@ -243,8 +243,10 @@ pub enum BookDeltaOutcome {
 }
 
 /// Build a book delta window honouring the same privacy pipeline as the
-/// full-catalog endpoint: drops `private=true` and non-owned books for
-/// non-owner callers and applies `redact_for_peer` on survivors.
+/// full-catalog endpoint: for non-owner callers, a `private=true` book is
+/// omitted, except in the window where it was made private, which answers
+/// with a delete operation (its id alone); `redact_for_peer` runs on every
+/// other book, non-owned ones included.
 ///
 /// `since = None` means "from the oldest retained operation_log row" (first
 /// sync). `limit` caps the raw-row scan and is clamped to
@@ -298,18 +300,23 @@ pub async fn build_book_delta_response(
                 };
                 if !is_owner {
                     if book.private.unwrap_or(false) {
-                        // Per ADR-028 D6: omit operations whose current state
-                        // is private rather than leak the id via a tombstone.
+                        // A private book is never described to a peer. The
+                        // window in which it was made private answers with a
+                        // delete, its id alone, so a peer who cached it while
+                        // it was visible drops the row. Every other window
+                        // omits it: a book that was always private, or a
+                        // later edit of a private book, sends nothing
+                        // (ADR-028 D6).
+                        if op.withdrawn_from_peers {
+                            pending.push(Pending::Delete(op.entity_id.clone()));
+                        }
                         continue;
                     }
-                    if !book.owned.unwrap_or(true) {
-                        // Non-owned books (wishlist entries, borrowed copies)
-                        // are never shared with peers: the full-catalog path
-                        // (owned_only=true) and the directory publication both
-                        // filter them, so the delta path must not leak them
-                        // either. Same omission rule as private (ADR-028 D6).
-                        continue;
-                    }
+                    // Non-owned books (wishes, borrowed copies) travel like
+                    // on the full-catalog lanes: redacted, with
+                    // `owned = false` and the derived `wanted` flag, so a
+                    // book that stopped being owned stops being offered for
+                    // loan on the peer's side.
                     book.redact_for_peer();
                 }
                 pending.push(Pending::Upsert(upserts.len()));
@@ -690,7 +697,36 @@ pub async fn update_book(
     // Update book via repository
     match state.book_repo.update(&id, book_data).await {
         Ok(updated_book) => {
-            let _ = crate::sync::log_operation(db, "book", &id, "UPDATE", None).await;
+            let withdrawn =
+                !current_book.private.unwrap_or(false) && updated_book.private.unwrap_or(false);
+            let _ = crate::sync::log_operation(
+                db,
+                "book",
+                &id,
+                "UPDATE",
+                withdrawn.then(crate::services::delta_service::peer_withdrawal_payload),
+            )
+            .await;
+
+            // Peers must drop or update their cached row when the book left
+            // or entered what they may see; other edits wait for their next
+            // delta.
+            {
+                use crate::services::catalog_notification::{
+                    PeerVisibility, schedule_if_peer_visibility_changed,
+                };
+                schedule_if_peer_visibility_changed(
+                    &state,
+                    PeerVisibility {
+                        private: current_book.private.unwrap_or(false),
+                        owned: old_owned,
+                    },
+                    PeerVisibility {
+                        private: updated_book.private.unwrap_or(false),
+                        owned: updated_book.owned.unwrap_or(true),
+                    },
+                );
+            }
 
             // Reverse wishlist trigger, on the transition INTO 'wanting'
             // only (same rule as book_service::update_book on the FFI door).
@@ -934,6 +970,7 @@ pub async fn get_book(
 /// 300x450 target.
 pub async fn get_book_cover(
     State(state): State<crate::infrastructure::AppState>,
+    claims: Option<crate::auth::Claims>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Response, StatusCode> {
     let book = crate::models::book::Entity::find_by_id(id.clone())
@@ -941,6 +978,12 @@ pub async fn get_book_cover(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Same rule as `get_book`: a private book answers 404 to anyone but the
+    // owner, so its cover cannot be fetched by a caller who learned the id.
+    if claims.is_none() && book.private {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     let cover_path = book
         .cover_url

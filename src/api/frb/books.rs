@@ -123,8 +123,8 @@ pub async fn record_read_book(book: FrbBook) -> Result<FrbReadRecord, String> {
         check_achievements(db).await;
     }
 
-    // A book the reader does not own reaches no peer: every outbound lane filters
-    // on `owned`. The one payload change worth announcing is a book they DO own
+    // A book the reader does not own is never offered to peers (it travels
+    // flagged `owned = false`). The one payload change worth announcing is a book they DO own
     // leaving the wishlist, since `wanted` is the one reading state peers see.
     if !record.created
         && !record.was_already_read

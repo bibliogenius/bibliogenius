@@ -41,6 +41,34 @@ pub struct DeltaOperation {
     pub entity_id: String,
     /// Either `"upsert"` or `"delete"`.
     pub op: DeltaOp,
+    /// True when a row of this window recorded that the entity was withdrawn
+    /// from what peers may see (see [`peer_withdrawal_payload`]). Kept apart
+    /// from the collapse: a later edit in the same window must not hide it.
+    pub withdrawn_from_peers: bool,
+}
+
+/// Payload key and value marking the operation_log row of an edit that
+/// withdrew an entity from what peers may see (a book made private).
+const PEER_VISIBILITY_KEY: &str = "peer_visibility";
+const PEER_VISIBILITY_WITHDRAWN: &str = "withdrawn";
+
+/// Payload to log with the UPDATE that makes a book private. The peer delta
+/// answers every window covering that row with a delete, so a peer who cached the book
+/// drops it; a book that was never visible carries no such row and its id
+/// never leaves the device. An enum value only, no personal data.
+pub fn peer_withdrawal_payload() -> serde_json::Value {
+    serde_json::json!({ PEER_VISIBILITY_KEY: PEER_VISIBILITY_WITHDRAWN })
+}
+
+fn is_peer_withdrawal(payload: Option<&str>) -> bool {
+    payload
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        .and_then(|v| {
+            v.get(PEER_VISIBILITY_KEY)
+                .and_then(|x| x.as_str())
+                .map(|x| x == PEER_VISIBILITY_WITHDRAWN)
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +159,7 @@ pub async fn fetch_delta(
     struct Entry {
         last_id: i32,
         is_delete: bool,
+        withdrawn_from_peers: bool,
     }
     let mut by_entity: HashMap<String, Entry> = HashMap::new();
     for row in used {
@@ -138,10 +167,13 @@ pub async fn fetch_delta(
         let entry = by_entity.entry(row.entity_id.clone()).or_insert(Entry {
             last_id: row.id,
             is_delete,
+            withdrawn_from_peers: false,
         });
         // Latest op wins.
         entry.last_id = row.id;
         entry.is_delete = is_delete;
+        // Sticky within the window: only the caller knows the current state.
+        entry.withdrawn_from_peers |= is_peer_withdrawal(row.payload.as_deref());
     }
 
     let mut collapsed: Vec<DeltaOperation> = by_entity
@@ -155,6 +187,7 @@ pub async fn fetch_delta(
             } else {
                 DeltaOp::Upsert
             },
+            withdrawn_from_peers: e.withdrawn_from_peers,
         })
         .collect();
     collapsed.sort_by_key(|r| r.id);

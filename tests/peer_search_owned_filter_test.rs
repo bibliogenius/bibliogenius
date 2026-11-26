@@ -1,11 +1,11 @@
 //! A peer searching my library must see the same books my catalogue shows.
 //!
 //! Books I do not own (wishes, copies borrowed from someone else, books read at
-//! someone else's place) are never shared: the full-catalogue path filters them
-//! through `owned_only=true`, the delta path omits them explicitly, and the
-//! directory push filters them through `public_catalog_condition`. `POST
-//! /peers/search` is the fourth outbound lane, the one a peer calls directly,
-//! and it used to answer with everything that was not private.
+//! someone else's place) are never offered: the catalogue lanes (full snapshot,
+//! delta) send them flagged `owned = false`, and the directory push filters
+//! them through `public_catalog_condition`. `POST /peers/search` is the lane a
+//! peer calls directly, and it used to answer with everything that was not
+//! private.
 //!
 //! The visible symptom: a peer searching my shelves found a book I had merely
 //! read at their place, and could ask to borrow a book I never had.

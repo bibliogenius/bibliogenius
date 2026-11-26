@@ -594,6 +594,7 @@ pub async fn update_book(
         .ok_or(ServiceError::NotFound)?;
 
     let previous_reading_status = book_model.reading_status.clone();
+    let private_before = book_model.private;
     let owned_after = book_data.owned.unwrap_or(book_model.owned);
     let mut reading_change = crate::domain::ReadingChange::from_book(&book_data);
     let mut book: BookActiveModel = book_model.into();
@@ -649,7 +650,15 @@ pub async fn update_book(
         .await?;
     txn.commit().await?;
 
-    let _ = crate::sync::log_operation(db, "book", id, "UPDATE", None).await;
+    let withdrawn = !private_before && model.private;
+    let _ = crate::sync::log_operation(
+        db,
+        "book",
+        id,
+        "UPDATE",
+        withdrawn.then(crate::services::delta_service::peer_withdrawal_payload),
+    )
+    .await;
 
     // Reverse wishlist trigger, on the transition INTO 'wanting' only:
     // unrelated edits of an existing wish must not re-fire the scan (the

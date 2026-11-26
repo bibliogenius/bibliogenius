@@ -651,6 +651,53 @@ mod tests {
         );
     }
 
+    /// A cached owned book that becomes a wish on the owner's side arrives as
+    /// a redacted upsert (`owned = false`, `wanted = true`): the existing row
+    /// must take both flags, and a later upsert without `wanted` (wish
+    /// withdrawn) must clear it.
+    #[tokio::test]
+    async fn upsert_sets_then_clears_wanted_on_existing_row() {
+        let db = setup().await;
+        let peer_id = create_peer(&db).await;
+        apply_peer_delta_operations(&db, peer_id, &[upsert_op("30", "Book")])
+            .await
+            .unwrap();
+
+        let as_wish = json!({
+            "op": "upsert",
+            "book": { "id": "30", "title": "Book", "owned": false, "wanted": true }
+        });
+        apply_peer_delta_operations(&db, peer_id, &[as_wish])
+            .await
+            .unwrap();
+        let row = peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .filter(peer_book::Column::RemoteBookId.eq("30"))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!row.owned);
+        assert_eq!(row.wanted, Some(true));
+
+        let withdrawn = json!({
+            "op": "upsert",
+            "book": { "id": "30", "title": "Book", "owned": false }
+        });
+        apply_peer_delta_operations(&db, peer_id, &[withdrawn])
+            .await
+            .unwrap();
+        let row = peer_book::Entity::find()
+            .filter(peer_book::Column::PeerId.eq(peer_id))
+            .filter(peer_book::Column::RemoteBookId.eq("30"))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!row.owned);
+        assert_eq!(row.wanted, None, "a withdrawn wish clears the flag");
+    }
+
     #[tokio::test]
     async fn persist_peer_cursor_updates_row() {
         let db = setup().await;

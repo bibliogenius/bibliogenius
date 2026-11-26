@@ -26,12 +26,11 @@ pub async fn search_local(
 
     let books = book::Entity::find()
         .filter(book::Column::Private.eq(false))
-        // Books the user does not own (wishes, borrowed copies, books read at
-        // someone else's place) are never shared with peers. The full-catalogue
-        // path (`owned_only=true`), the delta path and the directory push all
-        // filter them out; this receiver is the one a peer calls directly, so it
-        // has to hold the same line or the search answers what the catalogue
-        // refuses to show.
+        // A search result is an offer to borrow, so books the user does not
+        // own (wishes, borrowed copies, books read at someone else's place)
+        // stay out, as they do from the directory push. The catalogue lanes
+        // (full snapshot, delta) do send them, flagged `owned = false`, for
+        // the inverse wishlist marker; the peer does not offer them for loan.
         .filter(book::Column::Owned.eq(true))
         .filter(
             Condition::any()
