@@ -172,6 +172,12 @@ default is the shortest name, which may be wrong), a wrong site in Wikidata
 (results loaded by JavaScript from another address: look in the browser's
 network tab).
 
+A publisher bought by another house whose site now lists its books: send
+its prefix to the buyer's home page, and the prefix takes the buyer's site
+and recipes. Gaïa (978-2-84720), bought by Actes Sud: one page there shows
+the Gaïa and the Actes Sud editions of a work, and each gets its own cover,
+the images being named after their ISBN.
+
 A publisher Wikidata has no ISBN prefix for goes in the `publishers` list of
 `overrides.json` (name and home page, by hand: the report page does not edit
 it). Its site is probed like any other, and `build` gives it the publisher

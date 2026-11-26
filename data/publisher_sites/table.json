@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "generated": "2026-11-15",
+  "generated": "2026-11-26",
   "prefixes": [
     {
       "prefix": "978201",
@@ -3633,6 +3633,15 @@
         {
           "name": "Albiana",
           "site": "albiana.fr"
+        }
+      ]
+    },
+    {
+      "prefix": "978284720",
+      "publishers": [
+        {
+          "name": "Gaïa",
+          "site": "actes-sud.fr"
         }
       ]
     },
