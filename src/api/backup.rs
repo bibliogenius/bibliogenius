@@ -22,6 +22,12 @@
 //!     integrity.
 //!  7. The archive is built in a `tokio::task::spawn_blocking` worker and
 //!     written atomically (write to `*.partial.<uuid>`, fsync, rename).
+//!     When the output folder refuses new files (macOS App Store sandbox,
+//!     Linux document portal: only the chosen file is granted), the archive
+//!     is written in place instead, in a single write followed by fsync.
+//!
+//! The plaintext DB snapshot from step 1 lives beside the live DB, inside
+//! the app's own storage, never beside the user-chosen output.
 //!
 //! All sensitive intermediate buffers (master key, subkeys, plaintext DB,
 //! identity bytes, prefs JSON) are zeroized as soon as they are no longer
@@ -254,9 +260,10 @@ pub async fn write_backup(
         return Err(BackupError::InvalidInput("empty library_uuid".into()));
     }
 
-    // Resolve the temp DB path early so a bad output destination fails
-    // fast, before the ~0.5s Argon2 derivation runs.
-    let tmp_db_path = make_tmp_db_path(output_path)?;
+    // Check the output destination early so a bad one fails fast, before
+    // the ~0.5s Argon2 derivation runs.
+    ensure_parent_dir(output_path)?;
+    let tmp_db_path = make_tmp_db_path(db, output_path).await?;
     let _cleanup = TempFileGuard::new(tmp_db_path.clone());
 
     snapshot_db(db, &tmp_db_path).await?;
@@ -462,17 +469,14 @@ async fn snapshot_db(db: &DatabaseConnection, target: &Path) -> Result<(), Backu
     let target_str = target
         .to_str()
         .ok_or_else(|| BackupError::InvalidInput("non-utf8 temp path".into()))?;
-    // VACUUM INTO does not accept bind parameters and we control the path
-    // (deterministic placement next to `output_path`). Defense-in-depth:
-    // refuse anything containing a single quote, which would close the
-    // SQL string literal.
-    if target_str.contains('\'') {
-        return Err(BackupError::InvalidInput("invalid temp path".into()));
-    }
+    // VACUUM INTO does not accept bind parameters. The path sits under the
+    // user's home folder, which may contain a single quote (`O'Brien`), so
+    // quotes are doubled: the SQL escape that keeps them inside the literal.
+    let escaped = target_str.replace('\'', "''");
     // VACUUM INTO cannot run inside a transaction and is not preparable;
     // `execute_unprepared` sends the raw statement on a fresh statement
     // handle, which is the supported path for VACUUM in SQLite.
-    let sql = format!("VACUUM INTO '{target_str}'");
+    let sql = format!("VACUUM INTO '{escaped}'");
     db.execute_unprepared(&sql).await?;
     if !target.is_file() {
         // SQLite returned success but the file is missing. This happens on
@@ -595,38 +599,100 @@ fn build_zip(
     Ok(zw.finish()?.into_inner())
 }
 
-fn make_tmp_db_path(output_path: &Path) -> Result<PathBuf, BackupError> {
-    let parent = output_path
-        .parent()
+fn parent_dir(path: &Path) -> &Path {
+    path.parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn ensure_parent_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(parent_dir(path))
+}
+
+/// Path of the plaintext snapshot produced by `VACUUM INTO`.
+///
+/// Placed beside the live DB file: that folder belongs to the app and is
+/// writable on every platform, including sandboxed ones, and the plaintext
+/// copy never lands on a user-chosen volume. Falls back to the output folder
+/// when the connection has no backing file (in-memory DB).
+async fn make_tmp_db_path(
+    db: &DatabaseConnection,
+    output_path: &Path,
+) -> Result<PathBuf, BackupError> {
+    let dir = match live_db_file(db).await? {
+        Some(file) => parent_dir(&file).to_path_buf(),
+        None => parent_dir(output_path).to_path_buf(),
+    };
     let base = output_path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("backup");
     let name = format!("{base}.dbtmp.{}", uuid::Uuid::new_v4().simple());
-    Ok(parent.join(name))
+    Ok(dir.join(name))
 }
 
+/// File backing the `main` schema of `db`, or `None` for an in-memory DB.
+async fn live_db_file(db: &DatabaseConnection) -> Result<Option<PathBuf>, BackupError> {
+    use sea_orm::Statement;
+    let stmt = Statement::from_string(db.get_database_backend(), "PRAGMA database_list");
+    let rows = db
+        .query_all(stmt)
+        .await
+        .map_err(|e| BackupError::Db(e.to_string()))?;
+    for row in rows {
+        let name: String = row
+            .try_get("", "name")
+            .map_err(|e| BackupError::Db(e.to_string()))?;
+        if name != "main" {
+            continue;
+        }
+        let file: String = row
+            .try_get("", "file")
+            .map_err(|e| BackupError::Db(e.to_string()))?;
+        return Ok((!file.is_empty()).then(|| PathBuf::from(file)));
+    }
+    Ok(None)
+}
+
+/// Write `data` at `target` through a sibling `*.partial.<uuid>` file and a
+/// rename, so a crash never leaves a truncated archive under the final name.
+///
+/// Sandboxed desktop builds only grant the file chosen in the save panel:
+/// creating the sibling fails with `PermissionDenied`. The archive is then
+/// written in place, in one write followed by fsync, and removed on failure.
 fn write_atomic(target: &Path, data: &[u8]) -> std::io::Result<()> {
-    let parent = target
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
+    ensure_parent_dir(target)?;
     let base = target
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("backup");
-    let tmp = parent.join(format!("{base}.partial.{}", uuid::Uuid::new_v4().simple()));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
+    let tmp = parent_dir(target).join(format!("{base}.partial.{}", uuid::Uuid::new_v4().simple()));
+    let mut f = match std::fs::File::create(&tmp) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return write_in_place(target, data);
+        }
+        Err(e) => return Err(e),
+    };
+    if let Err(e) = f.write_all(data).and_then(|()| f.sync_all()) {
+        drop(f);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
+    drop(f);
     if let Err(e) = std::fs::rename(&tmp, target) {
         let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+fn write_in_place(target: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut f = std::fs::File::create(target)?;
+    // Only a file we truncated is removed: it no longer holds anything.
+    if let Err(e) = f.write_all(data).and_then(|()| f.sync_all()) {
+        drop(f);
+        let _ = std::fs::remove_file(target);
         return Err(e);
     }
     Ok(())
@@ -1803,5 +1869,34 @@ pub async fn latest_user_data_change_at(
             .try_get::<Option<String>>("", "m")
             .map_err(|e| BackupError::Db(e.to_string())),
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file the app cannot open for writing must survive a failed in-place
+    /// write: only a file we truncated ourselves may be removed.
+    #[cfg(unix)]
+    #[test]
+    fn write_in_place_keeps_a_file_it_could_not_open() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("existing.bgbackup");
+        std::fs::write(&target, b"previous backup").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .is_ok()
+        {
+            eprintln!("skipped: running with privileges that ignore file modes");
+            return;
+        }
+
+        assert!(write_in_place(&target, b"new archive").is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"previous backup");
     }
 }

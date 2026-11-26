@@ -405,3 +405,132 @@ async fn errors_cleanly_when_output_path_is_unwritable() {
     // this test).
     let _: &str = backup::FORMAT_VERSION;
 }
+
+/// The macOS App Store sandbox (and the Linux document portal) grants write
+/// access to the file chosen in the save panel, not to its folder. The export
+/// must therefore succeed when the output folder refuses new files, and must
+/// leave nothing beside the chosen file.
+#[cfg(unix)]
+#[tokio::test]
+async fn export_succeeds_when_output_folder_refuses_new_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let db = setup_test_db(&tmp).await;
+    seed_minimal(&db).await;
+    let cover_dir = tmp.path().join("covers");
+    std::fs::create_dir_all(&cover_dir).unwrap();
+
+    // Only the chosen file is writable, as after a save-panel grant.
+    let chosen_dir = tmp.path().join("chosen");
+    std::fs::create_dir_all(&chosen_dir).unwrap();
+    let out = chosen_dir.join("backup.bgbackup");
+    std::fs::write(&out, b"").unwrap();
+    std::fs::set_permissions(&chosen_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(chosen_dir.join("probe"), b"").is_ok() {
+        std::fs::set_permissions(&chosen_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("skipped: running with privileges that ignore folder modes");
+        return;
+    }
+
+    let res = write_backup(
+        &db,
+        &out,
+        TEST_SECRET,
+        UnlockKind::Passphrase,
+        TEST_LIBRARY_UUID,
+        None,
+        TEST_PREFS,
+        &cover_dir,
+    )
+    .await;
+
+    // Restore permissions first so TempDir can clean up even on failure.
+    std::fs::set_permissions(&chosen_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let summary = res.expect("write_backup into a folder that refuses new files");
+
+    let archive = std::fs::read(&out).unwrap();
+    assert_eq!(summary.archive_size_bytes, archive.len() as u64);
+    assert_eq!(parse_manifest(&archive).counts.books, 1);
+
+    let siblings: Vec<_> = std::fs::read_dir(&chosen_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(siblings, vec!["backup.bgbackup".to_string()]);
+}
+
+/// The plaintext DB snapshot is a temporary file: it must never be left behind,
+/// neither beside the live DB nor beside the chosen output.
+#[tokio::test]
+async fn export_leaves_no_snapshot_beside_live_db_or_output() {
+    let tmp = TempDir::new().unwrap();
+    let db = setup_test_db(&tmp).await;
+    seed_minimal(&db).await;
+    let cover_dir = tmp.path().join("covers");
+    std::fs::create_dir_all(&cover_dir).unwrap();
+    let out_dir = tmp.path().join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let out = out_dir.join("backup.bgbackup");
+
+    write_backup(
+        &db,
+        &out,
+        TEST_SECRET,
+        UnlockKind::Passphrase,
+        TEST_LIBRARY_UUID,
+        None,
+        TEST_PREFS,
+        &cover_dir,
+    )
+    .await
+    .expect("write_backup");
+
+    for dir in [tmp.path(), out_dir.as_path()] {
+        let stale: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("dbtmp") || n.contains("partial"))
+            .collect();
+        assert!(stale.is_empty(), "stale files in {dir:?}: {stale:?}");
+    }
+}
+
+/// The DB snapshot is written beside the live DB, under the user's home
+/// folder. A home folder with an apostrophe (`C:\Users\O'Brien`) must not
+/// break the export.
+#[tokio::test]
+async fn export_succeeds_when_live_db_folder_has_an_apostrophe() {
+    let tmp = TempDir::new().unwrap();
+    let db_dir = tmp.path().join("O'Brien");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        db_dir.join("source.sqlite").display()
+    );
+    let db = db::init_db(&url).await.expect("init_db");
+    seed_minimal(&db).await;
+    let cover_dir = tmp.path().join("covers");
+    std::fs::create_dir_all(&cover_dir).unwrap();
+    let out = tmp.path().join("backup.bgbackup");
+
+    write_backup(
+        &db,
+        &out,
+        TEST_SECRET,
+        UnlockKind::Passphrase,
+        TEST_LIBRARY_UUID,
+        None,
+        TEST_PREFS,
+        &cover_dir,
+    )
+    .await
+    .expect("write_backup with an apostrophe in the live DB folder");
+
+    assert_eq!(
+        parse_manifest(&std::fs::read(&out).unwrap()).counts.books,
+        1
+    );
+}
