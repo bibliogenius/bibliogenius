@@ -120,7 +120,7 @@ pub async fn list_loans(
         .map(|(loan, contact)| {
             let contact_name = contact
                 .as_ref()
-                .map(|c| c.name.clone())
+                .map(|c| c.full_name())
                 .unwrap_or_else(|| "Unknown".to_string());
             let book_info = copy_book_map.get(&loan.copy_id);
             let book_title = book_info

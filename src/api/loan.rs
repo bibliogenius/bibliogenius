@@ -78,7 +78,7 @@ pub async fn list_loans(
             let book = copy_book_map.get(&loan.copy_id);
             let contact_name = contact
                 .as_ref()
-                .map(|c| c.name.clone())
+                .map(|c| c.full_name())
                 .unwrap_or("Unknown".to_string());
             let book_title = book
                 .as_ref()
@@ -223,7 +223,7 @@ pub async fn return_loan(
             .await
             .ok()
             .flatten()
-            .map(|c| c.name)
+            .map(|c| c.full_name())
             .unwrap_or_default();
         crate::services::notification_service::emit(
             &db,

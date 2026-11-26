@@ -57,6 +57,20 @@ impl Related<super::library::Entity> for Entity {
     }
 }
 
+impl Model {
+    /// Display name used wherever a loan or sale names the contact: "First Last",
+    /// or the last name alone when there is no first name. Mirrors the app's
+    /// `Contact.fullName` so every screen shows the same name.
+    pub fn full_name(&self) -> String {
+        match self.first_name.as_deref() {
+            Some(first) if !first.is_empty() && !self.name.is_empty() => {
+                format!("{first} {}", self.name)
+            }
+            _ => self.name.clone(),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl ActiveModelBehavior for ActiveModel {
     async fn before_save<C>(mut self, _db: &C, insert: bool) -> Result<Self, DbErr>
@@ -113,5 +127,54 @@ impl From<Model> for ContactDto {
             library_owner_id: model.library_owner_id,
             is_active: model.is_active,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contact(first_name: Option<&str>, name: &str) -> Model {
+        Model {
+            id: "c".to_string(),
+            r#type: "person".to_string(),
+            name: name.to_string(),
+            first_name: first_name.map(str::to_string),
+            email: None,
+            phone: None,
+            address: None,
+            street_address: None,
+            postal_code: None,
+            city: None,
+            country: None,
+            latitude: None,
+            longitude: None,
+            notes: None,
+            user_id: None,
+            library_owner_id: 1,
+            is_active: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn full_name_puts_the_first_name_before_the_last_name() {
+        assert_eq!(
+            contact(Some("Jeanne"), "Dupont").full_name(),
+            "Jeanne Dupont"
+        );
+    }
+
+    #[test]
+    fn full_name_falls_back_to_the_last_name() {
+        assert_eq!(contact(None, "Dupont").full_name(), "Dupont");
+        assert_eq!(contact(Some(""), "Dupont").full_name(), "Dupont");
+    }
+
+    #[test]
+    fn full_name_is_empty_when_the_last_name_is_empty() {
+        // Same rule as the app's `Contact.fullName`: no first name alone.
+        assert_eq!(contact(Some("Jeanne"), "").full_name(), "");
     }
 }

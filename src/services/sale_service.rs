@@ -99,7 +99,7 @@ pub async fn list_sales(
     let result: Vec<SaleWithDetails> = sales_with_contacts
         .into_iter()
         .map(|(sale, contact)| {
-            let contact_name = contact.map(|c| c.name);
+            let contact_name = contact.map(|c| c.full_name());
             let book_title = copy_book_map
                 .get(&sale.copy_id)
                 .cloned()
